@@ -553,11 +553,15 @@ impl Type {
                 Type::Object => {
                     object::ObjectSerializer::write(self, values, writer, state).await?;
                 }
-                // DFE Fork: New types - not yet implemented for native Value serialization
-                Type::Variant(_) | Type::Dynamic { .. } | Type::Nested(_) => {
-                    return Err(Error::Unimplemented(format!(
-                        "Native Value serialization not implemented for {self}"
-                    )));
+                // DFE Fork: New ClickHouse 24.x+ types
+                Type::Variant(_) => {
+                    variant::VariantSerializer::write(self, values, writer, state).await?;
+                }
+                Type::Dynamic { .. } => {
+                    dynamic::DynamicSerializer::write(self, values, writer, state).await?;
+                }
+                Type::Nested(_) => {
+                    nested::NestedSerializer::write(self, values, writer, state).await?;
                 }
             }
             Ok(())
@@ -629,11 +633,15 @@ impl Type {
             Type::Object => {
                 object::ObjectSerializer::write_sync(self, values, writer, state)?;
             }
-            // DFE Fork: New types - not yet implemented for native Value serialization
-            Type::Variant(_) | Type::Dynamic { .. } | Type::Nested(_) => {
-                return Err(Error::Unimplemented(format!(
-                    "Native Value serialization not implemented for {self}"
-                )));
+            // DFE Fork: New ClickHouse 24.x+ types
+            Type::Variant(_) => {
+                variant::VariantSerializer::write_sync(self, values, writer, state)?;
+            }
+            Type::Dynamic { .. } => {
+                dynamic::DynamicSerializer::write_sync(self, values, writer, state)?;
+            }
+            Type::Nested(_) => {
+                nested::NestedSerializer::write_sync(self, values, writer, state)?;
             }
         }
         Ok(())
