@@ -69,13 +69,28 @@ clickhouse:
 #     - auth_events
 
 # Message routing configuration
+# Routes messages to destination db.table based on event data fields
 routing:
-  # Primary field for routing (default: "event_category")
-  routing_field: event_category
-  # Fallback field if primary is missing
-  fallback_field: tags.event_category
+  # Fields to check for database name (first match wins)
+  # Supports dot notation for nested fields (e.g., "metadata.org_id")
+  db_fields:
+    - org_id
+    # - tenant_id      # Alternative field
+    # - metadata.org   # Nested field example
 
-  # Map event_category values to destination tables
+  # Fields to check for table name (first match wins)
+  # Supports dot notation for nested fields
+  table_fields:
+    - event_category
+    - tags.event_category
+
+  # Default database if no db_field matches
+  default_db: common
+
+  # Default table if no table_field matches
+  default_table: common
+
+  # Optional: map extracted table values to different names
   category_to_table:
     auth: auth_events
     api: api_events
@@ -84,9 +99,6 @@ routing:
 
   # External mapping file (CSV, YAML, or JSON)
   # mapping_file: /etc/loader/category-mappings.yaml
-
-  # Default table for unmapped categories (optional, DLQ if not set)
-  # default_table: default_events
 
   # Dead Letter Queue settings
   dlq:

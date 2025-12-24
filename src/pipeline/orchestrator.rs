@@ -1,6 +1,9 @@
 //! Main pipeline coordinator
 //!
 //! Orchestrates the Kafka → Transform → Buffer → ClickHouse pipeline.
+//!
+//! Uses Arrow batching: accumulates multiple Kafka messages, converts to
+//! columnar Arrow RecordBatch, then pushes to buffer for ClickHouse insert.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -11,7 +14,7 @@ use tokio::time::interval;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
-use crate::buffer::{BufferManager, FlushBatch};
+use crate::buffer::{BufferManager, FlushBatch, KafkaOffset};
 use crate::clickhouse::{ClickHouseClient, Inserter, InserterConfig};
 use crate::config::Config;
 use crate::kafka::{Consumer, KafkaMessage};
@@ -120,9 +123,14 @@ impl Orchestrator {
 
                 _ = flush_interval.tick() => {
                     // Check for buffers ready to flush
-                    let batches = buffer_manager.get_ready_for_flush();
-                    if !batches.is_empty() {
-                        self.flush_batches(&inserter, batches).await;
+                    match buffer_manager.get_ready_for_flush() {
+                        Ok(batches) if !batches.is_empty() => {
+                            self.flush_batches(&inserter, batches).await;
+                        }
+                        Ok(_) => {} // No batches ready
+                        Err(e) => {
+                            warn!(error = %e, "Failed to get flush batches");
+                        }
                     }
                 }
 
@@ -159,14 +167,23 @@ impl Orchestrator {
 
                             // Update buffer stats
                             if let Some(ref m) = self.metrics {
-                                let (rows, bytes, tables) = buffer_manager.stats();
-                                m.update_buffer_stats(rows, bytes, tables);
+                                let stats = buffer_manager.stats();
+                                m.update_buffer_stats(
+                                    stats.pending_rows,
+                                    stats.pending_bytes,
+                                    stats.pending_chunks,
+                                );
                             }
 
                             // Check for immediate flush
-                            let batches = buffer_manager.get_ready_for_flush();
-                            if !batches.is_empty() {
-                                self.flush_batches(&inserter, batches).await;
+                            match buffer_manager.get_ready_for_flush() {
+                                Ok(batches) if !batches.is_empty() => {
+                                    self.flush_batches(&inserter, batches).await;
+                                }
+                                Ok(_) => {} // No batches ready
+                                Err(e) => {
+                                    warn!(error = %e, "Failed to get flush batches");
+                                }
                             }
                         }
                         None => {
@@ -179,10 +196,15 @@ impl Orchestrator {
         }
 
         // Final flush
-        let final_batches = buffer_manager.flush_all();
-        if !final_batches.is_empty() {
-            info!(batches = final_batches.len(), "Flushing remaining buffers");
-            self.flush_batches(&inserter, final_batches).await;
+        match buffer_manager.flush_all() {
+            Ok(final_batches) if !final_batches.is_empty() => {
+                info!(batches = final_batches.len(), "Flushing remaining buffers");
+                self.flush_batches(&inserter, final_batches).await;
+            }
+            Ok(_) => {} // No batches to flush
+            Err(e) => {
+                error!(error = %e, "Failed to flush remaining buffers");
+            }
         }
 
         // Wait for consumer to stop
@@ -218,7 +240,7 @@ impl Orchestrator {
             }
         };
 
-        // Step 2: Parse payload
+        // Step 2: Parse payload to JSON Value
         let value: Value = match format {
             PayloadFormat::Json => sonic_rs::from_slice(&msg.payload)
                 .map_err(|e| crate::Error::Json(format!("JSON parse error: {}", e)))?,
@@ -229,7 +251,7 @@ impl Orchestrator {
             }
         };
 
-        // Step 3: Route to table
+        // Step 3: Route to table (db.table)
         let route_result = router.route(&msg.payload);
         let table = match route_result {
             RouteResult::Table(t) => t,
@@ -239,24 +261,32 @@ impl Orchestrator {
             }
         };
 
-        // Step 4: Transform
+        // Step 4: Transform (flatten, timestamp validation, etc.)
         let transform_result = transformer.transform(value)?;
 
-        // Step 5: Buffer for batch insert
-        buffer_manager.push(&table, transform_result.data)?;
+        // Step 5: Push to per-table buffer
+        // Each table has its own ArrowBatchBuilder for schema uniformity.
+        // The data stays as JSON Map until the batch is ready, then converts to Arrow.
+        let kafka_offset = KafkaOffset {
+            topic: msg.topic.clone(),
+            partition: msg.partition,
+            offset: msg.offset,
+        };
 
-        debug!(table = %table, "Message buffered");
+        buffer_manager.push(&table, transform_result.data, Some(kafka_offset));
+
+        debug!(table = %table, "Message buffered for Arrow batch");
         Ok(table)
     }
 
-    /// Flush batches to ClickHouse
+    /// Flush Arrow batches to ClickHouse
     async fn flush_batches(&mut self, inserter: &Inserter, batches: Vec<FlushBatch>) {
         use std::time::Instant;
 
         let batch_count = batches.len();
-        let total_rows: usize = batches.iter().map(|b| b.rows.len()).sum();
+        let total_rows: usize = batches.iter().map(|b| b.batch.num_rows()).sum();
 
-        debug!(batches = batch_count, rows = total_rows, "Flushing batches");
+        debug!(batches = batch_count, rows = total_rows, "Flushing Arrow batches");
 
         let start = Instant::now();
         let results = inserter.insert_batches(batches).await;
@@ -271,7 +301,7 @@ impl Orchestrator {
                     }
                 }
                 Err(e) => {
-                    error!(error = %e, "Batch insert failed");
+                    error!(error = %e, "Arrow batch insert failed");
                     self.stats.errors += 1;
                     if let Some(ref m) = self.metrics {
                         m.record_error();

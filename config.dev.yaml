@@ -24,8 +24,18 @@ clickhouse:
     - api_events
 
 routing:
-  routing_field: event_category
-  fallback_field: tags.event_category
+  # Fields to extract database name (first match wins, dot notation for nested)
+  db_fields:
+    - org_id
+  # Fields to extract table name (first match wins, dot notation for nested)
+  table_fields:
+    - event_category
+    - tags.event_category
+  # Default database if no db_field matches
+  default_db: common
+  # Default table if no table_field matches
+  default_table: common
+  # Optional: explicit category to table mapping
   category_to_table:
     auth: auth_events
     api: api_events

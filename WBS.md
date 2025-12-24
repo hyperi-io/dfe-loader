@@ -2,40 +2,39 @@
 
 **Project:** Rust port of clickhouse-loader (Go)
 **Created:** 2024-12-24
-**Status:** Major Refactor - Arrow-based Architecture
+**Status:** Arrow Pipeline - Native Inserts Working
 
 ---
 
-## Architecture Change (2025-12-24)
+## Architecture (2025-12-24)
 
-**BREAKING CHANGE:** Migrating from JSON-based buffers to Arrow-based chunked buffers.
+**Per-table Arrow buffers with clickhouse-arrow native protocol**
 
 ```text
-OLD: Kafka → JSON parse → Transform (mutate JSON) → ColumnarBuffer → JSONEachRow
-NEW: Kafka → Arrow parse → Transform (build new batch) → ArrowBuffer → Native protocol
+Kafka → Parse JSON/MsgPack → Route to db.table → Per-table buffer → Arrow RecordBatch → ClickHouse (native)
 ```
 
 ### Key Design Decisions
 
-| Decision           | Choice               | Rationale                                   |
-| ------------------ | -------------------- | ------------------------------------------- |
-| Buffer Format      | **Arrow**            | Columnar, vectorized ops, zero-copy to CH   |
-| ClickHouse Client  | **clickhouse-arrow** | Native protocol with Arrow integration      |
-| Transform Strategy | **Build new batch**  | Immutable batches, Arc-share unchanged cols |
-| Schema Source      | **On-demand introspect** | Fetch from CH, refresh periodically     |
+| Decision             | Choice                 | Rationale                                     |
+| -------------------- | ---------------------- | --------------------------------------------- |
+| Buffer Format        | **Per-table Arrow**    | Schema uniformity per RecordBatch             |
+| ClickHouse Client    | **clickhouse-arrow**   | Native protocol with Arrow integration        |
+| Routing              | **Pre-flatten**        | Extract db.table before flattening            |
+| Schema Source        | **On-demand introspect** | Fetch from CH, cache with TTL refresh       |
 
 ---
 
-## Phase 0: Foundation & Decisions ✅ COMPLETE
+## Phase 0: Foundation ✅ COMPLETE
 
-### 0.1 Technical Decisions ✅ COMPLETE (REVISED)
+### 0.1 Technical Decisions ✅ COMPLETE
 
-| Decision           | Original Choice     | New Choice         | Rationale                    |
-| ------------------ | ------------------- | ------------------ | ---------------------------- |
-| JSON Library       | sonic-rs            | **arrow-json**     | JSON → Arrow direct          |
-| ClickHouse Library | klickhouse          | **clickhouse-arrow** | Arrow native protocol      |
-| Buffer Strategy    | Custom Columnar     | **Arrow chunks**   | Immutable, vectorized        |
-| Memory Control     | MemoryController    | **Chunk lifecycle**| Drop on ack, no row removal  |
+| Decision             | Choice               | Rationale                          |
+| -------------------- | -------------------- | ---------------------------------- |
+| JSON Library         | sonic-rs + arrow-json | SIMD parsing + Arrow conversion   |
+| ClickHouse Library   | clickhouse-arrow     | Arrow native protocol              |
+| Buffer Strategy      | Per-table buffers    | Schema uniformity per batch        |
+| Memory Control       | Chunk lifecycle      | Drop on ack, no row removal        |
 
 ### 0.2 Project Setup ✅ COMPLETE
 
@@ -45,114 +44,145 @@ NEW: Kafka → Arrow parse → Transform (build new batch) → ArrowBuffer → N
 
 ---
 
-## Phase 5: Buffer Management ⚠️ REWRITE
+## Phase 5: Buffer Management ✅ COMPLETE
 
-### 5.1 Arrow Buffer (NEW)
+### 5.1 Per-Table Arrow Buffer
 
-- [x] **5.1.1** ArrowChunk with lifecycle states (Pending/InFlight/Acked/Failed)
-- [x] **5.1.2** KafkaOffset tracking per chunk for at-least-once
-- [x] **5.1.3** Partition by _destination column at flush
-- [x] **5.1.4** Chunk-level ack (drop entire chunk, O(1))
-- [x] **5.1.5** ArrowBufferStats for monitoring
-- [ ] **5.1.6** Memory size tracking
+- [x] **5.1.1** ArrowBatchBuilder per table
+- [x] **5.1.2** KafkaOffset tracking per batch
+- [x] **5.1.3** Independent flush per table
+- [x] **5.1.4** ArrowBufferStats for monitoring
+- [ ] **5.1.5** Memory size tracking (future)
 
-### 5.2 Buffer Manager (NEW)
+### 5.2 Buffer Manager
 
-- [x] **5.2.1** Single ArrowBuffer for all destinations
+- [x] **5.2.1** HashMap<db.table, TableBuffer>
 - [x] **5.2.2** TableSchema registry with Arrow/CH type mapping
 - [x] **5.2.3** ch_type_to_arrow conversion function
-- [ ] **5.2.4** On-demand schema fetch from ClickHouse
-- [ ] **5.2.5** Periodic schema refresh (configurable interval)
-- [ ] **5.2.6** Schema cache invalidation on error
-
-### 5.3 REMOVED
-
-- ~~Buffer Pool~~ - Not needed with chunk lifecycle
+- [x] **5.2.4** On-demand schema fetch from ClickHouse
+- [x] **5.2.5** Periodic schema refresh (configurable interval)
+- [ ] **5.2.6** Schema cache invalidation on error (future)
 
 ---
 
-## Phase 4: Transformation ⚠️ REWRITE
+## Phase 3: Routing ✅ COMPLETE
 
-### 4.1 Arrow Transforms (NEW)
+### 3.1 Dynamic db.table Routing
 
-Arrow batches are immutable - transforms build NEW batches with changed columns.
-
-- [ ] **4.1.1** JSON → Arrow batch builder (arrow-json)
-- [ ] **4.1.2** MessagePack → Arrow batch builder
-- [ ] **4.1.3** Column addition (build new batch with extra columns)
-- [ ] **4.1.4** Zero-copy unchanged columns (Arc sharing)
-
-### 4.2 Enrichment with Arrow
-
-- [ ] **4.2.1** GeoIP enrichment (vectorized column append)
-- [ ] **4.2.2** Risk scoring (vectorized)
-- [ ] **4.2.3** Field derivation (compute new columns from existing)
-
-### 4.3 Transform Pipeline
-
-```rust
-// Transforms build new batches, chain with Arc-sharing
-fn transform_pipeline(batch: RecordBatch) -> Result<RecordBatch> {
-    let batch = add_destination_column(batch, &router)?;   // New col
-    let batch = enrich_geoip(batch, "src_ip")?;            // New cols
-    let batch = add_load_timestamp(batch)?;                // New col
-    Ok(batch)
-}
-```
+- [x] **3.1.1** db_fields priority list (configurable)
+- [x] **3.1.2** table_fields priority list (configurable)
+- [x] **3.1.3** Dot notation for nested field access
+- [x] **3.1.4** Default db/table fallbacks
+- [x] **3.1.5** Legacy category_to_table mapping
+- [x] **3.1.6** Pre-flatten routing (before JSON flattening)
 
 ---
 
-## Phase 6: ClickHouse Integration ⚠️ REWRITE
+## Phase 6: ClickHouse Integration ✅ COMPLETE
 
-### 6.1 clickhouse-arrow Client (NEW)
+### 6.1 clickhouse-arrow Client
 
 - [x] **6.1.1** Fork clickhouse-arrow with Variant/Dynamic/Nested types
-- [ ] **6.1.2** Arrow → ClickHouse native protocol serialization
-- [ ] **6.1.3** Connection management
-- [ ] **6.1.4** TLS configuration
+- [x] **6.1.2** ArrowClickHouseClient wrapper
+- [x] **6.1.3** Inserter with native Arrow inserts + JSON fallback
+- [ ] **6.1.4** TLS configuration (use when needed)
 
-### 6.2 Schema Introspection (REVISED)
+### 6.2 Schema Introspection
 
 - [x] **6.2.1** TableSchema struct with Arrow + CH type mapping
 - [x] **6.2.2** ch_type_to_arrow conversion
-- [ ] **6.2.3** On-demand fetch from system.columns
-- [ ] **6.2.4** Periodic refresh (configurable, e.g., 60s)
+- [x] **6.2.3** On-demand fetch from system.columns
+- [x] **6.2.4** Periodic refresh (configurable, default 60s)
 - [ ] **6.2.5** Cache invalidation on schema mismatch error
 
-### 6.3 Inserter (REVISED)
+### 6.3 Inserter
 
 - [x] **6.3.1** Arrow RecordBatch insert interface
 - [x] **6.3.2** Retry with exponential backoff
-- [ ] **6.3.3** clickhouse-arrow native protocol (replace JSON bridge)
-- [ ] **6.3.4** Concurrent multi-table insert
+- [x] **6.3.3** clickhouse-arrow native protocol with JSON fallback
+- [ ] **6.3.4** Concurrent multi-table insert (future)
 
 ---
 
-## Phase 7: Pipeline Orchestration ⚠️ UPDATE
+## Phase 7: Pipeline Orchestration ✅ COMPLETE
 
-### 7.1 Pipeline Core (REVISED)
+### 7.1 Pipeline Core
 
-- [ ] **7.1.1** Update for Arrow-based BufferManager
-- [ ] **7.1.2** Process message → build Arrow batch with _destination
-- [ ] **7.1.3** Flush → partition by destination, insert, ack chunks
-- [ ] **7.1.4** Kafka offset commit on chunk ack
+- [x] **7.1.1** Updated for per-table BufferManager
+- [x] **7.1.2** process_message → route → buffer with offset
+- [x] **7.1.3** flush_batches handles per-table FlushBatch
+- [ ] **7.1.4** Kafka offset commit on successful insert (future)
 
 ---
 
-## Summary
+## HIGH PRIORITY: Variant/Dynamic/Nested Serialization
 
-| Phase    | Description          | Status         | Notes                        |
-| -------- | -------------------- | -------------- | ---------------------------- |
-| Phase 0  | Foundation           | ✅ Complete    | Revised for Arrow            |
-| Phase 1  | Core Infrastructure  | ✅ Complete    | No changes needed            |
-| Phase 2  | Kafka Integration    | ✅ Complete    | No changes needed            |
-| Phase 3  | Routing              | ✅ Complete    | No changes needed            |
-| Phase 4  | Transformation       | ⚠️ Rewrite     | Arrow-based transforms       |
-| Phase 5  | Buffer Management    | ⚠️ Rewrite     | ArrowBuffer chunks           |
-| Phase 6  | ClickHouse           | ⚠️ Rewrite     | clickhouse-arrow client      |
-| Phase 7  | Pipeline             | ⚠️ Update      | Wire Arrow components        |
-| Phase 8  | CLI & Commands       | ✅ Complete    | No changes needed            |
-| Phase 9  | Enrichment           | ⏳ Post-MVP    | Arrow-native enrichment      |
+**Status:** PLACEHOLDER CODE - Must implement before production use
+
+The clickhouse-arrow fork has placeholder serialization for new ClickHouse types. These must be implemented with real serialization logic.
+
+### Implementation Tasks
+
+| Type    | File to Edit                                          | CH Reference                        | Status       |
+| ------- | ----------------------------------------------------- | ----------------------------------- | ------------ |
+| Variant | `crates/clickhouse-arrow/.../types/serialize.rs`      | `DataTypeVariant.cpp`               | ⚠️ Placeholder |
+| Dynamic | `crates/clickhouse-arrow/.../types/serialize.rs`      | `DataTypeDynamic.cpp`               | ⚠️ Placeholder |
+| Nested  | `crates/clickhouse-arrow/.../types/serialize.rs`      | `DataTypeNested.cpp`                | ⚠️ Placeholder |
+
+### Key Implementation Details
+
+**Variant:**
+- Discriminator byte/varint indicates active type
+- Type-specific data follows discriminator
+- Null variant has special discriminator value
+
+**Dynamic:**
+- max_types parameter limits stored type variations
+- Type discovery at runtime
+- Shared dictionary for type names
+
+**Nested:**
+- Stored as parallel arrays (one array per nested column)
+- All arrays must have same length per row
+- Flattened column names: `nested_name.column_name`
+
+### ClickHouse Source References
+
+- Variant: `ClickHouse/src/DataTypes/DataTypeVariant.cpp`
+- Dynamic: `ClickHouse/src/DataTypes/DataTypeDynamic.cpp`
+- Nested: `ClickHouse/src/DataTypes/DataTypeNested.cpp`
+- Serialization: `ClickHouse/src/DataTypes/Serializations/`
+
+---
+
+## Future Work
+
+### SIMD Optimizations (NOT NOW)
+
+- [ ] Investigate arrow-json SIMD for JSON → Arrow
+- [ ] sonic-rs SIMD tuning
+- [ ] Batch-level SIMD operations
+
+### DLQ Routing
+
+- [ ] Topic per db.table option
+- [ ] Common DLQ topic option
+- [ ] Configurable via ENV/config cascade
+
+---
+
+## Completed Phases
+
+| Phase    | Description          | Status         |
+| -------- | -------------------- | -------------- |
+| Phase 0  | Foundation           | ✅ Complete    |
+| Phase 1  | Core Infrastructure  | ✅ Complete    |
+| Phase 2  | Kafka Integration    | ✅ Complete    |
+| Phase 3  | Routing              | ✅ Complete    |
+| Phase 5  | Buffer Management    | ✅ Complete    |
+| Phase 6  | ClickHouse           | ✅ Complete    |
+| Phase 7  | Pipeline             | ✅ Complete    |
+| Phase 8  | CLI & Commands       | ✅ Complete    |
 
 ---
 

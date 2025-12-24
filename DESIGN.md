@@ -77,39 +77,96 @@ let new_batch = add_column(batch, "country", countries.finish());
 
 ## Core Components
 
-### 1. ArrowBuffer (Chunked Lifecycle)
+### 1. Per-Table Buffer Architecture
+
+Each destination table (db.table) has its own ArrowBatchBuilder. This ensures schema
+uniformity within each Arrow RecordBatch.
 
 ```rust
-struct ArrowChunk {
-    id: u64,
-    batch: RecordBatch,          // Immutable Arrow data
-    offset: Option<KafkaOffset>, // For at-least-once ack
-    state: ChunkState,           // Pending → InFlight → Acked/Failed
+struct BufferManager {
+    // Per-table buffers: key is "db.table"
+    buffers: HashMap<String, TableBuffer>,
+    // Cached schemas per table (from ClickHouse introspection)
+    schemas: HashMap<String, TableSchema>,
 }
 
-struct ArrowBuffer {
-    chunks: HashMap<u64, ArrowChunk>,
-    // Single buffer for ALL destinations
-    // _destination column for routing
+struct TableBuffer {
+    builder: ArrowBatchBuilder,       // Accumulates JSON objects
+    offsets: Vec<KafkaOffset>,        // Kafka offsets for at-least-once
+    created_at: Instant,              // For time-based flush
 }
 ```
 
+**Why per-table?**
+
+- **Schema uniformity**: Arrow RecordBatch requires all rows to have the same schema
+- **Schema introspection**: Each table's schema derived from ClickHouse `system.columns`
+- **Independent flush**: High-volume tables flush more often, low-volume wait for age trigger
+- **Memory efficient**: Data stays as JSON until batch is ready, then converts to Arrow
+
 **Lifecycle:**
 
-1. Kafka batch → parse → Arrow RecordBatch with `_destination` column
-2. Push to ArrowBuffer as chunk (Pending)
-3. Flush: partition by `_destination`, mark InFlight
-4. Insert to ClickHouse
-5. Success: Ack chunk (drop, instant memory free)
-6. Failure: Mark Failed, retry later
+1. Kafka message → Parse JSON/MsgPack → Route to db.table
+2. Push to per-table ArrowBatchBuilder (with Kafka offset)
+3. When ready (row count, time): Build Arrow RecordBatch
+4. Insert to ClickHouse via native protocol
+5. Success: Ack Kafka offsets
+6. Failure: Retry batch
 
-**Why chunked?**
+### 2. Dynamic db.table Routing
 
-- No row-level removal (expensive in columnar format)
-- Drop entire chunk on ack = O(1)
-- Natural batch boundary from Kafka
+Routing happens **PRE-flattening** on the original nested JSON/MessagePack structure.
+Both formats deserialize to `serde_json::Value` with the same nested structure.
 
-### 2. Transform Pipeline (Immutable Batches)
+```rust
+// Config (from ENV/config cascade)
+struct RoutingConfig {
+    db_fields: Vec<String>,      // ["org_id"]
+    table_fields: Vec<String>,   // ["event_category", "tags.event_category"]
+    default_db: String,          // "common"
+    default_table: String,       // "common"
+}
+
+// Routing logic
+fn route_to_table(event: &Value, config: &RoutingConfig) -> String {
+    // Extract db from first matching field
+    let db = config.db_fields.iter()
+        .find_map(|path| get_nested_value(event, path))
+        .map(|v| v.as_str().unwrap_or(&config.default_db))
+        .unwrap_or(&config.default_db);
+
+    // Extract table from first matching field
+    let table = config.table_fields.iter()
+        .find_map(|path| get_nested_value(event, path))
+        .map(|v| v.as_str().unwrap_or(&config.default_table))
+        .unwrap_or(&config.default_table);
+
+    format!("{}.{}", db, table)
+}
+
+// Dot notation for nested access: "tags.event_category" → event["tags"]["event_category"]
+fn get_nested_value<'a>(event: &'a Value, path: &str) -> Option<&'a Value> {
+    path.split('.').try_fold(event, |v, key| v.get(key))
+}
+```
+
+**Example:**
+
+```json
+{
+  "org_id": "acme",
+  "event_category": "auth",
+  "tags": { "event_category": "login" },
+  "data": { ... }
+}
+```
+
+With default config:
+- `db_fields = ["org_id"]` → finds "acme"
+- `table_fields = ["event_category", "tags.event_category"]` → finds "auth"
+- Result: `acme.auth`
+
+### 3. Transform Pipeline (Immutable Batches)
 
 Arrow batches are **immutable**. Transforms build **new batches** with column operations:
 
@@ -184,60 +241,70 @@ async fn insert_arrow(client: &Client, table: &str, batch: RecordBatch) -> Resul
 ```text
 ┌─────────────────────────────────────────────────────────────────────┐
 │                         Kafka Consumer                               │
-│  - Batch of messages (bytes)                                        │
-│  - Track partition/offset per batch                                 │
+│  - Stream of messages (bytes)                                       │
+│  - Track partition/offset per message                               │
 └────────────────────────────┬────────────────────────────────────────┘
                              │
                              ▼
 ┌─────────────────────────────────────────────────────────────────────┐
 │                      JSON/MsgPack Parser                            │
-│  - arrow-json for JSON → Arrow (SIMD)                               │
-│  - rmp → Arrow for MessagePack                                      │
-│  - Output: RecordBatch (one per Kafka batch)                        │
+│  - sonic-rs for JSON (SIMD)                                         │
+│  - rmp-serde for MessagePack                                        │
+│  - Output: serde_json::Value per message                            │
+└────────────────────────────┬────────────────────────────────────────┘
+                             │
+                             ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│                     Router (PRE-flattening)                          │
+│  - Extract db from first matching field in priority list            │
+│    Default: ["org_id"], fallback: "common"                          │
+│  - Extract table from first matching field in priority list         │
+│    Default: ["event_category", "tags.event_category"], fb: "common" │
+│  - Dot notation for nested access (tags.event_category)             │
+│  - Route to DLQ if configured                                       │
 └────────────────────────────┬────────────────────────────────────────┘
                              │
                              ▼
 ┌─────────────────────────────────────────────────────────────────────┐
 │                     Transform Pipeline                               │
-│  1. Route: Add _destination column (category → table mapping)       │
-│  2. Flatten: Nested JSON → flat columns (column-wise)               │
-│  3. Enrich: GeoIP, risk score (vectorized column append)            │
-│  4. Coerce: Type conversion to match CH schema (column-wise)        │
-│  5. Timestamp: Add load_timestamp column                            │
+│  1. Flatten: Nested JSON → flat columns                             │
+│  2. Timestamp: Validate/correct timestamps                          │
+│  3. Coerce: Type conversion (future: schema-aware)                  │
+│  4. Enrich: GeoIP, risk score (future)                              │
 │                                                                     │
-│  NOTE: Each step builds NEW batch, Arc-shares unchanged columns     │
+│  Output: JSON Map per message                                       │
 └────────────────────────────┬────────────────────────────────────────┘
                              │
                              ▼
 ┌─────────────────────────────────────────────────────────────────────┐
-│                        ArrowBuffer                                   │
-│  - Single buffer for all destinations                               │
-│  - Chunk = immutable RecordBatch + KafkaOffset                      │
-│  - State tracking: Pending → InFlight → Acked/Failed                │
+│                    Per-Table BufferManager                           │
+│  - HashMap<db.table, ArrowBatchBuilder>                             │
+│  - Each table has its own buffer (schema uniformity)                │
+│  - Tracks Kafka offsets per buffer                                  │
+│  - Schema from ClickHouse introspection                             │
 └────────────────────────────┬────────────────────────────────────────┘
                              │
-                             ▼ (flush trigger: rows, bytes, time)
+                             ▼ (flush trigger: rows, time per table)
 ┌─────────────────────────────────────────────────────────────────────┐
-│                     Partition by _destination                        │
-│  - Group rows by destination table (column operation)               │
-│  - Build separate RecordBatch per table                             │
-│  - Arrow's columnar format makes this efficient                     │
+│                  Arrow RecordBatch Build                             │
+│  - Convert buffered JSON objects to Arrow columnar format           │
+│  - Single RecordBatch per table (uniform schema)                    │
+│  - Efficient: batch all rows together, then build columns           │
 └────────────────────────────┬────────────────────────────────────────┘
                              │
                              ▼
 ┌─────────────────────────────────────────────────────────────────────┐
 │                    ClickHouse Inserter                               │
-│  - clickhouse-arrow native protocol                                 │
-│  - Concurrent multi-table insert                                    │
+│  - Currently: JSON bridge (insert_arrow_via_json)                   │
+│  - Future: clickhouse-arrow native protocol                         │
 │  - Retry with exponential backoff                                   │
 └────────────────────────────┬────────────────────────────────────────┘
                              │
                              ▼
 ┌─────────────────────────────────────────────────────────────────────┐
-│                       Chunk Ack                                      │
-│  - On success: drop chunk (Arc decrement, memory freed)             │
-│  - Commit Kafka offset for the chunk                                │
-│  - On failure: mark Failed, retry later                             │
+│                       Offset Ack                                     │
+│  - On success: Commit Kafka offsets from batch                      │
+│  - On failure: Retry batch, backpressure                            │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 

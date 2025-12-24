@@ -8,12 +8,14 @@
 
 //! ClickHouse client abstraction
 
+pub mod arrow_client;
 pub mod client;
 pub mod inserter;
 pub mod salvage;
 pub mod schema;
 pub mod types;
 
+pub use arrow_client::{ArrowClickHouseClient, SharedArrowClient};
 pub use client::{ClickHouseClient, ColumnInfo, SharedClickHouseClient, TableSchema};
 pub use inserter::{Inserter, InserterConfig};
 pub use schema::SchemaCache;

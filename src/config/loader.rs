@@ -327,22 +327,42 @@ impl Default for PayloadConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RoutingConfig {
-    pub routing_field: String,
-    pub fallback_field: Option<String>,
+    /// Fields to check for database name (first match wins, dot notation for nested)
+    /// Example: ["org_id", "tenant.id"]
+    pub db_fields: Vec<String>,
+
+    /// Fields to check for table name (first match wins, dot notation for nested)
+    /// Example: ["event_category", "tags.event_category"]
+    pub table_fields: Vec<String>,
+
+    /// Default database if no db_field matches
+    pub default_db: String,
+
+    /// Default table if no table_field matches
+    pub default_table: String,
+
+    /// Legacy: category to table mapping (for backwards compatibility)
     pub category_to_table: HashMap<String, String>,
+
+    /// Legacy: mapping file path
     pub mapping_file: Option<String>,
-    pub default_table: Option<String>,
+
+    /// DLQ configuration
     pub dlq: DlqConfig,
 }
 
 impl Default for RoutingConfig {
     fn default() -> Self {
         Self {
-            routing_field: "event_category".to_string(),
-            fallback_field: Some("tags.event_category".to_string()),
+            db_fields: vec!["org_id".to_string()],
+            table_fields: vec![
+                "event_category".to_string(),
+                "tags.event_category".to_string(),
+            ],
+            default_db: "common".to_string(),
+            default_table: "common".to_string(),
             category_to_table: HashMap::new(),
             mapping_file: None,
-            default_table: None,
             dlq: DlqConfig::default(),
         }
     }

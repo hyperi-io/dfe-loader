@@ -1,26 +1,32 @@
-//! Arrow-based buffer manager with schema introspection
+//! Per-table Arrow buffer manager with schema introspection
 //!
-//! Manages a single partitioned Arrow buffer where destination table is a column.
-//! Schema for each table is fetched from ClickHouse introspection.
+//! Each destination table has its own ArrowBatchBuilder for schema uniformity.
+//! Schema for each table is fetched from ClickHouse introspection on first use
+//! and cached with TTL-based refresh.
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use arrow::array::RecordBatch;
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
+use serde_json::{Map, Value};
+use tracing::debug;
 
-use crate::buffer::arrow::{ArrowBuffer, KafkaOffset, PartitionedBatch};
+use crate::buffer::arrow::KafkaOffset;
+use crate::clickhouse::ArrowClickHouseClient;
 use crate::config::BufferConfig;
+use crate::transform::ArrowBatchBuilder;
 use crate::Result;
 
 /// Data ready to be flushed to ClickHouse (Arrow-native)
 pub struct FlushBatch {
-    /// Destination table name
+    /// Destination table name (db.table)
     pub table: String,
     /// Arrow RecordBatch ready for insert
     pub batch: RecordBatch,
-    /// Chunk IDs included in this batch (for acknowledgment)
-    pub chunk_ids: Vec<u64>,
+    /// Kafka offsets for acknowledgment after successful insert
+    pub offsets: Vec<KafkaOffset>,
 }
 
 /// Per-table schema metadata from ClickHouse introspection
@@ -32,6 +38,8 @@ pub struct TableSchema {
     pub arrow_schema: SchemaRef,
     /// Column name to ClickHouse type mapping
     pub column_types: HashMap<String, String>,
+    /// Last refresh time
+    pub last_refresh: Instant,
 }
 
 impl TableSchema {
@@ -51,14 +59,42 @@ impl TableSchema {
             table_name,
             arrow_schema: Arc::new(Schema::new(fields)),
             column_types,
+            last_refresh: Instant::now(),
         })
+    }
+
+    /// Check if schema needs refresh
+    pub fn needs_refresh(&self, max_age: Duration) -> bool {
+        self.last_refresh.elapsed() > max_age
+    }
+}
+
+/// Convert Arrow DataType back to ClickHouse type hint (for logging/debugging)
+fn arrow_type_to_ch_hint(arrow_type: &DataType) -> String {
+    match arrow_type {
+        DataType::Int8 => "Int8".to_string(),
+        DataType::Int16 => "Int16".to_string(),
+        DataType::Int32 => "Int32".to_string(),
+        DataType::Int64 => "Int64".to_string(),
+        DataType::UInt8 => "UInt8".to_string(),
+        DataType::UInt16 => "UInt16".to_string(),
+        DataType::UInt32 => "UInt32".to_string(),
+        DataType::UInt64 => "UInt64".to_string(),
+        DataType::Float32 => "Float32".to_string(),
+        DataType::Float64 => "Float64".to_string(),
+        DataType::Boolean => "Bool".to_string(),
+        DataType::Utf8 | DataType::LargeUtf8 => "String".to_string(),
+        DataType::Binary | DataType::LargeBinary => "String".to_string(),
+        DataType::Date32 => "Date".to_string(),
+        DataType::Date64 => "Date".to_string(),
+        DataType::FixedSizeBinary(16) => "UUID".to_string(),
+        DataType::FixedSizeBinary(n) => format!("FixedString({})", n),
+        DataType::List(_) => "Array".to_string(),
+        _ => "String".to_string(), // Default fallback
     }
 }
 
 /// Convert ClickHouse type string to Arrow DataType
-///
-/// This is used during schema introspection to build Arrow schemas
-/// that match the ClickHouse table structure.
 fn ch_type_to_arrow(ch_type: &str) -> Result<DataType> {
     // Strip Nullable wrapper
     let inner_type = if ch_type.starts_with("Nullable(") && ch_type.ends_with(')') {
@@ -96,14 +132,13 @@ fn ch_type_to_arrow(ch_type: &str) -> Result<DataType> {
         "IPv6" => DataType::FixedSizeBinary(16),
 
         // Bool
-        "Bool" | "UInt8" => DataType::UInt8,
+        "Bool" => DataType::Boolean,
 
-        // Complex types - handle generically
+        // Complex types
         t if t.starts_with("DateTime64") => DataType::Int64,
         t if t.starts_with("DateTime") => DataType::Int64,
-        t if t.starts_with("Decimal") => DataType::Binary, // Store as bytes
+        t if t.starts_with("Decimal") => DataType::Binary,
         t if t.starts_with("FixedString") => {
-            // Parse FixedString(N)
             let n: i32 = t
                 .trim_start_matches("FixedString(")
                 .trim_end_matches(')')
@@ -112,21 +147,13 @@ fn ch_type_to_arrow(ch_type: &str) -> Result<DataType> {
             DataType::FixedSizeBinary(n)
         }
         t if t.starts_with("Array") => {
-            // Array(T) -> List(T)
             let inner = &t[6..t.len() - 1];
             let inner_type = ch_type_to_arrow(inner)?;
             DataType::List(Arc::new(Field::new("item", inner_type, true)))
         }
-        t if t.starts_with("Map") => {
-            // Map(K, V) -> Map(K, V)
-            DataType::Binary // Simplified for now
-        }
-        t if t.starts_with("Tuple") => {
-            // Tuple(T1, T2, ...) -> Struct
-            DataType::Binary // Simplified for now
-        }
+        t if t.starts_with("Map") => DataType::Binary,
+        t if t.starts_with("Tuple") => DataType::Binary,
         t if t.starts_with("LowCardinality") => {
-            // LowCardinality(T) - unwrap the inner type
             let inner = &t[15..t.len() - 1];
             ch_type_to_arrow(inner)?
         }
@@ -142,27 +169,102 @@ fn ch_type_to_arrow(ch_type: &str) -> Result<DataType> {
     })
 }
 
-/// Arrow-based buffer manager
+/// Per-table buffer tracking pending messages and Kafka offsets
+struct TableBuffer {
+    /// Batch builder for this table
+    builder: ArrowBatchBuilder,
+    /// Kafka offsets for messages in this buffer
+    offsets: Vec<KafkaOffset>,
+    /// Created timestamp
+    created_at: Instant,
+}
+
+impl TableBuffer {
+    fn new(batch_size: usize) -> Self {
+        Self {
+            builder: ArrowBatchBuilder::new(batch_size),
+            offsets: Vec::new(),
+            created_at: Instant::now(),
+        }
+    }
+
+    fn push(&mut self, data: Map<String, Value>, table: String, offset: Option<KafkaOffset>) {
+        self.builder.push(data, table);
+        if let Some(off) = offset {
+            self.offsets.push(off);
+        }
+    }
+
+    fn is_ready(&self, flush_rows: usize, flush_age_secs: u64) -> bool {
+        self.builder.len() >= flush_rows
+            || self.created_at.elapsed().as_secs() >= flush_age_secs
+    }
+
+    fn build(&mut self) -> Result<Option<(RecordBatch, Vec<KafkaOffset>)>> {
+        match self.builder.build()? {
+            Some(batch) => {
+                let offsets = std::mem::take(&mut self.offsets);
+                self.created_at = Instant::now();
+                Ok(Some((batch, offsets)))
+            }
+            None => Ok(None),
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.builder.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.builder.is_empty()
+    }
+}
+
+/// Buffer statistics
+#[derive(Debug, Clone, Default)]
+pub struct ArrowBufferStats {
+    pub pending_rows: usize,
+    pub pending_bytes: usize,
+    pub pending_chunks: usize,
+    pub table_count: usize,
+}
+
+/// Per-table Arrow buffer manager
 ///
-/// Uses a single ArrowBuffer with schema introspection from ClickHouse.
-/// Each table's schema is fetched on first use and cached.
+/// Each destination table (db.table) has its own ArrowBatchBuilder.
+/// This ensures schema uniformity within each Arrow RecordBatch.
 pub struct BufferManager {
-    /// The underlying Arrow buffer
-    buffer: ArrowBuffer,
+    /// Per-table buffers: key is "db.table"
+    buffers: HashMap<String, TableBuffer>,
     /// Cached schemas per table
     schemas: HashMap<String, TableSchema>,
-    /// Combined schema including _destination column
-    destination_schema: Option<SchemaRef>,
+    /// Batch size per table buffer
+    batch_size: usize,
+    /// Flush trigger: row count
+    flush_rows: usize,
+    /// Flush trigger: age in seconds
+    flush_age_secs: u64,
+    /// Schema refresh interval
+    schema_refresh_interval: Duration,
 }
 
 impl BufferManager {
     /// Create a new buffer manager with config
     pub fn new(config: &BufferConfig) -> Self {
         Self {
-            buffer: ArrowBuffer::new(config.flush_rows, config.flush_bytes, config.flush_age_secs),
+            buffers: HashMap::new(),
             schemas: HashMap::new(),
-            destination_schema: None,
+            batch_size: config.flush_rows.max(100), // At least 100 per batch
+            flush_rows: config.flush_rows,
+            flush_age_secs: config.flush_age_secs,
+            schema_refresh_interval: Duration::from_secs(60),
         }
+    }
+
+    /// Set schema refresh interval
+    pub fn with_schema_refresh(mut self, interval: Duration) -> Self {
+        self.schema_refresh_interval = interval;
+        self
     }
 
     /// Register a table schema (from ClickHouse introspection)
@@ -170,120 +272,185 @@ impl BufferManager {
         self.schemas.insert(schema.table_name.clone(), schema);
     }
 
-    /// Get the Arrow schema for a table
+    /// Get the schema for a table (if cached)
     pub fn get_schema(&self, table: &str) -> Option<&TableSchema> {
         self.schemas.get(table)
     }
 
-    /// Push an Arrow RecordBatch to the buffer
-    ///
-    /// The batch must include a _destination column for routing.
-    pub fn push_batch(&mut self, batch: RecordBatch, offset: Option<KafkaOffset>) -> u64 {
-        self.buffer.push(batch, offset)
-    }
-
-    /// Check if buffer should flush
-    pub fn should_flush(&self) -> bool {
-        self.buffer.should_flush()
-    }
-
-    /// Get batches ready for flush, partitioned by destination
-    ///
-    /// Returns FlushBatch structs with Arrow RecordBatches ready for ClickHouse insert.
-    pub fn get_ready_for_flush(&mut self) -> Result<Vec<FlushBatch>> {
-        if !self.buffer.should_flush() {
-            return Ok(Vec::new());
+    /// Check if schema needs refresh
+    pub fn schema_needs_refresh(&self, table: &str) -> bool {
+        match self.schemas.get(table) {
+            Some(schema) => schema.needs_refresh(self.schema_refresh_interval),
+            None => true, // No schema = needs fetch
         }
-
-        let (partitioned, chunk_ids) = self.buffer.partition_pending()?;
-
-        // Mark chunks as in-flight
-        self.buffer.mark_in_flight(&chunk_ids);
-
-        // Convert to FlushBatch
-        let batches = partitioned
-            .into_iter()
-            .map(|pb| FlushBatch {
-                table: pb.table,
-                batch: pb.batch,
-                chunk_ids: chunk_ids.clone(),
-            })
-            .collect();
-
-        Ok(batches)
     }
 
-    /// Acknowledge successful insert of chunks
+    /// Fetch schema from ClickHouse Arrow client and cache it
     ///
-    /// Returns Kafka offsets for acknowledgment.
-    pub fn ack_chunks(&mut self, chunk_ids: &[u64]) -> Vec<KafkaOffset> {
-        chunk_ids
+    /// This should be called before first insert to a table.
+    pub async fn fetch_and_cache_schema(
+        &mut self,
+        table: &str,
+        arrow_client: &ArrowClickHouseClient,
+    ) -> Result<SchemaRef> {
+        debug!(table = %table, "Fetching schema from ClickHouse");
+
+        let arrow_schema = arrow_client.fetch_schema(table).await?;
+
+        // Build column types map from Arrow schema
+        let column_types: HashMap<String, String> = arrow_schema
+            .fields()
             .iter()
-            .filter_map(|id| self.buffer.ack(*id))
-            .collect()
-    }
-
-    /// Mark chunks as failed (for retry)
-    pub fn fail_chunks(&mut self, chunk_ids: &[u64]) {
-        for id in chunk_ids {
-            self.buffer.fail(*id);
-        }
-    }
-
-    /// Reset failed chunks for retry
-    pub fn retry_failed(&mut self) {
-        self.buffer.retry_failed();
-    }
-
-    /// Get all pending batches (for shutdown flush)
-    pub fn flush_all(&mut self) -> Result<Vec<FlushBatch>> {
-        let (partitioned, chunk_ids) = self.buffer.partition_pending()?;
-
-        if partitioned.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        self.buffer.mark_in_flight(&chunk_ids);
-
-        let batches = partitioned
-            .into_iter()
-            .map(|pb| FlushBatch {
-                table: pb.table,
-                batch: pb.batch,
-                chunk_ids: chunk_ids.clone(),
-            })
+            .map(|f| (f.name().clone(), arrow_type_to_ch_hint(f.data_type())))
             .collect();
 
-        Ok(batches)
+        let schema = TableSchema {
+            table_name: table.to_string(),
+            arrow_schema: arrow_schema.clone(),
+            column_types,
+            last_refresh: Instant::now(),
+        };
+
+        self.schemas.insert(table.to_string(), schema);
+        debug!(table = %table, columns = arrow_schema.fields().len(), "Schema cached");
+
+        Ok(arrow_schema)
+    }
+
+    /// Get or fetch schema for a table
+    ///
+    /// Uses cached schema if valid, otherwise fetches from ClickHouse.
+    pub async fn get_or_fetch_schema(
+        &mut self,
+        table: &str,
+        arrow_client: &ArrowClickHouseClient,
+    ) -> Result<SchemaRef> {
+        if let Some(schema) = self.schemas.get(table) {
+            if !schema.needs_refresh(self.schema_refresh_interval) {
+                debug!(table = %table, "Using cached schema");
+                return Ok(schema.arrow_schema.clone());
+            }
+        }
+
+        self.fetch_and_cache_schema(table, arrow_client).await
+    }
+
+    /// Push a JSON object to the appropriate table buffer
+    ///
+    /// The table is determined by the caller (from routing).
+    pub fn push(
+        &mut self,
+        table: &str,
+        data: Map<String, Value>,
+        offset: Option<KafkaOffset>,
+    ) {
+        let buffer = self.buffers.entry(table.to_string()).or_insert_with(|| {
+            TableBuffer::new(self.batch_size)
+        });
+        buffer.push(data, table.to_string(), offset);
+    }
+
+    /// Check if any buffer needs flushing
+    pub fn should_flush(&self) -> bool {
+        self.buffers.values().any(|buf| {
+            buf.is_ready(self.flush_rows, self.flush_age_secs)
+        })
+    }
+
+    /// Get batches ready for flush
+    ///
+    /// Returns FlushBatch for each table that's ready.
+    pub fn get_ready_for_flush(&mut self) -> Result<Vec<FlushBatch>> {
+        let mut flush_batches = Vec::new();
+
+        // Collect tables that are ready
+        let ready_tables: Vec<String> = self.buffers
+            .iter()
+            .filter(|(_, buf)| buf.is_ready(self.flush_rows, self.flush_age_secs))
+            .map(|(table, _)| table.clone())
+            .collect();
+
+        // Build batches for ready tables
+        for table in ready_tables {
+            if let Some(buffer) = self.buffers.get_mut(&table) {
+                if let Some((batch, offsets)) = buffer.build()? {
+                    flush_batches.push(FlushBatch {
+                        table,
+                        batch,
+                        offsets,
+                    });
+                }
+            }
+        }
+
+        Ok(flush_batches)
+    }
+
+    /// Flush all buffers (for shutdown)
+    pub fn flush_all(&mut self) -> Result<Vec<FlushBatch>> {
+        let mut flush_batches = Vec::new();
+
+        for (table, buffer) in self.buffers.iter_mut() {
+            if let Some((batch, offsets)) = buffer.build()? {
+                flush_batches.push(FlushBatch {
+                    table: table.clone(),
+                    batch,
+                    offsets,
+                });
+            }
+        }
+
+        Ok(flush_batches)
     }
 
     /// Get buffer statistics
-    pub fn stats(&self) -> crate::buffer::ArrowBufferStats {
-        self.buffer.stats()
+    pub fn stats(&self) -> ArrowBufferStats {
+        let mut stats = ArrowBufferStats::default();
+        stats.table_count = self.buffers.len();
+
+        for buffer in self.buffers.values() {
+            stats.pending_rows += buffer.len();
+            stats.pending_chunks += if buffer.is_empty() { 0 } else { 1 };
+        }
+
+        stats
     }
 
     /// Get total pending row count
     pub fn pending_rows(&self) -> usize {
-        self.buffer.pending_rows()
+        self.buffers.values().map(|b| b.len()).sum()
     }
 
-    /// Get total pending bytes
+    /// Get pending bytes (estimate)
     pub fn pending_bytes(&self) -> usize {
-        self.buffer.pending_bytes()
+        // Rough estimate: 200 bytes per row average
+        self.pending_rows() * 200
     }
 
-    /// Clear the buffer (for shutdown)
+    /// Clear all buffers
     pub fn clear(&mut self) {
-        self.buffer.clear();
+        self.buffers.clear();
+    }
+
+    /// Get list of tables with pending data
+    pub fn tables_with_pending(&self) -> Vec<&str> {
+        self.buffers
+            .iter()
+            .filter(|(_, buf)| !buf.is_empty())
+            .map(|(table, _)| table.as_str())
+            .collect()
     }
 }
 
 impl Default for BufferManager {
     fn default() -> Self {
         Self {
-            buffer: ArrowBuffer::default(),
+            buffers: HashMap::new(),
             schemas: HashMap::new(),
-            destination_schema: None,
+            batch_size: 1000,
+            flush_rows: 10000,
+            flush_age_secs: 5,
+            schema_refresh_interval: Duration::from_secs(60),
         }
     }
 }
@@ -291,24 +458,8 @@ impl Default for BufferManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arrow::array::{Int64Array, StringArray};
+    use serde_json::json;
     use crate::config::BufferConfig;
-
-    fn create_test_batch(destinations: &[&str], values: &[i64]) -> RecordBatch {
-        let schema = Arc::new(Schema::new(vec![
-            Arc::new(Field::new("_destination", DataType::Utf8, false)),
-            Arc::new(Field::new("value", DataType::Int64, false)),
-        ]));
-
-        let dest_array = StringArray::from(destinations.to_vec());
-        let value_array = Int64Array::from(values.to_vec());
-
-        RecordBatch::try_new(
-            schema,
-            vec![Arc::new(dest_array), Arc::new(value_array)],
-        )
-        .unwrap()
-    }
 
     fn test_config() -> BufferConfig {
         BufferConfig {
@@ -319,52 +470,93 @@ mod tests {
     }
 
     #[test]
-    fn test_buffer_manager_basic() {
+    fn test_buffer_manager_push() {
         let mut manager = BufferManager::new(&test_config());
 
-        let batch = create_test_batch(&["table_a", "table_b"], &[1, 2]);
-        manager.push_batch(batch, None);
+        let data1 = json!({"id": 1, "name": "foo"}).as_object().unwrap().clone();
+        let data2 = json!({"id": 2, "name": "bar"}).as_object().unwrap().clone();
+
+        manager.push("db.table_a", data1, None);
+        manager.push("db.table_b", data2, None);
 
         assert_eq!(manager.pending_rows(), 2);
+        assert_eq!(manager.stats().table_count, 2);
     }
 
     #[test]
-    fn test_buffer_manager_flush() {
+    fn test_buffer_manager_flush_threshold() {
         let mut manager = BufferManager::new(&test_config());
 
-        // Add enough rows to trigger flush
-        let batch = create_test_batch(
-            &["t", "t", "t", "t", "t", "t"],
-            &[1, 2, 3, 4, 5, 6],
-        );
-        manager.push_batch(batch, None);
+        // Push enough rows to trigger flush (5 rows)
+        for i in 0..6 {
+            let data = json!({"id": i}).as_object().unwrap().clone();
+            manager.push("db.events", data, None);
+        }
 
         assert!(manager.should_flush());
 
         let batches = manager.get_ready_for_flush().unwrap();
         assert_eq!(batches.len(), 1);
-        assert_eq!(batches[0].table, "t");
+        assert_eq!(batches[0].table, "db.events");
         assert_eq!(batches[0].batch.num_rows(), 6);
     }
 
     #[test]
-    fn test_buffer_manager_partition() {
+    fn test_buffer_manager_per_table_isolation() {
         let mut manager = BufferManager::new(&test_config());
 
-        // Add rows for multiple tables
-        let batch = create_test_batch(
-            &["table_a", "table_b", "table_a", "table_b", "table_a", "table_b"],
-            &[1, 2, 3, 4, 5, 6],
-        );
-        manager.push_batch(batch, None);
+        // Push 3 rows to table_a, 2 rows to table_b
+        for i in 0..3 {
+            let data = json!({"id": i}).as_object().unwrap().clone();
+            manager.push("db.table_a", data, None);
+        }
+        for i in 0..2 {
+            let data = json!({"id": i}).as_object().unwrap().clone();
+            manager.push("db.table_b", data, None);
+        }
 
+        // Neither should trigger flush (threshold is 5)
+        assert!(!manager.should_flush());
+        assert_eq!(manager.pending_rows(), 5);
+
+        // Add more to table_a to trigger
+        for i in 3..6 {
+            let data = json!({"id": i}).as_object().unwrap().clone();
+            manager.push("db.table_a", data, None);
+        }
+
+        assert!(manager.should_flush());
+
+        let batches = manager.get_ready_for_flush().unwrap();
+        // Only table_a should flush
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].table, "db.table_a");
+        assert_eq!(batches[0].batch.num_rows(), 6);
+
+        // table_b still has 2 pending
+        assert_eq!(manager.pending_rows(), 2);
+    }
+
+    #[test]
+    fn test_buffer_manager_flush_all() {
+        let mut manager = BufferManager::new(&test_config());
+
+        // Push to multiple tables
+        for i in 0..3 {
+            let data = json!({"id": i}).as_object().unwrap().clone();
+            manager.push("db.table_a", data, None);
+        }
+        for i in 0..2 {
+            let data = json!({"id": i}).as_object().unwrap().clone();
+            manager.push("db.table_b", data, None);
+        }
+
+        // Flush all (shutdown scenario)
         let batches = manager.flush_all().unwrap();
         assert_eq!(batches.len(), 2);
 
-        // Each table should have 3 rows
-        for fb in &batches {
-            assert_eq!(fb.batch.num_rows(), 3);
-        }
+        // All buffers should be empty
+        assert_eq!(manager.pending_rows(), 0);
     }
 
     #[test]
@@ -374,6 +566,7 @@ mod tests {
         assert!(matches!(ch_type_to_arrow("Nullable(Int64)").unwrap(), DataType::Int64));
         assert!(matches!(ch_type_to_arrow("UUID").unwrap(), DataType::FixedSizeBinary(16)));
         assert!(matches!(ch_type_to_arrow("IPv4").unwrap(), DataType::FixedSizeBinary(4)));
+        assert!(matches!(ch_type_to_arrow("Bool").unwrap(), DataType::Boolean));
     }
 
     #[test]
@@ -389,5 +582,42 @@ mod tests {
         assert_eq!(schema.table_name, "test.events");
         assert_eq!(schema.arrow_schema.fields().len(), 3);
         assert_eq!(schema.column_types.get("id").unwrap(), "Int64");
+    }
+
+    #[test]
+    fn test_kafka_offset_tracking() {
+        let mut manager = BufferManager::new(&test_config());
+
+        let offset1 = KafkaOffset {
+            topic: "test".to_string(),
+            partition: 0,
+            offset: 100,
+        };
+        let offset2 = KafkaOffset {
+            topic: "test".to_string(),
+            partition: 0,
+            offset: 101,
+        };
+
+        // Push with offsets
+        let data1 = json!({"id": 1}).as_object().unwrap().clone();
+        let data2 = json!({"id": 2}).as_object().unwrap().clone();
+
+        manager.push("db.events", data1, Some(offset1));
+        manager.push("db.events", data2, Some(offset2));
+
+        // Add more to trigger flush
+        for i in 3..7 {
+            let data = json!({"id": i}).as_object().unwrap().clone();
+            manager.push("db.events", data, None);
+        }
+
+        let batches = manager.get_ready_for_flush().unwrap();
+        assert_eq!(batches.len(), 1);
+
+        // Should have 2 offsets tracked
+        assert_eq!(batches[0].offsets.len(), 2);
+        assert_eq!(batches[0].offsets[0].offset, 100);
+        assert_eq!(batches[0].offsets[1].offset, 101);
     }
 }
