@@ -1,0 +1,49 @@
+//! Error types for the loader
+
+use thiserror::Error;
+
+/// Main error type for the loader
+#[derive(Error, Debug)]
+pub enum Error {
+    #[error("Kafka error: {0}")]
+    Kafka(#[from] rdkafka::error::KafkaError),
+
+    #[error("ClickHouse error: {0}")]
+    ClickHouse(#[from] klickhouse::KlickhouseError),
+
+    #[error("JSON parse error: {0}")]
+    Json(String),
+
+    #[error("Configuration error: {0}")]
+    ConfigLoad(#[from] config::ConfigError),
+
+    #[error("Configuration validation error: {0}")]
+    Config(String),
+
+    #[error("IO error: {0}")]
+    Io(#[from] std::io::Error),
+
+    #[error("Routing error: no table mapping for category '{0}'")]
+    NoTableMapping(String),
+
+    #[error("Schema error: {0}")]
+    Schema(String),
+
+    #[error("Buffer error: {0}")]
+    Buffer(String),
+
+    #[error("Transform error: {0}")]
+    Transform(String),
+
+    #[error("Shutdown requested")]
+    Shutdown,
+}
+
+impl From<String> for Error {
+    fn from(s: String) -> Self {
+        Error::Config(s)
+    }
+}
+
+/// Result type alias using our Error
+pub type Result<T> = std::result::Result<T, Error>;

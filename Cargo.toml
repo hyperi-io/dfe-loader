@@ -1,0 +1,109 @@
+[package]
+name = "dfe-loader-clickhouse"
+version = "0.1.0"
+edition = "2021"
+authors = ["Hypersec"]
+description = "High-performance Kafka to ClickHouse data loader"
+license = "Proprietary"
+rust-version = "1.75"
+
+[lib]
+name = "dfe_loader_clickhouse"
+path = "src/lib.rs"
+
+[[bin]]
+name = "loader"
+path = "src/main.rs"
+
+[dependencies]
+# Async runtime
+tokio = { version = ">=1.48", features = ["full"] }
+tokio-util = { version = ">=0.7", features = ["rt"] }
+
+# Kafka (SASL/SCRAM required for auth)
+rdkafka = { version = ">=0.38", features = ["cmake-build", "ssl", "sasl"] }
+
+# ClickHouse (native protocol)
+klickhouse = ">=0.14"
+
+# JSON parsing (SIMD-accelerated)
+sonic-rs = ">=0.5"
+serde = { version = ">=1.0", features = ["derive"] }
+serde_json = ">=1.0"  # Fallback for complex cases
+
+# MessagePack parsing
+rmp-serde = ">=1.3"
+
+# Configuration
+config = ">=0.14"
+clap = { version = ">=4.5", features = ["derive", "env"] }
+dotenvy = ">=0.15"
+
+# Error handling
+thiserror = ">=2.0"
+anyhow = ">=1.0"
+
+# Logging & metrics
+tracing = ">=0.1"
+tracing-subscriber = { version = ">=0.3", features = ["env-filter", "json"] }
+prometheus = ">=0.14"
+hyper = { version = ">=1.8", features = ["server", "http1"] }
+hyper-util = { version = ">=0.1", features = ["tokio"] }
+http-body-util = ">=0.1"
+
+# Memory management
+tikv-jemalloc-ctl = ">=0.6"
+tikv-jemallocator = ">=0.6"
+
+# Utilities
+uuid = { version = ">=1.10", features = ["v4", "v7"] }
+chrono = { version = ">=0.4", features = ["serde"] }
+bytes = ">=1.7"
+futures = ">=0.3"
+parking_lot = ">=0.12"
+dashmap = ">=6.0"
+crossbeam-channel = ">=0.5"
+indexmap = { version = ">=2.5", features = ["serde"] }
+
+# Graceful shutdown
+tokio-graceful-shutdown = ">=0.15"
+
+# Async traits
+trait-variant = ">=0.1"
+
+[dev-dependencies]
+# Testing
+criterion = { version = ">=0.8", features = ["html_reports"] }
+proptest = ">=1.5"
+test-case = ">=3.3"
+rstest = ">=0.22"
+mockall = ">=0.13"
+
+# Integration test containers
+testcontainers = ">=0.26"
+testcontainers-modules = { version = ">=0.10", features = ["kafka", "clickhouse"] }
+
+# Async test utilities
+tokio-test = ">=0.4"
+
+[[bench]]
+name = "json_parsing"
+harness = false
+
+[[bench]]
+name = "transform"
+harness = false
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[profile.bench]
+inherits = "release"
+debug = true
+
+[features]
+default = []
+jemalloc = []  # Enable jemalloc allocator

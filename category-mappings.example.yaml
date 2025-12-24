@@ -1,0 +1,27 @@
+# Example category_to_table mapping file
+#
+# This file maps event_category values to ClickHouse destination tables.
+# Can be used instead of (or in addition to) the inline category_to_table
+# in the main config file.
+#
+# Mappings in this file TAKE PRECEDENCE over config file mappings.
+#
+# Supported formats: YAML (.yaml, .yml), JSON (.json), CSV (.csv)
+# Specify path via:
+#   - Config file: routing.mapping_file
+#   - ENV: LOADER_ROUTING_MAPPING_FILE
+#   - CLI: --routing-mapping-file
+
+# Format 1: Direct map (simple)
+auth: auth_events
+api: api_events
+admin: admin_events
+errors: error_events
+network: network_events
+
+# Format 2: Structured (use either format, not both)
+# mappings:
+#   - category: auth
+#     table: auth_events
+#   - category: api
+#     table: api_events

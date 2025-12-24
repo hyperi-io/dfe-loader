@@ -1,0 +1,81 @@
+# Development docker-compose for local testing
+# Use when .env is not configured for external systems (k8s.tyrell.com.au)
+#
+# Usage:
+#   docker-compose -f docker-compose.dev.yaml up -d
+#   cargo run -- --config config.dev.yaml
+#
+# Stop:
+#   docker-compose -f docker-compose.dev.yaml down -v
+
+services:
+  # ClickHouse for testing inserts
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8
+    container_name: clickhouse-dev
+    ports:
+      - "9000:9000"   # Native protocol
+      - "8123:8123"   # HTTP protocol
+    environment:
+      CLICKHOUSE_DB: default
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: ""
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+      - ./tests/fixtures/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD", "clickhouse-client", "--query", "SELECT 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+
+  # Kafka (Redpanda - Kafka-compatible, lighter weight)
+  redpanda:
+    image: redpandadata/redpanda:v24.2.1
+    container_name: redpanda-dev
+    command:
+      - redpanda
+      - start
+      - --kafka-addr internal://0.0.0.0:9092,external://0.0.0.0:19092
+      - --advertise-kafka-addr internal://redpanda:9092,external://localhost:19092
+      - --pandaproxy-addr internal://0.0.0.0:8082,external://0.0.0.0:18082
+      - --advertise-pandaproxy-addr internal://redpanda:8082,external://localhost:18082
+      - --schema-registry-addr internal://0.0.0.0:8081,external://0.0.0.0:18081
+      - --rpc-addr redpanda:33145
+      - --advertise-rpc-addr redpanda:33145
+      - --mode dev-container
+      - --smp 1
+      - --memory 512M
+      - --reserve-memory 0M
+      - --overprovisioned
+    ports:
+      - "19092:19092"  # Kafka external
+      - "18082:18082"  # Pandaproxy
+      - "18081:18081"  # Schema Registry
+    volumes:
+      - redpanda-data:/var/lib/redpanda/data
+    healthcheck:
+      test: ["CMD", "rpk", "cluster", "health"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # Redpanda Console (Kafka UI)
+  console:
+    image: redpandadata/console:v2.7.0
+    container_name: redpanda-console-dev
+    ports:
+      - "8080:8080"
+    environment:
+      KAFKA_BROKERS: redpanda:9092
+    depends_on:
+      redpanda:
+        condition: service_healthy
+
+volumes:
+  clickhouse-data:
+  redpanda-data:

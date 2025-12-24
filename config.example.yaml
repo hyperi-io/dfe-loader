@@ -1,0 +1,149 @@
+# Example configuration for dfe-loader-clickhouse (Rust)
+# Copy to config.yaml and modify as needed
+#
+# Configuration cascade (highest to lowest priority):
+#   1. CLI args (--config, --host, etc.)
+#   2. Environment variables (LOADER_KAFKA_BROKERS, etc.)
+#   3. .env file
+#   4. settings.{env}.yaml
+#   5. settings.yaml
+#   6. defaults.yaml
+#   7. Hard-coded defaults
+
+kafka:
+  brokers:
+    - localhost:9092
+  group: clickhouse-loader
+  topics:
+    - events
+  # Alternatively, use regex for topic matching:
+  # topic_regex: "events-.*"
+  client_id: clickhouse-loader
+  # SASL authentication (optional)
+  # sasl:
+  #   enabled: true
+  #   mechanism: PLAIN  # PLAIN, SCRAM-SHA-256, SCRAM-SHA-512
+  #   username: user
+  #   password: pass
+  # TLS configuration (optional)
+  # tls:
+  #   enabled: true
+  #   ca_cert_file: /certs/ca.pem
+  #   cert_file: /certs/client.pem     # For mTLS
+  #   key_file: /certs/client-key.pem  # For mTLS
+  #   skip_verify: false
+
+clickhouse:
+  hosts:
+    - localhost:9000
+  database: default
+  username: default
+  password: ""
+  # Protocol: "native" (default) - HTTP not supported in Rust version
+  # Native protocol is required for performance
+  protocol: native
+  tables:
+    - auth_events
+    - api_events
+    - admin_events
+    - error_events
+  # TLS configuration (optional for self-hosted, required for ClickHouse Cloud)
+  # tls:
+  #   enabled: true
+  #   ca_cert_file: /certs/ca.pem        # Optional: custom CA cert
+  #   skip_verify: false
+
+# =============================================================================
+# ClickHouse Cloud Configuration
+# =============================================================================
+# clickhouse:
+#   hosts:
+#     - your-instance.region.clickhouse.cloud:9440
+#   database: default
+#   username: default
+#   password: "your-cloud-password"
+#   protocol: native
+#   tls:
+#     enabled: true
+#   tables:
+#     - auth_events
+
+# Message routing configuration
+routing:
+  # Primary field for routing (default: "event_category")
+  routing_field: event_category
+  # Fallback field if primary is missing
+  fallback_field: tags.event_category
+
+  # Map event_category values to destination tables
+  category_to_table:
+    auth: auth_events
+    api: api_events
+    admin: admin_events
+    errors: error_events
+
+  # External mapping file (CSV, YAML, or JSON)
+  # mapping_file: /etc/loader/category-mappings.yaml
+
+  # Default table for unmapped categories (optional, DLQ if not set)
+  # default_table: default_events
+
+  # Dead Letter Queue settings
+  dlq:
+    enabled: true
+    topic_suffix: ".dlq"
+
+buffer:
+  flush_bytes: 1048576    # 1MB
+  flush_rows: 10000
+  flush_age_secs: 5
+
+# Memory management settings
+# The loader tracks buffer memory and applies backpressure before OOM
+memory:
+  # Maximum memory for buffers in bytes
+  # Set to 0 for auto-detection (67% of available)
+  limit_bytes: 0
+  # Pressure threshold (0.0-1.0) - pause consumption above this
+  pressure_threshold: 0.8
+
+metrics:
+  enabled: true
+  address: "0.0.0.0:9090"
+
+logging:
+  level: info    # trace, debug, info, warn, error
+  format: json   # json, text
+
+# Timestamp Data Quality settings
+timestamp_dq:
+  enabled: true
+  max_future_seconds: 600
+  max_past_seconds: 0
+  invalid_action: replace_with_now
+  correct_known_bad: true
+
+# Field name sanitization
+field_sanitization:
+  strip_at_prefix: true
+  handle_numeric_prefix: true
+  numeric_prefix: "col_"
+  collapse_underscores: true
+  trim_underscores: true
+  collision_strategy: last_wins
+
+# Metadata field injection
+metadata:
+  inject_timestamp_load: true
+  extract_timestamp_collector: true
+  collector_timestamp_path: "tags.collector.timestamp"
+
+# Type coercion settings
+coercion:
+  unknown_type_fallback: String
+  array_to_json: true
+
+# Schema caching
+schema:
+  cache_ttl_secs: 300   # 5 minutes
+  refresh_on_error: true

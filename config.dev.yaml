@@ -1,0 +1,62 @@
+# Development configuration for dfe-loader-clickhouse
+# Uses minimal memory footprint to avoid impacting dev environment
+#
+# Usage: ./loader --config config.dev.yaml
+# Or: cp config.dev.yaml config.yaml
+
+kafka:
+  brokers:
+    - localhost:9092
+  group: clickhouse-loader-dev
+  topics:
+    - events
+  client_id: clickhouse-loader-dev
+
+clickhouse:
+  hosts:
+    - localhost:9000
+  database: default
+  username: default
+  password: ""
+  protocol: native
+  tables:
+    - auth_events
+    - api_events
+
+routing:
+  routing_field: event_category
+  fallback_field: tags.event_category
+  category_to_table:
+    auth: auth_events
+    api: api_events
+  dlq:
+    enabled: true
+    topic_suffix: ".dlq"
+
+buffer:
+  flush_bytes: 524288    # 512KB (smaller for dev)
+  flush_rows: 1000       # Fewer rows for faster flushes
+  flush_age_secs: 2      # Faster flushes for dev
+
+# LOW MEMORY settings for development
+memory:
+  limit_bytes: 67108864    # 64MB fixed cap
+  pressure_threshold: 0.8
+
+metrics:
+  enabled: true
+  address: "0.0.0.0:9090"
+
+logging:
+  level: debug    # Verbose for dev
+  format: text    # Human-readable for dev
+
+timestamp_dq:
+  enabled: true
+  max_future_seconds: 600
+  invalid_action: replace_with_now
+  correct_known_bad: true
+
+schema:
+  cache_ttl_secs: 60   # Shorter cache for dev iteration
+  refresh_on_error: true
