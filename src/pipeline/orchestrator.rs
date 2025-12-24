@@ -15,6 +15,7 @@ use crate::buffer::{BufferManager, FlushBatch};
 use crate::clickhouse::{ClickHouseClient, Inserter, InserterConfig};
 use crate::config::Config;
 use crate::kafka::{Consumer, KafkaMessage};
+use crate::metrics::Metrics;
 use crate::payload::{FormatDetector, FormatMode, PayloadFormat};
 use crate::routing::{RouteResult, Router};
 use crate::transform::Transformer;
@@ -36,6 +37,7 @@ pub struct Orchestrator {
     config: Config,
     shutdown: CancellationToken,
     stats: PipelineStats,
+    metrics: Option<Metrics>,
 }
 
 impl Orchestrator {
@@ -45,6 +47,17 @@ impl Orchestrator {
             config,
             shutdown: CancellationToken::new(),
             stats: PipelineStats::default(),
+            metrics: None,
+        }
+    }
+
+    /// Create a new orchestrator with config and metrics
+    pub fn with_metrics(config: Config, metrics: Metrics) -> Self {
+        Self {
+            config,
+            shutdown: CancellationToken::new(),
+            stats: PipelineStats::default(),
+            metrics: Some(metrics),
         }
     }
 
@@ -117,6 +130,9 @@ impl Orchestrator {
                     match msg {
                         Some(kafka_msg) => {
                             self.stats.messages_received += 1;
+                            if let Some(ref m) = self.metrics {
+                                m.record_received();
+                            }
 
                             match self.process_message(
                                 &kafka_msg,
@@ -125,14 +141,26 @@ impl Orchestrator {
                                 &transformer,
                                 &mut buffer_manager,
                             ) {
-                                Ok(()) => {
+                                Ok(table) => {
                                     self.stats.messages_processed += 1;
+                                    if let Some(ref m) = self.metrics {
+                                        m.record_processed(&table);
+                                    }
                                 }
                                 Err(e) => {
                                     warn!(error = %e, "Message processing failed, sending to DLQ");
                                     self.stats.messages_dlq += 1;
+                                    if let Some(ref m) = self.metrics {
+                                        m.record_dlq();
+                                    }
                                     // TODO: Send to DLQ
                                 }
+                            }
+
+                            // Update buffer stats
+                            if let Some(ref m) = self.metrics {
+                                let (rows, bytes, tables) = buffer_manager.stats();
+                                m.update_buffer_stats(rows, bytes, tables);
                             }
 
                             // Check for immediate flush
@@ -173,6 +201,7 @@ impl Orchestrator {
     }
 
     /// Process a single message through the pipeline
+    /// Returns the table name on success for metrics tracking
     fn process_message(
         &self,
         msg: &KafkaMessage,
@@ -180,7 +209,7 @@ impl Orchestrator {
         router: &Router,
         transformer: &Transformer,
         buffer_manager: &mut BufferManager,
-    ) -> Result<()> {
+    ) -> Result<String> {
         // Step 1: Check/detect format
         let format = match format_detector.check_and_detect(&msg.payload) {
             Ok(fmt) => fmt,
@@ -217,26 +246,36 @@ impl Orchestrator {
         buffer_manager.push(&table, transform_result.data)?;
 
         debug!(table = %table, "Message buffered");
-        Ok(())
+        Ok(table)
     }
 
     /// Flush batches to ClickHouse
     async fn flush_batches(&mut self, inserter: &Inserter, batches: Vec<FlushBatch>) {
+        use std::time::Instant;
+
         let batch_count = batches.len();
         let total_rows: usize = batches.iter().map(|b| b.rows.len()).sum();
 
         debug!(batches = batch_count, rows = total_rows, "Flushing batches");
 
+        let start = Instant::now();
         let results = inserter.insert_batches(batches).await;
+        let latency = start.elapsed().as_secs_f64();
 
         for result in results {
             match result {
                 Ok(count) => {
                     self.stats.rows_inserted += count as u64;
+                    if let Some(ref m) = self.metrics {
+                        m.record_flush(count, latency);
+                    }
                 }
                 Err(e) => {
                     error!(error = %e, "Batch insert failed");
                     self.stats.errors += 1;
+                    if let Some(ref m) = self.metrics {
+                        m.record_error();
+                    }
                 }
             }
         }

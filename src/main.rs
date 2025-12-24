@@ -1,10 +1,14 @@
 //! CLI entry point for dfe-loader-clickhouse
 
+use std::net::SocketAddr;
+use std::sync::Arc;
+
 use clap::Parser;
 use tokio::signal;
 use tracing::{error, info, warn};
 
 use dfe_loader_clickhouse::config::Config;
+use dfe_loader_clickhouse::metrics::{run_server, Metrics, ServerState};
 use dfe_loader_clickhouse::pipeline::Orchestrator;
 
 #[derive(Parser, Debug)]
@@ -31,6 +35,10 @@ struct Args {
     /// Print effective config and exit
     #[arg(long)]
     print_config: bool,
+
+    /// Metrics server bind address
+    #[arg(long, env = "LOADER_METRICS_ADDR", default_value = "0.0.0.0:9090")]
+    metrics_addr: String,
 }
 
 #[tokio::main]
@@ -83,22 +91,44 @@ async fn main() -> anyhow::Result<()> {
         "Starting dfe-loader-clickhouse"
     );
 
+    // Initialize metrics
+    let metrics = Metrics::new();
+    let server_state = Arc::new(ServerState::new(metrics.clone()));
+
     // Create orchestrator
-    let mut orchestrator = Orchestrator::new(config);
+    let mut orchestrator = Orchestrator::with_metrics(config, metrics);
     let shutdown_token = orchestrator.shutdown_token();
 
+    // Start metrics server
+    let metrics_addr: SocketAddr = args.metrics_addr.parse().unwrap_or_else(|_| {
+        warn!(addr = %args.metrics_addr, "Invalid metrics address, using default");
+        "0.0.0.0:9090".parse().unwrap()
+    });
+
+    let metrics_shutdown = shutdown_token.clone();
+    let metrics_state = server_state.clone();
+    tokio::spawn(async move {
+        if let Err(e) = run_server(metrics_addr, metrics_state, metrics_shutdown).await {
+            error!(error = %e, "Metrics server error");
+        }
+    });
+
     // Spawn signal handler
+    let signal_shutdown = shutdown_token.clone();
     tokio::spawn(async move {
         match signal::ctrl_c().await {
             Ok(()) => {
                 info!("Received SIGINT, initiating shutdown");
-                shutdown_token.cancel();
+                signal_shutdown.cancel();
             }
             Err(e) => {
                 warn!(error = %e, "Failed to listen for SIGINT");
             }
         }
     });
+
+    // Mark as ready
+    server_state.set_ready(true);
 
     // Run the pipeline
     if let Err(e) = orchestrator.run().await {
