@@ -1,32 +1,31 @@
-//! Arrow-based columnar buffer management
+//! Per-table Arrow buffer management
 //!
-//! Uses a chunked Arrow buffer with partition-by-destination for efficient
-//! Kafka-to-ClickHouse data loading with at-least-once delivery guarantees.
+//! Each destination table (db.table) has its own ArrowBatchBuilder to ensure
+//! schema uniformity. Schema is derived from the target ClickHouse table via
+//! introspection.
 //!
 //! ## Architecture
 //!
 //! ```text
-//! Kafka batch → Arrow chunk (immutable RecordBatch)
-//!            → Tracks Kafka offset for ack
-//!            → Contains _destination column for routing
-//!            → Partition by _destination at flush time
-//!            → Drop entire chunk on successful insert
+//! Kafka message → Route to db.table
+//!              → Push to per-table ArrowBatchBuilder
+//!              → Batch accumulates messages with SAME schema
+//!              → Build RecordBatch when threshold reached
+//!              → Insert to ClickHouse via native protocol
+//!              → Ack Kafka offsets on success
 //! ```
 //!
 //! ## Benefits
 //!
-//! - **No row-level removal**: Drop whole chunks on ack, O(1) memory free
-//! - **Efficient partitioning**: Arrow's columnar format enables fast group-by
-//! - **Zero-copy to ClickHouse**: Arrow → ClickHouse native format via clickhouse-arrow
-//! - **Unified format**: JSON and MessagePack both deserialize to Arrow
-//! - **Memory locality**: All data from one Kafka batch stays together
+//! - **Schema uniformity**: Each RecordBatch has consistent schema (same table)
+//! - **Schema introspection**: Arrow schema derived from ClickHouse table
+//! - **Efficient batching**: Accumulate N messages before Arrow conversion
+//! - **Per-table flush**: Independent flush triggers per destination
+//! - **Offset tracking**: Track Kafka offsets per batch for at-least-once
 
 pub mod arrow;
 pub mod manager;
 pub mod pool;
 
-pub use arrow::{
-    ArrowBatchBuilder, ArrowBuffer, ArrowBufferStats, ArrowChunk, ChunkState, KafkaOffset,
-    PartitionedBatch,
-};
-pub use manager::{BufferManager, FlushBatch};
+pub use arrow::KafkaOffset;
+pub use manager::{ArrowBufferStats, BufferManager, FlushBatch, TableSchema};

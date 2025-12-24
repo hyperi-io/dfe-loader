@@ -1,6 +1,7 @@
 //! Arrow-based batch inserter for ClickHouse
 //!
 //! Handles batch inserts with retry logic using Arrow RecordBatch.
+//! Uses clickhouse-arrow for native Arrow protocol inserts.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -10,13 +11,15 @@ use tokio::time::sleep;
 use tracing::{debug, error, warn};
 
 use crate::buffer::FlushBatch;
-use crate::clickhouse::ClickHouseClient;
+use crate::clickhouse::{ArrowClickHouseClient, ClickHouseClient};
 use crate::Result;
 
 /// Configuration for the inserter
 pub struct InserterConfig {
     pub max_retries: u32,
     pub retry_delay_ms: u64,
+    /// Use native Arrow protocol (requires clickhouse-arrow)
+    pub use_arrow_native: bool,
 }
 
 impl Default for InserterConfig {
@@ -24,22 +27,45 @@ impl Default for InserterConfig {
         Self {
             max_retries: 3,
             retry_delay_ms: 1000,
+            use_arrow_native: true, // Prefer native Arrow by default
         }
     }
 }
 
 /// Handles batch inserts to ClickHouse with retry logic
+///
+/// Supports two modes:
+/// - Native Arrow protocol (via clickhouse-arrow) - preferred
+/// - JSON bridge (via klickhouse) - fallback
 pub struct Inserter {
-    client: Arc<ClickHouseClient>,
+    /// Arrow client for native protocol inserts
+    arrow_client: Option<Arc<ArrowClickHouseClient>>,
+    /// klickhouse client for JSON bridge inserts
+    json_client: Arc<ClickHouseClient>,
     max_retries: u32,
     retry_delay: Duration,
 }
 
 impl Inserter {
-    /// Create a new inserter
-    pub fn new(client: Arc<ClickHouseClient>, config: InserterConfig) -> Self {
+    /// Create a new inserter with both clients
+    pub fn new(json_client: Arc<ClickHouseClient>, config: InserterConfig) -> Self {
         Self {
-            client,
+            arrow_client: None,
+            json_client,
+            max_retries: config.max_retries,
+            retry_delay: Duration::from_millis(config.retry_delay_ms),
+        }
+    }
+
+    /// Create a new inserter with Arrow client for native inserts
+    pub fn with_arrow_client(
+        arrow_client: Arc<ArrowClickHouseClient>,
+        json_client: Arc<ClickHouseClient>,
+        config: InserterConfig,
+    ) -> Self {
+        Self {
+            arrow_client: Some(arrow_client),
+            json_client,
             max_retries: config.max_retries,
             retry_delay: Duration::from_millis(config.retry_delay_ms),
         }
@@ -47,7 +73,6 @@ impl Inserter {
 
     /// Insert an Arrow RecordBatch into a table with retry
     pub async fn insert_arrow(&self, table: &str, batch: RecordBatch) -> Result<usize> {
-        let row_count = batch.num_rows();
         let mut last_error = None;
 
         for attempt in 0..=self.max_retries {
@@ -56,11 +81,22 @@ impl Inserter {
                 sleep(self.retry_delay).await;
             }
 
-            // TODO: Use clickhouse-arrow client for actual Arrow insert
-            // For now, we'll use JSON serialization as a bridge
-            match self.insert_arrow_via_json(table, &batch).await {
+            // Try native Arrow insert first if available
+            let result = if let Some(ref arrow_client) = self.arrow_client {
+                arrow_client.insert(table, batch.clone()).await
+            } else {
+                // Fall back to JSON bridge
+                self.insert_arrow_via_json(table, &batch).await
+            };
+
+            match result {
                 Ok(count) => {
-                    debug!(table = %table, rows = count, "Insert successful");
+                    debug!(
+                        table = %table,
+                        rows = count,
+                        native = self.arrow_client.is_some(),
+                        "Insert successful"
+                    );
                     return Ok(count);
                 }
                 Err(e) => {
@@ -77,12 +113,11 @@ impl Inserter {
         }))
     }
 
-    /// Temporary: Convert Arrow batch to JSON for insert
+    /// Fallback: Convert Arrow batch to JSON for insert
     ///
-    /// This will be replaced with direct Arrow → ClickHouse native protocol
-    /// once clickhouse-arrow integration is complete.
+    /// Used when clickhouse-arrow native client is not available.
     async fn insert_arrow_via_json(&self, table: &str, batch: &RecordBatch) -> Result<usize> {
-        use serde_json::{Map, Value};
+        use serde_json::Map;
 
         let schema = batch.schema();
         let mut rows = Vec::with_capacity(batch.num_rows());
@@ -99,7 +134,7 @@ impl Inserter {
             rows.push(row_map);
         }
 
-        self.client.insert_json(table, rows).await
+        self.json_client.insert_json(table, rows).await
     }
 
     /// Insert a FlushBatch (Arrow-native)
@@ -112,13 +147,15 @@ impl Inserter {
         let mut handles = Vec::with_capacity(batches.len());
 
         for batch in batches {
-            let client = self.client.clone();
+            let arrow_client = self.arrow_client.clone();
+            let json_client = self.json_client.clone();
             let max_retries = self.max_retries;
             let retry_delay = self.retry_delay;
 
             handles.push(tokio::spawn(async move {
                 let inserter = Inserter {
-                    client,
+                    arrow_client,
+                    json_client,
                     max_retries,
                     retry_delay,
                 };
@@ -280,5 +317,6 @@ mod tests {
         let config = InserterConfig::default();
         assert_eq!(config.max_retries, 3);
         assert_eq!(config.retry_delay_ms, 1000);
+        assert!(config.use_arrow_native);
     }
 }

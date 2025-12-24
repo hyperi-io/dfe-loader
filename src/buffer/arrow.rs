@@ -27,7 +27,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use arrow::array::{ArrayRef, RecordBatch, StringArray};
-use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
+use arrow::datatypes::{Field, Schema, SchemaRef};
 
 use crate::Result;
 
@@ -468,37 +468,6 @@ pub struct ArrowBufferStats {
 impl Default for ArrowBuffer {
     fn default() -> Self {
         Self::new(10_000, 10 * 1024 * 1024, 5) // 10K rows, 10MB, 5 seconds
-    }
-}
-
-/// Builder for creating Arrow RecordBatches with destination column
-///
-/// This helper makes it easy to build batches with the required _destination
-/// column for routing.
-pub struct ArrowBatchBuilder {
-    schema: SchemaRef,
-    destination_values: Vec<String>,
-}
-
-impl ArrowBatchBuilder {
-    /// Create a new builder with the given schema
-    ///
-    /// The schema should NOT include _destination - it will be added automatically.
-    pub fn new(data_schema: SchemaRef) -> Self {
-        // Add _destination to schema
-        let mut fields: Vec<Arc<Field>> = data_schema.fields().iter().cloned().collect();
-        fields.push(Arc::new(Field::new("_destination", DataType::Utf8, false)));
-        let schema = Arc::new(Schema::new(fields));
-
-        Self {
-            schema,
-            destination_values: Vec::new(),
-        }
-    }
-
-    /// Get the schema (including _destination)
-    pub fn schema(&self) -> &SchemaRef {
-        &self.schema
     }
 }
 

@@ -6,49 +6,78 @@
 
 **Reference:** `/projects/clickhouse-loader` (Go version)
 
-**Architecture:** Arrow-based chunked buffer with clickhouse-arrow native protocol
+**Architecture:** Per-table Arrow buffers with clickhouse-arrow native protocol
 
 ---
 
-## Current Sprint: Arrow Migration
+## Current Sprint: Variant/Dynamic/Nested Serialization
 
-### In Progress
+### High Priority - REQUIRED FOR PRODUCTION
 
-- [ ] **Complete pipeline refactor for Arrow**
-  - ArrowBuffer with chunked lifecycle
-  - Schema introspection on-demand with refresh
-  - Partition by _destination at flush time
-  - clickhouse-arrow for native protocol inserts
+- [ ] **Implement Variant type serialization** (clickhouse-arrow fork)
+  - Location: `crates/clickhouse-arrow/clickhouse-arrow/src/native/types/serialize.rs`
+  - Reference: ClickHouse `src/DataTypes/DataTypeVariant.cpp`
+  - Discriminator encoding
+  - Type dispatch per variant
 
-### High Priority
+- [ ] **Implement Dynamic type serialization** (clickhouse-arrow fork)
+  - Location: `crates/clickhouse-arrow/clickhouse-arrow/src/native/types/serialize.rs`
+  - Reference: ClickHouse `src/DataTypes/DataTypeDynamic.cpp`
+  - max_types parameter handling
+  - Runtime type discovery
 
-- [ ] **Schema introspection on-demand with refresh**
-  - Fetch schema on first table write
-  - Refresh every N seconds (configurable)
-  - Build Arrow schema from ClickHouse system.columns
+- [ ] **Implement Nested type serialization** (clickhouse-arrow fork)
+  - Location: `crates/clickhouse-arrow/clickhouse-arrow/src/native/types/serialize.rs`
+  - Reference: ClickHouse `src/DataTypes/DataTypeNested.cpp`
+  - Parallel arrays structure
+  - Column ordering
 
-- [ ] **Wire up clickhouse-arrow client**
-  - Replace klickhouse JSON insert with native Arrow insert
-  - Use local fork with Variant/Dynamic/Nested types
+### Completed This Sprint
 
-- [ ] **Compare serialization with ClickHouse C++ source**
-  - Verify Variant serialization format
-  - Verify Dynamic serialization format
-  - Verify Nested serialization format
+- [x] **Dynamic db.table routing from event data**
+- [x] **clickhouse-arrow client integration**
+- [x] **Schema introspection on-demand with refresh**
 
 ---
 
-## Arrow Architecture TODO
+## Architecture
 
-### Core Buffer (ArrowBuffer)
+### Per-Table Buffer Design (Implemented)
 
-- [x] ArrowChunk with lifecycle (Pending → InFlight → Acked/Failed)
-- [x] KafkaOffset tracking per chunk
-- [x] Partition by _destination column
-- [x] Chunk-level ack/fail (no row-level removal)
+Each destination `db.table` has its own ArrowBatchBuilder:
+
+```
+Kafka message → Parse → Route to db.table → Push to per-table buffer
+                                          → Build Arrow RecordBatch on threshold
+                                          → Insert to ClickHouse (native Arrow)
+                                          → Ack Kafka offsets
+```
+
+**Why per-table?**
+
+- Schema uniformity: Arrow RecordBatch requires all rows have same schema
+- Schema introspection: Arrow schema derived from ClickHouse `system.columns`
+- Independent flush: High-volume tables flush more often
+
+### Routing Logic (Implemented)
+
+```
+db = first_present(event, config.db_fields) ?? config.default_db ?? "common"
+table = first_present(event, config.table_fields) ?? config.default_table ?? "common"
+destination = "{db}.{table}"
+```
+
+---
+
+## Core Buffer (Completed)
+
+- [x] Per-table ArrowBatchBuilder
+- [x] KafkaOffset tracking per batch
+- [x] Independent flush thresholds per table
 - [x] ArrowBufferStats for monitoring
-- [ ] JSON → Arrow deserialization (arrow-json)
-- [ ] MessagePack → Arrow deserialization
+- [x] JSON → Arrow conversion (manual)
+- [ ] JSON → Arrow conversion (arrow-json SIMD) - see Future Work
+- [ ] MessagePack → Arrow conversion
 
 ### Schema Registry
 
@@ -58,19 +87,19 @@
 - [ ] Periodic refresh (configurable interval)
 - [ ] Cache invalidation on schema change error
 
-### Inserter
+### Inserter (Completed)
 
 - [x] Arrow RecordBatch insert interface
 - [x] Retry logic with exponential backoff
-- [ ] clickhouse-arrow native protocol (replace JSON bridge)
+- [x] clickhouse-arrow native protocol with JSON fallback
 - [ ] Concurrent multi-table insert
 
-### Pipeline
+### Pipeline (Completed)
 
-- [ ] Update orchestrator for Arrow-based BufferManager
-- [ ] Update process_message for Arrow batches
-- [ ] Update flush_batches for Arrow FlushBatch
-- [ ] Wire chunk ack back to Kafka offset commit
+- [x] Per-table BufferManager integration
+- [x] process_message pushes to correct table buffer
+- [x] flush_batches handles per-table FlushBatch
+- [ ] Wire Kafka offset commit on successful insert
 
 ---
 
@@ -79,6 +108,8 @@
 ### Medium Priority
 
 - [ ] **DLQ Producer (2.2)** - Route bad messages to dead letter queue
+  - Option 1 (default): Topic per db.table using routing logic
+  - Option 2: Common DLQ topic for all failures
 - [ ] **Batch Salvage (6.4)** - Binary-split on insert failure
 - [ ] **Circuit Breaker (7.4)** - Per-table failure detection
 
@@ -89,7 +120,41 @@
 
 ---
 
+## Future Work (NOT NOW)
+
+### SIMD Optimizations Investigation
+
+- [ ] Investigate where further SIMD optimizations can be applied
+  - arrow-json for JSON → Arrow conversion
+  - sonic-rs SIMD parsing tuning
+  - Potential batch-level SIMD operations
+
+---
+
 ## Completed
+
+### 2025-12-24: clickhouse-arrow Integration
+
+- [x] Added clickhouse-arrow dependency to Cargo.toml
+- [x] Created ArrowClickHouseClient wrapper
+- [x] Updated Inserter with native Arrow inserts + JSON fallback
+- [x] All tests passing
+
+### 2025-12-24: Dynamic db.table Routing
+
+- [x] Updated RoutingConfig with db_fields, table_fields, default_db, default_table
+- [x] Updated Router to extract db.table pre-flattening with dot notation
+- [x] Updated config files (config.dev.yaml, config.example.yaml)
+- [x] Updated tests for new routing format
+
+### 2025-12-24: Per-Table Buffer Architecture
+
+- [x] Redesign from single buffer to per-table buffers
+- [x] Implement ArrowBatchBuilder in transform/arrow.rs
+- [x] Implement BufferManager with per-table HashMap
+- [x] Update orchestrator for new BufferManager API
+- [x] Fix all compilation errors and tests
+- [x] Update DESIGN.md with new architecture
 
 ### 2025-12-24: Arrow Migration Started
 
@@ -97,9 +162,8 @@
 - [x] Fork klickhouse with new types (parked)
 - [x] Design ArrowBuffer chunked architecture
 - [x] Implement ArrowBuffer with partition-by-destination
-- [x] Implement BufferManager with schema introspection
 - [x] Update Inserter for Arrow RecordBatch
-- [x] Update STATE.md/TODO.md/WBS.md for Arrow architecture
+- [x] Update documentation (STATE/TODO/WBS/DESIGN)
 
 ### Previous Work
 

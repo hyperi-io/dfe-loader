@@ -46,15 +46,17 @@ async fn test_transform_pipeline_unit() {
 #[tokio::test]
 async fn test_routing_and_buffer() {
     // Test routing and buffering without external dependencies
+    // New db.table routing: db from org_id, table from category field
     let routing_config = RoutingConfig {
-        routing_field: "category".to_string(),
-        fallback_field: Some("event_type".to_string()),
+        db_fields: vec!["org_id".to_string()],
+        table_fields: vec!["category".to_string(), "event_type".to_string()],
+        default_db: "common".to_string(),
+        default_table: "events_other".to_string(),
         category_to_table: [
             ("auth".to_string(), "events_auth".to_string()),
             ("api".to_string(), "events_api".to_string()),
         ].into_iter().collect(),
         mapping_file: None,
-        default_table: Some("events_other".to_string()),
         dlq: DlqConfig::default(),
     };
 
@@ -65,11 +67,12 @@ async fn test_routing_and_buffer() {
         flush_age_secs: 60,
     });
 
-    // Simulate processing messages
+    // Simulate processing messages with org_id for db routing
+    // Route result is now "db.table" format
     let messages: Vec<(&[u8], &str)> = vec![
-        (br#"{"category": "auth", "action": "login"}"#.as_slice(), "events_auth"),
-        (br#"{"category": "api", "endpoint": "/users"}"#.as_slice(), "events_api"),
-        (br#"{"category": "unknown", "data": "test"}"#.as_slice(), "events_other"),
+        (br#"{"org_id": "acme", "category": "auth", "action": "login"}"#.as_slice(), "acme.events_auth"),
+        (br#"{"org_id": "acme", "category": "api", "endpoint": "/users"}"#.as_slice(), "acme.events_api"),
+        (br#"{"org_id": "tenant1", "category": "unknown", "data": "test"}"#.as_slice(), "tenant1.unknown"),
     ];
 
     for (payload, expected_table) in messages {
@@ -78,7 +81,7 @@ async fn test_routing_and_buffer() {
             dfe_loader_clickhouse::routing::RouteResult::Table(table) => {
                 assert_eq!(table, expected_table);
                 let data = sonic_rs::from_slice::<serde_json::Value>(payload).unwrap();
-                buffer_manager.push(&table, data.as_object().unwrap().clone()).unwrap();
+                buffer_manager.push(&table, data.as_object().unwrap().clone(), None);
             }
             dfe_loader_clickhouse::routing::RouteResult::Dlq(_) => {
                 panic!("Should not route to DLQ with default_table set");
@@ -86,8 +89,8 @@ async fn test_routing_and_buffer() {
         }
     }
 
-    assert_eq!(buffer_manager.total_rows(), 3);
-    assert_eq!(buffer_manager.table_count(), 3);
+    assert_eq!(buffer_manager.pending_rows(), 3);
+    assert_eq!(buffer_manager.stats().table_count, 3);
 }
 
 #[tokio::test]
@@ -123,19 +126,19 @@ async fn test_buffer_flush_thresholds() {
     // Add 4 rows - should not flush
     for i in 0..4 {
         let data = json!({"id": i}).as_object().unwrap().clone();
-        buffer_manager.push("events", data).unwrap();
+        buffer_manager.push("events", data, None);
     }
 
-    let batches = buffer_manager.get_ready_for_flush();
+    let batches = buffer_manager.get_ready_for_flush().unwrap();
     assert!(batches.is_empty(), "Should not flush with only 4 rows");
 
     // Add 1 more - should trigger flush
     let data = json!({"id": 4}).as_object().unwrap().clone();
-    buffer_manager.push("events", data).unwrap();
+    buffer_manager.push("events", data, None);
 
-    let batches = buffer_manager.get_ready_for_flush();
+    let batches = buffer_manager.get_ready_for_flush().unwrap();
     assert_eq!(batches.len(), 1, "Should flush at 5 rows");
-    assert_eq!(batches[0].rows.len(), 5);
+    assert_eq!(batches[0].batch.num_rows(), 5);
 }
 
 #[tokio::test]

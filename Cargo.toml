@@ -25,9 +25,12 @@ rdkafka = { version = ">=0.38", features = ["cmake-build", "ssl", "sasl"] }
 
 # ClickHouse (native protocol) - using local fork with extended type support
 klickhouse = { path = "crates/klickhouse", features = ["serde", "compression"] }
+# ClickHouse Arrow client - using local fork with Variant/Dynamic/Nested types
+clickhouse-arrow = { path = "crates/clickhouse-arrow/clickhouse-arrow", default-features = false, features = ["serde", "pool"] }
 
 # Arrow for columnar data handling
 arrow = { version = ">=54.0", features = ["prettyprint"] }
+arrow-json = ">=54.0"  # JSON to Arrow conversion (SIMD)
 
 # JSON parsing (SIMD-accelerated)
 sonic-rs = ">=0.5"
