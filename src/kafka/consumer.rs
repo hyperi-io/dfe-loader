@@ -10,7 +10,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
-use crate::config::KafkaConfig;
+use crate::config::{KafkaConfig, SaslMechanism};
 use crate::Result;
 
 /// Kafka message with metadata
@@ -65,14 +65,56 @@ impl Consumer {
 
         // SASL authentication
         if let Some(ref sasl) = config.sasl {
-            if sasl.enabled {
-                client_config
-                    .set("security.protocol", "SASL_PLAINTEXT")
-                    .set("sasl.mechanism", &sasl.mechanism)
-                    .set("sasl.username", &sasl.username)
-                    .set("sasl.password", &sasl.password);
+            if sasl.enabled && sasl.mechanism != SaslMechanism::None {
+                // Set SASL mechanism
+                if let Some(mech) = sasl.mechanism.as_rdkafka_mechanism() {
+                    client_config.set("sasl.mechanism", mech);
+                }
 
-                info!(mechanism = %sasl.mechanism, username = %sasl.username, "SASL authentication enabled");
+                // Default to SASL_PLAINTEXT; TLS config may override to SASL_SSL
+                client_config.set("security.protocol", "SASL_PLAINTEXT");
+
+                // Username/password auth (PLAIN, SCRAM-*)
+                if sasl.mechanism.requires_credentials() {
+                    client_config
+                        .set("sasl.username", &sasl.username)
+                        .set("sasl.password", &sasl.password);
+                }
+
+                // OAuth configuration
+                if sasl.mechanism.is_oauth() {
+                    // Note: OAuth token refresh needs a callback - for now set static token
+                    // TODO: Implement OIDC token fetch callback
+                    if let Some(ref endpoint) = sasl.oauth_token_endpoint {
+                        client_config.set("sasl.oauthbearer.token.endpoint.url", endpoint);
+                    }
+                    if let Some(ref client_id) = sasl.oauth_client_id {
+                        client_config.set("sasl.oauthbearer.client.id", client_id);
+                    }
+                    if let Some(ref client_secret) = sasl.oauth_client_secret {
+                        client_config.set("sasl.oauthbearer.client.secret", client_secret);
+                    }
+                    if let Some(ref scope) = sasl.oauth_scope {
+                        client_config.set("sasl.oauthbearer.scope", scope);
+                    }
+                    if let Some(ref extensions) = sasl.oauth_extensions {
+                        client_config.set("sasl.oauthbearer.extensions", extensions);
+                    }
+                }
+
+                // AWS MSK IAM configuration
+                if sasl.mechanism.is_aws_iam() {
+                    // AWS MSK IAM uses OAUTHBEARER with a custom callback
+                    // For rdkafka, this requires the aws-msk-iam-sasl-signer library
+                    // Set the AWS region; credentials come from env/profile/explicit
+                    if let Some(ref region) = sasl.aws_region {
+                        // Note: AWS MSK IAM auth requires custom token provider
+                        // rdkafka doesn't natively support this - may need custom solution
+                        client_config.set("sasl.oauthbearer.config", format!("awsRegion={}", region));
+                    }
+                }
+
+                info!(mechanism = %sasl.mechanism, "SASL authentication enabled");
             }
         }
 

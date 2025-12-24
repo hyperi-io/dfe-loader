@@ -4,7 +4,7 @@
 
 use std::env;
 
-use dfe_loader_clickhouse::config::{KafkaConfig, SaslConfig};
+use dfe_loader_clickhouse::config::{KafkaConfig, SaslConfig, SaslMechanism};
 use dfe_loader_clickhouse::kafka::Consumer;
 
 fn load_dotenv() {
@@ -59,11 +59,20 @@ fn get_test_config() -> KafkaConfig {
 
     // Use .env SASL settings
     let sasl = if env::var("KAFKA_SASL_USER").is_ok() || env::var("KAFKA_SASL_MECHANISM").is_ok() {
+        let mechanism = match env::var("KAFKA_SASL_MECHANISM").unwrap_or_default().as_str() {
+            "PLAIN" => SaslMechanism::Plain,
+            "SCRAM-SHA-256" => SaslMechanism::ScramSha256,
+            "SCRAM-SHA-512" | "" => SaslMechanism::ScramSha512,
+            "OAUTHBEARER" => SaslMechanism::OAuthBearer,
+            "AWS_MSK_IAM" => SaslMechanism::AwsMskIam,
+            _ => SaslMechanism::ScramSha512,
+        };
         Some(SaslConfig {
             enabled: true,
-            mechanism: env::var("KAFKA_SASL_MECHANISM").unwrap_or_else(|_| "SCRAM-SHA-512".to_string()),
+            mechanism,
             username: env::var("KAFKA_SASL_USER").unwrap_or_default(),
             password: env::var("KAFKA_SASL_PASSWORD").unwrap_or_default(),
+            ..Default::default()
         })
     } else {
         None
@@ -140,14 +149,15 @@ async fn test_kafka_sasl_config() {
     let mut config = get_test_config();
     config.sasl = Some(SaslConfig {
         enabled: true,
-        mechanism: "SCRAM-SHA-256".to_string(),
+        mechanism: SaslMechanism::ScramSha256,
         username: "testuser".to_string(),
         password: "testpass".to_string(),
+        ..Default::default()
     });
 
     // Just verify config is set - actual connection test needs running Kafka
     assert!(config.sasl.is_some());
     let sasl = config.sasl.unwrap();
     assert!(sasl.enabled);
-    assert_eq!(sasl.mechanism, "SCRAM-SHA-256");
+    assert_eq!(sasl.mechanism, SaslMechanism::ScramSha256);
 }

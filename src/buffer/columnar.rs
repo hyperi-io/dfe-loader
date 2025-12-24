@@ -1,6 +1,9 @@
 //! Columnar buffer for batch inserts
 //!
-//! Accumulates JSON rows for a single table until flush threshold.
+//! Accumulates rows for a single table until flush threshold is reached.
+//!
+//! NOTE: Currently stores rows as serde_json::Map for MVP simplicity.
+//! TODO: Migrate to klickhouse-native columnar structure for zero-copy insert.
 
 use std::time::Instant;
 

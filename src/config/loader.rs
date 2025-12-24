@@ -84,23 +84,165 @@ impl Default for KafkaConfig {
     }
 }
 
+/// SASL authentication mechanism
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "SCREAMING-KEBAB-CASE")]
+#[allow(clippy::upper_case_acronyms)]
+pub enum SaslMechanism {
+    /// No authentication (dev/test only - full admin access)
+    None,
+    /// SASL/PLAIN - simple username/password (use with TLS!)
+    Plain,
+    /// SASL/SCRAM-SHA-256
+    ScramSha256,
+    /// SASL/SCRAM-SHA-512 (recommended for production)
+    #[default]
+    ScramSha512,
+    /// SASL/OAUTHBEARER - OAuth 2.0 / OIDC token authentication
+    OAuthBearer,
+    /// AWS MSK IAM authentication
+    AwsMskIam,
+}
+
+impl SaslMechanism {
+    /// Get the rdkafka mechanism string
+    pub fn as_rdkafka_mechanism(&self) -> Option<&'static str> {
+        match self {
+            SaslMechanism::None => None,
+            SaslMechanism::Plain => Some("PLAIN"),
+            SaslMechanism::ScramSha256 => Some("SCRAM-SHA-256"),
+            SaslMechanism::ScramSha512 => Some("SCRAM-SHA-512"),
+            SaslMechanism::OAuthBearer => Some("OAUTHBEARER"),
+            SaslMechanism::AwsMskIam => Some("OAUTHBEARER"), // AWS IAM uses OAUTHBEARER
+        }
+    }
+
+    /// Check if this mechanism requires username/password
+    pub fn requires_credentials(&self) -> bool {
+        matches!(
+            self,
+            SaslMechanism::Plain | SaslMechanism::ScramSha256 | SaslMechanism::ScramSha512
+        )
+    }
+
+    /// Check if this mechanism uses OAuth
+    pub fn is_oauth(&self) -> bool {
+        matches!(self, SaslMechanism::OAuthBearer)
+    }
+
+    /// Check if this mechanism uses AWS IAM
+    pub fn is_aws_iam(&self) -> bool {
+        matches!(self, SaslMechanism::AwsMskIam)
+    }
+}
+
+impl std::fmt::Display for SaslMechanism {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SaslMechanism::None => write!(f, "NONE"),
+            SaslMechanism::Plain => write!(f, "PLAIN"),
+            SaslMechanism::ScramSha256 => write!(f, "SCRAM-SHA-256"),
+            SaslMechanism::ScramSha512 => write!(f, "SCRAM-SHA-512"),
+            SaslMechanism::OAuthBearer => write!(f, "OAUTHBEARER"),
+            SaslMechanism::AwsMskIam => write!(f, "AWS_MSK_IAM"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SaslConfig {
+    /// Enable SASL authentication
     pub enabled: bool,
-    pub mechanism: String,
+    /// SASL mechanism to use
+    pub mechanism: SaslMechanism,
+
+    // --- Username/Password auth (PLAIN, SCRAM-*) ---
     pub username: String,
     pub password: String,
+
+    // --- OAuth 2.0 / OIDC auth (OAUTHBEARER) ---
+    /// OAuth token endpoint URL
+    pub oauth_token_endpoint: Option<String>,
+    /// OAuth client ID
+    pub oauth_client_id: Option<String>,
+    /// OAuth client secret
+    pub oauth_client_secret: Option<String>,
+    /// OAuth scope (space-separated)
+    pub oauth_scope: Option<String>,
+    /// OAuth extensions (key=value pairs)
+    pub oauth_extensions: Option<String>,
+
+    // --- AWS MSK IAM auth ---
+    /// AWS region for MSK IAM
+    pub aws_region: Option<String>,
+    /// AWS access key ID (optional - can use instance profile/environment)
+    pub aws_access_key_id: Option<String>,
+    /// AWS secret access key
+    pub aws_secret_access_key: Option<String>,
+    /// AWS session token (for temporary credentials)
+    pub aws_session_token: Option<String>,
+    /// AWS profile name (alternative to explicit credentials)
+    pub aws_profile: Option<String>,
 }
 
 impl Default for SaslConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            mechanism: "SCRAM-SHA-512".to_string(),
+            mechanism: SaslMechanism::default(),
             username: String::new(),
             password: String::new(),
+            oauth_token_endpoint: None,
+            oauth_client_id: None,
+            oauth_client_secret: None,
+            oauth_scope: None,
+            oauth_extensions: None,
+            aws_region: None,
+            aws_access_key_id: None,
+            aws_secret_access_key: None,
+            aws_session_token: None,
+            aws_profile: None,
         }
+    }
+}
+
+impl SaslConfig {
+    /// Validate the SASL configuration based on mechanism
+    pub fn validate(&self) -> std::result::Result<(), String> {
+        if !self.enabled {
+            return Ok(());
+        }
+
+        match self.mechanism {
+            SaslMechanism::None => {
+                // No validation needed - this is explicitly insecure
+            }
+            SaslMechanism::Plain | SaslMechanism::ScramSha256 | SaslMechanism::ScramSha512 => {
+                if self.username.is_empty() {
+                    return Err(format!("{} requires username", self.mechanism));
+                }
+                if self.password.is_empty() {
+                    return Err(format!("{} requires password", self.mechanism));
+                }
+            }
+            SaslMechanism::OAuthBearer => {
+                if self.oauth_token_endpoint.is_none() {
+                    return Err("OAUTHBEARER requires oauth_token_endpoint".to_string());
+                }
+                if self.oauth_client_id.is_none() {
+                    return Err("OAUTHBEARER requires oauth_client_id".to_string());
+                }
+            }
+            SaslMechanism::AwsMskIam => {
+                // AWS region is required; credentials can come from environment/instance profile
+                if self.aws_region.is_none() {
+                    return Err("AWS_MSK_IAM requires aws_region".to_string());
+                }
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -386,19 +528,94 @@ impl Default for MetadataConfig {
 // Type Coercion Configuration
 // ============================================================================
 
+/// Null handling strategy
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum NullHandling {
+    /// Substitute type-appropriate default value (recommended)
+    #[default]
+    Default,
+    /// Return error for null in non-nullable column
+    Error,
+    /// Pass null through (may cause ClickHouse errors)
+    Passthrough,
+}
+
+/// Type coercion configuration
+///
+/// Following the Go clickhouse-loader pattern:
+/// - Type mappings for custom types
+/// - Configurable null handling
+/// - Timezone handling for naive timestamps
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CoercionConfig {
+    /// Map custom type names to base coercer categories
+    /// e.g., {"MyCustomInt": "Int", "SpecialString": "String"}
+    pub type_mappings: std::collections::HashMap<String, String>,
+
+    /// Fallback coercer for unknown types (default: "String")
     pub unknown_type_fallback: String,
+
+    /// How to handle null values in non-nullable columns
+    pub null_handling: NullHandling,
+
+    /// Strings to recognise as null (case-sensitive)
+    pub null_strings: Vec<String>,
+
+    /// Default timezone for naive timestamps (IANA name or +HH:MM)
+    pub default_timezone: String,
+
+    /// Event fields to check for timezone info
+    pub timezone_fields: Vec<String>,
+
+    /// Convert arrays to JSON strings if true
     pub array_to_json: bool,
+
+    /// Strict mode: fail on any coercion error
+    pub strict: bool,
 }
 
 impl Default for CoercionConfig {
     fn default() -> Self {
         Self {
+            type_mappings: std::collections::HashMap::new(),
             unknown_type_fallback: "String".to_string(),
+            null_handling: NullHandling::Default,
+            null_strings: vec![
+                "null".to_string(),
+                "NULL".to_string(),
+                "Null".to_string(),
+                "None".to_string(),
+                "nil".to_string(),
+                "undefined".to_string(),
+                "\\N".to_string(),
+                "<null>".to_string(),
+                "NA".to_string(),
+                "N/A".to_string(),
+                "n/a".to_string(),
+                "NaN".to_string(),
+            ],
+            default_timezone: "UTC".to_string(),
+            timezone_fields: vec!["tags_collector_timezone".to_string()],
             array_to_json: true,
+            strict: false,
         }
+    }
+}
+
+impl CoercionConfig {
+    /// Check if a string value should be treated as null
+    pub fn is_null_string(&self, value: &str) -> bool {
+        value.is_empty() || self.null_strings.iter().any(|s| s == value)
+    }
+
+    /// Get the coercer category for a type, checking custom mappings first
+    pub fn get_coercer_category(&self, type_name: &str) -> &str {
+        self.type_mappings
+            .get(type_name)
+            .map(|s| s.as_str())
+            .unwrap_or(&self.unknown_type_fallback)
     }
 }
 
@@ -559,5 +776,268 @@ mod tests {
     fn test_config_validation_valid() {
         let config = Config::default();
         assert!(config.validate().is_ok());
+    }
+
+    // ========================================================================
+    // SASL Mechanism Tests
+    // ========================================================================
+
+    #[test]
+    fn test_sasl_mechanism_default() {
+        let mech = SaslMechanism::default();
+        assert_eq!(mech, SaslMechanism::ScramSha512);
+    }
+
+    #[test]
+    fn test_sasl_mechanism_display() {
+        assert_eq!(SaslMechanism::None.to_string(), "NONE");
+        assert_eq!(SaslMechanism::Plain.to_string(), "PLAIN");
+        assert_eq!(SaslMechanism::ScramSha256.to_string(), "SCRAM-SHA-256");
+        assert_eq!(SaslMechanism::ScramSha512.to_string(), "SCRAM-SHA-512");
+        assert_eq!(SaslMechanism::OAuthBearer.to_string(), "OAUTHBEARER");
+        assert_eq!(SaslMechanism::AwsMskIam.to_string(), "AWS_MSK_IAM");
+    }
+
+    #[test]
+    fn test_sasl_mechanism_rdkafka_mapping() {
+        assert_eq!(SaslMechanism::None.as_rdkafka_mechanism(), None);
+        assert_eq!(SaslMechanism::Plain.as_rdkafka_mechanism(), Some("PLAIN"));
+        assert_eq!(SaslMechanism::ScramSha256.as_rdkafka_mechanism(), Some("SCRAM-SHA-256"));
+        assert_eq!(SaslMechanism::ScramSha512.as_rdkafka_mechanism(), Some("SCRAM-SHA-512"));
+        assert_eq!(SaslMechanism::OAuthBearer.as_rdkafka_mechanism(), Some("OAUTHBEARER"));
+        assert_eq!(SaslMechanism::AwsMskIam.as_rdkafka_mechanism(), Some("OAUTHBEARER"));
+    }
+
+    #[test]
+    fn test_sasl_mechanism_requires_credentials() {
+        assert!(!SaslMechanism::None.requires_credentials());
+        assert!(SaslMechanism::Plain.requires_credentials());
+        assert!(SaslMechanism::ScramSha256.requires_credentials());
+        assert!(SaslMechanism::ScramSha512.requires_credentials());
+        assert!(!SaslMechanism::OAuthBearer.requires_credentials());
+        assert!(!SaslMechanism::AwsMskIam.requires_credentials());
+    }
+
+    #[test]
+    fn test_sasl_mechanism_is_oauth() {
+        assert!(!SaslMechanism::None.is_oauth());
+        assert!(!SaslMechanism::Plain.is_oauth());
+        assert!(SaslMechanism::OAuthBearer.is_oauth());
+        assert!(!SaslMechanism::AwsMskIam.is_oauth());
+    }
+
+    #[test]
+    fn test_sasl_mechanism_is_aws_iam() {
+        assert!(!SaslMechanism::None.is_aws_iam());
+        assert!(!SaslMechanism::Plain.is_aws_iam());
+        assert!(!SaslMechanism::OAuthBearer.is_aws_iam());
+        assert!(SaslMechanism::AwsMskIam.is_aws_iam());
+    }
+
+    // ========================================================================
+    // SASL Config Validation Tests
+    // ========================================================================
+
+    #[test]
+    fn test_sasl_config_disabled_no_validation() {
+        let config = SaslConfig {
+            enabled: false,
+            mechanism: SaslMechanism::ScramSha512,
+            username: String::new(), // Empty but OK because disabled
+            password: String::new(),
+            ..Default::default()
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_sasl_config_none_no_credentials_needed() {
+        let config = SaslConfig {
+            enabled: true,
+            mechanism: SaslMechanism::None,
+            username: String::new(),
+            password: String::new(),
+            ..Default::default()
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_sasl_config_scram_requires_username() {
+        let config = SaslConfig {
+            enabled: true,
+            mechanism: SaslMechanism::ScramSha512,
+            username: String::new(),
+            password: "secret".to_string(),
+            ..Default::default()
+        };
+        let result = config.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("requires username"));
+    }
+
+    #[test]
+    fn test_sasl_config_scram_requires_password() {
+        let config = SaslConfig {
+            enabled: true,
+            mechanism: SaslMechanism::ScramSha512,
+            username: "user".to_string(),
+            password: String::new(),
+            ..Default::default()
+        };
+        let result = config.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("requires password"));
+    }
+
+    #[test]
+    fn test_sasl_config_scram_valid() {
+        let config = SaslConfig {
+            enabled: true,
+            mechanism: SaslMechanism::ScramSha512,
+            username: "user".to_string(),
+            password: "secret".to_string(),
+            ..Default::default()
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_sasl_config_plain_valid() {
+        let config = SaslConfig {
+            enabled: true,
+            mechanism: SaslMechanism::Plain,
+            username: "user".to_string(),
+            password: "secret".to_string(),
+            ..Default::default()
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_sasl_config_oauth_requires_endpoint() {
+        let config = SaslConfig {
+            enabled: true,
+            mechanism: SaslMechanism::OAuthBearer,
+            oauth_token_endpoint: None,
+            oauth_client_id: Some("client".to_string()),
+            ..Default::default()
+        };
+        let result = config.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("oauth_token_endpoint"));
+    }
+
+    #[test]
+    fn test_sasl_config_oauth_requires_client_id() {
+        let config = SaslConfig {
+            enabled: true,
+            mechanism: SaslMechanism::OAuthBearer,
+            oauth_token_endpoint: Some("https://auth.example.com/token".to_string()),
+            oauth_client_id: None,
+            ..Default::default()
+        };
+        let result = config.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("oauth_client_id"));
+    }
+
+    #[test]
+    fn test_sasl_config_oauth_valid() {
+        let config = SaslConfig {
+            enabled: true,
+            mechanism: SaslMechanism::OAuthBearer,
+            oauth_token_endpoint: Some("https://auth.example.com/token".to_string()),
+            oauth_client_id: Some("my-client".to_string()),
+            oauth_client_secret: Some("secret".to_string()),
+            oauth_scope: Some("kafka".to_string()),
+            ..Default::default()
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_sasl_config_aws_iam_requires_region() {
+        let config = SaslConfig {
+            enabled: true,
+            mechanism: SaslMechanism::AwsMskIam,
+            aws_region: None,
+            ..Default::default()
+        };
+        let result = config.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("aws_region"));
+    }
+
+    #[test]
+    fn test_sasl_config_aws_iam_valid_with_region_only() {
+        // AWS IAM can use instance profile/environment for credentials
+        let config = SaslConfig {
+            enabled: true,
+            mechanism: SaslMechanism::AwsMskIam,
+            aws_region: Some("ap-southeast-2".to_string()),
+            ..Default::default()
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_sasl_config_aws_iam_valid_with_explicit_creds() {
+        let config = SaslConfig {
+            enabled: true,
+            mechanism: SaslMechanism::AwsMskIam,
+            aws_region: Some("ap-southeast-2".to_string()),
+            aws_access_key_id: Some("AKIAIOSFODNN7EXAMPLE".to_string()),
+            aws_secret_access_key: Some("wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY".to_string()),
+            ..Default::default()
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    // ========================================================================
+    // Coercion Config Tests
+    // ========================================================================
+
+    #[test]
+    fn test_coercion_config_is_null_string() {
+        let config = CoercionConfig::default();
+
+        // Empty string is null
+        assert!(config.is_null_string(""));
+
+        // Standard null strings
+        assert!(config.is_null_string("null"));
+        assert!(config.is_null_string("NULL"));
+        assert!(config.is_null_string("None"));
+        assert!(config.is_null_string("nil"));
+        assert!(config.is_null_string("undefined"));
+        assert!(config.is_null_string("\\N"));
+        assert!(config.is_null_string("N/A"));
+        assert!(config.is_null_string("NaN"));
+
+        // Not null strings
+        assert!(!config.is_null_string("hello"));
+        assert!(!config.is_null_string("0"));
+        assert!(!config.is_null_string("false"));
+    }
+
+    #[test]
+    fn test_coercion_config_get_coercer_category() {
+        let mut config = CoercionConfig::default();
+        config.type_mappings.insert("MyInt".to_string(), "Int".to_string());
+        config.type_mappings.insert("SpecialString".to_string(), "String".to_string());
+
+        // Custom mappings
+        assert_eq!(config.get_coercer_category("MyInt"), "Int");
+        assert_eq!(config.get_coercer_category("SpecialString"), "String");
+
+        // Unknown type falls back to default
+        assert_eq!(config.get_coercer_category("UnknownType"), "String");
+    }
+
+    #[test]
+    fn test_null_handling_default() {
+        let handling = NullHandling::default();
+        assert_eq!(handling, NullHandling::Default);
     }
 }

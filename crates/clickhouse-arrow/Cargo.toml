@@ -1,0 +1,97 @@
+[workspace]
+members = ["clickhouse-arrow", "clickhouse-arrow-derive"]
+resolver = "3"
+
+[workspace.package]
+version = "0.2.1"
+edition = "2024"
+rust-version = "1.88"
+authors = ["George Lee Patterson <patterson.george@gmail.com>"]
+license = "Apache-2.0"
+keywords = ["clickhouse", "arrow", "query", "sql", "database"]
+categories = ["database"]
+repository = "https://github.com/georgeleepatterson/clickhouse-arrow"
+homepage = "https://github.com/georgeleepatterson/clickhouse-arrow"
+documentation = "https://docs.rs/clickhouse-arrow"
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+# Detects large stack-allocated futures that may cause stack overflow crashes (see threshold in clippy.toml)
+large_futures = "warn"
+clone_on_ref_ptr = "warn"
+must_use_candidate = "allow"
+
+[workspace.lints.rust]
+# TODO: Re-enable after fixing macro hygiene issues
+# unused_imports = "deny"
+elided_lifetimes_in_paths = "deny"
+explicit_outlives_requirements = "warn"
+let_underscore_drop = "warn"
+missing_copy_implementations = "warn"
+redundant_lifetimes = "warn"
+rust_2024_incompatible_pat = "warn"
+single_use_lifetimes = "warn"
+trivial_numeric_casts = "warn"
+unit_bindings = "warn"
+unnameable_types = "warn"
+unreachable_pub = "warn"
+unsafe_op_in_unsafe_fn = "warn"
+unused_crate_dependencies = "warn"
+unused_import_braces = "warn"
+unused_lifetimes = "warn"
+unused_macro_rules = "warn"
+unused_results = "warn"
+unused_qualifications = "warn"
+variant_size_differences = "warn"
+
+# Running collection of lints I find quite absurd, but alas it is pedantic
+# naive_bytecount = "allow"
+
+[profile.release-with-debug]
+inherits = "release"
+debug = "full"
+
+[profile.release-lto]
+inherits = "release"
+lto = true
+opt-level = 3
+codegen-units = 1
+
+[profile.instruments]
+inherits = "release"
+debug = "full"
+lto = "off"
+codegen-units = 16       # default
+opt-level = 2
+debug-assertions = false
+incremental = false
+
+[profile.release-lto.package."*"]
+inherits = "release"
+opt-level = 3
+codegen-units = 1
+
+[profile.release-with-debug.package."*"]
+debug = "full"
+
+[profile.instruments.package."*"]
+debug = "full"
+
+[profile.ci]
+inherits = "dev"
+incremental = false
+
+# ci turns off debug info, etc. for dependencies to allow for smaller binaries making caching more effective
+[profile.ci.package."*"]
+debug = false
+debug-assertions = false
+strip = "debuginfo"
+incremental = false
+
+# Workaround for testcontainers incompatibility with bollard 0.19.5
+# bollard-stubs 1.49.3 made breaking changes to PortBinding type
+#
+# NOTE: No pending issue found yet
+# See: https://github.com/testcontainers/testcontainers-rs/issues/XXX
+[patch.crates-io]
+bollard = { git = "https://github.com/fussybeaver/bollard", tag = "v0.19.4" }
