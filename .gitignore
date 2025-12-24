@@ -1,0 +1,22 @@
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+.env
+.env.local
+.env.*.local
+*.log
+dist/
+dist-bin/
+build/
+out/
+test-results/
+coverage/
+
+
+# Added by cargo
+
+/target
