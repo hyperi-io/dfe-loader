@@ -117,6 +117,11 @@ impl BufferManager {
     pub fn table_stats(&self, table: &str) -> Option<(usize, usize)> {
         self.buffers.get(table).map(|b| (b.len(), b.bytes()))
     }
+
+    /// Get aggregate buffer stats: (total_rows, total_bytes, table_count)
+    pub fn stats(&self) -> (usize, usize, usize) {
+        (self.total_rows(), self.total_bytes(), self.table_count())
+    }
 }
 
 impl Default for BufferManager {
