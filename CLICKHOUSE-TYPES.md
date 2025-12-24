@@ -1,0 +1,362 @@
+# ClickHouse Data Types Reference
+
+**Purpose:** Complete enumeration of ClickHouse data types for implementing full type support in our client library.
+
+**Last Updated:** 2025-12-24
+
+**Sources:**
+- [ClickHouse Data Types Documentation](https://clickhouse.com/docs/en/sql-reference/data-types)
+- [ClickHouse Native Protocol - Columns](https://clickhouse.com/docs/native-protocol/columns)
+- [clickhouse-cpp GitHub](https://github.com/ClickHouse/clickhouse-cpp)
+- [JSON Type Blog Post](https://clickhouse.com/blog/a-new-powerful-json-data-type-for-clickhouse)
+- [ClickHouse 24.8 Release](https://clickhouse.com/blog/clickhouse-release-24-08)
+- [JSON/Dynamic/Variant Production Ready PR](https://github.com/ClickHouse/ClickHouse/pull/77785)
+
+---
+
+## Type Status Legend
+
+| Status | Meaning |
+|--------|---------|
+| ✅ GA | Generally Available, production-ready |
+| 🔷 Beta | Beta, stable but may change |
+| 🧪 Experimental | Experimental, requires setting flag |
+| ⚠️ Deprecated | Deprecated, avoid in new code |
+
+---
+
+## Complete Type Enumeration
+
+### Integer Types (✅ GA)
+
+| Type | Bytes | Range | Native Protocol |
+|------|-------|-------|-----------------|
+| `Int8` | 1 | -128 to 127 | Little-endian |
+| `Int16` | 2 | -32768 to 32767 | Little-endian |
+| `Int32` | 4 | -2³¹ to 2³¹-1 | Little-endian |
+| `Int64` | 8 | -2⁶³ to 2⁶³-1 | Little-endian |
+| `Int128` | 16 | -2¹²⁷ to 2¹²⁷-1 | Little-endian |
+| `Int256` | 32 | -2²⁵⁵ to 2²⁵⁵-1 | Little-endian |
+| `UInt8` | 1 | 0 to 255 | Little-endian |
+| `UInt16` | 2 | 0 to 65535 | Little-endian |
+| `UInt32` | 4 | 0 to 2³²-1 | Little-endian |
+| `UInt64` | 8 | 0 to 2⁶⁴-1 | Little-endian |
+| `UInt128` | 16 | 0 to 2¹²⁸-1 | Little-endian |
+| `UInt256` | 32 | 0 to 2²⁵⁶-1 | Little-endian |
+
+### Floating Point Types (✅ GA)
+
+| Type | Bytes | Description | Native Protocol |
+|------|-------|-------------|-----------------|
+| `Float32` | 4 | IEEE 754 single precision | IEEE 754 binary |
+| `Float64` | 8 | IEEE 754 double precision | IEEE 754 binary |
+| `BFloat16` | 2 | Brain floating point (ML) | IEEE 754 variant |
+
+### Decimal Types (✅ GA)
+
+| Type | Precision | Scale | Underlying |
+|------|-----------|-------|------------|
+| `Decimal(P, S)` | 1-76 | 0-P | Auto-selected |
+| `Decimal32(S)` | 1-9 | 0-9 | Int32 |
+| `Decimal64(S)` | 10-18 | 0-18 | Int64 |
+| `Decimal128(S)` | 19-38 | 0-38 | Int128 |
+| `Decimal256(S)` | 39-76 | 0-76 | Int256 |
+
+### Boolean Type (✅ GA)
+
+| Type | Underlying | Values |
+|------|------------|--------|
+| `Bool` | UInt8 | 0=false, 1=true |
+
+### String Types (✅ GA)
+
+| Type | Description | Native Protocol |
+|------|-------------|-----------------|
+| `String` | Variable-length, any bytes | (len, value) varint + bytes |
+| `FixedString(N)` | Fixed N bytes, zero-padded | N bytes exactly |
+
+### Date and Time Types (✅ GA)
+
+| Type | Range | Resolution | Underlying |
+|------|-------|------------|------------|
+| `Date` | 1970-01-01 to 2149-06-06 | 1 day | UInt16 (days since epoch) |
+| `Date32` | 1900-01-01 to 2299-12-31 | 1 day | Int32 (days since epoch) |
+| `DateTime` | 1970-01-01 to 2106-02-07 | 1 second | UInt32 (seconds since epoch) |
+| `DateTime(tz)` | Same + timezone | 1 second | UInt32 + timezone metadata |
+| `DateTime64(P)` | Wide range | 10⁻ᴾ seconds | Int64 (scaled) |
+| `DateTime64(P, tz)` | Same + timezone | 10⁻ᴾ seconds | Int64 + timezone metadata |
+| `Time` | 00:00:00 to 23:59:59 | 1 second | UInt32 |
+| `Time64(P)` | High precision time | 10⁻ᴾ seconds | Int64 |
+
+**DateTime64 Precision:**
+- P=0: seconds
+- P=3: milliseconds
+- P=6: microseconds
+- P=9: nanoseconds
+
+### UUID Type (✅ GA)
+
+| Type | Bytes | Format |
+|------|-------|--------|
+| `UUID` | 16 | RFC 4122, stored as FixedString(16) |
+
+### Network Types (✅ GA)
+
+| Type | Bytes | Format |
+|------|-------|--------|
+| `IPv4` | 4 | UInt32 alias, big-endian |
+| `IPv6` | 16 | FixedString(16), network byte order |
+
+### Enum Types (✅ GA)
+
+| Type | Underlying | Max Values |
+|------|------------|------------|
+| `Enum8('a'=1, 'b'=2, ...)` | Int8 | 256 |
+| `Enum16('a'=1, 'b'=2, ...)` | Int16 | 65536 |
+
+### Container Types (✅ GA)
+
+| Type | Description | Native Protocol |
+|------|-------------|-----------------|
+| `Array(T)` | Variable-length array | Offsets (UInt64[]) + Data (T[]) |
+| `Tuple(T1, T2, ...)` | Fixed heterogeneous tuple | Concatenated columns |
+| `Map(K, V)` | Key-value pairs | Offsets + Keys (K[]) + Values (V[]) |
+| `Nested(name1 T1, ...)` | Nested structure | Flattened to arrays |
+
+### Nullable Wrapper (✅ GA)
+
+| Type | Description | Native Protocol |
+|------|-------------|-----------------|
+| `Nullable(T)` | T or NULL | Nulls (UInt8[]) + Values (T[]) |
+
+### LowCardinality Wrapper (✅ GA)
+
+| Type | Description | Native Protocol |
+|------|-------------|-----------------|
+| `LowCardinality(T)` | Dictionary encoding | Index + Keys columns |
+
+Supported inner types: String, FixedString, Date, DateTime, numbers
+
+### Geo Types (✅ GA)
+
+| Type | Underlying | Description |
+|------|------------|-------------|
+| `Point` | Tuple(Float64, Float64) | (x, y) coordinate |
+| `Ring` | Array(Point) | Closed polygon ring |
+| `Polygon` | Array(Ring) | Polygon with holes |
+| `MultiPolygon` | Array(Polygon) | Multiple polygons |
+
+---
+
+## Semi-Structured Types (NEW - 2024/2025)
+
+### Variant Type (✅ GA as of late 2024)
+
+```sql
+Variant(T1, T2, T3, ...)
+```
+
+**Description:** Discriminated union of types. Each value is exactly one of the specified types.
+
+**Example:**
+```sql
+Variant(String, UInt64, Array(String))
+```
+
+**Native Protocol:**
+- Discriminator column (UInt8) indicating which type
+- Separate column for each type variant
+- Only the active variant has data for each row
+
+### Dynamic Type (✅ GA as of late 2024)
+
+```sql
+Dynamic
+Dynamic(max_types=N)
+```
+
+**Description:** Can store ANY type without pre-specification. Like Variant but types discovered at runtime.
+
+**Features:**
+- No need to declare types upfront
+- `max_types` limits separate storage columns (default 32)
+- Types beyond limit stored as String
+
+**Native Protocol:**
+- Type descriptor column
+- Multiple data columns
+- Overflow column for excess types
+
+### JSON Type (✅ GA as of late 2024)
+
+```sql
+JSON
+JSON(max_dynamic_paths=N, max_dynamic_types=M)
+```
+
+**Description:** Native columnar JSON storage. NOT the old Object('json') type.
+
+**Features:**
+- Paths flattened to subcolumns
+- Dynamic types per path via Variant
+- Typed paths extracted for efficient queries
+- Subpath access: `json_column.path.to.field`
+
+**Parameters:**
+- `max_dynamic_paths`: Limit dynamic path columns (default 1024)
+- `max_dynamic_types`: Limit types per path (default 32)
+
+**Native Protocol:**
+- Serialized as dynamic column structure
+- Each path becomes separate column
+- Uses Dynamic type internally for varying types
+
+**Example:**
+```sql
+CREATE TABLE events (
+    data JSON
+) ENGINE = MergeTree ORDER BY tuple();
+
+INSERT INTO events VALUES ('{"user": "alice", "score": 42, "tags": ["a", "b"]}');
+
+SELECT data.user, data.score FROM events;
+```
+
+---
+
+## Aggregate Function Types (✅ GA)
+
+| Type | Description |
+|------|-------------|
+| `AggregateFunction(name, T1, ...)` | Intermediate state of aggregate |
+| `SimpleAggregateFunction(name, T)` | Simplified aggregate state |
+
+**Common aggregates:**
+- `AggregateFunction(sum, UInt64)`
+- `AggregateFunction(avg, Float64)`
+- `AggregateFunction(uniq, String)`
+- `AggregateFunction(quantile(0.5), Float64)`
+- `SimpleAggregateFunction(sum, UInt64)`
+- `SimpleAggregateFunction(max, DateTime)`
+
+---
+
+## Deprecated/Legacy Types
+
+| Type | Status | Replacement |
+|------|--------|-------------|
+| `Object('json')` | ⚠️ Deprecated | Use `JSON` type |
+
+---
+
+## Library Support Comparison
+
+### klickhouse (Rust - current)
+
+| Type | Supported |
+|------|-----------|
+| Int8-Int256, UInt8-UInt256 | ✅ |
+| Float32, Float64 | ✅ |
+| Decimal32/64/128/256 | ✅ |
+| String, FixedString | ✅ |
+| Date, DateTime, DateTime64 | ✅ |
+| UUID | ✅ |
+| IPv4, IPv6 | ✅ |
+| Array, Tuple, Map | ✅ |
+| Nullable, LowCardinality | ✅ |
+| Enum8, Enum16 | ✅ |
+| Point, Ring, Polygon, MultiPolygon | ✅ |
+| **JSON** | ❌ Missing |
+| **Variant** | ❌ Missing |
+| **Dynamic** | ❌ Missing |
+| **Nested** | ❌ Missing |
+| **AggregateFunction** | ❌ Missing |
+| **SimpleAggregateFunction** | ❌ Missing |
+| **BFloat16** | ❌ Missing |
+| **Date32** | ❌ Missing |
+| **Time/Time64** | ❌ Missing |
+
+### clickhouse-cpp (C++ - official)
+
+| Type | Supported |
+|------|-----------|
+| Int8-Int128, UInt8-UInt64 | ✅ |
+| Float32, Float64 | ✅ |
+| Decimal32/64/128 | ✅ |
+| String, FixedString | ✅ |
+| Date, DateTime, DateTime64 | ✅ |
+| UUID | ✅ |
+| IPv4, IPv6 | ✅ |
+| Array, Tuple, Map | ✅ |
+| Nullable, LowCardinality | ✅ |
+| Enum8, Enum16 | ✅ |
+| Point, Ring, Polygon, MultiPolygon | ✅ |
+| **JSON** | ❌ [Open Issue #422](https://github.com/ClickHouse/clickhouse-cpp/issues) |
+| **Variant** | ❌ Not yet |
+| **Dynamic** | ❌ Not yet |
+| Int256, UInt256 | ❌ Missing |
+| Decimal256 | ❌ Missing |
+
+---
+
+## Native Protocol Serialization Notes
+
+### Numeric Types
+All numeric types use **little-endian** byte order, matching x86/x64 memory layout for zero-copy operations.
+
+### String/FixedString
+- String: Varint length prefix + raw bytes
+- FixedString(N): Exactly N bytes, zero-padded
+
+### Arrays
+```
+Offsets: [UInt64 offsets array]
+Data: [T elements array]
+```
+Offset[i] = end index of array[i] in data
+
+### Nullable
+```
+Nulls: [UInt8 mask, 1=null]
+Values: [T values, null positions have default]
+```
+
+### LowCardinality
+```
+Index type + Keys + Dictionary
+```
+
+### DateTime with Timezone
+Timezone stored in column metadata, not per-value. All values in column share timezone.
+
+---
+
+## Implementation Priority for dfe-loader-clickhouse
+
+### Phase 1: Critical Missing Types
+1. **JSON** - Production GA, key for event data
+2. **Variant** - Building block for JSON
+3. **Dynamic** - Building block for JSON
+
+### Phase 2: Useful Missing Types
+4. **Nested** - Common in analytics schemas
+5. **Date32** - Extended date range
+6. **AggregateFunction** - Materialized views
+
+### Phase 3: Edge Cases
+7. **SimpleAggregateFunction**
+8. **BFloat16** - ML workloads
+9. **Time/Time64** - Rare usage
+
+---
+
+## Decision: Fork vs FFI Bindings vs Rewrite
+
+See TODO.md for current decision status.
+
+**Options:**
+1. **Fork klickhouse** - Add missing types to pure Rust implementation
+2. **FFI to clickhouse-cpp** - Wrap C++ library, inherit their type support
+3. **New implementation** - Minimal client focused on our use case
+
+**Key Consideration:** clickhouse-cpp also lacks JSON/Variant/Dynamic support (open issue), so FFI doesn't immediately solve our problem.
