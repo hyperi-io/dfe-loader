@@ -87,6 +87,16 @@ pub enum Value {
     MultiPolygon(MultiPolygon),
 
     Object(Vec<u8>),
+
+    // === DFE Fork: New types for ClickHouse 24.x+ ===
+
+    /// Variant value - discriminator (0-254) and boxed inner value
+    /// Discriminator 255 (NULL_DISCRIMINATOR) is represented as Value::Null
+    Variant(u8, Box<Value>),
+
+    /// Dynamic value - type name and boxed inner value
+    /// NULL is represented as Value::Null
+    Dynamic(String, Box<Value>),
 }
 
 impl PartialEq for Value {
@@ -128,6 +138,9 @@ impl PartialEq for Value {
             (Self::Ring(l0), Self::Ring(r0)) => l0 == r0,
             (Self::Polygon(l0), Self::Polygon(r0)) => l0 == r0,
             (Self::MultiPolygon(l0), Self::MultiPolygon(r0)) => l0 == r0,
+            (Self::Object(l0), Self::Object(r0)) => l0 == r0,
+            (Self::Variant(l0, l1), Self::Variant(r0, r1)) => l0 == r0 && l1 == r1,
+            (Self::Dynamic(l0, l1), Self::Dynamic(r0, r1)) => l0 == r0 && l1 == r1,
             _ => core::mem::discriminant(self) == core::mem::discriminant(other),
         }
     }
@@ -194,6 +207,16 @@ impl Hash for Value {
             Value::MultiPolygon(x) => ::core::hash::Hash::hash(x, state),
 
             Value::Null => {}
+
+            // DFE Fork: New types
+            Value::Variant(discr, inner) => {
+                ::core::hash::Hash::hash(discr, state);
+                ::core::hash::Hash::hash(inner, state);
+            }
+            Value::Dynamic(type_name, inner) => {
+                ::core::hash::Hash::hash(type_name, state);
+                ::core::hash::Hash::hash(inner, state);
+            }
         }
     }
 }
@@ -316,6 +339,19 @@ impl Value {
             Value::Polygon(_) => Type::Polygon,
             Value::MultiPolygon(_) => Type::MultiPolygon,
             Value::Object(_) => Type::Object,
+            // DFE Fork: New types
+            Value::Variant(discr, inner) => {
+                // Create a single-variant Variant type with the inner type
+                let inner_type = inner.guess_type();
+                let mut variants = vec![Type::String; (*discr as usize) + 1];
+                variants[*discr as usize] = inner_type;
+                Type::Variant(variants)
+            }
+            Value::Dynamic(_, inner) => {
+                // Dynamic is best represented as Dynamic type
+                let _ = inner; // Inner value is opaque for type guessing
+                Type::Dynamic { max_types: None }
+            }
         }
     }
 }
@@ -499,6 +535,13 @@ impl fmt::Display for Value {
                     }
                 }
                 write!(f, "'")
+            }
+            // DFE Fork: New types
+            Value::Variant(discr, inner) => {
+                write!(f, "Variant({discr}, {inner})")
+            }
+            Value::Dynamic(type_name, inner) => {
+                write!(f, "Dynamic({type_name}, {inner})")
             }
         }
     }

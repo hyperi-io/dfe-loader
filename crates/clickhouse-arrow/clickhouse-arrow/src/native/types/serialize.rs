@@ -1,12 +1,15 @@
 pub(crate) mod array;
+pub(crate) mod dynamic;
 pub(crate) mod geo;
 pub(crate) mod low_cardinality;
 pub(crate) mod map;
+pub(crate) mod nested;
 pub(crate) mod nullable;
 pub(crate) mod object;
 pub(crate) mod sized;
 pub(crate) mod string;
 pub(crate) mod tuple;
+pub(crate) mod variant;
 
 use super::low_cardinality::LOW_CARDINALITY_VERSION;
 use super::*;
@@ -89,9 +92,15 @@ impl ClickHouseNativeSerializer for Type {
                         .await?;
                 }
                 Type::Object => object::ObjectSerializer::write_prefix(self, writer, state).await?,
-                // DFE Fork: New types - no special prefix needed
-                Type::Variant(_) | Type::Dynamic { .. } | Type::Nested(_) => {
-                    // These types will be handled when full serialization is implemented
+                // DFE Fork: New ClickHouse 24.x+ types
+                Type::Variant(_) => {
+                    variant::VariantSerializer::write_prefix(self, writer, state).await?;
+                }
+                Type::Dynamic { .. } => {
+                    dynamic::DynamicSerializer::write_prefix(self, writer, state).await?;
+                }
+                Type::Nested(_) => {
+                    nested::NestedSerializer::write_prefix(self, writer, state).await?;
                 }
             }
             Ok(())

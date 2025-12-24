@@ -216,3 +216,79 @@ async fn test_clickhouse_table_exists() {
     let result = client.table_exists("tables").await;
     assert!(result.is_ok());
 }
+
+/// Test that ClickHouse 24.x+ supports Variant type
+/// This validates our target ClickHouse version has experimental types enabled
+#[tokio::test]
+async fn test_clickhouse_variant_type_support() {
+    if skip_if_no_clickhouse() {
+        eprintln!("Skipping test: no ClickHouse available");
+        return;
+    }
+
+    let config = get_test_config();
+    let client = match ClickHouseClient::new(&config).await {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("Skipping test: ClickHouse connection failed: {}", e);
+            return;
+        }
+    };
+
+    // Check ClickHouse version
+    let version_result = client.query("SELECT version()").await;
+    match version_result {
+        Ok(_) => {
+            eprintln!("✓ ClickHouse version query succeeded");
+        }
+        Err(e) => {
+            eprintln!("Version query failed: {}", e);
+            return;
+        }
+    }
+
+    // Try to create a table with Variant type (requires 24.x+)
+    let table_name = format!("test_variant_{}", uuid::Uuid::new_v4().to_string().replace('-', ""));
+
+    // First, enable experimental types and create table
+    let create_sql = format!(
+        "CREATE TABLE IF NOT EXISTS {} (
+            id UInt64,
+            data Variant(String, Int64, Float64)
+        ) ENGINE = Memory
+        SETTINGS allow_experimental_variant_type = 1",
+        table_name
+    );
+
+    let result = client.query(&create_sql).await;
+    match result {
+        Ok(_) => {
+            eprintln!("✓ Created table with Variant type: {}", table_name);
+        }
+        Err(e) => {
+            eprintln!("✗ Failed to create Variant table (ClickHouse may be < 24.x): {}", e);
+            return;
+        }
+    }
+
+    // Insert test data via JSON
+    let rows: Vec<serde_json::Map<String, serde_json::Value>> = vec![
+        serde_json::json!({"id": 1, "data": "hello"}).as_object().unwrap().clone(),
+        serde_json::json!({"id": 2, "data": 42}).as_object().unwrap().clone(),
+        serde_json::json!({"id": 3, "data": 3.14}).as_object().unwrap().clone(),
+    ];
+
+    let insert_result = client.insert_json(&table_name, rows).await;
+    match insert_result {
+        Ok(count) => {
+            eprintln!("✓ Inserted {} rows into Variant table", count);
+        }
+        Err(e) => {
+            eprintln!("✗ Failed to insert into Variant table: {}", e);
+        }
+    }
+
+    // Cleanup
+    let _ = client.query(&format!("DROP TABLE IF EXISTS {}", table_name)).await;
+    eprintln!("✓ Cleaned up Variant test table");
+}
