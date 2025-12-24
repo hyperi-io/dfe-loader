@@ -427,6 +427,7 @@ checksum = "a6139a8597ed92cf816dfb33f5dd6cf0bb93a6adc938f11039f371bc5bcd26c3"
 dependencies = [
  "chrono",
  "phf",
+ "serde",
 ]
 
 [[package]]
@@ -765,6 +766,7 @@ dependencies = [
  "anyhow",
  "bytes",
  "chrono",
+ "chrono-tz",
  "clap",
  "config",
  "criterion",
@@ -1602,9 +1604,7 @@ dependencies = [
 
 [[package]]
 name = "klickhouse"
-version = "0.14.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f54188349939b1505dee5d42a51ea0c86de59b41656f1a92932ea98cf3b7b7d8"
+version = "0.15.0-dfe"
 dependencies = [
  "chrono",
  "chrono-tz",

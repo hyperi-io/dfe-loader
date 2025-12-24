@@ -1,0 +1,21 @@
+[package]
+name = "clickhouse-arrow-derive"
+description = "Procedural macros for the clickhouse-arrow crate"
+readme = "README.md"
+keywords = ["clickhouse", "arrow", "derive", "macro"]
+categories.workspace = true
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1"
+quote = "1.0"
+syn = "2"

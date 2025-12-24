@@ -35,6 +35,9 @@ pub enum Error {
     #[error("Transform error: {0}")]
     Transform(String),
 
+    #[error("Coercion error: {0}")]
+    Coercion(String),
+
     #[error("Shutdown requested")]
     Shutdown,
 }
