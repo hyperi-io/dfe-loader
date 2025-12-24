@@ -1,699 +1,515 @@
 # Design Document: dfe-loader-clickhouse
 
-**Project:** Rust port of clickhouse-loader (Go)
-**Purpose:** High-performance Kafka → ClickHouse data loader
-**Status:** Design Phase
+**Version:** 2.0 (Arrow Architecture)
+**Date:** 2025-12-24
 
 ---
 
-## 1. Source Project Analysis
+## Overview
 
-### 1.1 Original Architecture (Go)
+High-performance Kafka to ClickHouse data loader using Apache Arrow as the core data format.
 
+```text
+Kafka ──► Arrow Parse ──► Transform ──► ArrowBuffer ──► ClickHouse Native
+          (JSON/MsgPack)   (vectorized)   (chunked)      (clickhouse-arrow)
 ```
-Kafka Consumer → Router → Transformer → Buffer Manager → ClickHouse Inserter
-                   ↓ (invalid)
-                  DLQ Producer
-```
-
-### 1.2 Key Components from Go Implementation
-
-| Component | Go Package | Lines | Purpose |
-|-----------|------------|-------|---------|
-| Pipeline | `internal/pipeline/` | ~500 | Orchestrates all components |
-| Consumer | `internal/kafka/` | ~400 | franz-go based Kafka consumer |
-| Router | `internal/routing/` | ~600 | Fast-path event_category routing |
-| Transformer | `internal/transform/` | ~2000 | Flatten, coerce, project, rename |
-| Buffer | `internal/buffer/` | ~300 | Columnar per-table buffering |
-| Inserter | `internal/clickhouse/` | ~800 | Native protocol, batch salvage |
-| Enrichment | `internal/enrich/` | ~1500 | GeoIP, IP reputation (optional) |
-| Config | `internal/config/` | ~400 | 7-layer config cascade |
-| Metrics | `internal/metrics/` | ~300 | Prometheus metrics |
-
-**Total:** ~45K lines of Go code
-
-### 1.3 Critical Design Patterns
-
-1. **Columnar Buffering** - Data stored column-wise for efficient ClickHouse insertion
-2. **Schema-Driven Processing** - ClickHouse schema introspected via `system.columns`
-3. **Batch Salvage** - Binary-split to isolate bad rows on insert failure
-4. **Circuit Breaker** - Per-table failure detection prevents cascading failures
-5. **Fast-Path Routing** - Extract `event_category` before full JSON parse
-6. **Buffer Pooling** - Reuse buffers to reduce allocations
-7. **Worker Pressure Metric** - KEDA scaling on `worker_pressure` (0..1+)
 
 ---
 
-## 2. Rust Port Design
+## Design Goals
 
-### 2.1 Project Structure
+1. **Maximize throughput**: Vectorized column operations, not row-by-row
+2. **Minimize memory churn**: Chunk lifecycle, Arc-sharing, zero-copy where possible
+3. **At-least-once delivery**: Kafka offset tracking per chunk
+4. **Schema flexibility**: On-demand introspection, periodic refresh
+5. **Clean architecture**: Immutable data, functional transforms
 
-```
-dfe-loader-clickhouse/
-├── src/
-│   ├── main.rs                 # CLI entry point (clap)
-│   ├── lib.rs                  # Library exports
-│   ├── pipeline/
-│   │   ├── mod.rs
-│   │   └── orchestrator.rs     # Main pipeline coordinator
-│   ├── kafka/
-│   │   ├── mod.rs
-│   │   ├── consumer.rs         # + inline unit tests (#[cfg(test)])
-│   │   └── dlq.rs
-│   ├── routing/
-│   │   ├── mod.rs
-│   │   ├── router.rs           # + inline unit tests
-│   │   └── mapping.rs
-│   ├── transform/
-│   │   ├── mod.rs
-│   │   ├── transformer.rs      # + inline unit tests
-│   │   ├── flatten.rs
-│   │   ├── coerce.rs
-│   │   ├── project.rs
-│   │   └── timestamp.rs
-│   ├── buffer/
-│   │   ├── mod.rs
-│   │   ├── columnar.rs         # + inline unit tests
-│   │   ├── manager.rs
-│   │   └── pool.rs
-│   ├── clickhouse/
-│   │   ├── mod.rs
-│   │   ├── client.rs           # ClickHouseClient trait + KlickhouseClient
-│   │   ├── inserter.rs
-│   │   ├── schema.rs
-│   │   └── salvage.rs
-│   ├── enrich/
-│   │   ├── mod.rs
-│   │   ├── geoip.rs
-│   │   ├── reputation.rs
-│   │   └── risk.rs
-│   ├── config/
-│   │   ├── mod.rs
-│   │   └── loader.rs
-│   ├── metrics/
-│   │   ├── mod.rs
-│   │   └── prometheus.rs
-│   └── error.rs
-│
-├── tests/                      # Integration & E2E tests (separate crate)
-│   ├── common/
-│   │   └── mod.rs              # Shared fixtures, test env detection
-│   ├── integration/
-│   │   ├── mod.rs
-│   │   ├── kafka.rs            # Kafka consumer/producer tests
-│   │   └── clickhouse.rs       # ClickHouse insert/schema tests
-│   └── e2e/
-│       ├── mod.rs
-│       └── pipeline.rs         # Full pipeline tests
-│
-├── benches/                    # Criterion benchmarks
-│   ├── json_parsing.rs
-│   └── transform.rs
-│
-├── tests/fixtures/
-│   └── init.sql                # ClickHouse test schema
-│
-├── Cargo.toml
-├── config.example.yaml
-├── config.dev.yaml
-└── docker-compose.dev.yaml     # Local test environment
+---
+
+## Zero-Copy Analysis
+
+### Where We Achieve Zero-Copy
+
+| Stage | Zero-Copy? | Notes |
+|-------|------------|-------|
+| Transform unchanged columns | ✅ Yes | Arc clone, no data copy |
+| Chunk partition by destination | ✅ Yes | Index-based selection |
+| Chunk ack | ✅ Yes | Drop Arc reference, O(1) |
+| Arrow → CH (simple types) | ✅ Yes | Columnar layout matches |
+
+### Where Copy is Required
+
+| Stage | Why | Optimization |
+|-------|-----|--------------|
+| JSON parse | Text → typed values | arrow-json SIMD |
+| MsgPack parse | Binary → typed values | Direct to Arrow builders |
+| Type coercion | String → Int, etc. | Vectorized column ops |
+| Enrichment | New columns | Build entire column in batch |
+| Complex types | Variant/Dynamic | Minimize through schema design |
+
+---
+
+## Core Principle: Column Operations, Not Row-by-Row
+
+**BAD (row-by-row):**
+```rust
+for row in batch.iter_rows() {
+    row.set("country", geoip.lookup(row.get("ip")));  // O(n) overhead per row
+}
 ```
 
-**Rust Test Convention:**
+**GOOD (column operations):**
+```rust
+// Get entire IP column at once
+let ips: &StringArray = batch.column("ip").as_string();
 
-- **Unit tests**: Inline with source code using `#[cfg(test)] mod tests { }`
-- **Integration tests**: `tests/integration/*.rs` - test against real services
-- **E2E tests**: `tests/e2e/*.rs` - full pipeline tests
-- **Benchmarks**: `benches/*.rs` - criterion performance tests
+// Build entire country column at once
+let mut countries = StringBuilder::with_capacity(ips.len());
+for ip in ips.iter() {
+    countries.append_value(geoip.lookup(ip));
+}
 
-### 2.2 Target Platforms
+// Create new batch with Arc-shared original + new column
+let new_batch = add_column(batch, "country", countries.finish());
+```
 
-**Linux only, dual architecture:**
+---
 
-| Target | Triple | Use Case |
-|--------|--------|----------|
-| Linux amd64 | `x86_64-unknown-linux-gnu` | Cloud VMs, Intel/AMD servers |
-| Linux arm64 | `aarch64-unknown-linux-gnu` | AWS Graviton, ARM servers |
+## Core Components
 
-**Build outputs:**
+### 1. ArrowBuffer (Chunked Lifecycle)
 
-- Static binaries for both architectures
-- Multi-arch container images (single manifest)
-- No Windows/macOS release artifacts (dev only)
+```rust
+struct ArrowChunk {
+    id: u64,
+    batch: RecordBatch,          // Immutable Arrow data
+    offset: Option<KafkaOffset>, // For at-least-once ack
+    state: ChunkState,           // Pending → InFlight → Acked/Failed
+}
 
-**CI build matrix:**
+struct ArrowBuffer {
+    chunks: HashMap<u64, ArrowChunk>,
+    // Single buffer for ALL destinations
+    // _destination column for routing
+}
+```
+
+**Lifecycle:**
+
+1. Kafka batch → parse → Arrow RecordBatch with `_destination` column
+2. Push to ArrowBuffer as chunk (Pending)
+3. Flush: partition by `_destination`, mark InFlight
+4. Insert to ClickHouse
+5. Success: Ack chunk (drop, instant memory free)
+6. Failure: Mark Failed, retry later
+
+**Why chunked?**
+
+- No row-level removal (expensive in columnar format)
+- Drop entire chunk on ack = O(1)
+- Natural batch boundary from Kafka
+
+### 2. Transform Pipeline (Immutable Batches)
+
+Arrow batches are **immutable**. Transforms build **new batches** with column operations:
+
+```rust
+fn transform_pipeline(batch: RecordBatch) -> Result<RecordBatch> {
+    // Each transform operates on COLUMNS, not rows
+    // Unchanged columns are Arc-shared (zero-copy)
+
+    let batch = add_destination_column(batch, &router)?;    // New column
+    let batch = flatten_nested_json(batch)?;                 // Column transforms
+    let batch = enrich_geoip_column(batch, "src_ip")?;       // Vectorized lookup
+    let batch = add_load_timestamp_column(batch)?;           // New column
+
+    Ok(batch)
+}
+```
+
+**Column sharing example:**
+
+```rust
+fn add_column(batch: RecordBatch, name: &str, col: ArrayRef) -> RecordBatch {
+    let mut columns = batch.columns().to_vec();  // Vec of Arc, no data copy
+    columns.push(col);                            // Add new column
+    RecordBatch::try_new(new_schema, columns)     // Build new batch
+}
+```
+
+### 3. Schema Registry (On-Demand + Refresh)
+
+```rust
+struct SchemaRegistry {
+    schemas: HashMap<String, TableSchema>,
+    last_refresh: HashMap<String, Instant>,
+    refresh_interval: Duration,
+    client: Arc<ClickHouseClient>,
+}
+
+impl SchemaRegistry {
+    async fn get_or_fetch(&mut self, table: &str) -> Result<&TableSchema> {
+        let needs_refresh = self.last_refresh
+            .get(table)
+            .map(|t| t.elapsed() > self.refresh_interval)
+            .unwrap_or(true);
+
+        if needs_refresh {
+            let schema = self.fetch_from_clickhouse(table).await?;
+            self.schemas.insert(table.to_string(), schema);
+            self.last_refresh.insert(table.to_string(), Instant::now());
+        }
+
+        Ok(self.schemas.get(table).unwrap())
+    }
+}
+```
+
+### 4. ClickHouse Insert (Native Protocol)
+
+Using clickhouse-arrow fork with Variant/Dynamic/Nested types:
+
+```rust
+async fn insert_arrow(client: &Client, table: &str, batch: RecordBatch) -> Result<()> {
+    // clickhouse-arrow handles Arrow → ClickHouse native serialization
+    // Zero-copy for types with matching layout (Int, Float, String)
+    client.insert_arrow(table, batch).await
+}
+```
+
+---
+
+## Data Flow
+
+```text
+┌─────────────────────────────────────────────────────────────────────┐
+│                         Kafka Consumer                               │
+│  - Batch of messages (bytes)                                        │
+│  - Track partition/offset per batch                                 │
+└────────────────────────────┬────────────────────────────────────────┘
+                             │
+                             ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│                      JSON/MsgPack Parser                            │
+│  - arrow-json for JSON → Arrow (SIMD)                               │
+│  - rmp → Arrow for MessagePack                                      │
+│  - Output: RecordBatch (one per Kafka batch)                        │
+└────────────────────────────┬────────────────────────────────────────┘
+                             │
+                             ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│                     Transform Pipeline                               │
+│  1. Route: Add _destination column (category → table mapping)       │
+│  2. Flatten: Nested JSON → flat columns (column-wise)               │
+│  3. Enrich: GeoIP, risk score (vectorized column append)            │
+│  4. Coerce: Type conversion to match CH schema (column-wise)        │
+│  5. Timestamp: Add load_timestamp column                            │
+│                                                                     │
+│  NOTE: Each step builds NEW batch, Arc-shares unchanged columns     │
+└────────────────────────────┬────────────────────────────────────────┘
+                             │
+                             ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│                        ArrowBuffer                                   │
+│  - Single buffer for all destinations                               │
+│  - Chunk = immutable RecordBatch + KafkaOffset                      │
+│  - State tracking: Pending → InFlight → Acked/Failed                │
+└────────────────────────────┬────────────────────────────────────────┘
+                             │
+                             ▼ (flush trigger: rows, bytes, time)
+┌─────────────────────────────────────────────────────────────────────┐
+│                     Partition by _destination                        │
+│  - Group rows by destination table (column operation)               │
+│  - Build separate RecordBatch per table                             │
+│  - Arrow's columnar format makes this efficient                     │
+└────────────────────────────┬────────────────────────────────────────┘
+                             │
+                             ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│                    ClickHouse Inserter                               │
+│  - clickhouse-arrow native protocol                                 │
+│  - Concurrent multi-table insert                                    │
+│  - Retry with exponential backoff                                   │
+└────────────────────────────┬────────────────────────────────────────┘
+                             │
+                             ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│                       Chunk Ack                                      │
+│  - On success: drop chunk (Arc decrement, memory freed)             │
+│  - Commit Kafka offset for the chunk                                │
+│  - On failure: mark Failed, retry later                             │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## Type Mappings
+
+### ClickHouse → Arrow
+
+| ClickHouse | Arrow | Notes |
+|------------|-------|-------|
+| Int8-64 | Int8-64 | Direct, zero-copy |
+| UInt8-64 | UInt8-64 | Direct, zero-copy |
+| Float32/64 | Float32/64 | Direct, zero-copy |
+| String | Binary | UTF-8 not guaranteed |
+| FixedString(N) | FixedSizeBinary(N) | Direct |
+| UUID | FixedSizeBinary(16) | Raw bytes |
+| Date/Date32 | Date32 | Direct |
+| DateTime | Int32 | Unix timestamp |
+| DateTime64 | Int64 | With precision |
+| Array(T) | List(T) | Recursive |
+| Map(K,V) | Map(K,V) | Arrow Map type |
+| Tuple(...) | Struct | Named fields |
+| Nullable(T) | T with null bitmap | Arrow native |
+| LowCardinality(T) | Dictionary | Arrow dictionary encoding |
+| Variant | Binary | Serialized |
+| Dynamic | Binary | Serialized |
+| JSON | Binary | Serialized |
+| Nested | Struct of Lists | Parallel arrays |
+
+---
+
+## Memory Management
+
+### Chunk Lifecycle
+
+```
+CREATE: Kafka batch → Arrow chunk (allocate)
+BUFFER: Hold in ArrowBuffer (just pointer storage)
+FLUSH:  Partition → insert (may clone for multi-table)
+ACK:    Drop chunk (Arc refcount → 0 → deallocate)
+```
+
+### Arc Sharing (Zero-Copy Column Reuse)
+
+```rust
+// Original batch columns
+let cols = batch.columns();  // Vec<Arc<dyn Array>>
+
+// New batch with extra column - NO COPY of original data
+let mut new_cols = cols.to_vec();  // Clone Arc pointers, not data
+new_cols.push(Arc::new(new_column));
+RecordBatch::try_new(schema, new_cols)
+```
+
+### Memory Pressure Handling
+
+If memory pressure detected:
+
+1. Reduce chunk size (smaller Kafka batches)
+2. Flush more aggressively (lower thresholds)
+3. Backpressure to Kafka consumer (pause)
+
+---
+
+## Vectorized Operations Examples
+
+### GeoIP Enrichment (Column-wise)
+
+```rust
+fn enrich_geoip_column(batch: RecordBatch, ip_col: &str) -> Result<RecordBatch> {
+    let ips = batch.column_by_name(ip_col)?.as_string();
+
+    // Build ALL new columns at once
+    let mut country = StringBuilder::with_capacity(ips.len());
+    let mut city = StringBuilder::with_capacity(ips.len());
+    let mut lat = Float64Builder::with_capacity(ips.len());
+    let mut lon = Float64Builder::with_capacity(ips.len());
+
+    // Single pass through IP column
+    for ip in ips.iter() {
+        match ip.and_then(|s| geoip.lookup(s)) {
+            Some(geo) => {
+                country.append_value(geo.country);
+                city.append_value(geo.city);
+                lat.append_value(geo.latitude);
+                lon.append_value(geo.longitude);
+            }
+            None => {
+                country.append_null();
+                city.append_null();
+                lat.append_null();
+                lon.append_null();
+            }
+        }
+    }
+
+    // Build new batch with original columns (Arc-shared) + new columns
+    add_columns(batch, vec![
+        ("country", Arc::new(country.finish())),
+        ("city", Arc::new(city.finish())),
+        ("latitude", Arc::new(lat.finish())),
+        ("longitude", Arc::new(lon.finish())),
+    ])
+}
+```
+
+### Type Coercion (Column-wise)
+
+```rust
+fn coerce_to_int64(col: &StringArray) -> Int64Array {
+    let mut builder = Int64Builder::with_capacity(col.len());
+
+    for val in col.iter() {
+        match val.and_then(|s| s.parse::<i64>().ok()) {
+            Some(n) => builder.append_value(n),
+            None => builder.append_null(),
+        }
+    }
+
+    builder.finish()
+}
+```
+
+---
+
+## Configuration
 
 ```yaml
-strategy:
-  matrix:
-    target:
-      - x86_64-unknown-linux-gnu
-      - aarch64-unknown-linux-gnu
-```
+buffer:
+  flush_rows: 10000
+  flush_bytes: 10485760  # 10MB
+  flush_age_secs: 5
 
-### 2.3 Dependency Selection
+schema:
+  refresh_interval_secs: 60
+  on_error_refresh: true
 
-#### 2.2.1 ClickHouse Client (Decision Required)
+transform:
+  flatten_json: true
+  flatten_separator: "."
+  add_load_timestamp: true
 
-| Option | Protocol | Performance | Arrow | Maintenance |
-|--------|----------|-------------|-------|-------------|
-| **klickhouse** | Native TCP | Very High | No | Active |
-| **clickhouse-arrow** | Native TCP | Excellent | Yes | Active |
-| clickhouse (official) | HTTP only | Medium-High | No | ClickHouse Inc |
-
-**Recommendation:** Start with `klickhouse` for Go parity, evaluate `clickhouse-arrow` for zero-copy path.
-
-#### 2.2.2 Other Dependencies
-
-| Purpose | Go Library | Rust Crate | Notes |
-|---------|------------|------------|-------|
-| Kafka | franz-go | `rdkafka` | librdkafka bindings, production-proven |
-| Kafka (alt) | - | `rskafka` | Pure Rust, fewer features |
-| JSON | json-iterator | `simd-json` | SIMD-accelerated parsing |
-| JSON (alt) | - | `serde_json` | Standard, slower |
-| GeoIP | maxminddb-golang | `maxminddb` | Direct equivalent |
-| Metrics | prometheus/client | `prometheus` | Direct equivalent |
-| Config | viper | `config` + `figment` | 7-layer cascade |
-| CLI | pflag | `clap` | Derive macros |
-| Async | goroutines | `tokio` | Runtime |
-| Logging | slog | `tracing` | Structured logging |
-| Errors | - | `thiserror` + `anyhow` | Custom + context |
-
-### 2.3 Concurrency Model
-
-**Go Model:**
-- Goroutines with channels
-- WaitGroup for shutdown coordination
-- Atomic counters for stats
-
-**Rust Model:**
-- Tokio tasks with mpsc channels
-- `tokio::sync::Notify` or `CancellationToken` for shutdown
-- `AtomicU64` / `AtomicUsize` for stats
-- `Arc<Mutex<_>>` or lock-free structures where needed
-
-```rust
-// Pipeline concurrency structure
-pub struct Pipeline {
-    consumer: Consumer,
-    router: Router,
-    transformers: DashMap<String, Transformer>,  // Per-table cache
-    buffer_manager: BufferManager,
-    inserter: Inserter,
-
-    // Channels
-    route_tx: mpsc::Sender<RoutedMessage>,
-    flush_tx: mpsc::Sender<FlushRequest>,
-
-    // Shutdown
-    shutdown: CancellationToken,
-
-    // Stats
-    stats: Arc<PipelineStats>,
-}
-```
-
-### 2.4 Zero-Copy Considerations
-
-**Goal:** Kafka message bytes → ClickHouse insertion with minimal copies
-
-**Strategy:**
-1. **Direct JSON field extraction** - Use `simd-json` to extract routing field without full parse
-2. **Arena allocation** - Batch allocations for transform phase
-3. **Columnar buffers** - Build columns directly, avoid row intermediates
-4. **Arrow integration** (future) - If using `clickhouse-arrow`, leverage Arrow's zero-copy
-
-**Hot Path:**
-```
-Kafka bytes → extract event_category (no full parse)
-           → full parse only for matched messages
-           → flatten to column builders
-           → insert columnar data
-```
-
-### 2.5 Error Handling Strategy
-
-```rust
-#[derive(Debug, thiserror::Error)]
-pub enum LoaderError {
-    #[error("Kafka error: {0}")]
-    Kafka(#[from] rdkafka::error::KafkaError),
-
-    #[error("ClickHouse error: {0}")]
-    ClickHouse(#[from] klickhouse::Error),
-
-    #[error("Transform error for table '{table}': {reason}")]
-    Transform { table: String, reason: String },
-
-    #[error("Routing error: no mapping for category '{category}'")]
-    Routing { category: String },
-
-    #[error("Configuration error: {0}")]
-    Config(#[from] config::ConfigError),
-}
+enrichment:
+  geoip:
+    enabled: true
+    database: "/data/GeoLite2-City.mmdb"
+    columns: ["src_ip", "dst_ip"]
 ```
 
 ---
 
-## 3. Configuration Design
+## Schema-Aware Transformation
 
-### 3.1 7-Layer Cascade (Matching Go)
+### Why Introspection Matters
 
-1. CLI args (`--config`, `--host`)
-2. Environment variables (`LOADER_CLICKHOUSE_HOST`)
-3. `.env` file
-4. `settings.{env}.yaml`
-5. `settings.yaml`
-6. `defaults.yaml`
-7. Hard-coded defaults
+Schema introspection tells us **what NOT to flatten**. Without it, we'd incorrectly decompose JSON subtrees that should remain as JSON, Array, or Nested types.
 
-### 3.2 Config Structure
+**Example ClickHouse schema:**
 
-```rust
-#[derive(Debug, Deserialize)]
-pub struct Config {
-    pub kafka: KafkaConfig,
-    pub clickhouse: ClickHouseConfig,
-    pub routing: RoutingConfig,
-    pub buffer: BufferConfig,
-    pub transform: TransformConfig,
-    pub enrichment: Option<EnrichmentConfig>,
-    pub metrics: MetricsConfig,
-    pub logging: LoggingConfig,
-}
+```sql
+CREATE TABLE events (
+    user_id Int64,
+    timestamp DateTime64(3),
+    metadata JSON,              -- Keep as JSON blob!
+    tags Array(String),         -- Keep as Array!
+    geo Nested(lat Float64, lon Float64)  -- Keep as Nested!
+)
+```
 
-#[derive(Debug, Deserialize)]
-pub struct BufferConfig {
-    pub max_bytes: usize,      // 1MB default
-    pub max_rows: usize,       // 10,000 default
-    pub max_age_secs: u64,     // 5 seconds default
-    pub flush_workers: usize,  // 4 default
-    pub pool_size: usize,      // 4 per table default
+**Incoming JSON:**
+
+```json
+{
+  "user_id": 1,
+  "timestamp": "2025-01-01T00:00:00Z",
+  "metadata": {"foo": {"bar": {"deep": 1}}},
+  "tags": ["auth", "login"],
+  "geo": {"lat": [1.0, 2.0], "lon": [3.0, 4.0]}
 }
 ```
 
----
+**WITHOUT introspection (wrong):**
 
-## 4. Metrics Design
-
-### 4.1 Prometheus Metrics (Matching Go)
-
-**Namespace:** `ch_loader_`
-
-| Metric | Type | Labels | Description |
-|--------|------|--------|-------------|
-| `messages_consumed_total` | Counter | topic | Messages read from Kafka |
-| `messages_routed_total` | Counter | table | Messages routed to tables |
-| `messages_dlq_total` | Counter | reason | Messages sent to DLQ |
-| `rows_buffered` | Gauge | table | Current rows in buffer |
-| `rows_inserted_total` | Counter | table | Rows inserted to ClickHouse |
-| `insert_errors_total` | Counter | table, error_type | Insert failures |
-| `insert_latency_seconds` | Histogram | table | Insert duration |
-| `buffer_flushes_total` | Counter | table, reason | Flush triggers |
-| `worker_pressure` | Gauge | - | KEDA scaling metric (0..1+) |
-
-### 4.2 Cardinality Controls
-
-```rust
-const MAX_TABLES: usize = 100;
-const MAX_TOPICS: usize = 50;
-const MAX_PARTITIONS_PER_TOPIC: usize = 256;
+```
+user_id: 1
+timestamp: "2025-01-01T00:00:00Z"
+metadata.foo.bar.deep: 1        ← WRONG! Should be JSON blob
+tags.0: "auth"                  ← WRONG! Should be Array
+tags.1: "login"
+geo.lat.0: 1.0                  ← WRONG! Should be Nested
+geo.lat.1: 2.0
+geo.lon.0: 3.0
+geo.lon.1: 4.0
 ```
 
----
+**WITH introspection (correct):**
 
-## 5. Testing Strategy
-
-### 5.1 Unit Tests
-
-- Transform logic (flatten, coerce, project)
-- Routing rules
-- Buffer management
-- Config parsing
-
-### 5.2 Integration Tests
-
-- Kafka consumer with testcontainers
-- ClickHouse insertion with testcontainers
-- Full pipeline E2E
-
-### 5.3 Benchmarks
-
-- JSON parsing throughput
-- Transform throughput
-- Insert latency
-
----
-
-## 6. Critical Library Decisions
-
-### 6.1 JSON Library Decision
-
-**Use Case:** Kafka JSON bytes → Rust structs for transformation. **Parse-only, no serialisation needed.**
-
-#### Options Evaluated
-
-| Library | Performance | Fast-Path Extract | Stability | Platform | Notes |
-|---------|-------------|-------------------|-----------|----------|-------|
-| **sonic-rs** | Fastest (2-3x serde) | `get_unchecked` 75µs | v0.3, stable Rust | x86_64/aarch64 SIMD | ByteDance/CloudWego |
-| **simd-json** | Fast (1.5x serde) | Tape API | v0.14+, mature | x86_64/aarch64 SIMD | 2.6K dependents |
-| **serde_json** | Baseline | None | v1.x, very stable | All | Standard, slowest |
-| **gjson** | Medium | Path syntax | v0.8, stable | All | Simple extraction |
-
-#### Benchmark Data (twitter.json)
-
-| Operation | sonic-rs | simd-json | serde_json |
-|-----------|----------|-----------|------------|
-| Deserialize struct | 694-723µs | 1.06-1.11ms | 2.27-2.32ms |
-| Deserialize untyped | 525-562µs | 1.19-1.21ms | 2.86-3.85ms |
-| Field extraction | 75-77µs (unchecked) | N/A | N/A |
-
-#### Critical Features for Our Use Case
-
-1. **Fast-path routing extraction** - Extract `event_category` without full parse
-2. **Full deserialisation** - Parse complete message for transformation
-3. **Zero-copy where possible** - LazyValue references into source bytes
-4. **Stable on x86_64/aarch64** - Production deployment targets
-
-#### Decision: **sonic-rs** (Primary) + **serde_json** (Fallback)
-
-**Rationale:**
-- 2-3x faster than serde_json for full deserialisation
-- `get_unchecked` enables fast-path routing (75µs vs 430µs)
-- `LazyValue` provides zero-copy field access
-- Now supports stable Rust (was nightly-only)
-- serde-compatible API for easy migration
-- Fallback to serde_json for non-SIMD platforms (rare)
-
-**Risk Mitigation:**
-- sonic-rs is pre-1.0 but actively maintained (v0.3, 780 stars)
-- API is serde-compatible, so switching cost is low
-- Fallback path ensures correctness on all platforms
-
-```rust
-// Fast-path routing (no full parse)
-let category = sonic_rs::get_unchecked(&bytes, &["event_category"])?;
-
-// Full parse for transformation
-let msg: Message = sonic_rs::from_slice(&bytes)?;
+```
+user_id: 1 (Int64)
+timestamp: 1735689600000 (DateTime64)
+metadata: '{"foo":{"bar":{"deep":1}}}' (JSON - serialized)
+tags: ["auth", "login"] (Array<String>)
+geo.lat: [1.0, 2.0] (Nested - parallel arrays)
+geo.lon: [3.0, 4.0]
 ```
 
----
-
-### 6.2 ClickHouse Library Decision
-
-**Use Case:** High-throughput batch inserts, schema introspection. **Native protocol required.**
-
-#### Options Evaluated
-
-| Library | Protocol | Batch Insert | Schema Query | Arrow | Maturity |
-|---------|----------|--------------|--------------|-------|----------|
-| **klickhouse** | Native TCP | Yes | Manual | No | v0.13, active |
-| **clickhouse-arrow** | Native TCP | Yes | Manual | Yes | v0.2.1, newer |
-| **clickhouse (official)** | HTTP only | Yes | Yes | No | v0.14, ClickHouse Inc |
-| **clickhouse-cpp FFI** | Native TCP | Yes | Yes | No | Requires bindings |
-
-#### Key Considerations
-
-1. **Native TCP mandatory** - HTTP adds latency, not suitable for high-throughput
-2. **Batch insert performance** - Primary operation, must be fast
-3. **Schema introspection** - Query `system.columns` for type mapping
-4. **LZ4 compression** - Reduces network bandwidth
-5. **Arrow integration** - Zero-copy potential but adds CPU overhead
-
-#### Arrow Trade-off Analysis
-
-| Factor | Arrow Buffer | Custom Columnar |
-|--------|--------------|-----------------|
-| Memory | Lower (shared buffers) | Higher (per-column alloc) |
-| CPU | Higher (format conversion) | Lower (direct build) |
-| Zero-copy | Yes (if source is Arrow) | No |
-| Complexity | Higher | Lower |
-
-**Your insight is correct:** For a CPU-bound loader, Arrow's conversion overhead may hurt more than memory savings help. The Go version uses custom columnar buffers successfully.
-
-#### Decision: **klickhouse** (Primary) with abstraction layer
-
-**Rationale:**
-- Pure Rust, native TCP protocol (matches Go's clickhouse-go)
-- LZ4 compression built-in
-- Connection pooling via bb8
-- More mature than clickhouse-arrow (longer history)
-- Avoids Arrow CPU overhead for our CPU-bound workload
-
-**Abstraction Strategy:**
-```rust
-// Trait allows swapping implementations
-pub trait ClickHouseClient: Send + Sync {
-    async fn insert_batch(&self, table: &str, batch: ColumnarBatch) -> Result<InsertResult>;
-    async fn query_schema(&self, table: &str) -> Result<TableSchema>;
-}
-
-// Initial implementation
-pub struct KlickhouseClient { /* ... */ }
-
-// Future option if Arrow proves beneficial
-pub struct ArrowClient { /* ... */ }
-```
-
-**Future Evaluation:**
-- Benchmark klickhouse vs clickhouse-arrow with real workloads
-- Consider Arrow if we add Parquet/Flight integration later
-- Monitor clickhouse-arrow maturity (currently v0.2.1)
-
----
-
-### 6.3 Kafka Library Decision
-
-**Use Case:** Consume JSON messages, manual offset commit, at-least-once delivery.
-
-#### Options Evaluated
-
-| Library | Bindings | At-Least-Once | Features | Stability |
-|---------|----------|---------------|----------|-----------|
-| **rdkafka** | librdkafka C | Full support | Complete | v0.38, production |
-| **rskafka** | Pure Rust | Basic | Limited | v0.5, newer |
-| **kafka-rust** | Pure Rust | Basic | Limited | Unmaintained |
-
-#### Critical Requirements
-
-1. **Manual offset commit** - Commit only after ClickHouse insert succeeds
-2. **At-least-once delivery** - No message loss on failure
-3. **SASL/TLS** - Production security
-4. **Rebalance callbacks** - Drain buffers before partition loss
-5. **Consumer groups** - Horizontal scaling
-
-#### rdkafka At-Least-Once Pattern
+### Schema-Driven Transform Rules
 
 ```rust
-// From rdkafka examples/at_least_once.rs
-let config = ClientConfig::new()
-    .set("enable.auto.offset.store", "false")  // Manual control
-    .set("enable.auto.commit", "true")          // Commit stored offsets
-    .set("auto.commit.interval.ms", "5000");
-
-// Process message
-let result = process_and_insert(&msg).await?;
-
-// Only store offset after successful insert
-consumer.store_offset_from_message(&msg)?;
-// Offset will be committed on next auto-commit interval
-```
-
-#### Decision: **rdkafka**
-
-**Rationale:**
-- Production-proven (librdkafka powers Kafka clients in many languages)
-- Full at-least-once delivery support with manual offset control
-- Complete feature parity with Go's franz-go
-- SASL (PLAIN, SCRAM-SHA-256/512), TLS support
-- Rebalance callbacks for graceful partition handoff
-- 2,600+ crates.io dependents
-
-**C Dependency Mitigation:**
-- librdkafka is well-maintained by Confluent
-- Static linking available (`dynamic-linking` feature off)
-- Build process is straightforward on Linux/macOS
-
----
-
-### 6.4 Buffer Strategy Decision
-
-**Use Case:** Accumulate rows per-table, flush on size/count/time triggers.
-
-#### Options
-
-| Strategy | Memory | CPU | Zero-Copy | Complexity |
-|----------|--------|-----|-----------|------------|
-| **Custom Columnar** | Medium | Low | No | Low |
-| **Arrow RecordBatch** | Lower | Higher | Potential | Higher |
-
-#### Decision: **Custom Columnar Buffers** (matching Go)
-
-**Rationale:**
-- Go version proves this works at scale
-- Lower CPU overhead (no Arrow conversion)
-- Simpler implementation and debugging
-- Direct control over memory layout
-- Can add Arrow later if needed
-
-```rust
-pub struct ColumnarBuffer {
-    columns: HashMap<String, ColumnData>,
-    null_bitmaps: HashMap<String, BitVec>,
-    row_count: usize,
-    byte_size: usize,
-    created_at: Instant,
-    offsets: HashMap<i32, i64>,  // partition -> max offset
-}
-
-pub enum ColumnData {
-    String(Vec<String>),
-    Int64(Vec<i64>),
-    Float64(Vec<f64>),
-    DateTime64(Vec<i64>),
-    // ... other types
-}
-```
-
----
-
-### 6.5 Memory Limit Strategy
-
-**Requirement:** Graceful non-OOM memory limit (like Go's GOMEMLIMIT)
-
-#### Approach
-
-1. **Buffer memory tracking** - Each buffer tracks its byte size
-2. **Global memory budget** - Sum of all buffers vs configured limit
-3. **Backpressure on exceed** - Pause consumption, force flush
-4. **Metrics exposure** - `memory_used_bytes` gauge for monitoring
-
-```rust
-pub struct MemoryController {
-    limit_bytes: usize,
-    used_bytes: AtomicUsize,
-    pressure_threshold: f64,  // 0.8 = 80%
-}
-
-impl MemoryController {
-    pub fn try_allocate(&self, bytes: usize) -> Result<MemoryGuard, Backpressure> {
-        let current = self.used_bytes.fetch_add(bytes, Ordering::SeqCst);
-        if current + bytes > self.limit_bytes {
-            self.used_bytes.fetch_sub(bytes, Ordering::SeqCst);
-            return Err(Backpressure::MemoryExceeded);
+fn transform_field(name: &str, value: &JsonValue, ch_type: &Type) -> ArrayRef {
+    match ch_type {
+        Type::Json { .. } => {
+            // DON'T flatten - serialize entire subtree as JSON string
+            serialize_as_json_binary(value)
         }
-        Ok(MemoryGuard { controller: self, bytes })
+        Type::Array(inner) => {
+            // DON'T flatten - build Arrow List with inner type
+            build_list_array(value.as_array(), inner)
+        }
+        Type::Nested(fields) => {
+            // DON'T flatten - build parallel arrays per Nested semantics
+            build_nested_arrays(value.as_object(), fields)
+        }
+        Type::Variant(variants) => {
+            // Determine actual type, serialize accordingly
+            build_variant_value(value, variants)
+        }
+        Type::Dynamic { .. } => {
+            // Runtime type detection, serialize with type tag
+            build_dynamic_value(value)
+        }
+        // Scalar types - extract and coerce
+        Type::Int64 => build_int64_array(value),
+        Type::String => build_string_array(value),
+        // ... etc
+    }
+}
+```
+
+### Flatten Only Unlisted Fields
+
+For fields NOT in schema (extra data), we CAN flatten:
+
+```rust
+fn should_flatten(field: &str, schema: &TableSchema) -> bool {
+    // Only flatten if:
+    // 1. Field is NOT in ClickHouse schema (extra data)
+    // 2. OR field IS in schema but type is String (flatten to dot-notation key)
+
+    match schema.get_type(field) {
+        None => true,  // Not in schema, flatten into extra_data column
+        Some(Type::String) => true,  // String column, can flatten
+        Some(Type::Json { .. }) => false,  // JSON column, keep structure
+        Some(Type::Array(_)) => false,     // Array column, keep structure
+        Some(Type::Nested(_)) => false,    // Nested column, keep structure
+        Some(_) => false,  // Other typed columns, don't flatten
     }
 }
 ```
 
 ---
 
-### 6.6 hs-rustlib Strategy
+## Future Optimizations
 
-**Question:** How to structure shared Rust library (equivalent to hs-golib)?
-
-**Options:**
-- [ ] Private crates.io alternative (Artifactory)
-- [ ] Git submodule with path dependencies
-- [ ] Workspace member in monorepo
-
-**Decision:** TBD - needs infrastructure discussion
+1. **Arrow Flight**: Direct Arrow IPC to ClickHouse (if supported)
+2. **Dictionary encoding**: For low-cardinality string columns
+3. **Predicate pushdown**: Filter before transform
+4. **SIMD GeoIP**: Vectorized IP lookups
+5. **Memory-mapped Arrow**: For very large batches
+6. **Arrow compute kernels**: Use built-in SIMD operations
 
 ---
 
-## 7. Risk Assessment
-
-| Risk | Impact | Likelihood | Mitigation |
-|------|--------|------------|------------|
-| klickhouse maintenance drops | Medium | Low | Abstraction layer allows swap to clickhouse-arrow |
-| sonic-rs breaking changes | Medium | Low | serde-compatible API; fallback to serde_json |
-| rdkafka/librdkafka issues | Low | Very Low | Confluent-maintained; static linking available |
-| Performance regression vs Go | High | Medium | Benchmark early and continuously |
-| Feature parity gaps | Medium | Medium | Prioritise core path; defer enrichment |
-| Memory leaks in unsafe code | High | Low | Minimise unsafe; use miri in CI |
-
----
-
-## 8. Final Dependency Summary
-
-### Core Dependencies (Cargo.toml)
-
-```toml
-[dependencies]
-# Async runtime
-tokio = { version = "1", features = ["full"] }
-
-# JSON parsing (primary)
-sonic-rs = "0.3"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"  # fallback
-
-# Kafka
-rdkafka = { version = "0.38", features = ["ssl", "sasl"] }
-
-# ClickHouse
-klickhouse = { version = "0.13", features = ["compression", "bb8"] }
-
-# Configuration
-config = "0.14"
-figment = { version = "0.10", features = ["yaml", "env"] }
-dotenvy = "0.15"
-
-# CLI
-clap = { version = "4", features = ["derive"] }
-
-# Logging
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
-
-# Metrics
-prometheus = "0.13"
-
-# Error handling
-thiserror = "2"
-anyhow = "1"
-
-# Utilities
-dashmap = "6"           # Concurrent hashmap for transformer cache
-bitvec = "1"            # Null bitmaps
-uuid = "1"
-chrono = "0.4"
-tokio-util = "0.7"      # CancellationToken
-
-[dev-dependencies]
-testcontainers = "0.23"
-criterion = "0.5"
-tempfile = "3"
-```
-
-### Feature Flags
-
-```toml
-[features]
-default = ["simd"]
-simd = []                    # Enable SIMD JSON parsing
-enrichment = ["maxminddb"]   # Optional GeoIP/reputation
-```
-
----
-
-## Appendix A: Go to Rust Mapping
-
-| Go Concept | Rust Equivalent |
-|------------|-----------------|
-| `goroutine` | `tokio::spawn` |
-| `chan T` | `mpsc::channel` / `broadcast` |
-| `sync.WaitGroup` | `tokio::task::JoinSet` |
-| `sync.Mutex` | `tokio::sync::Mutex` / `std::sync::Mutex` |
-| `atomic.Int64` | `AtomicI64` |
-| `context.Context` | `CancellationToken` |
-| `interface{}` | `dyn Trait` / generics / `enum` |
-| `error` | `Result<T, E>` with `thiserror` |
-| `defer` | `Drop` trait / `scopeguard` |
-
----
-
-**Last Updated:** 2024-12-24
-**Version:** 0.1.0-design
+**Last Updated:** 2025-12-24

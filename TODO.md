@@ -6,153 +6,113 @@
 
 **Reference:** `/projects/clickhouse-loader` (Go version)
 
+**Architecture:** Arrow-based chunked buffer with clickhouse-arrow native protocol
+
 ---
 
-## Current Tasks
+## Current Sprint: Arrow Migration
+
+### In Progress
+
+- [ ] **Complete pipeline refactor for Arrow**
+  - ArrowBuffer with chunked lifecycle
+  - Schema introspection on-demand with refresh
+  - Partition by _destination at flush time
+  - clickhouse-arrow for native protocol inserts
 
 ### High Priority
 
-- [ ] **ClickHouse Client Library (0.2)** - Fork or replace klickhouse for full type support
-  - **Decision:** Fork klickhouse vs write new client
-  - **Missing types in klickhouse:**
-    - `JSON` (Object) - Native JSON column type (GA in ClickHouse 24.x)
-    - `Variant` - Dynamic union type
-    - `Dynamic` - Fully dynamic type
-    - `Object('json')` - Legacy JSON (deprecated but still used)
-    - `Nested` - Nested table structures
-    - `SimpleAggregateFunction` / `AggregateFunction`
-    - `Geo types` (beyond Point/Ring/Polygon)
-  - **Goals:**
-    - Full ClickHouse type coverage
-    - Zero-copy insert path
-    - Efficient columnar serialization
-  - **Options:**
-    1. Fork klickhouse, add missing types
-    2. New library: minimal native protocol client
-  - File: `src/clickhouse/client.rs` or new crate
+- [ ] **Schema introspection on-demand with refresh**
+  - Fetch schema on first table write
+  - Refresh every N seconds (configurable)
+  - Build Arrow schema from ClickHouse system.columns
 
-- [ ] **DLQ Producer (2.2)** - Route bad messages to dead letter queue
-  - DLQ message format with error context
-  - Configurable DLQ topic naming
-  - File: `src/kafka/dlq.rs`
+- [ ] **Wire up clickhouse-arrow client**
+  - Replace klickhouse JSON insert with native Arrow insert
+  - Use local fork with Variant/Dynamic/Nested types
+
+- [ ] **Compare serialization with ClickHouse C++ source**
+  - Verify Variant serialization format
+  - Verify Dynamic serialization format
+  - Verify Nested serialization format
+
+---
+
+## Arrow Architecture TODO
+
+### Core Buffer (ArrowBuffer)
+
+- [x] ArrowChunk with lifecycle (Pending → InFlight → Acked/Failed)
+- [x] KafkaOffset tracking per chunk
+- [x] Partition by _destination column
+- [x] Chunk-level ack/fail (no row-level removal)
+- [x] ArrowBufferStats for monitoring
+- [ ] JSON → Arrow deserialization (arrow-json)
+- [ ] MessagePack → Arrow deserialization
+
+### Schema Registry
+
+- [x] TableSchema with Arrow schema + ClickHouse types
+- [x] ch_type_to_arrow conversion
+- [ ] On-demand fetch from ClickHouse system.columns
+- [ ] Periodic refresh (configurable interval)
+- [ ] Cache invalidation on schema change error
+
+### Inserter
+
+- [x] Arrow RecordBatch insert interface
+- [x] Retry logic with exponential backoff
+- [ ] clickhouse-arrow native protocol (replace JSON bridge)
+- [ ] Concurrent multi-table insert
+
+### Pipeline
+
+- [ ] Update orchestrator for Arrow-based BufferManager
+- [ ] Update process_message for Arrow batches
+- [ ] Update flush_batches for Arrow FlushBatch
+- [ ] Wire chunk ack back to Kafka offset commit
+
+---
+
+## Remaining from Original Plan
 
 ### Medium Priority
 
+- [ ] **DLQ Producer (2.2)** - Route bad messages to dead letter queue
 - [ ] **Batch Salvage (6.4)** - Binary-split on insert failure
-  - Isolate bad rows
-  - Return bad rows for DLQ
-  - File: `src/clickhouse/salvage.rs`
-
-- [ ] **Schema Projection (4.3)** - Keep only schema-matching columns
-  - Mandatory field validation
-  - Field renaming rules
-  - File: `src/transform/project.rs`
-
 - [ ] **Circuit Breaker (7.4)** - Per-table failure detection
-  - States: Closed, Open, HalfOpen
-  - Configurable thresholds
-
-- [ ] **Orchestrator DLQ Integration** - Wire DLQ into pipeline
-  - File: `src/pipeline/orchestrator.rs:156`
-
-- [ ] **OIDC Token Callback** - Full OAuth token refresh for OAUTHBEARER
-  - File: `src/kafka/consumer.rs`
-
-- [x] **Native Columnar Buffer** - Migrate buffer to klickhouse-native format - 2025-12-24
-  - Zero-copy insert path via klickhouse RawRow
-  - File: `src/buffer/native.rs`
 
 ### Low Priority
 
 - [ ] **Buffer Pool (5.3)** - Object pool for buffer reuse
-  - Configurable pool size per table
-  - Pool metrics
-  - File: `src/buffer/pool.rs`
-
 - [ ] **Hot-reload (1.2.4)** - Config file watcher
-
-- [ ] **hs-rustlib Strategy (0.1.6)** - Decide on shared library approach
-  - Options: artifactory, git submodule, workspace
 
 ---
 
 ## Completed
 
-- [x] Cargo.toml with all dependencies - 2025-12-24
-- [x] Config module with 7-layer cascade - 2025-12-24
-- [x] Kafka consumer with SASL/SCRAM - 2025-12-24
-- [x] Extended Kafka auth mechanisms - 2025-12-24
-  - SASL/SCRAM-SHA-512, SCRAM-SHA-256
-  - SASL/PLAIN (with TLS)
-  - SASL/OAUTHBEARER (OAuth 2.0 / OIDC)
-  - AWS MSK IAM authentication
-  - mTLS (SSL client certificates)
-  - No auth (dev/test mode)
-- [x] Payload format detection (JSON/MessagePack) - 2025-12-24
-- [x] Router with category extraction - 2025-12-24
-- [x] JSON flattening transform - 2025-12-24
-- [x] Timestamp validation/correction - 2025-12-24
-- [x] Buffer manager with 3 flush triggers - 2025-12-24
-- [x] Native columnar buffer (klickhouse RawRow) - 2025-12-24
-- [x] ClickHouse inserter with retry logic - 2025-12-24
-- [x] Pipeline orchestrator - 2025-12-24
-- [x] Graceful shutdown with buffer drain - 2025-12-24
-- [x] Metrics and health endpoints (Phase 8) - 2025-12-24
-- [x] Integration tests - 2025-12-24
-- [x] Schema introspection (Phase 6.2) - 2025-12-24
-  - ParsedType for runtime type parsing
-  - SchemaCache with TTL and get_or_fetch
-  - ColumnInfo and TableSchema structs
-  - CoercionConfig with type mappings and null handling
-- [x] Type Coercion (Phase 4.2) - 2025-12-24
-  - All ClickHouse types: Int, UInt, Float, Decimal, String, Bool
-  - DateTime/DateTime64 with epoch detection (s/ms/us/ns)
-  - UUID normalization (standard, no-hyphens, braces)
-  - IPv4/IPv6 validation and integer conversion
-  - Array and Map coercion with element types
-  - Null handling: Default/Error/Passthrough strategies
-  - Config-driven type mappings for extensibility
+### 2025-12-24: Arrow Migration Started
 
----
+- [x] Fork clickhouse-arrow with Variant/Dynamic/Nested types
+- [x] Fork klickhouse with new types (parked)
+- [x] Design ArrowBuffer chunked architecture
+- [x] Implement ArrowBuffer with partition-by-destination
+- [x] Implement BufferManager with schema introspection
+- [x] Update Inserter for Arrow RecordBatch
+- [x] Update STATE.md/TODO.md/WBS.md for Arrow architecture
 
-## Blocked
+### Previous Work
 
-- [x] **Full zero-copy path** - Unblocked! NativeBuffer using klickhouse RawRow - 2025-12-24
-
----
-
-## Backlog (Post-MVP)
-
-- [ ] **GeoIP Enrichment (9.1)** - MaxMind MMDB support
-- [ ] **IP Reputation (9.2)** - VPN, Tor, proxy detection
-- [ ] **Risk Scoring (9.3)** - Malicious, scanner, spam classification
-- [ ] **CLI status command (8.2.2)** - Show running instance status
-- [ ] **CLI top command (8.2.4)** - Real-time statistics display
-- [ ] **Full E2E tests with testcontainers (10.2.3)**
-- [ ] **Benchmark comparison with Go version (10.3.4)**
-
----
-
-## Parity Tracking vs Go Version
-
-Run parity checks to ensure feature completeness:
-
-```bash
-# Compare feature lists
-diff <(grep -r "func " /projects/clickhouse-loader/internal/) \
-     <(grep -r "pub fn " /projects/dfe-loader-clickhouse/src/)
-```
-
-| Feature                 | Go | Rust | Notes                    |
-| ----------------------- | -- | ---- | ------------------------ |
-| Kafka SCRAM auth        | ✅ | ✅   | Production default       |
-| Kafka OAuth/OIDC        | ❌ | ✅   | Enhancement              |
-| Kafka AWS IAM           | ❌ | ✅   | Enhancement              |
-| Type coercion           | ✅ | ✅   | Config-driven            |
-| Schema introspection    | ✅ | ✅   | system.columns           |
-| Batch salvage           | ✅ | ⏳   | Pending                  |
-| DLQ producer            | ✅ | ⏳   | Pending                  |
-| Circuit breaker         | ✅ | ⏳   | Pending                  |
+- [x] Cargo.toml with all dependencies
+- [x] Config module with 7-layer cascade
+- [x] Kafka consumer with extended auth (SCRAM, OAuth, mTLS, IAM)
+- [x] Router with category extraction
+- [x] JSON flattening transform
+- [x] Timestamp validation/correction
+- [x] Type coercion (all ClickHouse types)
+- [x] Metrics and health endpoints
+- [x] Integration tests
+- [x] Schema introspection (Phase 6.2)
 
 ---
 
@@ -160,7 +120,8 @@ diff <(grep -r "func " /projects/clickhouse-loader/internal/) \
 
 - Build with `CARGO_BUILD_JOBS=2` to limit resource usage
 - Test environment: k8s.tyrell.com.au (see .env for credentials)
-- All configs support: ENV vars, config files, K8s mounted files
+- clickhouse-arrow fork: `crates/clickhouse-arrow/`
+- klickhouse fork (parked): `crates/klickhouse/`
 
 ---
 

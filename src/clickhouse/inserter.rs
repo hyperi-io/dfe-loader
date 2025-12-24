@@ -1,11 +1,11 @@
-//! Batch inserter for ClickHouse
+//! Arrow-based batch inserter for ClickHouse
 //!
-//! Handles batch inserts with retry logic.
+//! Handles batch inserts with retry logic using Arrow RecordBatch.
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use serde_json::{Map, Value};
+use arrow::array::RecordBatch;
 use tokio::time::sleep;
 use tracing::{debug, error, warn};
 
@@ -45,8 +45,9 @@ impl Inserter {
         }
     }
 
-    /// Insert a batch of rows into a table with retry
-    pub async fn insert(&self, table: &str, rows: Vec<Map<String, Value>>) -> Result<usize> {
+    /// Insert an Arrow RecordBatch into a table with retry
+    pub async fn insert_arrow(&self, table: &str, batch: RecordBatch) -> Result<usize> {
+        let row_count = batch.num_rows();
         let mut last_error = None;
 
         for attempt in 0..=self.max_retries {
@@ -55,7 +56,9 @@ impl Inserter {
                 sleep(self.retry_delay).await;
             }
 
-            match self.client.insert_json(table, rows.clone()).await {
+            // TODO: Use clickhouse-arrow client for actual Arrow insert
+            // For now, we'll use JSON serialization as a bridge
+            match self.insert_arrow_via_json(table, &batch).await {
                 Ok(count) => {
                     debug!(table = %table, rows = count, "Insert successful");
                     return Ok(count);
@@ -74,9 +77,34 @@ impl Inserter {
         }))
     }
 
-    /// Insert a FlushBatch
+    /// Temporary: Convert Arrow batch to JSON for insert
+    ///
+    /// This will be replaced with direct Arrow → ClickHouse native protocol
+    /// once clickhouse-arrow integration is complete.
+    async fn insert_arrow_via_json(&self, table: &str, batch: &RecordBatch) -> Result<usize> {
+        use serde_json::{Map, Value};
+
+        let schema = batch.schema();
+        let mut rows = Vec::with_capacity(batch.num_rows());
+
+        for row_idx in 0..batch.num_rows() {
+            let mut row_map = Map::new();
+
+            for (col_idx, field) in schema.fields().iter().enumerate() {
+                let column = batch.column(col_idx);
+                let value = arrow_value_to_json(column, row_idx);
+                row_map.insert(field.name().clone(), value);
+            }
+
+            rows.push(row_map);
+        }
+
+        self.client.insert_json(table, rows).await
+    }
+
+    /// Insert a FlushBatch (Arrow-native)
     pub async fn insert_batch(&self, batch: FlushBatch) -> Result<usize> {
-        self.insert(&batch.table, batch.rows).await
+        self.insert_arrow(&batch.table, batch.batch).await
     }
 
     /// Insert multiple batches concurrently
@@ -112,6 +140,136 @@ impl Inserter {
         results
     }
 }
+
+/// Convert an Arrow array value at an index to JSON
+fn arrow_value_to_json(array: &dyn arrow::array::Array, idx: usize) -> serde_json::Value {
+    use arrow::array::*;
+    use arrow::datatypes::DataType;
+    use serde_json::Value;
+
+    if array.is_null(idx) {
+        return Value::Null;
+    }
+
+    match array.data_type() {
+        DataType::Int8 => {
+            let arr = array.as_any().downcast_ref::<Int8Array>().unwrap();
+            Value::Number(arr.value(idx).into())
+        }
+        DataType::Int16 => {
+            let arr = array.as_any().downcast_ref::<Int16Array>().unwrap();
+            Value::Number(arr.value(idx).into())
+        }
+        DataType::Int32 => {
+            let arr = array.as_any().downcast_ref::<Int32Array>().unwrap();
+            Value::Number(arr.value(idx).into())
+        }
+        DataType::Int64 => {
+            let arr = array.as_any().downcast_ref::<Int64Array>().unwrap();
+            Value::Number(arr.value(idx).into())
+        }
+        DataType::UInt8 => {
+            let arr = array.as_any().downcast_ref::<UInt8Array>().unwrap();
+            Value::Number(arr.value(idx).into())
+        }
+        DataType::UInt16 => {
+            let arr = array.as_any().downcast_ref::<UInt16Array>().unwrap();
+            Value::Number(arr.value(idx).into())
+        }
+        DataType::UInt32 => {
+            let arr = array.as_any().downcast_ref::<UInt32Array>().unwrap();
+            Value::Number(arr.value(idx).into())
+        }
+        DataType::UInt64 => {
+            let arr = array.as_any().downcast_ref::<UInt64Array>().unwrap();
+            Value::Number(arr.value(idx).into())
+        }
+        DataType::Float32 => {
+            let arr = array.as_any().downcast_ref::<Float32Array>().unwrap();
+            serde_json::Number::from_f64(arr.value(idx) as f64)
+                .map(Value::Number)
+                .unwrap_or(Value::Null)
+        }
+        DataType::Float64 => {
+            let arr = array.as_any().downcast_ref::<Float64Array>().unwrap();
+            serde_json::Number::from_f64(arr.value(idx))
+                .map(Value::Number)
+                .unwrap_or(Value::Null)
+        }
+        DataType::Utf8 => {
+            let arr = array.as_any().downcast_ref::<StringArray>().unwrap();
+            Value::String(arr.value(idx).to_string())
+        }
+        DataType::Binary => {
+            let arr = array.as_any().downcast_ref::<BinaryArray>().unwrap();
+            // Try to parse as UTF-8 string, otherwise use base64
+            match std::str::from_utf8(arr.value(idx)) {
+                Ok(s) => Value::String(s.to_string()),
+                Err(_) => Value::String(base64_encode(arr.value(idx))),
+            }
+        }
+        DataType::Boolean => {
+            let arr = array.as_any().downcast_ref::<BooleanArray>().unwrap();
+            Value::Bool(arr.value(idx))
+        }
+        _ => {
+            // Fallback: try to format as string
+            Value::String(format!("{:?}", array))
+        }
+    }
+}
+
+/// Simple base64 encoding for binary data
+fn base64_encode(data: &[u8]) -> String {
+    use std::fmt::Write;
+    let mut result = String::with_capacity(data.len() * 4 / 3 + 4);
+    for chunk in data.chunks(3) {
+        match chunk.len() {
+            3 => {
+                let n = (chunk[0] as u32) << 16 | (chunk[1] as u32) << 8 | chunk[2] as u32;
+                write!(
+                    &mut result,
+                    "{}{}{}{}",
+                    BASE64_CHARS[(n >> 18 & 0x3f) as usize],
+                    BASE64_CHARS[(n >> 12 & 0x3f) as usize],
+                    BASE64_CHARS[(n >> 6 & 0x3f) as usize],
+                    BASE64_CHARS[(n & 0x3f) as usize]
+                )
+                .unwrap();
+            }
+            2 => {
+                let n = (chunk[0] as u32) << 16 | (chunk[1] as u32) << 8;
+                write!(
+                    &mut result,
+                    "{}{}{}=",
+                    BASE64_CHARS[(n >> 18 & 0x3f) as usize],
+                    BASE64_CHARS[(n >> 12 & 0x3f) as usize],
+                    BASE64_CHARS[(n >> 6 & 0x3f) as usize]
+                )
+                .unwrap();
+            }
+            1 => {
+                let n = (chunk[0] as u32) << 16;
+                write!(
+                    &mut result,
+                    "{}{}==",
+                    BASE64_CHARS[(n >> 18 & 0x3f) as usize],
+                    BASE64_CHARS[(n >> 12 & 0x3f) as usize]
+                )
+                .unwrap();
+            }
+            _ => {}
+        }
+    }
+    result
+}
+
+const BASE64_CHARS: &[char] = &[
+    'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S',
+    'T', 'U', 'V', 'W', 'X', 'Y', 'Z', 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l',
+    'm', 'n', 'o', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z', '0', '1', '2', '3', '4',
+    '5', '6', '7', '8', '9', '+', '/',
+];
 
 #[cfg(test)]
 mod tests {

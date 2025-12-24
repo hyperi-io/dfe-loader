@@ -2,7 +2,7 @@
 
 **Project:** dfe-loader-clickhouse
 **Purpose:** High-performance Kafka to ClickHouse data loader (Rust port of Go clickhouse-loader)
-**Status:** MVP Complete - Ready for Production Hardening
+**Status:** Major Refactor - Arrow-based Architecture
 **Reference:** Feature parity (or better) with `/projects/clickhouse-loader` (Go version)
 
 ---
@@ -18,203 +18,148 @@ export CARGO_BUILD_JOBS=2
 
 ## Current Status (2025-12-24)
 
-### MVP Pipeline: ✅ COMPLETE
+### Architecture Migration: Arrow-Based Pipeline
 
-The core pipeline is fully functional:
+**BREAKING CHANGE:** Migrating from JSON-based buffers to Arrow-based chunked buffers.
 
 ```text
-Kafka → Consumer → PayloadDetect → Router → Transform → Buffer → ClickHouse
+OLD: Kafka → Consumer → JSON parse → Transform → ColumnarBuffer (JSON) → JSONEachRow insert
+NEW: Kafka → Consumer → Arrow parse → Transform → ArrowBuffer (chunks) → Native protocol insert
 ```
 
-### Phase Completion
+### New Design Principles
 
-| Phase | Component              | Status   | Notes                                            |
-| ----- | ---------------------- | -------- | ------------------------------------------------ |
-| 0     | Foundation & Decisions | ✅ 100%  | All technical decisions made                     |
-| 1     | Core Infrastructure    | ✅ 100%  | Config, logging, errors                          |
-| 2     | Kafka Consumer         | ✅ 100%  | Extended auth: SCRAM, PLAIN, OAuth, mTLS, AWS IAM|
-| 3     | Router                 | ✅ 100%  | Category extraction, table mapping               |
-| 4     | Transform              | ✅ 95%   | Flatten, timestamp, type coercion - projection pending |
-| 5     | Buffer Manager         | ✅ 100%  | All 3 flush triggers + NativeBuffer for zero-copy|
-| 6     | ClickHouse             | ✅ 95%   | Native insert, retry, schema introspection       |
-| 7     | Pipeline               | ✅ 95%   | Orchestrator, shutdown - missing circuit breaker |
-| 8     | Metrics & Health       | ✅ 100%  | Prometheus, health endpoints                     |
+1. **Single partitioned buffer**: One ArrowBuffer for all tables, destination is a column
+2. **Chunked lifecycle**: Each Kafka batch → immutable Arrow chunk → drop on ack
+3. **Schema introspection on-demand**: Fetch schema on first write, refresh periodically
+4. **No backwards compatibility code**: Clean break from JSON-based approach
 
-### Parity with Go clickhouse-loader
+### Libraries
 
-| Feature                      | Go Version | Rust Version | Notes                           |
-| ---------------------------- | ---------- | ------------ | ------------------------------- |
-| Kafka SCRAM-SHA-512          | ✅         | ✅           | Production auth                 |
-| Kafka PLAIN                  | ✅         | ✅           | Extended beyond Go              |
-| Kafka OAuth/OIDC             | ❌         | ✅           | **Enhancement** beyond Go       |
-| Kafka mTLS                   | ✅         | ✅           | Via TLS cert/key config         |
-| Kafka AWS MSK IAM            | ❌         | ✅           | **Enhancement** beyond Go       |
-| Schema introspection         | ✅         | ✅           | system.columns queries          |
-| Type coercion                | ✅         | ✅           | Config-driven, all types        |
-| Null handling strategies     | ✅         | ✅           | Default/Error/Passthrough       |
-| JSON flattening              | ✅         | ✅           | Dot notation                    |
-| Timestamp validation         | ✅         | ✅           | Future/past checks              |
-| MessagePack support          | ✅         | ✅           | Auto-detection                  |
-| Batch retry                  | ✅         | ✅           | Exponential backoff             |
-| Batch salvage                | ✅         | ⏳           | Pending                         |
-| DLQ producer                 | ✅         | ⏳           | Pending                         |
-| Circuit breaker              | ✅         | ⏳           | Pending                         |
-| GeoIP enrichment             | ✅         | ⏳           | Post-MVP                        |
-
-### Inline TODOs in Codebase
-
-| File                              | TODO                       | Priority |
-| --------------------------------- | -------------------------- | -------- |
-| `src/transform/project.rs:5`      | Implement projection       | Medium   |
-| `src/clickhouse/salvage.rs:18`    | Binary search salvage      | Medium   |
-| `src/kafka/dlq.rs:18`             | DLQ producer               | Medium   |
-| `src/buffer/pool.rs:5`            | Buffer pooling             | Low      |
-| `src/pipeline/orchestrator.rs:156`| Send to DLQ                | Medium   |
-| `src/kafka/consumer.rs:87`        | OIDC token fetch callback  | Medium   |
-| `src/enrich/geoip.rs:25`          | MaxMind implementation     | Post-MVP |
-| `src/enrich/reputation.rs:23`     | Reputation database        | Post-MVP |
-| `src/enrich/risk.rs:12`           | Risk rules                 | Post-MVP |
+| Purpose        | Library          | Status      | Notes                                    |
+|----------------|------------------|-------------|------------------------------------------|
+| ClickHouse     | clickhouse-arrow | In Progress | Forked with Variant/Dynamic/Nested types |
+| ClickHouse     | klickhouse       | Parked      | Fork complete, not used for main path    |
+| Arrow          | arrow            | Active      | Columnar data format                     |
+| JSON→Arrow     | arrow-json       | Planned     | SIMD JSON to Arrow deserialization       |
+| MsgPack→Arrow  | TBD              | Planned     | MessagePack to Arrow                     |
 
 ---
 
-## Completed Work
+## Chunked Arrow Buffer Design
 
-### Phase 0: Foundation ✅
+### Core Concepts
 
-- Cargo.toml with all dependencies (sonic-rs, klickhouse, rdkafka, etc.)
-- Project structure (src/, tests/, benches/)
-- Technical decisions documented
+```rust
+/// Kafka batch → Arrow chunk (immutable)
+struct ArrowChunk {
+    id: u64,
+    batch: RecordBatch,        // Includes _destination column
+    offset: Option<KafkaOffset>, // For at-least-once ack
+    state: ChunkState,         // Pending → InFlight → Acked/Failed
+}
 
-### Phase 1: Core Infrastructure ✅
+/// Single buffer for all destinations
+struct ArrowBuffer {
+    chunks: HashMap<u64, ArrowChunk>,
+    // Partition by _destination at flush time
+}
+```
 
-- Error types with thiserror
-- 7-layer config cascade
-- Tracing with RFC 3339 timestamps
-- JSON/human-friendly log formats
+### Flow
 
-### Phase 2: Kafka Consumer ✅
+1. **Ingest**: Kafka batch → deserialize (JSON/MsgPack) → Arrow RecordBatch
+2. **Route**: Add `_destination` column based on category extraction
+3. **Buffer**: Push chunk to ArrowBuffer with Kafka offset
+4. **Flush**: Partition pending chunks by `_destination`, write to ClickHouse
+5. **Ack**: On success, drop chunk (instant memory free via Arc)
+6. **Retry**: On failure, mark chunk as failed, retry later
 
-- Consumer wrapper with rdkafka
-- Extended authentication mechanisms:
-  - SASL/SCRAM-SHA-512 (default, recommended)
-  - SASL/SCRAM-SHA-256
-  - SASL/PLAIN (with TLS)
-  - SASL/OAUTHBEARER (OAuth 2.0 / OIDC)
-  - AWS MSK IAM authentication
-  - mTLS (SSL client certificates via TlsConfig)
-  - No auth (dev/test only)
-- Manual offset commit
-- Partition tracking
+### Benefits
 
-### Phase 3: Router ✅
-
-- Fast-path category extraction (no full parse)
-- Category-to-table mapping
-- Default table routing
-- Sub-schema rules
-
-### Phase 4: Transform ✅ (95%)
-
-- JSON flattening with configurable separator
-- Timestamp validation/correction
-- Load timestamp injection
-- Field sanitisation
-- **Type Coercion (NEW):**
-  - Schema-aware type conversion
-  - All ClickHouse types: Int, UInt, Float, Decimal, String, Bool
-  - DateTime/DateTime64 with epoch detection (s/ms/us/ns)
-  - UUID normalization (multiple formats)
-  - IPv4/IPv6 validation and integer conversion
-  - Array and Map coercion with element types
-  - Null handling: Default/Error/Passthrough strategies
-  - Config-driven type mappings for custom types
-- **Pending:** Schema projection
-
-### Phase 5: Buffer Manager ✅
-
-- Per-table columnar buffers
-- Byte size tracking
-- Row count tracking
-- Age tracking
-- Flush triggers: rows, bytes, time
-- **NativeBuffer (NEW):**
-  - klickhouse RawRow for zero-copy insert
-  - Schema-aware type conversion to klickhouse Value types
-  - All ClickHouse types supported: Date, DateTime, DateTime64, UUID, IPv4, IPv6, Map, Array
-  - Epoch auto-detection (s/ms/us/ns)
-  - JSON-inferred types for schemaless operation
-
-### Phase 6: ClickHouse ✅ (95%)
-
-- Native protocol via klickhouse
-- JSONEachRow batch insertion
-- Retry with exponential backoff
-- Concurrent multi-table insertion
-- Schema introspection via system.columns
-- ParsedType for runtime type parsing
-- SchemaCache with TTL and get_or_fetch
-- CoercionConfig with type mappings
-- **Pending:** Batch salvage
-
-### Phase 7: Pipeline ✅ (95%)
-
-- Main orchestrator
-- Channel-based communication
-- Statistics tracking
-- Graceful shutdown with buffer drain
-- **Pending:** Circuit breaker, DLQ integration
-
-### Phase 8: Metrics & Health ✅
-
-- Prometheus metrics endpoint
-- Health endpoints (live, ready, startup)
-- Core metrics (counters, gauges, histograms)
+- **O(1) memory free**: Drop whole chunks, no row-level cleanup
+- **Efficient partitioning**: Arrow's columnar format for fast group-by
+- **Schema introspection**: Build Arrow schema from ClickHouse `system.columns`
+- **Zero-copy potential**: Arrow → ClickHouse native via clickhouse-arrow
 
 ---
 
-## Remaining for Production
+## Schema Introspection
 
-### High Priority
+### On-Demand with Refresh
 
-1. **ClickHouse Client Library (Phase 0.2)** - Fork/replace klickhouse for full type support
-   - klickhouse missing: JSON, Variant, Dynamic, Nested, AggregateFunction
-   - Decision needed: fork vs new implementation
+```rust
+struct SchemaRegistry {
+    schemas: HashMap<String, TableSchema>,
+    last_refresh: HashMap<String, Instant>,
+    refresh_interval: Duration,  // e.g., 60 seconds
+    client: Arc<ClickHouseClient>,
+}
 
-2. **DLQ Producer (Phase 2.2)** - Route bad messages
+impl SchemaRegistry {
+    async fn get_or_fetch(&mut self, table: &str) -> Result<&TableSchema> {
+        if self.needs_refresh(table) {
+            self.fetch_schema(table).await?;
+        }
+        Ok(self.schemas.get(table).unwrap())
+    }
+}
+```
 
-### Medium Priority
+### ClickHouse Type → Arrow Type
 
-1. **Batch Salvage (Phase 6.4)** - Binary-split on failure
-2. **Schema Projection (Phase 4.3)** - Keep only schema columns
-3. **Circuit Breaker (Phase 7.4)** - Per-table failure detection
-4. **OIDC Token Callback** - Full OAuth token refresh
-
-### Low Priority
-
-1. **Buffer Pool (Phase 5.3)** - Object pool for reuse
-2. **Hot-reload (Phase 1.2.4)** - Config file watcher
-
-### Post-MVP
-
-1. **Enrichment (Phase 9)** - GeoIP, reputation, risk scoring
-2. **Additional CLI commands** - status, top, metrics dump
+| ClickHouse      | Arrow               | Notes                        |
+|-----------------|---------------------|------------------------------|
+| Int8-64         | Int8-64             | Direct mapping               |
+| UInt8-64        | UInt8-64            | Direct mapping               |
+| Float32/64      | Float32/64          | Direct mapping               |
+| String          | Binary              | UTF-8 not guaranteed         |
+| UUID            | FixedSizeBinary(16) | Raw bytes                    |
+| DateTime64      | Int64               | Epoch with precision         |
+| Array(T)        | List(T)             | Recursive                    |
+| Variant         | Binary              | Serialized bytes             |
+| Dynamic         | Binary              | Serialized bytes             |
+| JSON            | Binary              | Serialized bytes             |
 
 ---
 
-## Enhancements Beyond Go Version
+## Work Completed
 
-This Rust implementation includes enhancements not present in the Go clickhouse-loader:
+### clickhouse-arrow Fork
 
-1. **Extended Kafka Authentication:**
-   - SASL/OAUTHBEARER (OAuth 2.0 / OIDC)
-   - AWS MSK IAM authentication
-   - Configurable via environment, config files, or K8s mounts
+Added new ClickHouse types to local fork:
 
-2. **SIMD-accelerated JSON parsing** via sonic-rs
+- `Type::Variant(Vec<Type>)` - Discriminated union
+- `Type::Dynamic { max_types: Option<usize> }` - Runtime-typed
+- `Type::Nested(Vec<(String, Type)>)` - Parallel arrays
 
-3. **Config-driven type coercion** allowing new ClickHouse types without code changes
+Files modified:
+- `crates/clickhouse-arrow/clickhouse-arrow/src/native/types.rs`
+- `crates/clickhouse-arrow/clickhouse-arrow/src/native/types/deserialize.rs`
+- `crates/clickhouse-arrow/clickhouse-arrow/src/arrow/types.rs`
+- `crates/clickhouse-arrow/clickhouse-arrow/src/errors.rs`
 
-4. **Zero-copy native buffer** using klickhouse RawRow format (no JSON re-serialization on insert)
+### klickhouse Fork (Parked)
+
+Complete fork with Variant/Dynamic/JSON/Nested types. Parked in favor of clickhouse-arrow.
+
+Location: `crates/klickhouse/`
+
+---
+
+## TODO
+
+### Immediate
+
+1. [ ] Complete pipeline refactor to Arrow-based approach
+2. [ ] Implement schema introspection with on-demand refresh
+3. [ ] Wire up clickhouse-arrow for native protocol inserts
+
+### Pending
+
+1. [ ] Compare serialization with ClickHouse C++ source
+2. [ ] Add arrow-json for SIMD JSON → Arrow
+3. [ ] Implement MessagePack → Arrow
 
 ---
 
@@ -228,40 +173,6 @@ Located at k8s.tyrell.com.au with:
 
 ---
 
-## Architecture
-
-### Key Components
-
-1. **Kafka Consumer** - Extended auth (SCRAM, OAuth, mTLS, IAM), at-least-once delivery
-2. **Payload Detector** - Auto-detect JSON/MessagePack, caching
-3. **Router** - Category field extraction, table mapping
-4. **Transform** - Flatten, timestamp validation, type coercion
-5. **Buffer Manager** - Per-table columnar buffers
-6. **ClickHouse Inserter** - klickhouse native protocol
-
-### Tech Stack
-
-- **Language:** Rust
-- **JSON:** sonic-rs (SIMD-accelerated)
-- **MessagePack:** rmp-serde
-- **Kafka:** rdkafka with extended SASL support
-- **ClickHouse:** klickhouse (native protocol)
-- **Async:** tokio
-
----
-
-## Library Decisions
-
-| Purpose     | Library   | Rationale                        |
-| ----------- | --------- | -------------------------------- |
-| JSON        | sonic-rs  | SIMD, fastest benchmarks         |
-| ClickHouse  | klickhouse| Native protocol, async           |
-| Kafka       | rdkafka   | librdkafka bindings, full SASL   |
-| MessagePack | rmp-serde | Serde integration                |
-| UUID        | uuid v4+v7| v7 for time-ordered indexing     |
-
----
-
 **Last Updated:** 2025-12-24
-**Version:** 0.1.0
-**Status:** MVP Complete
+**Version:** 0.2.0-arrow
+**Status:** Major Refactor In Progress
