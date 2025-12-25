@@ -13,6 +13,7 @@ pub struct Metrics {
     pub batches_flushed: Counter,
     pub rows_inserted: Counter,
     pub insert_errors: Counter,
+    pub offsets_committed: Counter,
     pub buffer_rows: Gauge,
     pub buffer_bytes: Gauge,
     pub buffer_tables: Gauge,
@@ -77,6 +78,12 @@ impl Metrics {
         ))
         .unwrap();
 
+        let offsets_committed = Counter::with_opts(Opts::new(
+            "loader_kafka_offsets_committed_total",
+            "Total Kafka offsets committed after successful insert",
+        ))
+        .unwrap();
+
         // Buffer gauges
         let buffer_rows = Gauge::with_opts(Opts::new(
             "loader_buffer_rows",
@@ -138,6 +145,7 @@ impl Metrics {
         registry.register(Box::new(batches_flushed.clone())).unwrap();
         registry.register(Box::new(rows_inserted.clone())).unwrap();
         registry.register(Box::new(insert_errors.clone())).unwrap();
+        registry.register(Box::new(offsets_committed.clone())).unwrap();
         registry.register(Box::new(buffer_rows.clone())).unwrap();
         registry.register(Box::new(buffer_bytes.clone())).unwrap();
         registry.register(Box::new(buffer_tables.clone())).unwrap();
@@ -155,6 +163,7 @@ impl Metrics {
             batches_flushed,
             rows_inserted,
             insert_errors,
+            offsets_committed,
             buffer_rows,
             buffer_bytes,
             buffer_tables,
@@ -223,6 +232,11 @@ impl Metrics {
         self.buffer_rows.set(rows as f64);
         self.buffer_bytes.set(bytes as f64);
         self.buffer_tables.set(tables as f64);
+    }
+
+    /// Record Kafka offsets committed after successful insert
+    pub fn record_offsets_committed(&self, count: usize) {
+        self.offsets_committed.inc_by(count as f64);
     }
 }
 

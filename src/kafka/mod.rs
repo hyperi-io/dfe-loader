@@ -4,4 +4,4 @@ pub mod consumer;
 pub mod dlq;
 
 pub use consumer::{Consumer, KafkaMessage};
-pub use dlq::DlqProducer;
+pub use dlq::{DlqMessage, DlqProducer, DlqRoutingMode};
