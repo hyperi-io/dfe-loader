@@ -19,5 +19,5 @@ pub mod types;
 pub use arrow_client::{ArrowClickHouseClient, SharedArrowClient};
 pub use circuit_breaker::{CircuitBreaker, CircuitBreakerConfig, CircuitBreakerStats, CircuitState};
 pub use inserter::{FailedRow, InsertResult, Inserter, InserterConfig};
-pub use schema::SchemaCache;
+pub use schema::{SchemaCache, SchemaCacheConfig, SchemaCacheStats, SharedSchemaCache};
 pub use types::{ColumnInfo, ParsedType, TableSchema, default_value_for_category, is_null_string, NULL_STRINGS};

@@ -9,6 +9,7 @@ use clickhouse_arrow::{Client, ArrowFormat, ClientBuilder};
 use futures::StreamExt;
 use tracing::{debug, info};
 
+use crate::clickhouse::types::{ColumnInfo, ParsedType, TableSchema};
 use crate::config::ClickHouseConfig;
 use crate::Result;
 
@@ -166,9 +167,78 @@ impl ArrowClickHouseClient {
         Ok(schemas.keys().cloned().collect())
     }
 
+    /// Fetch table schema as TableSchema (for schema cache)
+    ///
+    /// This returns the full TableSchema used by the schema cache,
+    /// including column info with parsed types.
+    pub async fn fetch_table_schema(&self, table: &str) -> Result<TableSchema> {
+        let (db, tbl) = parse_db_table(table, &self.database);
+
+        // Fetch Arrow schema
+        let arrow_schema = self.fetch_schema(table).await?;
+
+        // Convert Arrow schema to ColumnInfo
+        let columns: Vec<ColumnInfo> = arrow_schema
+            .fields()
+            .iter()
+            .enumerate()
+            .map(|(i, field)| {
+                let type_name = arrow_type_to_ch_name(field.data_type());
+                ColumnInfo {
+                    name: field.name().clone(),
+                    type_name: type_name.clone(),
+                    parsed_type: ParsedType::parse(&type_name),
+                    position: i as u64 + 1,
+                    default_kind: String::new(),
+                    default_expression: String::new(),
+                    comment: String::new(),
+                    is_in_primary_key: false,
+                    is_in_sorting_key: false,
+                }
+            })
+            .collect();
+
+        Ok(TableSchema {
+            database: db,
+            table: tbl,
+            columns,
+            comment: String::new(),
+        })
+    }
+
     /// Get inner client for advanced operations
     pub fn inner(&self) -> &ArrowClient {
         &self.client
+    }
+}
+
+/// Convert Arrow DataType to ClickHouse type name (best effort)
+fn arrow_type_to_ch_name(dt: &arrow::datatypes::DataType) -> String {
+    use arrow::datatypes::DataType;
+
+    match dt {
+        DataType::Int8 => "Int8".to_string(),
+        DataType::Int16 => "Int16".to_string(),
+        DataType::Int32 => "Int32".to_string(),
+        DataType::Int64 => "Int64".to_string(),
+        DataType::UInt8 => "UInt8".to_string(),
+        DataType::UInt16 => "UInt16".to_string(),
+        DataType::UInt32 => "UInt32".to_string(),
+        DataType::UInt64 => "UInt64".to_string(),
+        DataType::Float32 => "Float32".to_string(),
+        DataType::Float64 => "Float64".to_string(),
+        DataType::Boolean => "Bool".to_string(),
+        DataType::Utf8 | DataType::LargeUtf8 => "String".to_string(),
+        DataType::Binary | DataType::LargeBinary => "String".to_string(),
+        DataType::Date32 | DataType::Date64 => "Date".to_string(),
+        DataType::FixedSizeBinary(16) => "UUID".to_string(),
+        DataType::FixedSizeBinary(4) => "IPv4".to_string(),
+        DataType::FixedSizeBinary(n) => format!("FixedString({})", n),
+        DataType::List(inner) => format!("Array({})", arrow_type_to_ch_name(inner.data_type())),
+        DataType::Timestamp(_, _) => "DateTime64(3)".to_string(),
+        DataType::Time32(_) => "DateTime".to_string(),
+        DataType::Time64(_) => "DateTime64(6)".to_string(),
+        _ => "String".to_string(), // Default fallback
     }
 }
 
