@@ -32,11 +32,36 @@ use arrow::datatypes::{Field, Schema, SchemaRef};
 use crate::Result;
 
 /// Kafka offset metadata for a chunk
+///
+/// Uses `Arc<str>` for topic to avoid cloning the topic string for every message.
+/// Most messages from the same Kafka partition share the same topic name.
 #[derive(Debug, Clone)]
 pub struct KafkaOffset {
-    pub topic: String,
+    pub topic: Arc<str>,
     pub partition: i32,
     pub offset: i64,
+}
+
+impl KafkaOffset {
+    /// Create a new KafkaOffset with an owned topic string
+    #[inline]
+    pub fn new(topic: impl Into<Arc<str>>, partition: i32, offset: i64) -> Self {
+        Self {
+            topic: topic.into(),
+            partition,
+            offset,
+        }
+    }
+
+    /// Create a new KafkaOffset sharing an existing topic Arc
+    #[inline]
+    pub fn with_shared_topic(topic: Arc<str>, partition: i32, offset: i64) -> Self {
+        Self {
+            topic,
+            partition,
+            offset,
+        }
+    }
 }
 
 /// State of a chunk in the buffer
@@ -534,11 +559,7 @@ mod tests {
         let mut buffer = ArrowBuffer::new(100, 1024 * 1024, 5);
 
         let batch = create_test_batch(&["table_a"], &[1]);
-        let offset = KafkaOffset {
-            topic: "test".to_string(),
-            partition: 0,
-            offset: 42,
-        };
+        let offset = KafkaOffset::new("test", 0, 42);
         let chunk_id = buffer.push(batch, Some(offset));
 
         // Ack the chunk

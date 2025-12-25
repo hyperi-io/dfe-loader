@@ -4,15 +4,34 @@
 //!   {"tags": {"category": "auth"}}
 //! To flattened form:
 //!   {"tags.category": "auth"}
+//!
+//! ## Performance
+//!
+//! Prefer `flatten_value_owned()` when you own the Value to avoid cloning.
 
 use serde_json::{Map, Value};
 
 /// Flatten a nested JSON value into a flat map with dot notation keys.
 ///
 /// Arrays are converted to JSON string representation.
+///
+/// **Note**: This clones values. Use `flatten_value_owned()` when you own the Value.
 pub fn flatten_value(value: &Value) -> Map<String, Value> {
     let mut result = Map::new();
     flatten_recursive(value, String::new(), &mut result);
+    result
+}
+
+/// Flatten a nested JSON value into a flat map, taking ownership to avoid clones.
+///
+/// This is the preferred method in the hot path when you already own the Value.
+/// Arrays are converted to JSON string representation.
+#[inline]
+pub fn flatten_value_owned(value: Value) -> Map<String, Value> {
+    let mut result = Map::new();
+    // Estimate depth of 4 with average key length of 16 chars
+    let mut prefix_buf = String::with_capacity(64);
+    flatten_recursive_owned_buffered(value, &mut prefix_buf, &mut result);
     result
 }
 
@@ -35,6 +54,59 @@ fn flatten_recursive(value: &Value, prefix: String, result: &mut Map<String, Val
         _ => {
             // Leaf value (string, number, bool, null)
             result.insert(prefix, value.clone());
+        }
+    }
+}
+
+/// Optimized owned version using a reusable prefix buffer
+///
+/// Reduces allocations by reusing a single String buffer for building prefixes.
+/// The buffer is extended and truncated instead of creating new Strings.
+/// For top-level fields (depth 0), takes ownership of key directly without cloning.
+fn flatten_recursive_owned_buffered(value: Value, prefix_buf: &mut String, result: &mut Map<String, Value>) {
+    match value {
+        Value::Object(map) => {
+            let base_len = prefix_buf.len();
+            let is_top_level = base_len == 0;
+
+            for (key, val) in map {
+                // Check if this is a leaf value we can optimize
+                let is_leaf = !matches!(val, Value::Object(_));
+
+                if is_top_level && is_leaf {
+                    // Top-level leaf: use key directly without building prefix (zero copy)
+                    match val {
+                        Value::Array(arr) => {
+                            result.insert(key, Value::String(serde_json::to_string(&arr).unwrap_or_default()));
+                        }
+                        _ => {
+                            result.insert(key, val);
+                        }
+                    }
+                } else {
+                    // Build key in buffer for recursion
+                    if base_len > 0 {
+                        prefix_buf.push('.');
+                    }
+                    prefix_buf.push_str(&key);
+
+                    flatten_recursive_owned_buffered(val, prefix_buf, result);
+
+                    // Restore buffer to original length for next iteration
+                    prefix_buf.truncate(base_len);
+                }
+            }
+        }
+        Value::Array(arr) => {
+            // Convert arrays to JSON string representation
+            // Must clone prefix since we may need it for sibling keys
+            let key = prefix_buf.clone();
+            result.insert(key, Value::String(serde_json::to_string(&arr).unwrap_or_default()));
+        }
+        _ => {
+            // Leaf value - must clone prefix since we may need it for sibling keys
+            let key = prefix_buf.clone();
+            result.insert(key, value);
         }
     }
 }
