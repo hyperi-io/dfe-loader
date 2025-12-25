@@ -6,10 +6,13 @@ use thiserror::Error;
 #[derive(Error, Debug)]
 pub enum Error {
     #[error("Kafka error: {0}")]
-    Kafka(#[from] rdkafka::error::KafkaError),
+    KafkaLib(#[from] rdkafka::error::KafkaError),
+
+    #[error("Kafka error: {0}")]
+    Kafka(String),
 
     #[error("ClickHouse error: {0}")]
-    ClickHouse(#[from] klickhouse::KlickhouseError),
+    ClickHouse(String),
 
     #[error("JSON parse error: {0}")]
     Json(String),

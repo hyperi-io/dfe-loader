@@ -27,18 +27,15 @@ pub fn parse_payload(payload: &[u8]) -> Result<serde_json::Value> {
 }
 
 /// Parse JSON using sonic-rs (SIMD-accelerated)
+///
+/// sonic-rs uses SIMD instructions for fast JSON parsing. The result is directly
+/// deserialized to serde_json::Value for compatibility with downstream processing.
 #[inline]
 fn parse_json(payload: &[u8]) -> Result<serde_json::Value> {
-    // Use sonic-rs for fast parsing, convert to serde_json::Value
-    let value: sonic_rs::Value = sonic_rs::from_slice(payload)
-        .map_err(|e| crate::Error::Json(format!("JSON parse error: {}", e)))?;
-
-    // Convert sonic_rs::Value to serde_json::Value
-    // This is a bit wasteful but maintains compatibility
-    let json_str = sonic_rs::to_string(&value)
-        .map_err(|e| crate::Error::Json(format!("JSON serialize error: {}", e)))?;
-
-    serde_json::from_str(&json_str)
+    // Use sonic-rs's SIMD-accelerated parsing directly to serde_json::Value
+    // This is efficient because sonic_rs::from_slice can deserialize into any
+    // type implementing serde::Deserialize, including serde_json::Value
+    sonic_rs::from_slice(payload)
         .map_err(|e| crate::Error::Json(format!("JSON parse error: {}", e)))
 }
 
