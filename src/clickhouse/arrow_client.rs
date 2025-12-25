@@ -44,9 +44,7 @@ impl ArrowClickHouseClient {
             .with_database(&config.database)
             .build_arrow()
             .await
-            .map_err(|e| crate::Error::ClickHouse(
-                klickhouse::KlickhouseError::ProtocolError(format!("Arrow client connect failed: {}", e))
-            ))?;
+            .map_err(|e| crate::Error::ClickHouse(format!("Arrow client connect failed: {}", e)))?;
 
         info!("Arrow client connected to ClickHouse");
 
@@ -75,22 +73,18 @@ impl ArrowClickHouseClient {
         // Parse db.table format
         let (db, tbl) = parse_db_table(table, &self.database);
 
-        // Build INSERT query
-        let insert_query = format!("INSERT INTO {}.{}", db, tbl);
+        // Build INSERT query - VALUES keyword required for Arrow format
+        let insert_query = format!("INSERT INTO {}.{} VALUES", db, tbl);
 
         // Use clickhouse-arrow's insert method
         let mut stream = self.client
             .insert(&insert_query, batch, None)
             .await
-            .map_err(|e| crate::Error::ClickHouse(
-                klickhouse::KlickhouseError::ProtocolError(format!("Arrow insert failed: {}", e))
-            ))?;
+            .map_err(|e| crate::Error::ClickHouse(format!("Arrow insert failed: {}", e)))?;
 
         // Consume the stream to complete the insert
         while let Some(result) = stream.next().await {
-            result.map_err(|e| crate::Error::ClickHouse(
-                klickhouse::KlickhouseError::ProtocolError(format!("Arrow insert stream error: {}", e))
-            ))?;
+            result.map_err(|e| crate::Error::ClickHouse(format!("Arrow insert stream error: {}", e)))?;
         }
 
         debug!(table = %table, rows = row_count, "Arrow insert complete");
@@ -107,19 +101,15 @@ impl ArrowClickHouseClient {
         debug!(table = %table, batches = batches.len(), rows = total_rows, "Inserting Arrow batches");
 
         let (db, tbl) = parse_db_table(table, &self.database);
-        let insert_query = format!("INSERT INTO {}.{}", db, tbl);
+        let insert_query = format!("INSERT INTO {}.{} VALUES", db, tbl);
 
         let mut stream = self.client
             .insert_many(&insert_query, batches, None)
             .await
-            .map_err(|e| crate::Error::ClickHouse(
-                klickhouse::KlickhouseError::ProtocolError(format!("Arrow insert_many failed: {}", e))
-            ))?;
+            .map_err(|e| crate::Error::ClickHouse(format!("Arrow insert_many failed: {}", e)))?;
 
         while let Some(result) = stream.next().await {
-            result.map_err(|e| crate::Error::ClickHouse(
-                klickhouse::KlickhouseError::ProtocolError(format!("Arrow insert_many stream error: {}", e))
-            ))?;
+            result.map_err(|e| crate::Error::ClickHouse(format!("Arrow insert_many stream error: {}", e)))?;
         }
 
         debug!(table = %table, rows = total_rows, "Arrow insert_many complete");
@@ -145,9 +135,40 @@ impl ArrowClickHouseClient {
         self.client
             .health_check(true)
             .await
-            .map_err(|e| crate::Error::ClickHouse(
-                klickhouse::KlickhouseError::ProtocolError(format!("Health check failed: {}", e))
-            ))
+            .map_err(|e| crate::Error::ClickHouse(format!("Health check failed: {}", e)))
+    }
+
+    /// Execute a query (for DDL, schema queries, etc.)
+    pub async fn query(&self, sql: &str) -> Result<()> {
+        debug!(sql = %sql, "Executing query via Arrow client");
+        self.client
+            .execute(sql, None)
+            .await
+            .map_err(|e| crate::Error::ClickHouse(format!("Query failed: {}", e)))
+    }
+
+    /// Check if a table exists by trying to fetch its schema
+    pub async fn table_exists(&self, table: &str) -> Result<bool> {
+        match self.fetch_schema(table).await {
+            Ok(_) => Ok(true),
+            Err(crate::Error::Schema(_)) => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Get list of all table names in the database
+    pub async fn list_tables(&self) -> Result<Vec<String>> {
+        let schemas = self.client
+            .fetch_schema(Some(&self.database), &[], None)
+            .await
+            .map_err(|e| crate::Error::Schema(format!("Failed to list tables: {}", e)))?;
+
+        Ok(schemas.keys().cloned().collect())
+    }
+
+    /// Get inner client for advanced operations
+    pub fn inner(&self) -> &ArrowClient {
+        &self.client
     }
 }
 

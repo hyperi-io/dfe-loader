@@ -23,9 +23,8 @@ tokio-util = { version = ">=0.7", features = ["rt"] }
 # Kafka (SASL/SCRAM required for auth)
 rdkafka = { version = ">=0.38", features = ["cmake-build", "ssl", "sasl"] }
 
-# ClickHouse (native protocol) - using local fork with extended type support
-klickhouse = { path = "crates/klickhouse", features = ["serde", "compression"] }
 # ClickHouse Arrow client - using local fork with Variant/Dynamic/Nested types
+# Native Arrow protocol for efficient columnar inserts
 clickhouse-arrow = { path = "crates/clickhouse-arrow/clickhouse-arrow", default-features = false, features = ["serde", "pool"] }
 
 # Arrow for columnar data handling

@@ -21,8 +21,7 @@ use std::time::{Duration, Instant};
 use parking_lot::RwLock;
 use tracing::{debug, info};
 
-use crate::clickhouse::client::{ClickHouseClient, TableSchema};
-use crate::Result;
+use crate::clickhouse::types::TableSchema;
 
 /// Cached schema with timestamp
 struct CachedSchema {
@@ -93,38 +92,6 @@ impl SchemaCache {
         if count > 0 {
             info!(count = count, "All schema caches invalidated");
         }
-    }
-
-    /// Get schema, fetching from ClickHouse if not cached or expired
-    ///
-    /// This is the primary method for schema access, following the Go pattern.
-    pub async fn get_or_fetch(
-        &self,
-        table: &str,
-        client: &ClickHouseClient,
-    ) -> Result<TableSchema> {
-        // Try cache first
-        if let Some(schema) = self.get(table) {
-            debug!(table = %table, "Schema cache hit");
-            return Ok(schema);
-        }
-
-        // Fetch from ClickHouse
-        debug!(table = %table, "Schema cache miss, fetching");
-        let schema = client.describe_table(table).await?;
-
-        // Cache the result
-        self.insert(table.to_string(), schema.clone());
-
-        Ok(schema)
-    }
-
-    /// Force refresh a schema, ignoring cache
-    pub async fn refresh(&self, table: &str, client: &ClickHouseClient) -> Result<TableSchema> {
-        debug!(table = %table, "Force refreshing schema");
-        let schema = client.describe_table(table).await?;
-        self.insert(table.to_string(), schema.clone());
-        Ok(schema)
     }
 
     /// Get all cached table names
