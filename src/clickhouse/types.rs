@@ -340,6 +340,71 @@ pub fn is_null_string(value: &str) -> bool {
     NULL_STRINGS.contains(&value)
 }
 
+/// Column information from ClickHouse system.columns
+#[derive(Debug, Clone)]
+pub struct ColumnInfo {
+    /// Column name
+    pub name: String,
+    /// Raw type string from ClickHouse
+    pub type_name: String,
+    /// Parsed type information
+    pub parsed_type: ParsedType,
+    /// Column position (1-based)
+    pub position: u64,
+    /// Default kind (empty, DEFAULT, MATERIALIZED, ALIAS, EPHEMERAL)
+    pub default_kind: String,
+    /// Default expression
+    pub default_expression: String,
+    /// Column comment (may contain metadata directives)
+    pub comment: String,
+    /// Whether column is part of primary key
+    pub is_in_primary_key: bool,
+    /// Whether column is part of sorting key
+    pub is_in_sorting_key: bool,
+}
+
+impl ColumnInfo {
+    /// Check if this column is nullable
+    pub fn is_nullable(&self) -> bool {
+        self.parsed_type.nullable
+    }
+
+    /// Get the coercer category for this column
+    pub fn coercer_category(&self) -> &str {
+        self.parsed_type.coercer_category()
+    }
+}
+
+/// Table schema with all column information
+#[derive(Debug, Clone)]
+pub struct TableSchema {
+    /// Database name
+    pub database: String,
+    /// Table name
+    pub table: String,
+    /// Columns in order
+    pub columns: Vec<ColumnInfo>,
+    /// Table comment (may contain directives like logjson=force)
+    pub comment: String,
+}
+
+impl TableSchema {
+    /// Get column by name
+    pub fn column(&self, name: &str) -> Option<&ColumnInfo> {
+        self.columns.iter().find(|c| c.name == name)
+    }
+
+    /// Get column names
+    pub fn column_names(&self) -> Vec<&str> {
+        self.columns.iter().map(|c| c.name.as_str()).collect()
+    }
+
+    /// Check if a column exists
+    pub fn has_column(&self, name: &str) -> bool {
+        self.columns.iter().any(|c| c.name == name)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
