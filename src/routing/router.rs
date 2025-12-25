@@ -3,8 +3,15 @@
 //! Routing happens PRE-flattening using dot notation for nested field access.
 //! db is extracted from first matching field in priority list (default: org_id)
 //! table is extracted from first matching field in priority list (default: event_category)
+//!
+//! ## Performance
+//!
+//! Prefer `route_value()` when you already have a parsed `serde_json::Value` to avoid
+//! double-parsing. Use `route()` only when you only have raw bytes.
 
 use std::collections::HashMap;
+
+use serde_json::Value;
 
 use crate::config::RoutingConfig;
 use crate::payload::parse::{extract_field_json, extract_nested_field_json};
@@ -89,25 +96,100 @@ impl Router {
         }
     }
 
-    /// Route a message to db.table based on its payload
+    /// Route a message to db.table based on its payload (raw bytes)
+    ///
+    /// **Performance note**: This parses the JSON. If you already have a parsed
+    /// `serde_json::Value`, use `route_value()` instead to avoid double-parsing.
     ///
     /// Returns "db.table" string for buffer routing.
     pub fn route(&self, payload: &[u8]) -> RouteResult {
         let db = self.extract_db(payload);
         let table = self.extract_table(payload);
 
+        self.build_route_result(&db, &table)
+    }
+
+    /// Route a message to db.table based on already-parsed JSON Value
+    ///
+    /// **This is the preferred method** when you've already parsed the JSON,
+    /// as it avoids a second parse. The orchestrator should use this.
+    ///
+    /// Returns "db.table" string for buffer routing.
+    #[inline]
+    pub fn route_value(&self, value: &Value) -> RouteResult {
+        let db = self.extract_db_from_value(value);
+        let table = self.extract_table_from_value(value);
+
+        self.build_route_result(&db, &table)
+    }
+
+    /// Build RouteResult from db and table strings
+    #[inline]
+    fn build_route_result(&self, db: &str, table: &str) -> RouteResult {
         // Validate we have non-empty values
         if db.is_empty() || table.is_empty() {
             if self.dlq_enabled {
                 return RouteResult::Dlq("empty_db_or_table".to_string());
             }
             // Use defaults for empty values
-            let db = if db.is_empty() { &self.default_db } else { &db };
-            let table = if table.is_empty() { &self.default_table } else { &table };
+            let db = if db.is_empty() { &self.default_db } else { db };
+            let table = if table.is_empty() { &self.default_table } else { table };
             return RouteResult::Table(format!("{}.{}", db, table));
         }
 
         RouteResult::Table(format!("{}.{}", db, table))
+    }
+
+    /// Extract db from an already-parsed Value (avoids re-parsing)
+    #[inline]
+    fn extract_db_from_value(&self, value: &Value) -> String {
+        self.extract_first_match_from_value(value, &self.db_fields)
+            .unwrap_or_else(|| self.default_db.clone())
+    }
+
+    /// Extract table from an already-parsed Value (avoids re-parsing)
+    #[inline]
+    fn extract_table_from_value(&self, value: &Value) -> String {
+        let table = self.extract_first_match_from_value(value, &self.table_fields)
+            .unwrap_or_else(|| self.default_table.clone());
+
+        // Check legacy category_to_table mapping
+        if let Some(mapped) = self.category_to_table.get(&table) {
+            mapped.clone()
+        } else {
+            table
+        }
+    }
+
+    /// Extract a field value from parsed JSON Value using dot notation
+    #[inline]
+    fn extract_first_match_from_value(&self, value: &Value, fields: &[String]) -> Option<String> {
+        for field in fields {
+            if let Some(val) = self.get_nested_field(value, field) {
+                if let Some(s) = val.as_str() {
+                    return Some(s.to_string());
+                }
+            }
+        }
+        None
+    }
+
+    /// Get a nested field from a Value using dot notation (e.g., "tags.event_category")
+    ///
+    /// Fast path for simple (non-nested) field names to avoid iterator allocation.
+    #[inline]
+    fn get_nested_field<'a>(&self, value: &'a Value, path: &str) -> Option<&'a Value> {
+        // Fast path: no dot means simple field access (most common case)
+        if !path.contains('.') {
+            return value.get(path);
+        }
+
+        // Slow path: nested field access
+        let mut current = value;
+        for part in path.split('.') {
+            current = current.get(part)?;
+        }
+        Some(current)
     }
 
     /// Route with pre-extracted category (legacy compatibility)
@@ -314,5 +396,71 @@ mod tests {
             router.route_category("network"),
             RouteResult::Table("common.network".to_string())
         );
+    }
+
+    #[test]
+    fn test_route_value_basic() {
+        let router = Router::new(&test_config());
+        let value = serde_json::json!({
+            "org_id": "acme",
+            "event_category": "login",
+            "user_id": 123
+        });
+
+        assert_eq!(
+            router.route_value(&value),
+            RouteResult::Table("acme.login".to_string())
+        );
+    }
+
+    #[test]
+    fn test_route_value_with_mapping() {
+        let router = Router::new(&test_config());
+        let value = serde_json::json!({
+            "org_id": "acme",
+            "event_category": "auth",
+            "user_id": 123
+        });
+
+        assert_eq!(
+            router.route_value(&value),
+            RouteResult::Table("acme.events_auth".to_string())
+        );
+    }
+
+    #[test]
+    fn test_route_value_nested() {
+        let router = Router::new(&test_config());
+        let value = serde_json::json!({
+            "org_id": "tenant1",
+            "tags": {"event_category": "api"},
+            "user_id": 123
+        });
+
+        assert_eq!(
+            router.route_value(&value),
+            RouteResult::Table("tenant1.events_api".to_string())
+        );
+    }
+
+    #[test]
+    fn test_route_value_defaults() {
+        let router = Router::new(&test_config());
+        let value = serde_json::json!({"user_id": 123});
+
+        assert_eq!(
+            router.route_value(&value),
+            RouteResult::Table("common.common".to_string())
+        );
+    }
+
+    #[test]
+    fn test_route_value_matches_route() {
+        // Ensure route() and route_value() give the same result
+        let router = Router::new(&test_config());
+        let payload = br#"{"org_id": "acme", "event_category": "auth", "user_id": 123}"#;
+        let value: Value = serde_json::from_slice(payload).unwrap();
+
+        assert_eq!(router.route(payload), router.route_value(&value));
     }
 }

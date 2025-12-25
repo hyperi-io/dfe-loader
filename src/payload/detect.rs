@@ -180,30 +180,46 @@ impl Default for FormatDetector {
 }
 
 /// Detect payload format from raw bytes (internal).
+///
+/// Optimized for the common case where JSON starts with '{' at position 0.
 #[inline]
 fn detect_format_bytes(payload: &[u8]) -> Option<PayloadFormat> {
-    // Skip leading whitespace for JSON detection
-    let first = payload.iter().find(|&&b| !b.is_ascii_whitespace())?;
+    // Fast path: check first byte directly (common case - no leading whitespace)
+    let first_byte = *payload.first()?;
 
-    match *first {
-        // JSON object or array
-        b'{' | b'[' => Some(PayloadFormat::Json),
-
-        // MessagePack fixmap (0x80-0x8F)
-        0x80..=0x8F => Some(PayloadFormat::MessagePack),
-
-        // MessagePack map16 (0xDE) or map32 (0xDF)
-        0xDE | 0xDF => Some(PayloadFormat::MessagePack),
-
-        // MessagePack fixarray (0x90-0x9F)
-        0x90..=0x9F => Some(PayloadFormat::MessagePack),
-
-        // MessagePack array16 (0xDC) or array32 (0xDD)
-        0xDC | 0xDD => Some(PayloadFormat::MessagePack),
-
-        // Unknown format
-        _ => None,
+    // Most common case: JSON object starting with '{'
+    if first_byte == b'{' || first_byte == b'[' {
+        return Some(PayloadFormat::Json);
     }
+
+    // Check for MessagePack before considering whitespace
+    // (MessagePack never starts with whitespace-like bytes)
+    match first_byte {
+        // MessagePack fixmap (0x80-0x8F)
+        0x80..=0x8F => return Some(PayloadFormat::MessagePack),
+        // MessagePack map16 (0xDE) or map32 (0xDF)
+        0xDE | 0xDF => return Some(PayloadFormat::MessagePack),
+        // MessagePack fixarray (0x90-0x9F)
+        0x90..=0x9F => return Some(PayloadFormat::MessagePack),
+        // MessagePack array16 (0xDC) or array32 (0xDD)
+        0xDC | 0xDD => return Some(PayloadFormat::MessagePack),
+        _ => {}
+    }
+
+    // Slow path: skip leading whitespace for JSON (rare case)
+    if first_byte.is_ascii_whitespace() {
+        for &b in payload.iter().skip(1) {
+            if !b.is_ascii_whitespace() {
+                return match b {
+                    b'{' | b'[' => Some(PayloadFormat::Json),
+                    _ => None,
+                };
+            }
+        }
+        return None; // All whitespace
+    }
+
+    None
 }
 
 /// Legacy function for direct detection

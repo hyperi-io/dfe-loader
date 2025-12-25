@@ -532,6 +532,24 @@ pub struct MetadataConfig {
     pub inject_timestamp_load: bool,
     pub extract_timestamp_collector: bool,
     pub collector_timestamp_path: String,
+
+    // Tags handling (Common Header v2)
+    /// Fields to check for tags (first match wins, dot notation for nested)
+    pub tags_fields: Vec<String>,
+    /// Output field name for tags (underscore prefix avoids collision)
+    pub tags_output: String,
+    /// Drop tags entirely after routing extraction (saves storage)
+    pub drop_tags: bool,
+
+    // logjson capture (Common Header v2)
+    /// Store complete original Kafka message as JSON before transformation
+    pub capture_logjson: bool,
+    /// Output field name for logjson
+    pub logjson_output: String,
+
+    // Routing field removal (Common Header v2)
+    /// Remove routing fields from output after extraction
+    pub remove_routing_fields: bool,
 }
 
 impl Default for MetadataConfig {
@@ -540,6 +558,23 @@ impl Default for MetadataConfig {
             inject_timestamp_load: true,
             extract_timestamp_collector: true,
             collector_timestamp_path: "tags.collector.timestamp".to_string(),
+
+            // Tags handling defaults
+            tags_fields: vec![
+                "tags".to_string(),
+                "_tags".to_string(),
+                "meta".to_string(),
+                "metadata.tags".to_string(),
+            ],
+            tags_output: "_tags".to_string(),
+            drop_tags: false,
+
+            // logjson capture defaults
+            capture_logjson: true,
+            logjson_output: "logjson".to_string(),
+
+            // Routing field removal defaults
+            remove_routing_fields: true,
         }
     }
 }
