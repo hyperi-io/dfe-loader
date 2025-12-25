@@ -50,6 +50,10 @@ impl Serializer for SizedSerializer {
                 Value::DateTime64(x) => writer.write_u64_le(x.1).await?,
                 Value::Ipv4(x) => writer.write_u32_le(x.0.into()).await?,
                 Value::Ipv6(x) => writer.write_all(&x.octets()[..]).await?,
+                // DFE Fork: Additional types
+                Value::BFloat16(x) => writer.write_u16_le(*x).await?,
+                Value::Time(x) => writer.write_u32_le(*x).await?,
+                Value::Time64(_, x) => writer.write_i64_le(*x).await?,
                 _ => {
                     return Err(Error::SerializeError(format!(
                         "SizedSerializer unimplemented: {type_:?} for value = {value:?}",
@@ -100,6 +104,10 @@ impl Serializer for SizedSerializer {
                 Value::DateTime64(x) => writer.put_u64_le(x.1),
                 Value::Ipv4(x) => writer.put_u32_le(x.0.into()),
                 Value::Ipv6(x) => writer.put_slice(&x.octets()[..]),
+                // DFE Fork: Additional types
+                Value::BFloat16(x) => writer.put_u16_le(*x),
+                Value::Time(x) => writer.put_u32_le(*x),
+                Value::Time64(_, x) => writer.put_i64_le(*x),
                 _ => {
                     return Err(Error::SerializeError(format!(
                         "SizedSerializer unimplemented: {type_:?} for value = {value:?}",

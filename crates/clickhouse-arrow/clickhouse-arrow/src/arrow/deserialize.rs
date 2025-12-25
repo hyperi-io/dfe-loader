@@ -387,7 +387,14 @@ impl ClickHouseArrowDeserializer for Type {
                 )).await?
             }
             // DFE Fork: New types - Arrow deserialization not yet implemented
-            Type::Variant(_) | Type::Dynamic { .. } | Type::Nested(_) => {
+            Type::Variant(_)
+            | Type::Dynamic { .. }
+            | Type::Nested(_)
+            | Type::BFloat16
+            | Type::Time
+            | Type::Time64(_)
+            | Type::AggregateFunction { .. }
+            | Type::SimpleAggregateFunction { .. } => {
                 return Err(Error::Unimplemented(format!(
                     "Arrow deserialization not implemented for {self}"
                 )));

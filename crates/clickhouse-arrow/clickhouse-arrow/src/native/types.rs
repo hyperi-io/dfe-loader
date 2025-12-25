@@ -97,6 +97,34 @@ pub enum Type {
     /// Nested type - nested table structure
     /// Stored as parallel arrays internally
     Nested(Vec<(String, Type)>),
+
+    /// BFloat16 - Brain floating point (ML workloads)
+    /// 16-bit floating point with 8-bit exponent, 7-bit mantissa
+    BFloat16,
+
+    /// Time - time of day (00:00:00 to 23:59:59)
+    /// Stored as seconds since midnight (UInt32)
+    Time,
+
+    /// Time64 - high precision time of day
+    /// Stored as scaled value since midnight (Int64)
+    /// Precision: 0=seconds, 3=milliseconds, 6=microseconds, 9=nanoseconds
+    Time64(usize),
+
+    /// AggregateFunction - intermediate state of an aggregate function
+    /// name: function name (e.g., "sum", "avg", "uniq")
+    /// types: argument types
+    AggregateFunction {
+        name: String,
+        types: Vec<Type>,
+    },
+
+    /// SimpleAggregateFunction - simplified aggregate state
+    /// Used for simple aggregates that can be combined with simple operations
+    SimpleAggregateFunction {
+        name: String,
+        types: Vec<Type>,
+    },
 }
 
 impl Type {
@@ -233,6 +261,15 @@ impl Type {
                 // Nested defaults to empty arrays for each field
                 Value::Tuple(fields.iter().map(|(_, _)| Value::Array(vec![])).collect())
             }
+            Type::BFloat16 => Value::BFloat16(0),
+            Type::Time => Value::Time(0),
+            Type::Time64(precision) => Value::Time64(*precision, 0),
+            Type::AggregateFunction { .. } => Value::AggregateFunction(vec![]),
+            Type::SimpleAggregateFunction { types, .. } => {
+                // Default to the first type's default value if available
+                let inner = types.first().map_or(Value::UInt64(0), Type::default_value);
+                Value::SimpleAggregateFunction(Box::new(inner))
+            }
         }
     }
 }
@@ -330,6 +367,23 @@ impl Display for Type {
                 }
                 write!(f, ")")
             }
+            Type::BFloat16 => write!(f, "BFloat16"),
+            Type::Time => write!(f, "Time"),
+            Type::Time64(precision) => write!(f, "Time64({precision})"),
+            Type::AggregateFunction { name, types } => {
+                write!(f, "AggregateFunction({name}")?;
+                for t in types {
+                    write!(f, ", {t}")?;
+                }
+                write!(f, ")")
+            }
+            Type::SimpleAggregateFunction { name, types } => {
+                write!(f, "SimpleAggregateFunction({name}")?;
+                for t in types {
+                    write!(f, ", {t}")?;
+                }
+                write!(f, ")")
+            }
         }
     }
 }
@@ -408,6 +462,28 @@ impl Type {
                         "Native Value deserialization not implemented for {self}"
                     )));
                 }
+                // DFE Fork: Additional types - sized types
+                Type::BFloat16 | Type::Time | Type::Time64(_) => {
+                    sized::SizedDeserializer::read(self, reader, rows, state).await?
+                }
+                // DFE Fork: Aggregate function types - opaque binary
+                Type::AggregateFunction { .. } => {
+                    string::StringDeserializer::read(self, reader, rows, state).await?
+                }
+                // DFE Fork: SimpleAggregateFunction delegates to underlying type
+                Type::SimpleAggregateFunction { types, .. } => {
+                    if let Some(inner_type) = types.first() {
+                        let inner_values = inner_type.deserialize_column(reader, rows, state).await?;
+                        inner_values
+                            .into_iter()
+                            .map(|v| Value::SimpleAggregateFunction(Box::new(v)))
+                            .collect()
+                    } else {
+                        return Err(Error::Unimplemented(
+                            "SimpleAggregateFunction with no types".to_string(),
+                        ));
+                    }
+                }
             })
         }
         .boxed()
@@ -480,6 +556,28 @@ impl Type {
                 return Err(Error::Unimplemented(format!(
                     "Native Value deserialization not implemented for {self}"
                 )));
+            }
+            // DFE Fork: Additional types - sized types
+            Type::BFloat16 | Type::Time | Type::Time64(_) => {
+                sized::SizedDeserializer::read_sync(self, reader, rows, state)?
+            }
+            // DFE Fork: Aggregate function types - opaque binary
+            Type::AggregateFunction { .. } => {
+                string::StringDeserializer::read_sync(self, reader, rows, state)?
+            }
+            // DFE Fork: SimpleAggregateFunction delegates to underlying type
+            Type::SimpleAggregateFunction { types, .. } => {
+                if let Some(inner_type) = types.first() {
+                    let inner_values = inner_type.deserialize_column_sync(reader, rows, state)?;
+                    inner_values
+                        .into_iter()
+                        .map(|v| Value::SimpleAggregateFunction(Box::new(v)))
+                        .collect()
+                } else {
+                    return Err(Error::Unimplemented(
+                        "SimpleAggregateFunction with no types".to_string(),
+                    ));
+                }
             }
         })
     }
@@ -563,6 +661,34 @@ impl Type {
                 Type::Nested(_) => {
                     nested::NestedSerializer::write(self, values, writer, state).await?;
                 }
+                // DFE Fork: Additional types - sized types
+                Type::BFloat16 | Type::Time | Type::Time64(_) => {
+                    sized::SizedSerializer::write(self, values, writer, state).await?;
+                }
+                // DFE Fork: Aggregate function types - opaque binary
+                Type::AggregateFunction { .. } => {
+                    string::StringSerializer::write(self, values, writer, state).await?;
+                }
+                // DFE Fork: SimpleAggregateFunction delegates to underlying type
+                Type::SimpleAggregateFunction { types, .. } => {
+                    if let Some(inner_type) = types.first() {
+                        // Unwrap the SimpleAggregateFunction wrapper
+                        let inner_values: Vec<Value> = values
+                            .into_iter()
+                            .map(|v| match v {
+                                Value::SimpleAggregateFunction(inner) => *inner,
+                                other => other,
+                            })
+                            .collect();
+                        inner_type
+                            .serialize_column(inner_values, writer, state)
+                            .await?;
+                    } else {
+                        return Err(Error::Unimplemented(
+                            "SimpleAggregateFunction with no types".to_string(),
+                        ));
+                    }
+                }
             }
             Ok(())
         }
@@ -642,6 +768,32 @@ impl Type {
             }
             Type::Nested(_) => {
                 nested::NestedSerializer::write_sync(self, values, writer, state)?;
+            }
+            // DFE Fork: Additional types - sized types
+            Type::BFloat16 | Type::Time | Type::Time64(_) => {
+                sized::SizedSerializer::write_sync(self, values, writer, state)?;
+            }
+            // DFE Fork: Aggregate function types - opaque binary
+            Type::AggregateFunction { .. } => {
+                string::StringSerializer::write_sync(self, values, writer, state)?;
+            }
+            // DFE Fork: SimpleAggregateFunction delegates to underlying type
+            Type::SimpleAggregateFunction { types, .. } => {
+                if let Some(inner_type) = types.first() {
+                    // Unwrap the SimpleAggregateFunction wrapper
+                    let inner_values: Vec<Value> = values
+                        .into_iter()
+                        .map(|v| match v {
+                            Value::SimpleAggregateFunction(inner) => *inner,
+                            other => other,
+                        })
+                        .collect();
+                    inner_type.serialize_column_sync(inner_values, writer, state)?;
+                } else {
+                    return Err(Error::Unimplemented(
+                        "SimpleAggregateFunction with no types".to_string(),
+                    ));
+                }
             }
         }
         Ok(())
@@ -844,6 +996,16 @@ impl Type {
                     && keys.iter().all(|x| key.inner_validate_value(x))
                     && values.iter().all(|x| value.inner_validate_value(x))
             }
+            // DFE Fork: New types
+            (Type::BFloat16, Value::BFloat16(_)) => true,
+            (Type::Time, Value::Time(_)) => true,
+            (Type::Time64(p1), Value::Time64(p2, _)) => p1 == p2,
+            (Type::AggregateFunction { .. }, Value::AggregateFunction(_)) => true,
+            (Type::SimpleAggregateFunction { types, .. }, Value::SimpleAggregateFunction(inner)) => {
+                types.first().is_some_and(|t| t.inner_validate_value(inner))
+            }
+            (Type::Variant(_), Value::Variant(_, _) | Value::Null) => true,
+            (Type::Dynamic { .. }, Value::Dynamic(_, _) | Value::Null) => true,
             _ => false,
         }
     }
@@ -877,8 +1039,22 @@ impl Type {
                 4 + key_data + value_data // 4 bytes for offsets
             }
 
+            // DFE Fork: New types
+            Type::BFloat16 => 2,
+            Type::Time => 4,
+            Type::Time64(_) => 8,
+            Type::AggregateFunction { .. } => 64, // Opaque binary, variable size
+            Type::SimpleAggregateFunction { types, .. } => {
+                types.first().map_or(8, Type::estimate_capacity)
+            }
+            Type::Variant(variants) => {
+                1 + variants.iter().map(Type::estimate_capacity).max().unwrap_or(8)
+            }
+            Type::Dynamic { .. } => 64,
+            Type::Nested(fields) => fields.iter().map(|(_, t)| t.estimate_capacity()).sum(),
+
             // Placeholder for unsupported types
-            _ => 64, // Default to 8 bytes as a safe estimate
+            _ => 64, // Default to 64 bytes as a safe estimate
         }
     }
 }

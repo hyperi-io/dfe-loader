@@ -97,6 +97,24 @@ pub enum Value {
     /// Dynamic value - type name and boxed inner value
     /// NULL is represented as Value::Null
     Dynamic(String, Box<Value>),
+
+    // === DFE Fork: Additional types ===
+
+    /// BFloat16 - Brain floating point (raw u16 bits)
+    BFloat16(u16),
+
+    /// Time - seconds since midnight (0-86399)
+    Time(u32),
+
+    /// Time64 - scaled value since midnight (precision, value)
+    Time64(usize, i64),
+
+    /// AggregateFunction - opaque binary state
+    AggregateFunction(Vec<u8>),
+
+    /// SimpleAggregateFunction - uses underlying value type
+    /// Stored as the underlying type's value
+    SimpleAggregateFunction(Box<Value>),
 }
 
 impl PartialEq for Value {
@@ -141,6 +159,11 @@ impl PartialEq for Value {
             (Self::Object(l0), Self::Object(r0)) => l0 == r0,
             (Self::Variant(l0, l1), Self::Variant(r0, r1)) => l0 == r0 && l1 == r1,
             (Self::Dynamic(l0, l1), Self::Dynamic(r0, r1)) => l0 == r0 && l1 == r1,
+            (Self::BFloat16(l0), Self::BFloat16(r0)) => l0 == r0,
+            (Self::Time(l0), Self::Time(r0)) => l0 == r0,
+            (Self::Time64(l0, l1), Self::Time64(r0, r1)) => l0 == r0 && l1 == r1,
+            (Self::AggregateFunction(l0), Self::AggregateFunction(r0)) => l0 == r0,
+            (Self::SimpleAggregateFunction(l0), Self::SimpleAggregateFunction(r0)) => l0 == r0,
             _ => core::mem::discriminant(self) == core::mem::discriminant(other),
         }
     }
@@ -217,6 +240,14 @@ impl Hash for Value {
                 ::core::hash::Hash::hash(type_name, state);
                 ::core::hash::Hash::hash(inner, state);
             }
+            Value::BFloat16(x) => ::core::hash::Hash::hash(x, state),
+            Value::Time(x) => ::core::hash::Hash::hash(x, state),
+            Value::Time64(precision, x) => {
+                ::core::hash::Hash::hash(precision, state);
+                ::core::hash::Hash::hash(x, state);
+            }
+            Value::AggregateFunction(x) => ::core::hash::Hash::hash(x, state),
+            Value::SimpleAggregateFunction(x) => ::core::hash::Hash::hash(x, state),
         }
     }
 }
@@ -351,6 +382,23 @@ impl Value {
                 // Dynamic is best represented as Dynamic type
                 let _ = inner; // Inner value is opaque for type guessing
                 Type::Dynamic { max_types: None }
+            }
+            Value::BFloat16(_) => Type::BFloat16,
+            Value::Time(_) => Type::Time,
+            Value::Time64(precision, _) => Type::Time64(*precision),
+            Value::AggregateFunction(_) => {
+                // Can't guess the function name/types from opaque state
+                Type::AggregateFunction {
+                    name: String::new(),
+                    types: vec![],
+                }
+            }
+            Value::SimpleAggregateFunction(inner) => {
+                // Infer type from inner value
+                Type::SimpleAggregateFunction {
+                    name: String::new(),
+                    types: vec![inner.guess_type()],
+                }
             }
         }
     }
@@ -542,6 +590,35 @@ impl fmt::Display for Value {
             }
             Value::Dynamic(type_name, inner) => {
                 write!(f, "Dynamic({type_name}, {inner})")
+            }
+            Value::BFloat16(bits) => {
+                // Convert raw bits to approximate f32 for display
+                // BFloat16 is the upper 16 bits of f32
+                let f32_bits = (u32::from(*bits)) << 16;
+                let value = f32::from_bits(f32_bits);
+                write!(f, "{value}::BFloat16")
+            }
+            Value::Time(secs) => {
+                let hours = secs / 3600;
+                let mins = (secs % 3600) / 60;
+                let secs = secs % 60;
+                write!(f, "'{hours:02}:{mins:02}:{secs:02}'")
+            }
+            Value::Time64(precision, value) => {
+                // Scale value to seconds for display
+                let divisor = 10i64.pow(*precision as u32);
+                let secs = value / divisor;
+                let frac = value % divisor;
+                let hours = secs / 3600;
+                let mins = (secs % 3600) / 60;
+                let secs = secs % 60;
+                write!(f, "'{hours:02}:{mins:02}:{secs:02}.{frac:0>width$}'", width = *precision)
+            }
+            Value::AggregateFunction(state) => {
+                write!(f, "AggregateFunction({} bytes)", state.len())
+            }
+            Value::SimpleAggregateFunction(inner) => {
+                write!(f, "SimpleAggregateFunction({inner})")
             }
         }
     }

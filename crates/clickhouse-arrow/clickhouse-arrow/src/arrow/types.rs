@@ -507,6 +507,40 @@ pub fn ch_to_arrow_type(ch_type: &Type, options: Option<ArrowOptions>) -> Result
                 .collect::<Result<Vec<_>>>()?;
             DataType::Struct(arrow_fields.into())
         }
+        // DFE Fork: Additional types
+        Type::BFloat16 => {
+            // BFloat16 is 16-bit, store as UInt16 (raw bits)
+            // Arrow doesn't have BFloat16 natively
+            DataType::UInt16
+        }
+        Type::Time => {
+            // Time is seconds since midnight, stored as UInt32
+            DataType::Time32(TimeUnit::Second)
+        }
+        Type::Time64(precision) => {
+            // Time64 with precision
+            match precision {
+                0..=3 => DataType::Time64(TimeUnit::Millisecond),
+                4..=6 => DataType::Time64(TimeUnit::Microsecond),
+                7..=9 => DataType::Time64(TimeUnit::Nanosecond),
+                _ => {
+                    return Err(Error::ArrowUnsupportedType(format!(
+                        "Time64 precision must be 0-9, received {precision}"
+                    )));
+                }
+            }
+        }
+        Type::AggregateFunction { .. } => {
+            // AggregateFunction is opaque binary state
+            DataType::Binary
+        }
+        Type::SimpleAggregateFunction { types, .. } => {
+            // SimpleAggregateFunction delegates to underlying type
+            if let Some(inner) = types.first() {
+                return ch_to_arrow_type(inner, options);
+            }
+            DataType::Binary
+        }
     };
 
     Ok((arrow_type, is_null))

@@ -102,6 +102,14 @@ impl ClickHouseNativeSerializer for Type {
                 Type::Nested(_) => {
                     nested::NestedSerializer::write_prefix(self, writer, state).await?;
                 }
+                // DFE Fork: Additional types - no special prefix needed
+                Type::BFloat16
+                | Type::Time
+                | Type::Time64(_)
+                | Type::AggregateFunction { .. }
+                | Type::SimpleAggregateFunction { .. } => {
+                    // These types have no special prefix
+                }
             }
             Ok(())
         }

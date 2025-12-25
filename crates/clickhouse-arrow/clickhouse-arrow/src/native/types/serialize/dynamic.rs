@@ -294,6 +294,14 @@ fn infer_type_name(value: &Value) -> String {
         Value::Decimal256(scale, _) => format!("Decimal256({})", scale),
         Value::Variant(_, _) => "Variant".to_string(),
         Value::Dynamic(type_name, _) => type_name.clone(),
+        // DFE Fork: Additional types
+        Value::BFloat16(_) => "BFloat16".to_string(),
+        Value::Time(_) => "Time".to_string(),
+        Value::Time64(precision, _) => format!("Time64({precision})"),
+        Value::AggregateFunction(_) => "AggregateFunction".to_string(),
+        Value::SimpleAggregateFunction(inner) => {
+            format!("SimpleAggregateFunction({})", infer_type_name(inner))
+        }
     }
 }
 
