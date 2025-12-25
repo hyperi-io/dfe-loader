@@ -1,11 +1,22 @@
 //! Kafka consumer with manual offset management for at-least-once delivery
+//!
+//! ## Offset Commit Strategy
+//!
+//! For true at-least-once delivery to ClickHouse:
+//! 1. Consumer receives messages and forwards to processing pipeline
+//! 2. Messages are buffered and inserted to ClickHouse
+//! 3. ONLY after successful ClickHouse insert, offsets are committed
+//!
+//! This ensures that if the loader crashes before insert, messages will be
+//! re-delivered on restart.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use rdkafka::consumer::{Consumer as RdConsumer, StreamConsumer};
+use rdkafka::consumer::{Consumer as RdConsumer, StreamConsumer, CommitMode};
 use rdkafka::message::{BorrowedMessage, Message};
-use rdkafka::{ClientConfig, TopicPartitionList};
+use rdkafka::{ClientConfig, Offset, TopicPartitionList};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
@@ -14,10 +25,12 @@ use crate::config::{KafkaConfig, SaslMechanism};
 use crate::Result;
 
 /// Kafka message with metadata
+///
+/// Uses `Arc<str>` for topic to enable zero-cost sharing with KafkaOffset.
 #[derive(Debug)]
 pub struct KafkaMessage {
     pub payload: Vec<u8>,
-    pub topic: String,
+    pub topic: Arc<str>,
     pub partition: i32,
     pub offset: i64,
     pub key: Option<Vec<u8>>,
@@ -28,7 +41,7 @@ impl KafkaMessage {
     fn from_borrowed(msg: &BorrowedMessage<'_>) -> Option<Self> {
         Some(Self {
             payload: msg.payload()?.to_vec(),
-            topic: msg.topic().to_string(),
+            topic: Arc::from(msg.topic()),
             partition: msg.partition(),
             offset: msg.offset(),
             key: msg.key().map(|k| k.to_vec()),
@@ -159,6 +172,9 @@ impl Consumer {
     }
 
     /// Run the consumer loop, sending messages to the channel
+    ///
+    /// Note: This does NOT auto-commit offsets. The caller must use
+    /// `commit_offsets()` after successful processing to commit.
     pub async fn run(
         &self,
         tx: mpsc::Sender<KafkaMessage>,
@@ -184,15 +200,10 @@ impl Consumer {
                                 );
 
                                 // Send to processing channel
+                                // NOTE: Do NOT store offset here - wait for successful ClickHouse insert
                                 if tx.send(kafka_msg).await.is_err() {
                                     warn!("Message channel closed");
                                     break;
-                                }
-
-                                // Store offset for auto-commit
-                                // This marks the message as processed
-                                if let Err(e) = self.inner.store_offset_from_message(&msg) {
-                                    error!(error = %e, "Failed to store offset");
                                 }
                             }
                         }
@@ -207,12 +218,74 @@ impl Consumer {
         }
 
         // Commit any pending offsets before shutdown
-        if let Err(e) = self.inner.commit_consumer_state(rdkafka::consumer::CommitMode::Sync) {
+        if let Err(e) = self.inner.commit_consumer_state(CommitMode::Sync) {
             warn!(error = %e, "Failed to commit offsets on shutdown");
         }
 
         info!("Consumer stopped");
         Ok(())
+    }
+
+    /// Commit offsets for successfully processed messages
+    ///
+    /// Call this AFTER successful ClickHouse insert to mark messages as processed.
+    /// Uses synchronous commit for reliability.
+    ///
+    /// # Arguments
+    /// * `offsets` - List of (topic, partition, offset) tuples to commit
+    ///               The offset should be the message offset + 1 (next to consume)
+    pub fn commit_offsets(&self, offsets: &[(String, i32, i64)]) -> Result<()> {
+        if offsets.is_empty() {
+            return Ok(());
+        }
+
+        let mut tpl = TopicPartitionList::new();
+
+        for (topic, partition, offset) in offsets {
+            // Kafka commits the NEXT offset to consume, so add 1
+            tpl.add_partition_offset(topic, *partition, Offset::Offset(offset + 1))
+                .map_err(|e| crate::Error::Kafka(format!("Failed to add partition: {}", e)))?;
+        }
+
+        debug!(count = offsets.len(), "Committing offsets");
+
+        self.inner
+            .commit(&tpl, CommitMode::Sync)
+            .map_err(|e| crate::Error::Kafka(format!("Offset commit failed: {}", e)))?;
+
+        Ok(())
+    }
+
+    /// Commit offsets from KafkaOffset structs (convenience method)
+    ///
+    /// Groups offsets by topic/partition and commits the highest offset for each.
+    pub fn commit_kafka_offsets(&self, offsets: &[crate::buffer::KafkaOffset]) -> Result<()> {
+        if offsets.is_empty() {
+            return Ok(());
+        }
+
+        // Group by topic/partition, keeping highest offset
+        // Use Arc<str> as key to avoid cloning strings
+        let mut max_offsets: HashMap<(Arc<str>, i32), i64> = HashMap::new();
+
+        for off in offsets {
+            let key = (off.topic.clone(), off.partition);  // Arc::clone is cheap
+            max_offsets
+                .entry(key)
+                .and_modify(|existing| {
+                    if off.offset > *existing {
+                        *existing = off.offset;
+                    }
+                })
+                .or_insert(off.offset);
+        }
+
+        let commit_list: Vec<(String, i32, i64)> = max_offsets
+            .into_iter()
+            .map(|((topic, partition), offset)| (topic.to_string(), partition, offset))
+            .collect();
+
+        self.commit_offsets(&commit_list)
     }
 
     /// Get current partition assignments
@@ -252,14 +325,14 @@ mod tests {
         // KafkaMessage struct creation test
         let msg = KafkaMessage {
             payload: b"test".to_vec(),
-            topic: "topic".to_string(),
+            topic: Arc::from("topic"),
             partition: 0,
             offset: 100,
             key: Some(b"key".to_vec()),
             timestamp_ms: Some(1234567890),
         };
 
-        assert_eq!(msg.topic, "topic");
+        assert_eq!(&*msg.topic, "topic");
         assert_eq!(msg.offset, 100);
     }
 }
