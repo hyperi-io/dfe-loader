@@ -1,14 +1,18 @@
 //! Main transformer that applies all transformations
 //!
-//! Pipeline: Parse → Flatten → Timestamp → Metadata → Sanitize
+//! Pipeline: Parse → Extract tags/logjson → Flatten → Timestamp → Metadata → Sanitize → Remove routing fields
 
 use chrono::Utc;
 use serde_json::{Map, Value};
 
-use crate::config::{FieldSanitizationConfig, MetadataConfig, TimestampDqConfig};
-use crate::transform::flatten::flatten_value;
+use crate::config::{FieldSanitizationConfig, MetadataConfig, RoutingConfig, TimestampDqConfig};
+use crate::transform::flatten::flatten_value_owned;
 use crate::transform::timestamp::{TimestampResult, TimestampValidator};
 use crate::Result;
+
+/// Static field names (avoids allocation per message)
+static TIMESTAMP_FIELD: &str = "timestamp";
+static TIMESTAMP_COLLECTOR_FIELD: &str = "timestamp_collector";
 
 /// Transform result with metadata
 pub struct TransformResult {
@@ -17,17 +21,35 @@ pub struct TransformResult {
 }
 
 /// Applies transformations to JSON events
+///
+/// Common Header v2 features:
+/// - Extract `_tags` from config-driven source fields before flattening
+/// - Capture `logjson` (raw payload) before transformation
+/// - Remove routing fields after extraction
+///
+/// Uses static strings for common field names to avoid allocation per message.
 pub struct Transformer {
     timestamp_validator: TimestampValidator,
-    timestamp_field: String,
-    inject_load_timestamp: bool,
-    load_timestamp_field: String,
     extract_collector_timestamp: bool,
     collector_timestamp_path: String,
     strip_at_prefix: bool,
     collapse_underscores: bool,
     trim_underscores: bool,
     flatten_nested: bool,
+
+    // Common Header v2: Tags handling
+    tags_fields: Vec<String>,
+    tags_output: String,
+    drop_tags: bool,
+
+    // Common Header v2: logjson capture
+    capture_logjson: bool,
+    logjson_output: String,
+
+    // Common Header v2: Routing field removal
+    remove_routing_fields: bool,
+    routing_db_fields: Vec<String>,
+    routing_table_fields: Vec<String>,
 }
 
 impl Transformer {
@@ -39,38 +61,81 @@ impl Transformer {
     ) -> Self {
         Self {
             timestamp_validator: TimestampValidator::new(timestamp_config),
-            timestamp_field: "timestamp".to_string(),
-            inject_load_timestamp: metadata_config.inject_timestamp_load,
-            load_timestamp_field: "timestamp_load".to_string(),
             extract_collector_timestamp: metadata_config.extract_timestamp_collector,
             collector_timestamp_path: metadata_config.collector_timestamp_path.clone(),
             strip_at_prefix: sanitization_config.strip_at_prefix,
             collapse_underscores: sanitization_config.collapse_underscores,
             trim_underscores: sanitization_config.trim_underscores,
             flatten_nested: true,
+
+            // Common Header v2: Tags handling
+            tags_fields: metadata_config.tags_fields.clone(),
+            tags_output: metadata_config.tags_output.clone(),
+            drop_tags: metadata_config.drop_tags,
+
+            // Common Header v2: logjson capture
+            capture_logjson: metadata_config.capture_logjson,
+            logjson_output: metadata_config.logjson_output.clone(),
+
+            // Common Header v2: Routing field removal (empty until with_routing called)
+            remove_routing_fields: metadata_config.remove_routing_fields,
+            routing_db_fields: Vec::new(),
+            routing_table_fields: Vec::new(),
         }
     }
 
-    /// Transform a parsed JSON value
-    pub fn transform(&self, value: Value) -> Result<TransformResult> {
-        let mut warnings = Vec::new();
+    /// Create transformer with routing config for field removal
+    pub fn with_routing(
+        timestamp_config: &TimestampDqConfig,
+        metadata_config: &MetadataConfig,
+        sanitization_config: &FieldSanitizationConfig,
+        routing_config: &RoutingConfig,
+    ) -> Self {
+        let mut transformer = Self::new(timestamp_config, metadata_config, sanitization_config);
+        transformer.routing_db_fields = routing_config.db_fields.clone();
+        transformer.routing_table_fields = routing_config.table_fields.clone();
+        transformer
+    }
 
-        // Step 1: Flatten nested objects
-        let mut data = if self.flatten_nested {
-            flatten_value(&value)
-        } else if let Value::Object(map) = value {
-            map
-        } else {
-            return Err(crate::Error::Transform("Expected JSON object".into()));
+    /// Transform a parsed JSON value with raw payload for logjson capture
+    ///
+    /// This is the primary entry point for Common Header v2 processing.
+    /// The raw_payload is stored as `logjson` before any transformation.
+    pub fn transform_with_raw(&self, value: Value, raw_payload: &[u8]) -> Result<TransformResult> {
+        // Cache current time once per message to avoid multiple syscalls
+        let now = Utc::now();
+        let now_str = now.to_rfc3339();
+
+        // Lazy warnings allocation - only allocate if we actually have warnings
+        let mut warnings: Option<Vec<String>> = None;
+
+        // Ensure we have an object to work with
+        let obj = match value {
+            Value::Object(map) => map,
+            _ => return Err(crate::Error::Transform("Expected JSON object".into())),
         };
 
-        // Step 2: Validate/correct timestamp
-        if let Some(ts_value) = data.get(&self.timestamp_field) {
+        // Step 1: Extract _tags BEFORE flattening (preserves nested structure)
+        let extracted_tags = if !self.drop_tags {
+            self.extract_tags(&obj)
+        } else {
+            None
+        };
+
+        // Step 2: Flatten nested objects (owned version avoids cloning leaf values)
+        let mut data = if self.flatten_nested {
+            flatten_value_owned(Value::Object(obj))
+        } else {
+            obj
+        };
+
+        // Step 3: Validate/correct timestamp (uses static field name)
+        if let Some(ts_value) = data.get(TIMESTAMP_FIELD) {
             let ts_result = match ts_value {
-                Value::String(s) => self.timestamp_validator.validate(s),
+                Value::String(s) => self.timestamp_validator.validate_with_now(s, now),
                 Value::Number(n) => {
                     if let Some(i) = n.as_i64() {
-                        self.timestamp_validator.validate_unix(i)
+                        self.timestamp_validator.validate_unix_with_now(i, now)
                     } else {
                         TimestampResult::Invalid("Invalid number format".into())
                     }
@@ -81,85 +146,205 @@ impl Transformer {
             match ts_result {
                 TimestampResult::Valid(dt) => {
                     data.insert(
-                        self.timestamp_field.clone(),
+                        TIMESTAMP_FIELD.to_string(),
                         Value::String(dt.to_rfc3339()),
                     );
                 }
                 TimestampResult::Corrected(dt, reason) => {
-                    warnings.push(reason);
+                    warnings.get_or_insert_with(Vec::new).push(reason);
                     data.insert(
-                        self.timestamp_field.clone(),
+                        TIMESTAMP_FIELD.to_string(),
                         Value::String(dt.to_rfc3339()),
                     );
                 }
                 TimestampResult::Invalid(reason) => {
-                    warnings.push(reason);
-                    // Replace with now
+                    warnings.get_or_insert_with(Vec::new).push(reason);
+                    // Replace with cached now (avoid another syscall)
                     data.insert(
-                        self.timestamp_field.clone(),
-                        Value::String(Utc::now().to_rfc3339()),
+                        TIMESTAMP_FIELD.to_string(),
+                        Value::String(now_str.clone()),
                     );
                 }
             }
-        }
-
-        // Step 3: Inject load timestamp
-        if self.inject_load_timestamp {
+        } else {
+            // No timestamp field - inject current time
             data.insert(
-                self.load_timestamp_field.clone(),
-                Value::String(Utc::now().to_rfc3339()),
+                TIMESTAMP_FIELD.to_string(),
+                Value::String(now_str.clone()),
             );
         }
 
         // Step 4: Extract collector timestamp if present
         if self.extract_collector_timestamp {
             if let Some(ts) = data.get(&self.collector_timestamp_path).cloned() {
-                data.insert("timestamp_collector".to_string(), ts);
+                data.insert(TIMESTAMP_COLLECTOR_FIELD.to_string(), ts);
             }
         }
 
-        // Step 5: Sanitize field names
+        // Step 5: Add logjson (raw payload as JSON string for JSON column)
+        if self.capture_logjson {
+            // Store raw payload as a JSON string value
+            // ClickHouse JSON column will parse this
+            if let Ok(json_str) = std::str::from_utf8(raw_payload) {
+                data.insert(
+                    self.logjson_output.clone(),
+                    Value::String(json_str.to_string()),
+                );
+            }
+        }
+
+        // Step 6: Add extracted _tags
+        if let Some(tags) = extracted_tags {
+            data.insert(self.tags_output.clone(), tags);
+        }
+
+        // Step 7: Remove routing fields (they're only used for db.table routing)
+        if self.remove_routing_fields {
+            self.remove_routing_fields_from(&mut data);
+        }
+
+        // Step 8: Sanitize field names
         let sanitized = self.sanitize_fields(data);
 
         Ok(TransformResult {
             data: sanitized,
-            warnings,
+            warnings: warnings.unwrap_or_default(),
         })
     }
 
+    /// Transform a parsed JSON value (takes ownership to avoid cloning)
+    ///
+    /// Legacy method - use transform_with_raw for Common Header v2 features.
+    pub fn transform(&self, value: Value) -> Result<TransformResult> {
+        // For backward compatibility, call transform_with_raw with empty payload
+        self.transform_with_raw(value, &[])
+    }
+
+    /// Extract tags from the first matching field in tags_fields
+    ///
+    /// Returns the extracted value (preserves nested structure).
+    /// Uses dot notation for nested field access.
+    fn extract_tags(&self, obj: &Map<String, Value>) -> Option<Value> {
+        for field in &self.tags_fields {
+            if let Some(value) = self.get_nested_field_from_map(obj, field) {
+                return Some(value.clone());
+            }
+        }
+        None
+    }
+
+    /// Get a nested field from a Map using dot notation
+    fn get_nested_field_from_map<'a>(&self, obj: &'a Map<String, Value>, path: &str) -> Option<&'a Value> {
+        // Fast path: no dot means simple field access
+        if !path.contains('.') {
+            return obj.get(path);
+        }
+
+        // Slow path: nested field access
+        let mut parts = path.split('.');
+        let first = parts.next()?;
+        let mut current = obj.get(first)?;
+
+        for part in parts {
+            current = current.get(part)?;
+        }
+
+        Some(current)
+    }
+
+    /// Remove routing fields from the data map
+    ///
+    /// Removes both db_fields and table_fields used for routing.
+    /// Only removes top-level fields (flattened keys like "tags.event_category").
+    fn remove_routing_fields_from(&self, data: &mut Map<String, Value>) {
+        // Remove db fields
+        for field in &self.routing_db_fields {
+            // For nested fields like "tags.org_id", after flattening it becomes "tags.org_id"
+            data.remove(field);
+        }
+
+        // Remove table fields
+        for field in &self.routing_table_fields {
+            data.remove(field);
+        }
+    }
+
+    /// Check if any sanitization is enabled
+    #[inline]
+    fn needs_sanitization(&self) -> bool {
+        self.strip_at_prefix || self.collapse_underscores || self.trim_underscores
+    }
+
     /// Sanitize field names for ClickHouse compatibility
+    ///
+    /// Fast path: returns input unchanged if no sanitization is enabled.
+    /// Uses owned key sanitization to avoid cloning keys that don't need changes.
     fn sanitize_fields(&self, data: Map<String, Value>) -> Map<String, Value> {
-        let mut result = Map::new();
+        // Fast path: no sanitization needed
+        if !self.needs_sanitization() {
+            return data;
+        }
+
+        let mut result = Map::with_capacity(data.len());
 
         for (key, value) in data {
-            let mut sanitized_key = key;
-
-            // Strip @ prefix (common in Elasticsearch)
-            if self.strip_at_prefix && sanitized_key.starts_with('@') {
-                sanitized_key = sanitized_key[1..].to_string();
-            }
-
-            // Collapse multiple underscores
-            if self.collapse_underscores {
-                while sanitized_key.contains("__") {
-                    sanitized_key = sanitized_key.replace("__", "_");
-                }
-            }
-
-            // Trim leading/trailing underscores
-            if self.trim_underscores {
-                sanitized_key = sanitized_key.trim_matches('_').to_string();
-            }
-
-            // Handle empty key after sanitization
-            if sanitized_key.is_empty() {
-                sanitized_key = "unnamed".to_string();
-            }
-
+            // Move key ownership - avoids clone when no sanitization needed
+            let sanitized_key = self.sanitize_key_owned(key);
             result.insert(sanitized_key, value);
         }
 
         result
+    }
+
+    /// Sanitize a single field key, returning owned key with minimal allocation
+    ///
+    /// When no sanitization needed, returns the original key moved (zero allocation).
+    /// When sanitization needed, applies transformations.
+    ///
+    /// Note: Keys starting with underscore (like _tags, _uuid) are preserved
+    /// when they are system fields (output field names from config).
+    #[inline]
+    fn sanitize_key_owned(&self, key: String) -> String {
+        // Preserve system fields that start with underscore
+        if key == self.tags_output || key == self.logjson_output {
+            return key;
+        }
+
+        // Check if we need to modify
+        let needs_change = (self.strip_at_prefix && key.starts_with('@'))
+            || (self.collapse_underscores && key.contains("__"))
+            || (self.trim_underscores && (key.starts_with('_') || key.ends_with('_')));
+
+        // Fast path: no changes needed - return as-is (zero allocation)
+        if !needs_change {
+            return key;
+        }
+
+        // Slow path: apply transformations
+        let mut sanitized = if self.strip_at_prefix && key.starts_with('@') {
+            key[1..].to_string()
+        } else {
+            key
+        };
+
+        // Collapse multiple underscores
+        if self.collapse_underscores {
+            while sanitized.contains("__") {
+                sanitized = sanitized.replace("__", "_");
+            }
+        }
+
+        // Trim leading/trailing underscores
+        if self.trim_underscores {
+            sanitized = sanitized.trim_matches('_').to_string();
+        }
+
+        // Handle empty key after sanitization
+        if sanitized.is_empty() {
+            sanitized = "unnamed".to_string();
+        }
+
+        sanitized
     }
 
     /// Transform raw JSON bytes
@@ -167,7 +352,7 @@ impl Transformer {
         let value: Value = sonic_rs::from_slice(json)
             .map_err(|e| crate::Error::Json(format!("Parse error: {}", e)))?;
 
-        let result = self.transform(value)?;
+        let result = self.transform_with_raw(value, json)?;
 
         serde_json::to_vec(&Value::Object(result.data))
             .map_err(|e| crate::Error::Json(format!("Serialize error: {}", e)))
@@ -178,15 +363,32 @@ impl Default for Transformer {
     fn default() -> Self {
         Self {
             timestamp_validator: TimestampValidator::default(),
-            timestamp_field: "timestamp".to_string(),
-            inject_load_timestamp: true,
-            load_timestamp_field: "timestamp_load".to_string(),
             extract_collector_timestamp: true,
             collector_timestamp_path: "tags.collector.timestamp".to_string(),
             strip_at_prefix: true,
             collapse_underscores: true,
             trim_underscores: true,
             flatten_nested: true,
+
+            // Common Header v2 defaults
+            tags_fields: vec![
+                "tags".to_string(),
+                "_tags".to_string(),
+                "meta".to_string(),
+                "metadata.tags".to_string(),
+            ],
+            tags_output: "_tags".to_string(),
+            drop_tags: false,
+
+            capture_logjson: true,
+            logjson_output: "logjson".to_string(),
+
+            remove_routing_fields: true,
+            routing_db_fields: vec!["org_id".to_string()],
+            routing_table_fields: vec![
+                "event_category".to_string(),
+                "tags.event_category".to_string(),
+            ],
         }
     }
 }
@@ -206,7 +408,6 @@ mod tests {
         let result = transformer.transform(input).unwrap();
         assert_eq!(result.data["event"], "login");
         assert_eq!(result.data["user_id"], 123);
-        assert!(result.data.contains_key("timestamp_load"));
     }
 
     #[test]
@@ -259,5 +460,73 @@ mod tests {
         let parsed: Value = serde_json::from_slice(&output).unwrap();
 
         assert_eq!(parsed["event"], "test");
+    }
+
+    #[test]
+    fn test_transformer_extracts_tags() {
+        let transformer = Transformer::default();
+        let raw = br#"{"event": "login", "tags": {"source": "api", "level": "info"}}"#;
+        let value: Value = serde_json::from_slice(raw).unwrap();
+
+        let result = transformer.transform_with_raw(value, raw).unwrap();
+
+        // _tags should contain the extracted tags object
+        assert!(result.data.contains_key("_tags"));
+        let tags = &result.data["_tags"];
+        assert!(tags.is_object() || tags.is_string()); // Could be object or serialized
+    }
+
+    #[test]
+    fn test_transformer_captures_logjson() {
+        let transformer = Transformer::default();
+        let raw = br#"{"event": "login", "user_id": 123}"#;
+        let value: Value = serde_json::from_slice(raw).unwrap();
+
+        let result = transformer.transform_with_raw(value, raw).unwrap();
+
+        // logjson should contain the raw payload
+        assert!(result.data.contains_key("logjson"));
+    }
+
+    #[test]
+    fn test_transformer_removes_routing_fields() {
+        let transformer = Transformer::default();
+        let raw = br#"{"org_id": "acme", "event_category": "auth", "data": "test"}"#;
+        let value: Value = serde_json::from_slice(raw).unwrap();
+
+        let result = transformer.transform_with_raw(value, raw).unwrap();
+
+        // Routing fields should be removed
+        assert!(!result.data.contains_key("org_id"));
+        assert!(!result.data.contains_key("event_category"));
+        // Other fields should remain
+        assert!(result.data.contains_key("data"));
+    }
+
+    #[test]
+    fn test_transformer_preserves_underscore_system_fields() {
+        let transformer = Transformer::default();
+        let raw = br#"{"event": "test", "tags": {"level": "info"}}"#;
+        let value: Value = serde_json::from_slice(raw).unwrap();
+
+        let result = transformer.transform_with_raw(value, raw).unwrap();
+
+        // _tags should not be trimmed to "tags" by underscore sanitization
+        assert!(result.data.contains_key("_tags"));
+        assert!(!result.data.contains_key("tags")); // Should not exist as "tags" after extraction
+    }
+
+    #[test]
+    fn test_transformer_drop_tags() {
+        let mut transformer = Transformer::default();
+        transformer.drop_tags = true;
+
+        let raw = br#"{"event": "login", "tags": {"source": "api"}}"#;
+        let value: Value = serde_json::from_slice(raw).unwrap();
+
+        let result = transformer.transform_with_raw(value, raw).unwrap();
+
+        // _tags should not be present when drop_tags is true
+        assert!(!result.data.contains_key("_tags"));
     }
 }

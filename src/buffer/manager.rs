@@ -188,7 +188,7 @@ impl TableBuffer {
         }
     }
 
-    fn push(&mut self, data: Map<String, Value>, table: String, offset: Option<KafkaOffset>) {
+    fn push(&mut self, data: Map<String, Value>, table: &str, offset: Option<KafkaOffset>) {
         self.builder.push(data, table);
         if let Some(off) = offset {
             self.offsets.push(off);
@@ -338,16 +338,25 @@ impl BufferManager {
     /// Push a JSON object to the appropriate table buffer
     ///
     /// The table is determined by the caller (from routing).
+    /// Uses get_mut for existing tables (common case) to avoid key allocation.
+    #[inline]
     pub fn push(
         &mut self,
         table: &str,
         data: Map<String, Value>,
         offset: Option<KafkaOffset>,
     ) {
-        let buffer = self.buffers.entry(table.to_string()).or_insert_with(|| {
-            TableBuffer::new(self.batch_size)
-        });
-        buffer.push(data, table.to_string(), offset);
+        // Fast path: table already exists (common case after first message)
+        // Avoids allocating String for HashMap key lookup
+        if let Some(buffer) = self.buffers.get_mut(table) {
+            buffer.push(data, table, offset);
+            return;
+        }
+
+        // Slow path: new table - allocate key and create buffer
+        let mut buffer = TableBuffer::new(self.batch_size);
+        buffer.push(data, table, offset);
+        self.buffers.insert(table.to_string(), buffer);
     }
 
     /// Check if any buffer needs flushing
@@ -586,18 +595,13 @@ mod tests {
 
     #[test]
     fn test_kafka_offset_tracking() {
+        use std::sync::Arc;
         let mut manager = BufferManager::new(&test_config());
 
-        let offset1 = KafkaOffset {
-            topic: "test".to_string(),
-            partition: 0,
-            offset: 100,
-        };
-        let offset2 = KafkaOffset {
-            topic: "test".to_string(),
-            partition: 0,
-            offset: 101,
-        };
+        // Use shared topic Arc to avoid redundant allocations
+        let topic: Arc<str> = Arc::from("test");
+        let offset1 = KafkaOffset::with_shared_topic(topic.clone(), 0, 100);
+        let offset2 = KafkaOffset::with_shared_topic(topic, 0, 101);
 
         // Push with offsets
         let data1 = json!({"id": 1}).as_object().unwrap().clone();

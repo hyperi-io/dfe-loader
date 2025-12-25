@@ -35,11 +35,17 @@ impl TimestampValidator {
 
     /// Validate and potentially correct a timestamp string
     pub fn validate(&self, ts: &str) -> TimestampResult {
+        self.validate_with_now(ts, Utc::now())
+    }
+
+    /// Validate with a pre-cached current time (avoids syscall in hot path)
+    #[inline]
+    pub fn validate_with_now(&self, ts: &str, now: DateTime<Utc>) -> TimestampResult {
         // Try to parse as various formats
         let parsed = self.parse_timestamp(ts);
 
         match parsed {
-            Some(dt) => self.check_bounds(dt),
+            Some(dt) => self.check_bounds_with_now(dt, now),
             None => {
                 // Check for known bad formats
                 if self.correct_known_bad {
@@ -57,6 +63,12 @@ impl TimestampValidator {
 
     /// Validate a Unix timestamp (seconds or milliseconds)
     pub fn validate_unix(&self, ts: i64) -> TimestampResult {
+        self.validate_unix_with_now(ts, Utc::now())
+    }
+
+    /// Validate Unix timestamp with a pre-cached current time (avoids syscall in hot path)
+    #[inline]
+    pub fn validate_unix_with_now(&self, ts: i64, now: DateTime<Utc>) -> TimestampResult {
         // Determine if seconds or milliseconds based on magnitude
         let dt = if ts > 1_000_000_000_000 {
             // Milliseconds
@@ -67,7 +79,7 @@ impl TimestampValidator {
         };
 
         match dt {
-            Some(dt) => self.check_bounds(dt),
+            Some(dt) => self.check_bounds_with_now(dt, now),
             None => TimestampResult::Invalid(format!("Invalid Unix timestamp: {}", ts)),
         }
     }
@@ -97,8 +109,9 @@ impl TimestampValidator {
         None
     }
 
-    fn check_bounds(&self, dt: DateTime<Utc>) -> TimestampResult {
-        let now = Utc::now();
+    /// Check bounds with a pre-cached current time (avoids syscall in hot path)
+    #[inline]
+    fn check_bounds_with_now(&self, dt: DateTime<Utc>, now: DateTime<Utc>) -> TimestampResult {
         let diff_secs = (dt - now).num_seconds();
 
         // Check future bound
