@@ -77,6 +77,10 @@ impl Serializer for StringSerializer {
                         .collect::<Vec<u8>>();
                     emit_bytes(type_, &bytes, writer).await?;
                 }
+                // DFE Fork: AggregateFunction stored as opaque binary
+                Value::AggregateFunction(bytes) => {
+                    writer.write_string(&bytes).await?;
+                }
                 _ => {
                     return Err(Error::SerializeError(format!(
                         "StringSerializer unimplemented: {type_:?} for value = {value:?}",
@@ -118,6 +122,10 @@ impl Serializer for StringSerializer {
                         })
                         .collect::<Vec<u8>>();
                     emit_bytes_sync(type_, &bytes, writer)?;
+                }
+                // DFE Fork: AggregateFunction stored as opaque binary
+                Value::AggregateFunction(bytes) => {
+                    writer.put_string(&bytes)?;
                 }
                 _ => {
                     return Err(Error::SerializeError(format!(

@@ -251,7 +251,31 @@ SELECT data.user, data.score FROM events;
 
 ## Library Support Comparison
 
-### klickhouse (Rust - current)
+### clickhouse-arrow (DFE Fork - current)
+
+| Type | Supported |
+|------|-----------|
+| Int8-Int256, UInt8-UInt256 | ✅ |
+| Float32, Float64 | ✅ |
+| Decimal32/64/128/256 | ✅ |
+| String, FixedString | ✅ |
+| Date, Date32, DateTime, DateTime64 | ✅ |
+| UUID | ✅ |
+| IPv4, IPv6 | ✅ |
+| Array, Tuple, Map | ✅ |
+| Nullable, LowCardinality | ✅ |
+| Enum8, Enum16 | ✅ |
+| Point, Ring, Polygon, MultiPolygon | ✅ |
+| **Variant** | ✅ DFE Fork |
+| **Dynamic** | ✅ DFE Fork |
+| **Nested** | ✅ DFE Fork |
+| **BFloat16** | ✅ DFE Fork |
+| **Time/Time64** | ✅ DFE Fork |
+| **AggregateFunction** | ✅ DFE Fork |
+| **SimpleAggregateFunction** | ✅ DFE Fork |
+| **JSON** | ⚠️ Via Dynamic |
+
+### klickhouse (Rust - upstream, parked)
 
 | Type | Supported |
 |------|-----------|

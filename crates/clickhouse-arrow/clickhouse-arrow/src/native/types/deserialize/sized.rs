@@ -85,6 +85,10 @@ impl Deserializer for SizedDeserializer {
                     )?;
                     Value::Enum16(value.0.clone(), idx)
                 }
+                // DFE Fork: Additional types
+                Type::BFloat16 => Value::BFloat16(reader.read_u16_le().await?),
+                Type::Time => Value::Time(reader.read_u32_le().await?),
+                Type::Time64(precision) => Value::Time64(*precision, reader.read_i64_le().await?),
                 _ => {
                     return Err(crate::Error::DeserializeError(format!(
                         "SizedDeserializer unimplemented: {type_:?}"
@@ -169,6 +173,10 @@ impl Deserializer for SizedDeserializer {
                     )?;
                     Value::Enum16(value.0.clone(), idx)
                 }
+                // DFE Fork: Additional types
+                Type::BFloat16 => Value::BFloat16(reader.try_get_u16_le()?),
+                Type::Time => Value::Time(reader.try_get_u32_le()?),
+                Type::Time64(precision) => Value::Time64(*precision, reader.try_get_i64_le()?),
                 _ => {
                     return Err(crate::Error::DeserializeError(format!(
                         "SizedDeserializer unimplemented: {type_:?}"

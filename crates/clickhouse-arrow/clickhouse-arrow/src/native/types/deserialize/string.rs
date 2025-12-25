@@ -35,6 +35,14 @@ impl Deserializer for StringDeserializer {
                 }
                 Ok(out)
             }
+            // DFE Fork: AggregateFunction stored as opaque binary
+            Type::AggregateFunction { .. } => {
+                let mut out = Vec::with_capacity(rows);
+                for _ in 0..rows {
+                    out.push(Value::AggregateFunction(reader.read_string().await?));
+                }
+                Ok(out)
+            }
             _ => Err(crate::Error::DeserializeError(
                 "StringDeserializer called with non-string type".to_string(),
             )),
@@ -63,6 +71,14 @@ impl Deserializer for StringDeserializer {
                     let first_null = buf.iter().position(|x| *x == 0).unwrap_or(buf.len());
                     buf.truncate(first_null);
                     out.push(Value::String(buf));
+                }
+                Ok(out)
+            }
+            // DFE Fork: AggregateFunction stored as opaque binary
+            Type::AggregateFunction { .. } => {
+                let mut out = Vec::with_capacity(rows);
+                for _ in 0..rows {
+                    out.push(Value::AggregateFunction(reader.try_get_string()?.to_vec()));
                 }
                 Ok(out)
             }

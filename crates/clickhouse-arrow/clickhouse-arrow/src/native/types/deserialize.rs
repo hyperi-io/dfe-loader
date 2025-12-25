@@ -94,8 +94,15 @@ impl ClickHouseNativeDeserializer for Type {
                     object::ObjectDeserializer::read_prefix(self, reader, state).await?;
                 }
                 // DFE Fork: New types - no special prefix needed
-                Type::Variant(_) | Type::Dynamic { .. } | Type::Nested(_) => {
-                    // These types will be handled when full deserialization is implemented
+                Type::Variant(_)
+                | Type::Dynamic { .. }
+                | Type::Nested(_)
+                | Type::BFloat16
+                | Type::Time
+                | Type::Time64(_)
+                | Type::AggregateFunction { .. }
+                | Type::SimpleAggregateFunction { .. } => {
+                    // These types have no special prefix
                 }
             }
             Ok(())

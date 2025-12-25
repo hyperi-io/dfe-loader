@@ -177,7 +177,14 @@ impl ClickHouseArrowSerializer for Type {
             // Null stripped above
             Type::Nullable(_) => unreachable!(),
             // DFE Fork: New types - Arrow serialization not yet implemented
-            Type::Variant(_) | Type::Dynamic { .. } | Type::Nested(_) => {
+            Type::Variant(_)
+            | Type::Dynamic { .. }
+            | Type::Nested(_)
+            | Type::BFloat16
+            | Type::Time
+            | Type::Time64(_)
+            | Type::AggregateFunction { .. }
+            | Type::SimpleAggregateFunction { .. } => {
                 return Err(Error::Unimplemented(format!(
                     "Arrow serialization not implemented for {base_type}"
                 )));
@@ -266,7 +273,14 @@ impl ClickHouseArrowSerializer for Type {
             // Null stripped above
             Type::Nullable(_) => unreachable!(),
             // DFE Fork: New types - Arrow serialization not yet implemented
-            Type::Variant(_) | Type::Dynamic { .. } | Type::Nested(_) => {
+            Type::Variant(_)
+            | Type::Dynamic { .. }
+            | Type::Nested(_)
+            | Type::BFloat16
+            | Type::Time
+            | Type::Time64(_)
+            | Type::AggregateFunction { .. }
+            | Type::SimpleAggregateFunction { .. } => {
                 return Err(Error::Unimplemented(format!(
                     "Arrow serialization not implemented for {base_type}"
                 )));
