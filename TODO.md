@@ -21,30 +21,15 @@
 
 ---
 
-## Next: Transport Integration (dfe-loader-clickhouse)
+## Next: Performance Validation
 
-**Transport Layer:** Implemented in `hs-rustlib` (52 tests passing).
+- [ ] **Benchmark transport integration** - Verify no performance regression
+  - Compare before/after throughput with Kafka
+  - Test with MemoryTransport for baseline
 
-**Specs:**
-
-- [reference/transport_abstraction_spec.md](reference/transport_abstraction_spec.md) - Full transport design
-- [reference/devtest_transport_analysis.md](reference/devtest_transport_analysis.md) - Dev/test options analysis
-
-**Decision:** Three transports (Memory, Zenoh, Kafka) confirmed. Zenoh for dev/test, Kafka for production.
-
-**Related (out of scope):**
-
-- [reference/RECEIVER-WBS.md](reference/RECEIVER-WBS.md) - HTTP ingestion service (separate project)
-- [reference/DFE-LOADER-S3-WBS.md](reference/DFE-LOADER-S3-WBS.md) - S3 archival loader (separate project)
-
-### Integration Tasks
-
-- [ ] Add transport config section to Config
-- [ ] Replace direct Consumer with Transport trait
-- [ ] Update Orchestrator to use generic transport
-- [ ] Maintain existing KafkaOffset for buffer tracking
-- [ ] Test with all three transports
-- [ ] Benchmark to ensure no performance regression
+- [ ] **Production load testing** - Real-world validation
+  - Test against k8s.tyrell.com.au environment
+  - Monitor memory usage under sustained load
 
 ---
 

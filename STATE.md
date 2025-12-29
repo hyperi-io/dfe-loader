@@ -554,55 +554,79 @@ Located at k8s.tyrell.com.au with:
 
 ## Current Session (2025-12-29)
 
-### Completed
+### Accomplished
 
-- **Transport Abstraction Layer** - Fully implemented in hs-rustlib
-  - `Transport` trait with async send/recv/commit methods
-  - `MemoryTransport` - tokio::mpsc for unit tests (all tests passing)
-  - `KafkaTransport` - rdkafka wrapper with offset tracking
-  - `ZenohTransport` - Zenoh 1.x with SHM support
-  - `PayloadFormat` auto-detection (JSON/MsgPack by first byte)
-  - Feature flags: `transport-memory`, `transport-kafka`, `transport-zenoh`, `transport-all`
+1. **Transport Abstraction in hs-rustlib** (commit 8156e33)
+   - `Transport` trait with async send/recv/commit methods
+   - `MemoryTransport` - tokio::mpsc for unit tests
+   - `KafkaTransport` - rdkafka wrapper with SASL/TLS, HyperSec defaults
+   - `ZenohTransport` - Zenoh 1.x with SHM support
+   - `PayloadFormat` auto-detection (JSON/MsgPack by first byte)
+   - Feature flags: `transport-memory`, `transport-kafka`, `transport-zenoh`
+   - 52 tests passing
 
-### Files Created in hs-rustlib
+2. **Transport Integration in dfe-loader** (commit 2e4beb1)
+   - `TransportAdapter` wrapping KafkaTransport
+   - `MemoryTransportAdapter` for unit testing (no infrastructure)
+   - Updated `Orchestrator` to use TransportAdapter
+   - `flush_batches_transport()` with async offset commits
+   - Zero-copy message handling (payload moved, Arc<str> topic shared)
+   - Batch receiving (RECV_BATCH_SIZE = 100)
 
-| File | Purpose |
-| ---- | ------- |
-| `src/transport/mod.rs` | Module exports and re-exports |
-| `src/transport/error.rs` | TransportError, TransportResult |
-| `src/transport/traits.rs` | Transport trait, CommitToken trait |
-| `src/transport/types.rs` | Message, SendResult, PayloadFormat |
-| `src/transport/payload.rs` | JSON/MsgPack parsing utilities |
-| `src/transport/memory/mod.rs` | MemoryTransport implementation |
-| `src/transport/memory/token.rs` | MemoryToken |
-| `src/transport/kafka/mod.rs` | KafkaTransport implementation |
-| `src/transport/kafka/config.rs` | KafkaConfig |
-| `src/transport/kafka/token.rs` | KafkaToken |
-| `src/transport/zenoh/mod.rs` | ZenohTransport implementation |
-| `src/transport/zenoh/config.rs` | ZenohConfig with to_json5() |
-| `src/transport/zenoh/token.rs` | ZenohToken |
+3. **Unit Tests with MemoryTransport** (15 tests)
+   - Memory adapter: inject/recv, keys, batch, close
+   - Message processing: JSON format detection, routing
+   - Transform: flattening, routing field removal
+   - Buffer: accumulation, flush threshold
+   - E2E flow: full pipeline without ClickHouse
 
-### Key Implementation Details
+### Files Modified in dfe-loader
 
-1. **Zenoh 1.x API**: Uses `Config::from_json5()` with custom `to_json5()` method
-2. **Arc<str> caching**: Topics cached and shared to avoid allocations
-3. **Batch receiving**: `recv(max)` returns up to N messages in one call
-4. **Non-blocking sends**: Memory/Zenoh use try_send to avoid blocking
-5. **Kafka SASL/SSL**: Full security config support
+| File | Change |
+| ---- | ------ |
+| `src/kafka/transport.rs` | New - TransportAdapter + MemoryTransportAdapter |
+| `src/kafka/mod.rs` | Export MemoryTransportAdapter |
+| `src/pipeline/orchestrator.rs` | Use TransportAdapter, batch recv, async commit |
+| `tests/unit/transport.rs` | New - 15 MemoryTransport tests |
+| `tests/unit/mod.rs` | New - Unit test module |
+| `tests/integration_tests.rs` | Add unit module (transport-memory feature) |
+| `Cargo.toml` | Add hs-rustlib, transport-memory/zenoh features |
+
+### Key Design Decisions
+
+1. **Zero-copy in hot path**: Payload moved (not copied), topic uses Arc<str> clone
+2. **At-least-once delivery**: Removed enable.idempotence, using acks=all + retries
+3. **HyperSec defaults**: 10K batch size, lz4 compression, matched Python kafkaplus
+4. **Batch receiving**: Process 100 messages per recv() call for efficiency
+5. **Preserve sonic-rs**: Keep local hot-path parsing (not hs-rustlib payload utils)
+
+### Git State
+
+- **Branch:** main
+- **Upstream:** pushed (both repos)
+- **Uncommitted:** clean
+- **Commits:**
+  - hs-rustlib: 8156e33 - feat: add transport abstraction layer
+  - dfe-loader: 2e4beb1 - feat: integrate transport abstraction and add MemoryTransport tests
 
 ### Test Results
 
-```
-52 tests passed, 0 failed
-- transport::memory::tests::* (5 tests)
-- transport::payload::tests::* (6 tests)
-- transport::types::tests::* (5 tests)
+```text
+hs-rustlib: 52 tests passed
+dfe-loader: 277 lib + 15 unit = 292 tests passed
 ```
 
-### Next Steps
+### Pending
 
-1. Integrate transport abstraction into dfe-loader-clickhouse
-2. Run Mison benchmarks (awaiting clean CPU)
+- Run Mison benchmarks (awaiting clean CPU environment)
+
+### Session Context Summary
+
+Implemented full transport abstraction layer in hs-rustlib (Kafka/Zenoh/Memory),
+then integrated into dfe-loader-clickhouse with zero-copy design. Created 15 unit
+tests using MemoryTransport that test the full pipeline (parse → route → transform
+→ buffer) without requiring Kafka or ClickHouse infrastructure. All code committed
+and pushed to both repos.
 
 ---
 
@@ -619,5 +643,5 @@ Located at k8s.tyrell.com.au with:
 
 **Last Updated:** 2025-12-29
 **ClickHouse:** 25.12 (native protocol)
-**Version:** 0.12.0-transport
-**Status:** Transport Abstraction Designed - Implementation Next
+**Version:** 0.13.0-transport-integrated
+**Status:** Transport Abstraction Complete - Benchmarks Pending
