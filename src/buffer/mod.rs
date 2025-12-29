@@ -29,3 +29,7 @@ pub mod pool;
 
 pub use arrow::KafkaOffset;
 pub use manager::{ArrowBufferStats, BufferManager, FlushBatch, TableSchema};
+pub use pool::{
+    BufferPools, BufferPoolsStats, MapPool, ObjectPool, OffsetsPool, Poolable, Pooled,
+    PoolConfig, PooledMap, PooledOffsets, PooledString, PoolStats, StringPool,
+};

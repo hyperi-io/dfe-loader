@@ -1,0 +1,7 @@
+column,type,default,index_order,index_type,comment
+timestamp,DateTime64(3),,,dimension,Time the event occurred (milliseconds) NOT NULLABLE
+timestamp_load,DateTime64(3),now64(3),,,Load time (ClickHouse DEFAULT) NOT NULLABLE
+_uuid,UUID,generateUUIDv7(),,,Unique event ID UUIDv7 (time-ordered) NOT NULLABLE
+logoriginal,String,,,,The original unparsed log line NULLABLE
+logjson,JSON,,,,Complete message as it was from kafka as a JSON type NULLABLE
+_tags,JSON,,,,The message meta information and collector or agent information as a JSON type NULLABLE

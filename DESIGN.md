@@ -1,18 +1,26 @@
 # Design Document: dfe-loader-clickhouse
 
-**Version:** 2.0 (Arrow Architecture)
-**Date:** 2025-12-24
+**Version:** 2.1 (Arrow Architecture + Transport Abstraction)
+**Date:** 2025-12-29
 
 ---
 
 ## Overview
 
-High-performance Kafka to ClickHouse data loader using Apache Arrow as the core data format.
+High-performance data loader from message transports to ClickHouse using Apache Arrow.
 
 ```text
-Kafka ──► Arrow Parse ──► Transform ──► ArrowBuffer ──► ClickHouse Native
-          (JSON/MsgPack)   (vectorized)   (chunked)      (clickhouse-arrow)
+Transport ──► Parse ──► Route ──► Transform ──► Buffer ──► ClickHouse Native
+(Kafka/Zenoh/Memory)  (SIMD)   (db.table)  (vectorized)  (per-table)   (Arrow protocol)
 ```
+
+### Transport Selection
+
+| Transport | Use Case | Persistence | Latency |
+|-----------|----------|-------------|---------|
+| **Kafka** | Production (default) | At-least-once with offset tracking | ~1-5ms |
+| **Zenoh** | Dev/test, edge, real-time | In-flight only (no persistence) | ~30µs with SHM |
+| **Memory** | Unit tests | None | ~1µs |
 
 ---
 
@@ -579,4 +587,190 @@ fn should_flatten(field: &str, schema: &TableSchema) -> bool {
 
 ---
 
-**Last Updated:** 2025-12-24
+## Transport Abstraction (hs-rustlib)
+
+The transport layer is implemented in `hs-rustlib` as a shared library for all HyperSec Rust projects.
+This provides a consistent pattern for message transport with support for JSON/MsgPack payloads.
+
+### Architecture
+
+```mermaid
+graph TB
+    subgraph "hs-rustlib Transport Layer"
+        T[Transport Trait]
+
+        subgraph "Implementations"
+            K[KafkaTransport<br/>rdkafka]
+            Z[ZenohTransport<br/>zenoh 1.x]
+            M[MemoryTransport<br/>tokio::mpsc]
+        end
+
+        subgraph "Payload Handling"
+            P[PayloadFormat<br/>Auto-detect]
+            J[JSON<br/>serde_json]
+            MP[MsgPack<br/>rmp-serde]
+        end
+
+        T --> K
+        T --> Z
+        T --> M
+
+        K --> P
+        Z --> P
+        M --> P
+
+        P --> J
+        P --> MP
+    end
+
+    subgraph "dfe-loader-clickhouse"
+        O[Orchestrator]
+        R[Router]
+        B[BufferManager]
+        I[Inserter]
+    end
+
+    K --> O
+    Z --> O
+    M --> O
+    O --> R
+    R --> B
+    B --> I
+```
+
+### Transport Trait
+
+```rust
+#[async_trait]
+pub trait Transport: Send + Sync {
+    type Token: CommitToken;
+
+    /// Send a message to the given key (topic/key-expression).
+    async fn send(&self, key: &str, payload: &[u8]) -> SendResult;
+
+    /// Receive up to `max` messages.
+    async fn recv(&self, max: usize) -> TransportResult<Vec<Message<Self::Token>>>;
+
+    /// Commit processed messages (Kafka: offset commit, Zenoh: no-op).
+    async fn commit(&self, tokens: &[Self::Token]) -> TransportResult<()>;
+
+    /// Close the transport gracefully.
+    async fn close(&self) -> TransportResult<()>;
+
+    /// Check if transport is healthy.
+    fn is_healthy(&self) -> bool;
+
+    /// Transport name for logging/metrics.
+    fn name(&self) -> &'static str;
+}
+```
+
+### Message Type
+
+```rust
+pub struct Message<T: CommitToken> {
+    /// Topic/key-expression (Arc-shared for efficiency).
+    pub key: Option<Arc<str>>,
+    /// Raw payload bytes (JSON or MsgPack).
+    pub payload: Vec<u8>,
+    /// Transport-specific commit token.
+    pub token: T,
+    /// Message timestamp (milliseconds since epoch).
+    pub timestamp_ms: Option<i64>,
+    /// Detected payload format.
+    pub format: PayloadFormat,
+}
+```
+
+### Payload Auto-Detection
+
+```rust
+impl PayloadFormat {
+    pub fn detect(payload: &[u8]) -> Self {
+        if payload.is_empty() {
+            return Self::Json;
+        }
+        match payload[0] {
+            b'{' | b'[' => Self::Json,              // JSON object/array
+            0x80..=0x8f => Self::MsgPack,           // MsgPack fixmap
+            0xde | 0xdf => Self::MsgPack,           // MsgPack map16/map32
+            0x90..=0x9f => Self::MsgPack,           // MsgPack fixarray
+            0xdc | 0xdd => Self::MsgPack,           // MsgPack array16/array32
+            _ => Self::Json,                         // Default to JSON
+        }
+    }
+}
+```
+
+### Feature Flags
+
+```toml
+# Cargo.toml (hs-rustlib)
+[features]
+transport = ["tokio", "async-trait", "serde_json", "rmp-serde", "chrono"]
+transport-memory = ["transport"]
+transport-kafka = ["transport", "rdkafka"]
+transport-zenoh = ["transport", "zenoh"]
+transport-all = ["transport-memory", "transport-kafka", "transport-zenoh"]
+```
+
+### Transport Configurations
+
+#### Kafka (Production Default)
+
+```rust
+let config = KafkaConfig {
+    brokers: vec!["kafka:9092".to_string()],
+    group: "dfe-loader".to_string(),
+    topics: vec!["events".to_string()],
+    security_protocol: "SASL_SSL".to_string(),
+    sasl_mechanism: Some("SCRAM-SHA-512".to_string()),
+    ..Default::default()
+};
+let transport = KafkaTransport::new(&config).await?;
+```
+
+#### Zenoh (Dev/Test)
+
+```rust
+let config = ZenohConfig::peer(vec!["events/**".to_string()]);
+// or with routers:
+let config = ZenohConfig::client(
+    vec!["tcp/zenoh-router:7447".to_string()],
+    vec!["events/**".to_string()],
+);
+let transport = ZenohTransport::new(&config).await?;
+```
+
+#### Memory (Unit Tests)
+
+```rust
+let config = MemoryConfig::default();
+let transport = MemoryTransport::new(&config);
+
+// Inject test messages
+transport.inject(Some("test-topic"), payload).await?;
+```
+
+### Performance Considerations
+
+1. **Arc<str> for topics**: Topics are cached and Arc-shared to avoid repeated allocations
+2. **Batch receiving**: `recv(max)` returns up to `max` messages in one call
+3. **Non-blocking sends**: Memory/Zenoh use try_send to avoid blocking on full buffers
+4. **Payload format detection**: Single byte check, no parsing overhead
+
+### Local Performance Deviations
+
+While `hs-rustlib` provides the baseline transport pattern, this project MAY deviate locally
+for performance-critical paths:
+
+- **sonic-rs for JSON**: SIMD-accelerated JSON parsing (vs serde_json in hs-rustlib)
+- **Direct Arrow conversion**: Skip intermediate Value representation where possible
+- **Mison structural indexing**: Schema-guided field extraction without full parse
+
+The local implementation MUST remain compatible with the transport abstraction's Message type
+and payload format conventions.
+
+---
+
+**Last Updated:** 2025-12-29

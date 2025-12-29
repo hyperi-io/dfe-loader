@@ -1,15 +1,17 @@
 //! Main pipeline coordinator
 //!
-//! Orchestrates the Kafka → Transform → Buffer → ClickHouse pipeline.
+//! Orchestrates the Transport → Transform → Buffer → ClickHouse pipeline.
 //!
-//! Uses Arrow batching: accumulates multiple Kafka messages, converts to
+//! Uses the hs-rustlib Transport abstraction for message sources (Kafka/Zenoh/Memory).
+//! Processes messages in batches for efficiency.
+//!
+//! Uses Arrow batching: accumulates multiple messages, converts to
 //! columnar Arrow RecordBatch, then pushes to buffer for ClickHouse insert.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::Value;
-use tokio::sync::mpsc;
 use tokio::time::interval;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
@@ -17,7 +19,8 @@ use tracing::{debug, error, info, warn};
 use crate::buffer::{BufferManager, FlushBatch, KafkaOffset};
 use crate::clickhouse::{ArrowClickHouseClient, Inserter, InserterConfig};
 use crate::config::Config;
-use crate::kafka::{Consumer, KafkaMessage};
+use crate::kafka::{DlqMessage, DlqProducer, KafkaMessage, TransportAdapter};
+// Note: Consumer removed - now using TransportAdapter for transport abstraction
 use crate::metrics::Metrics;
 use crate::payload::{FormatDetector, FormatMode, PayloadFormat};
 use crate::routing::{RouteResult, Router};
@@ -73,15 +76,33 @@ impl Orchestrator {
     pub async fn run(&mut self) -> Result<()> {
         info!("Starting pipeline orchestrator");
 
-        // Initialize components
-        let consumer = Arc::new(Consumer::new(&self.config.kafka)?);
-        consumer.subscribe()?;
+        // Initialize transport adapter (wraps hs-rustlib KafkaTransport)
+        let transport = TransportAdapter::new(&self.config.kafka).await?;
+        info!(transport = transport.name(), "Transport initialized");
 
         // Create Arrow client for native protocol inserts and schema queries
         let arrow_client = Arc::new(ArrowClickHouseClient::new(&self.config.clickhouse).await?);
 
         // Inserter uses Arrow-only path
         let inserter = Inserter::new(arrow_client, InserterConfig::default());
+
+        // DLQ producer (optional - only if enabled in config)
+        let dlq_config = &self.config.routing.dlq;
+        let dlq_producer: Option<Arc<DlqProducer>> = if dlq_config.enabled {
+            match DlqProducer::new(&self.config.kafka, dlq_config) {
+                Ok(producer) => {
+                    info!(suffix = %dlq_config.topic_suffix, "DLQ producer enabled");
+                    Some(Arc::new(producer))
+                }
+                Err(e) => {
+                    warn!(error = %e, "Failed to create DLQ producer, DLQ disabled");
+                    None
+                }
+            }
+        } else {
+            debug!("DLQ producer disabled by config");
+            None
+        };
 
         let router = Router::new(&self.config.routing);
         // Use with_routing to enable routing field removal
@@ -99,29 +120,25 @@ impl Orchestrator {
 
         let mut buffer_manager = BufferManager::new(&self.config.buffer);
 
-        // Message channel
-        let (tx, mut rx) = mpsc::channel::<KafkaMessage>(1000);
-
-        // Spawn consumer task (clone Arc for the task)
-        let consumer_task = consumer.clone();
-        let consumer_shutdown = self.shutdown.clone();
-        let consumer_handle = tokio::spawn(async move {
-            consumer_task.run(tx, consumer_shutdown).await
-        });
-
         // Flush interval timer
         let mut flush_interval = interval(Duration::from_secs(self.config.buffer.flush_age_secs));
+
+        // Batch size for transport.recv() - process multiple messages per iteration
+        const RECV_BATCH_SIZE: usize = 100;
 
         info!(
             format_mode = ?format_mode,
             flush_rows = self.config.buffer.flush_rows,
             flush_bytes = self.config.buffer.flush_bytes,
             flush_secs = self.config.buffer.flush_age_secs,
+            recv_batch_size = RECV_BATCH_SIZE,
             "Pipeline running"
         );
 
         loop {
             tokio::select! {
+                biased; // Prioritize shutdown check
+
                 _ = self.shutdown.cancelled() => {
                     info!("Shutdown requested, flushing remaining buffers");
                     break;
@@ -131,7 +148,7 @@ impl Orchestrator {
                     // Check for buffers ready to flush
                     match buffer_manager.get_ready_for_flush() {
                         Ok(batches) if !batches.is_empty() => {
-                            self.flush_batches(&inserter, &consumer, batches).await;
+                            self.flush_batches_transport(&inserter, &transport, batches).await;
                         }
                         Ok(_) => {} // No batches ready
                         Err(e) => {
@@ -140,38 +157,74 @@ impl Orchestrator {
                     }
                 }
 
-                msg = rx.recv() => {
-                    match msg {
-                        Some(kafka_msg) => {
-                            self.stats.messages_received += 1;
-                            if let Some(ref m) = self.metrics {
-                                m.record_received();
-                            }
+                // Receive batch of messages from transport
+                // Zero-copy: payload is moved (not copied), topic is Arc<str> clone (refcount only)
+                messages = transport.recv(RECV_BATCH_SIZE) => {
+                    match messages {
+                        Ok(batch) if !batch.is_empty() => {
+                            // Process batch of messages
+                            for kafka_msg in batch {
+                                self.stats.messages_received += 1;
+                                if let Some(ref m) = self.metrics {
+                                    m.record_received();
+                                }
 
-                            match self.process_message(
-                                &kafka_msg,
-                                &format_detector,
-                                &router,
-                                &transformer,
-                                &mut buffer_manager,
-                            ) {
-                                Ok(table) => {
-                                    self.stats.messages_processed += 1;
-                                    if let Some(ref m) = self.metrics {
-                                        m.record_processed(&table);
+                                // Hot path: process_message uses sonic-rs directly on payload bytes
+                                // No intermediate copies - payload bytes go straight to parser
+                                match self.process_message(
+                                    &kafka_msg,
+                                    &format_detector,
+                                    &router,
+                                    &transformer,
+                                    &mut buffer_manager,
+                                ) {
+                                    Ok(table) => {
+                                        self.stats.messages_processed += 1;
+                                        if let Some(ref m) = self.metrics {
+                                            m.record_processed(&table);
+                                        }
+                                    }
+                                    Err(e) => {
+                                        self.stats.messages_dlq += 1;
+                                        if let Some(ref m) = self.metrics {
+                                            m.record_dlq();
+                                        }
+
+                                        // Send to DLQ if producer is available
+                                        if let Some(ref dlq) = dlq_producer {
+                                            // Clone Arc for the spawned task
+                                            let dlq_clone: Arc<DlqProducer> = Arc::clone(dlq);
+                                            let reason_owned = e.to_string();
+                                            let payload_owned = kafka_msg.payload.clone();
+                                            let topic_owned = kafka_msg.topic.to_string();
+                                            let partition = kafka_msg.partition;
+                                            let offset = kafka_msg.offset;
+                                            let key_owned = kafka_msg.key.clone();
+
+                                            // Fire-and-forget DLQ send (don't block pipeline)
+                                            tokio::spawn(async move {
+                                                let msg = DlqMessage {
+                                                    payload: &payload_owned,
+                                                    reason: &reason_owned,
+                                                    destination: None,
+                                                    original_topic: &topic_owned,
+                                                    original_partition: partition,
+                                                    original_offset: offset,
+                                                    key: key_owned.as_deref(),
+                                                };
+                                                if let Err(dlq_err) = dlq_clone.send(msg).await {
+                                                    error!(error = %dlq_err, "Failed to send message to DLQ");
+                                                }
+                                            });
+                                            debug!(error = %e, "Message queued for DLQ");
+                                        } else {
+                                            warn!(error = %e, "Message processing failed, DLQ disabled");
+                                        }
                                     }
                                 }
-                                Err(e) => {
-                                    warn!(error = %e, "Message processing failed, sending to DLQ");
-                                    self.stats.messages_dlq += 1;
-                                    if let Some(ref m) = self.metrics {
-                                        m.record_dlq();
-                                    }
-                                    // TODO: Send to DLQ
-                                }
                             }
 
-                            // Update buffer stats
+                            // Update buffer stats (once per batch, not per message)
                             if let Some(ref m) = self.metrics {
                                 let stats = buffer_manager.stats();
                                 m.update_buffer_stats(
@@ -185,7 +238,7 @@ impl Orchestrator {
                             if buffer_manager.should_flush() {
                                 match buffer_manager.get_ready_for_flush() {
                                     Ok(batches) if !batches.is_empty() => {
-                                        self.flush_batches(&inserter, &consumer, batches).await;
+                                        self.flush_batches_transport(&inserter, &transport, batches).await;
                                     }
                                     Ok(_) => {} // No batches ready
                                     Err(e) => {
@@ -194,9 +247,18 @@ impl Orchestrator {
                                 }
                             }
                         }
-                        None => {
-                            warn!("Message channel closed");
-                            break;
+                        Ok(_) => {
+                            // Empty batch - no messages available, continue
+                        }
+                        Err(e) => {
+                            // Check if transport is closed
+                            if !transport.is_healthy() {
+                                warn!("Transport closed");
+                                break;
+                            }
+                            error!(error = %e, "Transport recv error");
+                            // Brief pause before retry
+                            tokio::time::sleep(Duration::from_millis(100)).await;
                         }
                     }
                 }
@@ -207,7 +269,7 @@ impl Orchestrator {
         match buffer_manager.flush_all() {
             Ok(final_batches) if !final_batches.is_empty() => {
                 info!(batches = final_batches.len(), "Flushing remaining buffers");
-                self.flush_batches(&inserter, &consumer, final_batches).await;
+                self.flush_batches_transport(&inserter, &transport, final_batches).await;
             }
             Ok(_) => {} // No batches to flush
             Err(e) => {
@@ -215,8 +277,10 @@ impl Orchestrator {
             }
         }
 
-        // Wait for consumer to stop
-        let _ = consumer_handle.await;
+        // Close transport
+        if let Err(e) = transport.close().await {
+            warn!(error = %e, "Error closing transport");
+        }
 
         info!(
             messages_received = self.stats.messages_received,
@@ -290,11 +354,11 @@ impl Orchestrator {
         Ok(table)
     }
 
-    /// Flush Arrow batches to ClickHouse and commit Kafka offsets on success
-    async fn flush_batches(
+    /// Flush Arrow batches to ClickHouse and commit Kafka offsets via transport on success
+    async fn flush_batches_transport(
         &mut self,
         inserter: &Inserter,
-        consumer: &Arc<Consumer>,
+        transport: &TransportAdapter,
         batches: Vec<FlushBatch>,
     ) {
         use std::time::Instant;
@@ -341,11 +405,11 @@ impl Orchestrator {
             }
         }
 
-        // Commit Kafka offsets ONLY if all inserts succeeded
+        // Commit Kafka offsets via transport ONLY if all inserts succeeded
         // This ensures at-least-once delivery - if any insert fails,
         // the messages will be re-delivered on restart
         if all_success && !all_offsets.is_empty() {
-            match consumer.commit_kafka_offsets(&all_offsets) {
+            match transport.commit(&all_offsets).await {
                 Ok(()) => {
                     debug!(
                         offsets = all_offsets.len(),

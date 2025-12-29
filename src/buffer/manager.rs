@@ -4,9 +4,11 @@
 //! Schema for each table is fetched from ClickHouse introspection on first use
 //! and cached with TTL-based refresh.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+use compact_str::CompactString;
+use rustc_hash::FxHashMap;
 
 use arrow::array::RecordBatch;
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
@@ -20,9 +22,12 @@ use crate::transform::ArrowBatchBuilder;
 use crate::Result;
 
 /// Data ready to be flushed to ClickHouse (Arrow-native)
+///
+/// Uses CompactString for table names (stack-allocated for ≤24 bytes).
+/// Typical "db.table" names fit in ~20 bytes, avoiding heap allocation.
 pub struct FlushBatch {
-    /// Destination table name (db.table)
-    pub table: String,
+    /// Destination table name (db.table) - stack-allocated for short names
+    pub table: CompactString,
     /// Arrow RecordBatch ready for insert
     pub batch: RecordBatch,
     /// Kafka offsets for acknowledgment after successful insert
@@ -37,7 +42,7 @@ pub struct TableSchema {
     /// Arrow schema for this table
     pub arrow_schema: SchemaRef,
     /// Column name to ClickHouse type mapping
-    pub column_types: HashMap<String, String>,
+    pub column_types: FxHashMap<String, String>,
     /// Last refresh time
     pub last_refresh: Instant,
 }
@@ -46,7 +51,7 @@ impl TableSchema {
     /// Create a TableSchema from column definitions
     pub fn from_columns(table_name: String, columns: Vec<(String, String)>) -> Result<Self> {
         let mut fields = Vec::with_capacity(columns.len());
-        let mut column_types = HashMap::with_capacity(columns.len());
+        let mut column_types = FxHashMap::with_capacity_and_hasher(columns.len(), Default::default());
 
         for (name, ch_type) in columns {
             let arrow_type = ch_type_to_arrow(&ch_type)?;
@@ -235,9 +240,9 @@ pub struct ArrowBufferStats {
 /// This ensures schema uniformity within each Arrow RecordBatch.
 pub struct BufferManager {
     /// Per-table buffers: key is "db.table"
-    buffers: HashMap<String, TableBuffer>,
+    buffers: FxHashMap<String, TableBuffer>,
     /// Cached schemas per table
-    schemas: HashMap<String, TableSchema>,
+    schemas: FxHashMap<String, TableSchema>,
     /// Batch size per table buffer
     batch_size: usize,
     /// Flush trigger: row count
@@ -252,8 +257,8 @@ impl BufferManager {
     /// Create a new buffer manager with config
     pub fn new(config: &BufferConfig) -> Self {
         Self {
-            buffers: HashMap::new(),
-            schemas: HashMap::new(),
+            buffers: FxHashMap::default(),
+            schemas: FxHashMap::default(),
             batch_size: config.flush_rows.max(100), // At least 100 per batch
             flush_rows: config.flush_rows,
             flush_age_secs: config.flush_age_secs,
@@ -298,7 +303,7 @@ impl BufferManager {
         let arrow_schema = arrow_client.fetch_schema(table).await?;
 
         // Build column types map from Arrow schema
-        let column_types: HashMap<String, String> = arrow_schema
+        let column_types: FxHashMap<String, String> = arrow_schema
             .fields()
             .iter()
             .map(|f| (f.name().clone(), arrow_type_to_ch_hint(f.data_type())))
@@ -369,22 +374,24 @@ impl BufferManager {
     /// Get batches ready for flush
     ///
     /// Returns FlushBatch for each table that's ready.
+    /// Uses in-place iteration to avoid intermediate Vec allocation.
     pub fn get_ready_for_flush(&mut self) -> Result<Vec<FlushBatch>> {
-        let mut flush_batches = Vec::new();
+        let flush_rows = self.flush_rows;
+        let flush_age_secs = self.flush_age_secs;
 
-        // Collect tables that are ready
-        let ready_tables: Vec<String> = self.buffers
-            .iter()
-            .filter(|(_, buf)| buf.is_ready(self.flush_rows, self.flush_age_secs))
-            .map(|(table, _)| table.clone())
-            .collect();
+        // Count ready buffers for pre-allocation
+        let ready_count = self.buffers.values()
+            .filter(|buf| buf.is_ready(flush_rows, flush_age_secs))
+            .count();
 
-        // Build batches for ready tables
-        for table in ready_tables {
-            if let Some(buffer) = self.buffers.get_mut(&table) {
+        let mut flush_batches = Vec::with_capacity(ready_count);
+
+        // Build batches directly from mutable iterator
+        for (table, buffer) in self.buffers.iter_mut() {
+            if buffer.is_ready(flush_rows, flush_age_secs) {
                 if let Some((batch, offsets)) = buffer.build()? {
                     flush_batches.push(FlushBatch {
-                        table,
+                        table: CompactString::from(table.as_str()),
                         batch,
                         offsets,
                     });
@@ -397,12 +404,12 @@ impl BufferManager {
 
     /// Flush all buffers (for shutdown)
     pub fn flush_all(&mut self) -> Result<Vec<FlushBatch>> {
-        let mut flush_batches = Vec::new();
+        let mut flush_batches = Vec::with_capacity(self.buffers.len());
 
         for (table, buffer) in self.buffers.iter_mut() {
             if let Some((batch, offsets)) = buffer.build()? {
                 flush_batches.push(FlushBatch {
-                    table: table.clone(),
+                    table: CompactString::from(table.as_str()),
                     batch,
                     offsets,
                 });
@@ -454,8 +461,8 @@ impl BufferManager {
 impl Default for BufferManager {
     fn default() -> Self {
         Self {
-            buffers: HashMap::new(),
-            schemas: HashMap::new(),
+            buffers: FxHashMap::default(),
+            schemas: FxHashMap::default(),
             batch_size: 1000,
             flush_rows: 10000,
             flush_age_secs: 5,
