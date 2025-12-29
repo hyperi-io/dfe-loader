@@ -15,11 +15,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use arrow::array::RecordBatch;
+use tokio::sync::Semaphore;
 use tokio::time::sleep;
 use tracing::{debug, error, info, warn};
 
 use crate::buffer::arrow::KafkaOffset;
 use crate::buffer::FlushBatch;
+use crate::clickhouse::circuit_breaker::CircuitBreaker;
 use crate::clickhouse::ArrowClickHouseClient;
 use crate::Result;
 
@@ -31,6 +33,8 @@ pub struct InserterConfig {
     pub enable_salvage: bool,
     /// Maximum depth for binary-split salvage (prevents infinite recursion)
     pub max_salvage_depth: u32,
+    /// Maximum concurrent inserts (0 = unlimited)
+    pub max_concurrent_inserts: usize,
 }
 
 impl Default for InserterConfig {
@@ -40,6 +44,7 @@ impl Default for InserterConfig {
             retry_delay_ms: 1000,
             enable_salvage: true,
             max_salvage_depth: 20, // 2^20 = 1M rows max batch size
+            max_concurrent_inserts: 8, // Reasonable default for ClickHouse
         }
     }
 }
@@ -88,18 +93,36 @@ pub struct Inserter {
     retry_delay: Duration,
     enable_salvage: bool,
     max_salvage_depth: u32,
+    /// Semaphore for limiting concurrent inserts
+    semaphore: Option<Arc<Semaphore>>,
+    /// Circuit breaker for per-table failure detection
+    circuit_breaker: Option<Arc<CircuitBreaker>>,
 }
 
 impl Inserter {
     /// Create a new inserter with Arrow client
     pub fn new(arrow_client: Arc<ArrowClickHouseClient>, config: InserterConfig) -> Self {
+        let semaphore = if config.max_concurrent_inserts > 0 {
+            Some(Arc::new(Semaphore::new(config.max_concurrent_inserts)))
+        } else {
+            None
+        };
+
         Self {
             arrow_client,
             max_retries: config.max_retries,
             retry_delay: Duration::from_millis(config.retry_delay_ms),
             enable_salvage: config.enable_salvage,
             max_salvage_depth: config.max_salvage_depth,
+            semaphore,
+            circuit_breaker: None,
         }
+    }
+
+    /// Set the circuit breaker for per-table failure detection
+    pub fn with_circuit_breaker(mut self, cb: Arc<CircuitBreaker>) -> Self {
+        self.circuit_breaker = Some(cb);
+        self
     }
 
     /// Insert an Arrow RecordBatch into a table with retry
@@ -315,6 +338,10 @@ impl Inserter {
     }
 
     /// Insert multiple batches concurrently with salvage
+    ///
+    /// Uses semaphore to limit concurrent inserts if configured.
+    /// All batches are spawned as tasks, but only `max_concurrent_inserts`
+    /// will execute simultaneously.
     pub async fn insert_batches_with_salvage(
         &self,
         batches: Vec<FlushBatch>,
@@ -327,15 +354,24 @@ impl Inserter {
             let retry_delay = self.retry_delay;
             let enable_salvage = self.enable_salvage;
             let max_salvage_depth = self.max_salvage_depth;
-            let table = batch.table.clone();
+            let table = batch.table.to_string();
+            let semaphore = self.semaphore.clone();
 
             handles.push(tokio::spawn(async move {
+                // Acquire semaphore permit if configured (limits concurrent inserts)
+                let _permit = match &semaphore {
+                    Some(sem) => Some(sem.acquire().await.expect("Semaphore closed")),
+                    None => None,
+                };
+
                 let inserter = Inserter {
                     arrow_client,
                     max_retries,
                     retry_delay,
                     enable_salvage,
                     max_salvage_depth,
+                    semaphore: None, // Child inserter doesn't need its own semaphore
+                    circuit_breaker: None,
                 };
                 let result = inserter.insert_with_salvage(batch).await;
                 (table, result)
@@ -367,6 +403,8 @@ impl Inserter {
     }
 
     /// Insert multiple batches concurrently (simple version)
+    ///
+    /// Uses semaphore to limit concurrent inserts if configured.
     pub async fn insert_batches(&self, batches: Vec<FlushBatch>) -> Vec<Result<usize>> {
         let mut handles = Vec::with_capacity(batches.len());
 
@@ -376,14 +414,23 @@ impl Inserter {
             let retry_delay = self.retry_delay;
             let enable_salvage = self.enable_salvage;
             let max_salvage_depth = self.max_salvage_depth;
+            let semaphore = self.semaphore.clone();
 
             handles.push(tokio::spawn(async move {
+                // Acquire semaphore permit if configured (limits concurrent inserts)
+                let _permit = match &semaphore {
+                    Some(sem) => Some(sem.acquire().await.expect("Semaphore closed")),
+                    None => None,
+                };
+
                 let inserter = Inserter {
                     arrow_client,
                     max_retries,
                     retry_delay,
                     enable_salvage,
                     max_salvage_depth,
+                    semaphore: None,
+                    circuit_breaker: None,
                 };
                 inserter.insert_batch(batch).await
             }));
@@ -443,5 +490,21 @@ mod tests {
         assert_eq!(result.failed.len(), 2);
         assert_eq!(result.failed[0].row_index, 5);
         assert_eq!(result.failed[1].row_index, 10);
+    }
+
+    #[test]
+    fn test_inserter_config_semaphore() {
+        let config = InserterConfig {
+            max_concurrent_inserts: 4,
+            ..Default::default()
+        };
+        assert_eq!(config.max_concurrent_inserts, 4);
+
+        // Test with 0 (unlimited)
+        let unlimited = InserterConfig {
+            max_concurrent_inserts: 0,
+            ..Default::default()
+        };
+        assert_eq!(unlimited.max_concurrent_inserts, 0);
     }
 }

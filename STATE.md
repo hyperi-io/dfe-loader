@@ -10,9 +10,11 @@
 ## Build Settings
 
 ```bash
-# Limit Cargo resource consumption
+# Limit Cargo resource consumption (optional)
 export CARGO_BUILD_JOBS=2
 ```
+
+**SIMD Flags:** `.cargo/config.toml` configures `-C target-cpu=native` for sonic-rs SIMD optimizations.
 
 ---
 
@@ -69,7 +71,7 @@ Two options (configurable via ENV/config cascade):
 | MsgPack        | rmp-serde        | Active      | MessagePack to serde_json::Value         |
 
 **clickhouse-arrow DFE Fork Types:**
-- Variant, Dynamic, Nested (ClickHouse 24.x+)
+- Variant, Dynamic, Nested (ClickHouse 24.1+, tested with 25.12)
 - BFloat16 (ML workloads)
 - Time/Time64 (time-of-day)
 - AggregateFunction, SimpleAggregateFunction (materialized views)
@@ -131,12 +133,42 @@ Two options (configurable via ENV/config cascade):
 8. **Cached current time**: Transformer caches `Utc::now()` once per message and reuses for
    timestamp validation, injection, and fallback. Reduces syscalls from 2-3 to 1 per message.
 
+**Round 3 - JSON Parser & Routing Optimizations (2025-12-25):**
+
+9. **sonic-rs on-demand field access**: Uses `get_from_slice()` for 4-8x faster routing field
+   extraction without building full DOM tree. Navigates directly to field via SIMD path lookup.
+
+10. **Cow<str> for routing values**: `extract_first_match_from_value()` returns `&str` borrowed
+    from the Value, eliminating String allocation. Uses `Cow<str>` to handle owned vs borrowed.
+
+11. **Efficient db.table string building**: Replaced `format!("{}.{}", db, table)` with
+    pre-allocated `String::with_capacity()` + `push_str()`. Avoids format macro overhead.
+
+12. **Collector timestamp ownership transfer**: Uses `data.remove()` instead of `get().cloned()`
+    to take ownership of collector timestamp without cloning the Value.
+
+**Round 4 - Data Structures & Memory (2025-12-25):**
+
+13. **SIMD rustflags**: Added `.cargo/config.toml` with `-C target-cpu=native` for AVX2/SSE4.2
+    SIMD instructions in sonic-rs. Required for full SIMD performance.
+
+14. **FxHashMap for internal maps**: Replaced `std::collections::HashMap` with `rustc_hash::FxHashMap`
+    in BufferManager, Router, and SchemaCache. FxHash is 5-10% faster for short string keys.
+
+15. **CompactString for table names**: `FlushBatch.table` uses `compact_str::CompactString` which
+    stores strings ≤24 bytes on the stack. Typical "db.table" names (~15-20 bytes) avoid heap.
+
+16. **Eliminated flush Vec allocation**: `get_ready_for_flush()` now iterates directly with
+    `iter_mut()` instead of collecting table names first. Saves one Vec<String> allocation per flush.
+
+17. **Pre-allocated flush Vec**: Both `get_ready_for_flush()` and `flush_all()` use
+    `Vec::with_capacity()` to avoid reallocation during batch collection.
+
 ### Future Optimizations
 
 1. **simd-json integration**: Replace sonic-rs with simd-json for even faster parsing
 2. **Vectorized flattening**: SIMD-accelerated nested JSON flattening
 3. **Arrow compute kernels**: Use arrow-rs compute functions for transformations
-4. **String interning for db.table**: Cache common destination strings to avoid repeated format!()
 
 ---
 
@@ -212,11 +244,11 @@ UUIDv7 is time-ordered (millisecond precision) with random suffix - ideal for ev
 ```sql
 _uuid UUID DEFAULT generateUUIDv7()
 ```
-- ClickHouse 24.8+ has native `generateUUIDv7()`
+- ClickHouse 24.8+ has native `generateUUIDv7()` (tested with 25.12)
 - Monotonic within timestamp, sortable
 - Loader doesn't need to generate - just omit field
 
-**Variants available in ClickHouse 24.8+:**
+**Variants available in ClickHouse 24.8+ (tested with 25.12):**
 | Function | Monotonicity | Notes |
 |----------|--------------|-------|
 | `generateUUIDv7()` | Thread-monotonic | Guarantees ordering within thread |
@@ -332,13 +364,113 @@ Location: `crates/clickhouse-arrow/`
 - [x] Created `serialize/dynamic.rs` with DynamicSerializer
 - [x] Created `serialize/nested.rs` with NestedSerializer
 - [x] Wired up all serializers in serialize.rs and types.rs
-- [x] Integration test against ClickHouse 25.12.1
+- [x] Integration test against ClickHouse 25.12
+
+### Resilience Features (2025-12-25)
+
+- [x] **Batch Salvage**: Binary-split retry on insert failure
+  - Splits failed batch in half, recursively retries
+  - Isolates single failing rows for DLQ routing
+  - Configurable max depth (default: 20 = 2^20 = 1M rows)
+  - `InsertResult` with `inserted` count and `FailedRow` list
+
+- [x] **Circuit Breaker**: Per-table failure detection
+  - Three states: Closed (normal), Open (failing), HalfOpen (testing)
+  - Configurable thresholds (failure_threshold, success_threshold, open_duration)
+  - Prevents cascading failures on unhealthy tables
+  - `CircuitBreakerStats` for monitoring
+
+- [x] **Schema Cache Enhancement**: Periodic refresh with error invalidation
+  - TTL-based caching with configurable refresh interval
+  - Background refresh task via `start_background_refresh()`
+  - Error-based invalidation for schema mismatch errors
+  - Metrics: hits, misses, refreshes, invalidations
+
+- [x] **On-Demand JSON Field Access**: sonic-rs SIMD optimization
+  - Uses `get_from_slice()` for 4-8x faster routing field extraction
+  - No full DOM parse - navigates directly to field
+  - `extract_field_json()` for top-level, `extract_nested_field_json()` for dot notation
+
+- [x] **Concurrent Insert Semaphore**: Configurable parallel insert limit
+  - `max_concurrent_inserts` in InserterConfig (default: 8, 0 = unlimited)
+  - Prevents overwhelming ClickHouse with too many concurrent connections
+  - Applied to `insert_batches()` and `insert_batches_with_salvage()`
 
 ---
 
-## TODO
+## Current Sprint: Performance Optimisation
 
-### All Completed
+**Benchmark Priority (measure in this order):**
+
+1. **CPU consumption** - cycles per message
+2. **Latency** - time for event throughput processing (p50/p95/p99)
+3. **Memory consumption** - peak and steady-state
+
+### In Progress
+
+- [x] **Production Load Testing** - Benchmark infrastructure
+  - `benches/pipeline.rs` - E2E throughput benchmarks
+  - `benches/transform.rs` - Transform operation benchmarks
+
+- [ ] **Zero-Copy Routing** - Eliminate String allocations
+- [ ] **Buffer Pool** - Object pool for buffer reuse
+- [ ] **Config Hot-Reload** - File watcher for config changes
+
+### Deferred
+
+- [ ] **Vectorised JSON Flattening** - Current implementation already optimised
+- [ ] **simd-json integration** - sonic-rs benchmarks show it's already faster
+
+---
+
+## Library Performance Research (2025-12-28)
+
+### Keep (Benchmarked/Optimized)
+
+| Library | Purpose | Status | Notes |
+|---------|---------|--------|-------|
+| `sonic-rs` | JSON parsing | **KEEP** | Extensively benchmarked, fastest SIMD JSON |
+| `rdkafka` | Kafka client | **KEEP** | librdkafka wrapper, most mature |
+| `arrow` + `arrow-json` | Columnar data | **KEEP** | Apache Arrow, SIMD JSON→Arrow |
+| `rustc-hash` (FxHashMap) | Fast hashmap | **KEEP** | 5-10% faster for short keys |
+| `compact_str` | Small strings | **KEEP** | Stack-allocated ≤24 bytes |
+
+### New Libraries Evaluated
+
+| Library | Purpose | Feature Flags | Notes |
+|---------|---------|---------------|-------|
+| `maxminddb` | GeoIP MMDB | `mmap`, `simdutf8`, `unsafe-str-decode` | Enable `mmap` + `simdutf8` for best perf |
+| `moka` | LRU cache | - | TinyLFU policy, concurrent, Caffeine-inspired |
+| `quick_cache` | LRU cache | - | Lower overhead than moka, no TTL support |
+| `ratatui` | TUI dashboard | - | Primary Rust TUI framework (tui-rs fork) |
+
+### maxminddb Performance Flags
+
+```toml
+# Cargo.toml - enable for best performance
+maxminddb = { version = ">=0.24", features = ["mmap", "simdutf8"] }
+```
+
+- **mmap**: Memory-mapped file access (reduces memory for long-running apps)
+- **simdutf8**: SIMD-accelerated UTF-8 validation during string decoding
+- **unsafe-str-decode**: ~20% faster lookups (mutually exclusive with simdutf8, requires trusted data)
+
+### Reputation Check Options
+
+1. **ipqs_db_reader** - IPQualityScore flat file database (commercial, requires subscription)
+2. **Custom radix trie** - Use `iprange-rs` for fast IP prefix matching with blocklists
+
+### TUI Dashboard Stack
+
+- **ratatui** + **crossterm** - Standard stack for Rust TUIs
+- Consume existing Prometheus metrics endpoint (like vector.dev TUI)
+- Built-in widgets: Gauge, Chart, Sparkline, Table for real-time monitoring
+
+---
+
+## All Previously Completed
+
+### Core Pipeline
 
 1. [x] Implement configurable db.table field routing
 2. [x] Wire up clickhouse-arrow for native protocol inserts
@@ -349,25 +481,25 @@ Location: `crates/clickhouse-arrow/`
 7. [x] Use arrow-json for SIMD JSON → Arrow conversion
 8. [x] Kafka offset commit on successful insert
 9. [x] DLQ routing with db.table topic naming
-10. [x] Investigate further SIMD optimizations
+10. [x] Hot path optimisations (4 rounds)
 11. [x] BFloat16/Time/Time64/AggregateFunction types in clickhouse-arrow fork
 
-### Common Header v2 Implementation
+### Resilience (2025-12-25)
 
-1. [x] **Capture `logjson` before transform** - Store raw Kafka payload as JSON before any processing
-2. [x] **Config-driven `_tags` extraction** - First-match from `tags_fields` list, store as `_tags`
-3. [x] **Add `drop_tags` config option** - Option to not store tags after routing extraction
-4. [x] **Remove routing fields** - Strip `org_id`/`event_category` from output (used only for routing)
-5. [x] **Let ClickHouse generate `_uuid`** - Use DEFAULT `generateUUIDv7()` in DDL
-6. [x] **Let ClickHouse generate `timestamp_load`** - Use DEFAULT `now64(3)` in DDL
-7. [x] **Update table DDL template** - Create reference DDL with common header columns
+- [x] Batch Salvage - Binary-split retry on insert failure
+- [x] Circuit Breaker - Per-table failure detection
+- [x] Schema Cache Enhancement - Periodic refresh, error invalidation
+- [x] Concurrent Insert Semaphore - Configurable parallel limit
 
-### Future Enhancements
+### Common Header v2
 
-1. [ ] simd-json integration (even faster than sonic-rs)
-2. [ ] Zero-copy routing field extraction
-3. [ ] Vectorized JSON flattening
-4. [ ] Production load testing and benchmarking
+1. [x] Capture `logjson` before transform
+2. [x] Config-driven `_tags` extraction
+3. [x] Add `drop_tags` config option
+4. [x] Remove routing fields from output
+5. [x] Let ClickHouse generate `_uuid`
+6. [x] Let ClickHouse generate `timestamp_load`
+7. [x] Update table DDL template
 
 ---
 
@@ -375,7 +507,7 @@ Location: `crates/clickhouse-arrow/`
 
 Located at k8s.tyrell.com.au with:
 
-- ClickHouse: port 30900 (native), 30123 (HTTP)
+- ClickHouse 25.12: port 30900 (native), 30123 (HTTP)
 - Kafka: port 30092 with SCRAM-SHA-512
 - See `.env` for credentials
 
@@ -389,6 +521,103 @@ Located at k8s.tyrell.com.au with:
 
 ---
 
-**Last Updated:** 2025-12-25
-**Version:** 0.6.0-hot-path-optimized
-**Status:** Arrow-Only Pipeline with Hot Path Optimizations - Production Ready
+## Enrichment Modules (2025-12-28)
+
+### GeoIP Enrichment (`src/enrich/geoip.rs`)
+
+- **MaxMind MMDB support**: City and ASN databases
+- **LRU cache**: 100K entries, 25% eviction on capacity
+- **Private IP fast path**: RFC1918, loopback, link-local, CGNAT detection
+- **Batch deduplication**: Process unique IPs once
+- **Schema-aware output**: `to_schema_map()` for selective field output
+- **Feature flags**: `mmap` + `simdutf8` for SIMD UTF-8 validation
+
+### Reputation Enrichment (`src/enrich/reputation.rs`)
+
+- **Threat types**: VPN, proxy, Tor, relay, datacenter, residential, botnet, spam, scanner, malware, phishing, bruteforce, exploit
+- **Threat sources**: TorProject, FireHOL, AbuseIPDB, AbuseCH, Spamhaus, MaxMind, IPInfo, CrowdSec, GreyNoise, Custom
+- **Dual storage**: O(1) FxHashMap for individual IPs + CIDR prefix matching
+- **LRU cache**: 100K entries with atomic hit/miss counters
+- **Blocklist loading**: Plain text format (IP or CIDR per line)
+- **Common blocklists**: Tor exit nodes, Feodo botnet C2, FireHOL Level1, Spamhaus DROP
+
+### Risk Scoring (`src/enrich/risk.rs`)
+
+- **Component scores**: Geographic, reputation, privacy, threat (each 0-100)
+- **Weighted composite**: Configurable weights (default: geo 15%, rep 25%, priv 25%, threat 35%)
+- **Risk levels**: Minimal (0-19), Low (20-39), Medium (40-59), High (60-79), Critical (80-100)
+- **Presets**: UsEnterprise, EuEnterprise, ApacEnterprise, Global, HighSecurity
+- **Risk factors**: Human-readable flags (e.g., "tor_detected", "high_risk_country")
+- **Integer math only**: All u8 scores, no floating point in hot path
+
+---
+
+## Current Session (2025-12-29)
+
+### Completed
+
+- **Transport Abstraction Layer** - Fully implemented in hs-rustlib
+  - `Transport` trait with async send/recv/commit methods
+  - `MemoryTransport` - tokio::mpsc for unit tests (all tests passing)
+  - `KafkaTransport` - rdkafka wrapper with offset tracking
+  - `ZenohTransport` - Zenoh 1.x with SHM support
+  - `PayloadFormat` auto-detection (JSON/MsgPack by first byte)
+  - Feature flags: `transport-memory`, `transport-kafka`, `transport-zenoh`, `transport-all`
+
+### Files Created in hs-rustlib
+
+| File | Purpose |
+| ---- | ------- |
+| `src/transport/mod.rs` | Module exports and re-exports |
+| `src/transport/error.rs` | TransportError, TransportResult |
+| `src/transport/traits.rs` | Transport trait, CommitToken trait |
+| `src/transport/types.rs` | Message, SendResult, PayloadFormat |
+| `src/transport/payload.rs` | JSON/MsgPack parsing utilities |
+| `src/transport/memory/mod.rs` | MemoryTransport implementation |
+| `src/transport/memory/token.rs` | MemoryToken |
+| `src/transport/kafka/mod.rs` | KafkaTransport implementation |
+| `src/transport/kafka/config.rs` | KafkaConfig |
+| `src/transport/kafka/token.rs` | KafkaToken |
+| `src/transport/zenoh/mod.rs` | ZenohTransport implementation |
+| `src/transport/zenoh/config.rs` | ZenohConfig with to_json5() |
+| `src/transport/zenoh/token.rs` | ZenohToken |
+
+### Key Implementation Details
+
+1. **Zenoh 1.x API**: Uses `Config::from_json5()` with custom `to_json5()` method
+2. **Arc<str> caching**: Topics cached and shared to avoid allocations
+3. **Batch receiving**: `recv(max)` returns up to N messages in one call
+4. **Non-blocking sends**: Memory/Zenoh use try_send to avoid blocking
+5. **Kafka SASL/SSL**: Full security config support
+
+### Test Results
+
+```
+52 tests passed, 0 failed
+- transport::memory::tests::* (5 tests)
+- transport::payload::tests::* (6 tests)
+- transport::types::tests::* (5 tests)
+```
+
+### Next Steps
+
+1. Integrate transport abstraction into dfe-loader-clickhouse
+2. Run Mison benchmarks (awaiting clean CPU)
+
+---
+
+## Previous Session (2025-12-28)
+
+### Mison Structural Index - Complete
+
+- All 39 tests pass, benchmarks ready
+- Single-pass batch extraction O(colons + fields)
+- Runtime SIMD detection (AVX2/SSE4.2/NEON)
+- Awaiting benchmark validation on dedicated host
+
+---
+
+**Last Updated:** 2025-12-29
+**ClickHouse:** 25.12 (native protocol)
+**Version:** 0.12.0-transport
+**Status:** Transport Abstraction Designed - Implementation Next

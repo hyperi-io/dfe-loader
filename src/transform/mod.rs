@@ -12,6 +12,6 @@ pub use arrow::{
     infer_schema_from_json_bytes, ArrowBatchBuilder, SimdBatchBuilder,
 };
 pub use coerce::Coercer;
-pub use flatten::{flatten, flatten_value, flatten_value_owned};
+pub use flatten::{flatten, flatten_value, flatten_value_owned, BatchFlattener, BatchFlattenStats};
 pub use timestamp::{validate_timestamp, TimestampResult, TimestampValidator};
 pub use transformer::{TransformResult, Transformer};

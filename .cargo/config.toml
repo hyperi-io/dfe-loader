@@ -1,0 +1,10 @@
+# Cargo build configuration for dfe-loader-clickhouse
+#
+# Enable native CPU features for SIMD optimizations in sonic-rs and arrow.
+# This is REQUIRED for sonic-rs to use AVX2/SSE4.2 SIMD instructions.
+
+[build]
+rustflags = ["-C", "target-cpu=native"]
+
+# Limit parallel jobs to reduce memory usage (optional, can be overridden with CARGO_BUILD_JOBS)
+# jobs = 2

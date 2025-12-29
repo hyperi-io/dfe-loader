@@ -8,13 +8,19 @@
 //!
 //! Prefer `route_value()` when you already have a parsed `serde_json::Value` to avoid
 //! double-parsing. Use `route()` only when you only have raw bytes.
+//!
+//! Uses `Cow<str>` internally to avoid String allocations when returning references.
 
-use std::collections::HashMap;
+use std::borrow::Cow;
 
+use rustc_hash::FxHashMap;
 use serde_json::Value;
 
 use crate::config::RoutingConfig;
-use crate::payload::parse::{extract_field_json, extract_nested_field_json};
+use crate::payload::parse::{
+    extract_field_json, extract_field_json_cow,
+    extract_nested_field_json, extract_nested_field_json_cow,
+};
 
 /// Route result with destination info
 #[derive(Debug, Clone, PartialEq)]
@@ -39,7 +45,7 @@ pub struct Router {
     /// Default table if no table_field matches
     default_table: String,
     /// Legacy: category to table mapping (for backwards compatibility)
-    category_to_table: HashMap<String, String>,
+    category_to_table: FxHashMap<String, String>,
     /// Whether DLQ is enabled
     dlq_enabled: bool,
 }
@@ -47,12 +53,18 @@ pub struct Router {
 impl Router {
     /// Create a new router from config
     pub fn new(config: &RoutingConfig) -> Self {
+        // Convert HashMap to FxHashMap for faster lookups
+        let category_to_table: FxHashMap<String, String> = config.category_to_table
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+
         Self {
             db_fields: config.db_fields.clone(),
             table_fields: config.table_fields.clone(),
             default_db: config.default_db.clone(),
             default_table: config.default_table.clone(),
-            category_to_table: config.category_to_table.clone(),
+            category_to_table,
             dlq_enabled: config.dlq.enabled,
         }
     }
@@ -109,6 +121,71 @@ impl Router {
         self.build_route_result(&db, &table)
     }
 
+    /// Zero-copy route from raw bytes.
+    ///
+    /// Uses zero-copy field extraction to avoid String allocations when extracting
+    /// routing fields from non-escaped JSON strings (the common case).
+    /// The only guaranteed allocation is the final "db.table" string.
+    ///
+    /// **This is the fastest routing method** for raw bytes - use when you haven't
+    /// parsed the JSON yet and may not need to (e.g., DLQ routing).
+    #[inline]
+    pub fn route_cow(&self, payload: &[u8]) -> RouteResult {
+        let db = self.extract_db_cow(payload);
+        let table = self.extract_table_cow(payload);
+
+        self.build_route_result(&db, &table)
+    }
+
+    /// Zero-copy extract db from raw payload.
+    ///
+    /// Returns Cow::Borrowed for non-escaped strings (zero-copy from payload),
+    /// Cow::Owned for escaped strings or when using default.
+    #[inline]
+    fn extract_db_cow<'a>(&'a self, payload: &'a [u8]) -> Cow<'a, str> {
+        self.extract_first_match_cow(payload, &self.db_fields)
+            .unwrap_or_else(|| Cow::Borrowed(&self.default_db))
+    }
+
+    /// Zero-copy extract table from raw payload.
+    ///
+    /// Returns Cow::Borrowed for non-escaped strings (zero-copy from payload),
+    /// Cow::Owned for escaped strings or when using default/mapping.
+    #[inline]
+    fn extract_table_cow<'a>(&'a self, payload: &'a [u8]) -> Cow<'a, str> {
+        let table_cow = self.extract_first_match_cow(payload, &self.table_fields);
+
+        match table_cow {
+            Some(cow) => {
+                // Check legacy category_to_table mapping
+                if let Some(mapped) = self.category_to_table.get(cow.as_ref()) {
+                    Cow::Borrowed(mapped.as_str())
+                } else {
+                    cow
+                }
+            }
+            None => Cow::Borrowed(&self.default_table),
+        }
+    }
+
+    /// Zero-copy field extraction from raw bytes.
+    ///
+    /// Returns Cow::Borrowed for non-escaped strings, Cow::Owned for escaped.
+    #[inline]
+    fn extract_first_match_cow<'a>(&self, payload: &'a [u8], fields: &[String]) -> Option<Cow<'a, str>> {
+        for field in fields {
+            let value = if field.contains('.') {
+                extract_nested_field_json_cow(payload, field)
+            } else {
+                extract_field_json_cow(payload, field)
+            };
+            if value.is_some() {
+                return value;
+            }
+        }
+        None
+    }
+
     /// Route a message to db.table based on already-parsed JSON Value
     ///
     /// **This is the preferred method** when you've already parsed the JSON,
@@ -124,50 +201,59 @@ impl Router {
     }
 
     /// Build RouteResult from db and table strings
+    ///
+    /// Uses pre-allocated String with exact capacity to avoid format!() overhead.
     #[inline]
     fn build_route_result(&self, db: &str, table: &str) -> RouteResult {
         // Validate we have non-empty values
         if db.is_empty() || table.is_empty() {
             if self.dlq_enabled {
-                return RouteResult::Dlq("empty_db_or_table".to_string());
+                return RouteResult::Dlq("empty_db_or_table".into());
             }
             // Use defaults for empty values
             let db = if db.is_empty() { &self.default_db } else { db };
             let table = if table.is_empty() { &self.default_table } else { table };
-            return RouteResult::Table(format!("{}.{}", db, table));
+            return RouteResult::Table(build_db_table_string(db, table));
         }
 
-        RouteResult::Table(format!("{}.{}", db, table))
+        RouteResult::Table(build_db_table_string(db, table))
     }
 
     /// Extract db from an already-parsed Value (avoids re-parsing)
+    ///
+    /// Returns borrowed reference when using default, owned when from payload.
     #[inline]
-    fn extract_db_from_value(&self, value: &Value) -> String {
+    fn extract_db_from_value<'a>(&'a self, value: &'a Value) -> Cow<'a, str> {
         self.extract_first_match_from_value(value, &self.db_fields)
-            .unwrap_or_else(|| self.default_db.clone())
+            .map(Cow::Borrowed)
+            .unwrap_or_else(|| Cow::Borrowed(&self.default_db))
     }
 
     /// Extract table from an already-parsed Value (avoids re-parsing)
+    ///
+    /// Returns borrowed reference when possible, owned when mapped.
     #[inline]
-    fn extract_table_from_value(&self, value: &Value) -> String {
+    fn extract_table_from_value<'a>(&'a self, value: &'a Value) -> Cow<'a, str> {
         let table = self.extract_first_match_from_value(value, &self.table_fields)
-            .unwrap_or_else(|| self.default_table.clone());
+            .unwrap_or(&self.default_table);
 
         // Check legacy category_to_table mapping
-        if let Some(mapped) = self.category_to_table.get(&table) {
-            mapped.clone()
+        if let Some(mapped) = self.category_to_table.get(table) {
+            Cow::Borrowed(mapped.as_str())
         } else {
-            table
+            Cow::Borrowed(table)
         }
     }
 
     /// Extract a field value from parsed JSON Value using dot notation
+    ///
+    /// Returns borrowed `&str` from the Value to avoid allocation.
     #[inline]
-    fn extract_first_match_from_value(&self, value: &Value, fields: &[String]) -> Option<String> {
+    fn extract_first_match_from_value<'a>(&self, value: &'a Value, fields: &[String]) -> Option<&'a str> {
         for field in fields {
             if let Some(val) = self.get_nested_field(value, field) {
                 if let Some(s) = val.as_str() {
-                    return Some(s.to_string());
+                    return Some(s);
                 }
             }
         }
@@ -195,13 +281,25 @@ impl Router {
     /// Route with pre-extracted category (legacy compatibility)
     pub fn route_category(&self, category: &str) -> RouteResult {
         let table = if let Some(mapped) = self.category_to_table.get(category) {
-            mapped.clone()
+            mapped.as_str()
         } else {
-            category.to_string()
+            category
         };
 
-        RouteResult::Table(format!("{}.{}", self.default_db, table))
+        RouteResult::Table(build_db_table_string(&self.default_db, table))
     }
+}
+
+/// Build "db.table" string efficiently with pre-allocated capacity.
+///
+/// Avoids format!() macro overhead by using push_str directly.
+#[inline]
+fn build_db_table_string(db: &str, table: &str) -> String {
+    let mut result = String::with_capacity(db.len() + 1 + table.len());
+    result.push_str(db);
+    result.push('.');
+    result.push_str(table);
+    result
 }
 
 impl Default for Router {
@@ -214,7 +312,7 @@ impl Default for Router {
             ],
             default_db: "common".to_string(),
             default_table: "common".to_string(),
-            category_to_table: HashMap::new(),
+            category_to_table: FxHashMap::default(),
             dlq_enabled: true,
         }
     }
@@ -223,6 +321,7 @@ impl Default for Router {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
 
     fn test_config() -> RoutingConfig {
         let mut category_to_table = HashMap::new();
@@ -462,5 +561,42 @@ mod tests {
         let value: Value = serde_json::from_slice(payload).unwrap();
 
         assert_eq!(router.route(payload), router.route_value(&value));
+    }
+
+    #[test]
+    fn test_route_cow_matches_route() {
+        // Ensure route_cow() (zero-copy) and route() give the same result
+        let router = Router::new(&test_config());
+
+        let payloads = [
+            br#"{"org_id": "acme", "event_category": "auth", "user_id": 123}"#.as_slice(),
+            br#"{"org_id": "tenant1", "event_category": "login"}"#.as_slice(),
+            br#"{"org_id": "acme", "tags": {"event_category": "api"}}"#.as_slice(),
+            br#"{"event_category": "network"}"#.as_slice(), // no org_id
+            br#"{"org_id": "test"}"#.as_slice(),            // no event_category
+            br#"{"user_id": 123}"#.as_slice(),              // no routing fields
+        ];
+
+        for payload in payloads {
+            assert_eq!(
+                router.route_cow(payload),
+                router.route(payload),
+                "Mismatch for payload: {:?}",
+                std::str::from_utf8(payload).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn test_route_cow_with_escaped_strings() {
+        // Ensure escaped strings are handled correctly
+        let router = Router::default();
+
+        // org_id with escape sequence
+        let payload = br#"{"org_id": "acme\ncorp", "event_category": "auth"}"#;
+        let result = router.route_cow(payload);
+
+        // Should still route correctly (value is "acme\ncorp" with actual newline)
+        assert!(matches!(result, RouteResult::Table(ref s) if s.contains("auth")));
     }
 }

@@ -10,6 +10,7 @@ pub mod enrich;
 pub mod error;
 pub mod kafka;
 pub mod metrics;
+pub mod mison;
 pub mod payload;
 pub mod pipeline;
 pub mod routing;

@@ -16,12 +16,12 @@
 //! - Optional background refresh task
 //! - Thread-safe via parking_lot RwLock
 
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use parking_lot::RwLock;
+use rustc_hash::FxHashMap;
 use tracing::{debug, error, info, warn};
 
 use crate::clickhouse::types::TableSchema;
@@ -64,7 +64,7 @@ impl Default for SchemaCacheConfig {
 /// Caches table schemas to avoid repeated queries to system.columns.
 /// Schemas are automatically refreshed after TTL expiry.
 pub struct SchemaCache {
-    schemas: RwLock<HashMap<String, CachedSchema>>,
+    schemas: RwLock<FxHashMap<String, CachedSchema>>,
     config: SchemaCacheConfig,
     ttl: Duration,
     /// Metrics
@@ -92,7 +92,7 @@ impl SchemaCache {
     /// Create a schema cache with full configuration
     pub fn with_config(config: SchemaCacheConfig) -> Self {
         Self {
-            schemas: RwLock::new(HashMap::new()),
+            schemas: RwLock::new(FxHashMap::default()),
             ttl: Duration::from_secs(config.ttl_secs),
             config,
             hits: AtomicU64::new(0),

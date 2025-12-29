@@ -1,0 +1,25 @@
+column,type,default,index_order,index_type,comment
+timestamp,timestamp,,,dimension,Time the event occurred REQUIRED
+timestamp_collector,timestamp,,,,Time the event was received by a HyperCollector
+timestamp_load,timestamp,now(),0.0,,Time the event was loaded into the engine or store REQUIRED
+timestamp_received,timestamp,,,,Time the event was accepted by the receiver
+timestamp_finalise,timestamp,,,,Time the event was finalised in the ingest pipeline
+timestamp_epochms,int64,,,,Epochms time the event occurred
+timestamp_collector_epochms,int64,,,,Epochms time the event was received by a HyperCollector
+timestamp_load_epochms,int64,,,,Epochms time the event was loaded into the engine or store
+timestamp_received_epochms,int64,,,,Epochms time the event was accepted by the receiver
+timestamp_finalise_epochms,int64,,,,Epochms time the event was finalised in the ingest pipeline
+event_hash,string_fast,,,,Unique hash of this event for reference and alerting REQUIRED
+logoriginal,text,,,,The original unparsed log line
+logjson,json,,,,The parsed log line as a JSON object
+org_id,string_fast_lowcardinality,,,,The unique alphanumeric ID of the source organisations
+tags.collector.host,string_fast_lowcardinality,,,,Host ip and info of the HyperCollector
+tags.collector.hostname,string_fast_lowcardinality,,,,Hostname of the HyperCollector
+tags.collector.source,string_fast_lowcardinality,,,,The transport level source
+tags.collector.timestamp,datetime,,,,The time the event was received by the HyperCollector
+tags.collector.timezone,string,,,,The timezone the source HyperCollector is placed
+tags.event.category,string_fast_lowcardinality,,,,Category of the event selects topic and ingestion routing
+tags.event.org_id,string_fast_lowcardinality,,,,Source organisation ID maps directly to org_id
+tags.event.site_id,string_fast_lowcardinality,,,,Optional site id within the source org_id
+tags.event.type,string_fast_lowcardinality,,,,Low level type of the message
+tags.event.error,string_fast_lowcardinality,,,,Any parsing or time errors are placed here
