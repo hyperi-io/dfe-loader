@@ -35,20 +35,7 @@
 
 ## Code TODOs (from source)
 
-### Critical Path
-
-- [ ] **DLQ Send** - `src/pipeline/orchestrator.rs:170`
-  - Currently just logs, needs actual DLQ producer integration
-
-### Auth (Medium Priority)
-
-- [ ] **OIDC Token Fetch** - `src/kafka/consumer.rs:100`
-  - Implement OAuth Bearer token refresh callback
-
-### Transform (Low Priority)
-
-- [ ] **Projection** - `src/transform/project.rs:5`
-  - Field projection/selection (stub, not currently used)
+None currently - all critical TODOs completed.
 
 ---
 
@@ -60,10 +47,16 @@
 - [ ] **simd-json integration** - sonic-rs benchmarks show it's already faster
 - [ ] **TLS Configuration** - Use when needed
 - [ ] **Memory Size Tracking** - Per-buffer memory accounting
+- [ ] **OIDC Token Fetch** - `src/kafka/consumer.rs:100` - OAuth Bearer token refresh callback (awaiting requirement)
 
 ---
 
 ## Completed
+
+### 2026-01-07: Code TODOs Cleanup
+
+- [x] DLQ Send integration (already implemented in orchestrator.rs:194-218)
+- [x] Field Projection - `Projector` struct with schema-based field filtering
 
 ### 2025-12-29: Transport Abstraction (hs-rustlib)
 
@@ -143,4 +136,4 @@
 
 ---
 
-**Last Updated:** 2025-12-29
+**Last Updated:** 2026-01-07
