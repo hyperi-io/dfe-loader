@@ -13,5 +13,6 @@ pub use arrow::{
 };
 pub use coerce::Coercer;
 pub use flatten::{flatten, flatten_value, flatten_value_owned, BatchFlattener, BatchFlattenStats};
+pub use project::{project, ProjectedData, Projector};
 pub use timestamp::{validate_timestamp, TimestampResult, TimestampValidator};
 pub use transformer::{TransformResult, Transformer};
