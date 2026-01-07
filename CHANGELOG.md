@@ -1,3 +1,10 @@
+# [1.1.0](https://github.com/hypersec-io/dfe-loader-clickhouse/compare/v1.0.0...v1.1.0) (2026-01-07)
+
+
+### Features
+
+* implement schema projection for field filtering ([e2ecb00](https://github.com/hypersec-io/dfe-loader-clickhouse/commit/e2ecb0005e793655cddce7d51a521817f5a0b567))
+
 # 1.0.0 (2026-01-07)
 
 
