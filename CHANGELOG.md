@@ -1,3 +1,10 @@
+## [1.2.1](https://github.com/hypersec-io/dfe-loader-clickhouse/compare/v1.2.0...v1.2.1) (2026-01-12)
+
+
+### Bug Fixes
+
+* preserve _org_id in sanitizer and improve RLS tests ([73b2788](https://github.com/hypersec-io/dfe-loader-clickhouse/commit/73b2788f7b15177a3c3941a4561a7009088c283a))
+
 # [1.2.0](https://github.com/hypersec-io/dfe-loader-clickhouse/compare/v1.1.0...v1.2.0) (2026-01-12)
 
 
