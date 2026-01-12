@@ -181,18 +181,24 @@ The destination tables have a minimal required schema. All other fields are dyna
 | `timestamp` | DateTime64(3) | - | **NO** | Event occurrence time (milliseconds) |
 | `timestamp_load` | DateTime64(3) | `now64(3)` | **NO** | Load time (ClickHouse DEFAULT) |
 | `_uuid` | UUID | `generateUUIDv7()` | **NO** | Unique event ID. UUIDv7 (time-ordered) |
+| `_org_id` | String | - | **NO** | Organisation ID for multi-tenancy and RLS |
 | `logoriginal` | String | - | YES | Original unparsed log line |
 | `logjson` | JSON | - | YES | Complete Kafka message as JSON type |
 | `_tags` | JSON | - | YES | Meta info + collector/agent info as JSON |
 
-### Routing Fields (NOT stored in destination)
+### Routing and Multi-Tenancy Fields
 
-| Field | Config Priority | Purpose |
-|-------|-----------------|---------|
-| `org_id` | `["org_id", "tags.event.org_id"]` | Sets **database** for insert |
-| `event_category` | `["event_category", "tags.event.category"]` | Sets **table** for insert |
+| Field | Config | Purpose |
+|-------|--------|---------|
+| `org_id` | `org_id_field` (default: `"org_id"`) | Extracted to `_org_id` field (stored in destination) |
+| Database routing | `db_fields` (default: empty) | Sets **database** for insert (shared schema by default) |
+| Table routing | `table_fields` | Sets **table** for insert |
 
-These are extracted pre-flatten for routing but **removed before insert** (not in destination schema).
+**Key Changes in v2:**
+- `org_id` is now **STORED** as `_org_id` in destination (required for row-level security)
+- Default behavior: All data goes to `common.{table}` regardless of org_id (shared schema)
+- Optional per-org routing via `routed_orgs` allowlist or `route_all_by_org = true`
+- Database and table routing fields are **removed before insert** (not in destination schema)
 
 ### Config: Tags Handling
 
@@ -225,11 +231,18 @@ drop_tags = false
    - Time-ordered (sortable), unique per event
    - Let ClickHouse generate via DEFAULT `generateUUIDv7()`
 
-4. **`logjson`** - **NEW**
+4. **`_org_id`** (NOT NULLABLE) - **NEW in v2**
+   - String field extracted from source data (configurable via `org_id_field`)
+   - Required for row-level security (RLS) in shared schema deployments
+   - Injected by Transformer during processing
+   - Used by ClickHouse row policies for data isolation
+   - See `reference/clickhouse_rls.md` for row policy setup
+
+5. **`logjson`** - **NEW**
    - Store complete original Kafka message as JSON
    - Capture before any transformation
 
-5. **`_tags`** - **CHANGED** (was `tags`)
+6. **`_tags`** - **CHANGED** (was `tags`)
    - Renamed to `_tags` (underscore prefix avoids collision)
    - Config-driven source field list (first match wins)
    - Optional: `drop_tags = true` to not store after routing extraction
@@ -261,20 +274,53 @@ _uuid UUID DEFAULT generateUUIDv7()
 
 Routing happens **PRE-flattening** using dot notation for nested field access.
 
+### Shared Schema (Default)
+
+**Default behavior:** All data goes to `common.{table}` regardless of org_id.
+
 ```rust
 // Config (from ENV/config cascade)
-db_fields: ["org_id", "tags.event.org_id"]          // First matching field = database
+db_fields: []                                       // Empty = shared schema (common db)
 table_fields: ["event_category", "tags.event.category"]  // First matching = table
-default_db: "common"                                // Fallback if no field found
-default_table: "common"                             // Fallback if no field found
+default_db: "common"                                // Used when db_fields is empty
+default_table: "events"                             // Fallback if no table field found
+org_id_field: Some("org_id")                        // Extract for _org_id field (RLS)
+routed_orgs: []                                     // Empty = all orgs use default_db
+route_all_by_org: false                             // false = shared schema
 ```
 
 **Example event:**
 ```json
-{"org_id": "acme", "event_category": "auth", "tags": {"event": {"org_id": "backup"}}}
+{"org_id": "acme", "event_category": "auth", "action": "login"}
 ```
 
-**Result:** `acme.auth` (org_id found at top level, event_category found first)
+**Result:** `common.events_auth` (shared schema, org_id extracted to `_org_id` field)
+
+### Per-Org Routing (Optional)
+
+Enable per-org databases via allowlist OR global switch:
+
+**Option 1 - Allowlist:** Only specific orgs get their own database
+```rust
+db_fields: ["org_id"]                               // Field to extract for database name
+routed_orgs: ["acme", "bigcorp"]                    // Only these orgs get org_id.table
+route_all_by_org: false                             // Allowlist mode
+default_db: "common"                                // Everyone else goes here
+```
+
+**Option 2 - Route All:** Every org gets its own database
+```rust
+db_fields: ["org_id"]                               // Field to extract for database name
+routed_orgs: []                                     // Not used when route_all_by_org = true
+route_all_by_org: true                              // All orgs get their own database
+default_db: "common"                                // Fallback if org_id missing
+```
+
+**Benefits of Shared Schema:**
+- Simpler infrastructure (one database instead of hundreds)
+- Easier cross-org analytics
+- Row-level security handles data isolation
+- Better resource utilization (shared buffer pools, caches)
 
 ---
 
@@ -365,6 +411,15 @@ Location: `crates/clickhouse-arrow/`
 - [x] Created `serialize/nested.rs` with NestedSerializer
 - [x] Wired up all serializers in serialize.rs and types.rs
 - [x] Integration test against ClickHouse 25.12
+
+### Row-Level Security (RLS) (2025-12-29)
+
+- [x] **_org_id field injection**: Transformer extracts org_id from source and injects as `_org_id`
+- [x] **Shared schema routing**: Default behavior routes all data to `common.{table}`
+- [x] **Optional per-org routing**: Via `routed_orgs` allowlist or `route_all_by_org = true`
+- [x] **ClickHouse RLS documentation**: `reference/clickhouse_rls.md` with row policy examples
+- [x] **Updated Common Header**: Added `_org_id` field to schema (NOT NULLABLE)
+- [x] **Integration tests**: 4 RLS tests verify org_id extraction and injection
 
 ### Resilience Features (2025-12-25)
 

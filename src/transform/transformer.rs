@@ -50,6 +50,9 @@ pub struct Transformer {
     remove_routing_fields: bool,
     routing_db_fields: Vec<String>,
     routing_table_fields: Vec<String>,
+
+    // Common Header v2: _org_id field injection
+    org_id_output: String,
 }
 
 impl Transformer {
@@ -81,6 +84,9 @@ impl Transformer {
             remove_routing_fields: metadata_config.remove_routing_fields,
             routing_db_fields: Vec::new(),
             routing_table_fields: Vec::new(),
+
+            // Common Header v2: _org_id field injection
+            org_id_output: "_org_id".to_string(),
         }
     }
 
@@ -101,7 +107,18 @@ impl Transformer {
     ///
     /// This is the primary entry point for Common Header v2 processing.
     /// The raw_payload is stored as `logjson` before any transformation.
-    pub fn transform_with_raw(&self, value: Value, raw_payload: &[u8]) -> Result<TransformResult> {
+    ///
+    /// ## Parameters
+    ///
+    /// - `value`: Parsed JSON object to transform
+    /// - `raw_payload`: Original raw bytes for logjson capture
+    /// - `org_id`: Optional org_id value for _org_id field (RLS)
+    pub fn transform_with_raw(
+        &self,
+        value: Value,
+        raw_payload: &[u8],
+        org_id: Option<&str>,
+    ) -> Result<TransformResult> {
         // Cache current time once per message to avoid multiple syscalls
         let now = Utc::now();
         // OPTIMIZATION: Lazy timestamp formatting - only format if we need to insert
@@ -196,12 +213,17 @@ impl Transformer {
             data.insert(self.tags_output.clone(), tags);
         }
 
-        // Step 7: Remove routing fields (they're only used for db.table routing)
+        // Step 7: Inject _org_id for row-level security (RLS)
+        if let Some(org) = org_id {
+            data.insert(self.org_id_output.clone(), Value::String(org.to_string()));
+        }
+
+        // Step 8: Remove routing fields (they're only used for db.table routing)
         if self.remove_routing_fields {
             self.remove_routing_fields_from(&mut data);
         }
 
-        // Step 8: Sanitize field names
+        // Step 9: Sanitize field names
         let sanitized = self.sanitize_fields(data);
 
         Ok(TransformResult {
@@ -214,8 +236,8 @@ impl Transformer {
     ///
     /// Legacy method - use transform_with_raw for Common Header v2 features.
     pub fn transform(&self, value: Value) -> Result<TransformResult> {
-        // For backward compatibility, call transform_with_raw with empty payload
-        self.transform_with_raw(value, &[])
+        // For backward compatibility, call transform_with_raw with empty payload and no org_id
+        self.transform_with_raw(value, &[], None)
     }
 
     /// Extract tags from the first matching field in tags_fields
@@ -362,7 +384,7 @@ impl Transformer {
         let value: Value = sonic_rs::from_slice(json)
             .map_err(|e| crate::Error::Json(format!("Parse error: {}", e)))?;
 
-        let result = self.transform_with_raw(value, json)?;
+        let result = self.transform_with_raw(value, json, None)?;
 
         serde_json::to_vec(&Value::Object(result.data))
             .map_err(|e| crate::Error::Json(format!("Serialize error: {}", e)))
@@ -399,6 +421,8 @@ impl Default for Transformer {
                 "event_category".to_string(),
                 "tags.event_category".to_string(),
             ],
+
+            org_id_output: "_org_id".to_string(),
         }
     }
 }
@@ -478,7 +502,7 @@ mod tests {
         let raw = br#"{"event": "login", "tags": {"source": "api", "level": "info"}}"#;
         let value: Value = serde_json::from_slice(raw).unwrap();
 
-        let result = transformer.transform_with_raw(value, raw).unwrap();
+        let result = transformer.transform_with_raw(value, raw, None).unwrap();
 
         // _tags should contain the extracted tags object
         assert!(result.data.contains_key("_tags"));
@@ -492,7 +516,7 @@ mod tests {
         let raw = br#"{"event": "login", "user_id": 123}"#;
         let value: Value = serde_json::from_slice(raw).unwrap();
 
-        let result = transformer.transform_with_raw(value, raw).unwrap();
+        let result = transformer.transform_with_raw(value, raw, None).unwrap();
 
         // logjson should contain the raw payload
         assert!(result.data.contains_key("logjson"));
@@ -504,7 +528,7 @@ mod tests {
         let raw = br#"{"org_id": "acme", "event_category": "auth", "data": "test"}"#;
         let value: Value = serde_json::from_slice(raw).unwrap();
 
-        let result = transformer.transform_with_raw(value, raw).unwrap();
+        let result = transformer.transform_with_raw(value, raw, None).unwrap();
 
         // Routing fields should be removed
         assert!(!result.data.contains_key("org_id"));
@@ -519,7 +543,7 @@ mod tests {
         let raw = br#"{"event": "test", "tags": {"level": "info"}}"#;
         let value: Value = serde_json::from_slice(raw).unwrap();
 
-        let result = transformer.transform_with_raw(value, raw).unwrap();
+        let result = transformer.transform_with_raw(value, raw, None).unwrap();
 
         // _tags should not be trimmed to "tags" by underscore sanitization
         assert!(result.data.contains_key("_tags"));
@@ -534,7 +558,7 @@ mod tests {
         let raw = br#"{"event": "login", "tags": {"source": "api"}}"#;
         let value: Value = serde_json::from_slice(raw).unwrap();
 
-        let result = transformer.transform_with_raw(value, raw).unwrap();
+        let result = transformer.transform_with_raw(value, raw, None).unwrap();
 
         // _tags should not be present when drop_tags is true
         assert!(!result.data.contains_key("_tags"));

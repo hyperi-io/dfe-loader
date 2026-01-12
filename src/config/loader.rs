@@ -329,17 +329,35 @@ impl Default for PayloadConfig {
 pub struct RoutingConfig {
     /// Fields to check for database name (first match wins, dot notation for nested)
     /// Example: ["org_id", "tenant.id"]
+    /// NOTE: Leave empty to always use default_db (recommended for shared schema)
     pub db_fields: Vec<String>,
 
     /// Fields to check for table name (first match wins, dot notation for nested)
     /// Example: ["event_category", "tags.event_category"]
     pub table_fields: Vec<String>,
 
-    /// Default database if no db_field matches
+    /// Default database if no db_field matches (or db_fields is empty)
+    /// Default: "common" (shared multi-tenant schema)
     pub default_db: String,
 
     /// Default table if no table_field matches
     pub default_table: String,
+
+    /// Field to extract for _org_id column (stored in data for RLS)
+    /// Example: "org_id" or "tenant.id"
+    /// This field is extracted and stored as _org_id, regardless of routing behaviour
+    pub org_id_field: Option<String>,
+
+    /// Organisations that get their own database (allowlist)
+    /// Example: ["acme", "bigcorp"] → routes to acme.*, bigcorp.*
+    /// Empty list = all orgs go to default_db (recommended)
+    pub routed_orgs: Vec<String>,
+
+    /// Route ALL organisations to their own databases
+    /// If true: org_id always determines database (ignores routed_orgs)
+    /// If false: only routed_orgs get own database, others use default_db
+    /// Default: false (shared schema)
+    pub route_all_by_org: bool,
 
     /// Legacy: category to table mapping (for backwards compatibility)
     pub category_to_table: HashMap<String, String>,
@@ -354,13 +372,19 @@ pub struct RoutingConfig {
 impl Default for RoutingConfig {
     fn default() -> Self {
         Self {
-            db_fields: vec!["org_id".to_string()],
+            // NEW default: db_fields empty = shared schema (all to common.*)
+            db_fields: vec![],
             table_fields: vec![
                 "event_category".to_string(),
                 "tags.event_category".to_string(),
             ],
             default_db: "common".to_string(),
             default_table: "common".to_string(),
+            // Extract org_id for _org_id column (RLS)
+            org_id_field: Some("org_id".to_string()),
+            // No per-org routing by default (shared schema)
+            routed_orgs: vec![],
+            route_all_by_org: false,
             category_to_table: HashMap::new(),
             mapping_file: None,
             dlq: DlqConfig::default(),
