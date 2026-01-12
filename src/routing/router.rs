@@ -13,7 +13,7 @@
 
 use std::borrow::Cow;
 
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use serde_json::Value;
 
 use crate::config::RoutingConfig;
@@ -35,15 +35,35 @@ pub enum RouteResult {
 ///
 /// Extracts database and table names from configured field priority lists.
 /// Falls back to configurable defaults if no fields match.
+///
+/// ## Shared Schema (Default)
+///
+/// By default, all organisations share the common database:
+/// - `db_fields` is empty → always use `default_db`
+/// - All events go to `common.{table}`
+/// - `org_id` extracted to `_org_id` field for row-level security
+///
+/// ## Per-Org Routing (Optional)
+///
+/// Enable per-org databases via:
+/// - `routed_orgs`: allowlist of org_ids that get own database
+/// - `route_all_by_org`: route ALL orgs to own database
 pub struct Router {
     /// Fields to check for database name (first match wins)
+    /// Empty = always use default_db (shared schema)
     db_fields: Vec<String>,
     /// Fields to check for table name (first match wins)
     table_fields: Vec<String>,
-    /// Default database if no db_field matches
+    /// Default database if no db_field matches (or db_fields empty)
     default_db: String,
     /// Default table if no table_field matches
     default_table: String,
+    /// Field to extract for _org_id column (for RLS)
+    org_id_field: Option<String>,
+    /// Orgs that get their own database (allowlist)
+    routed_orgs: FxHashSet<String>,
+    /// Route all orgs to own databases (overrides routed_orgs)
+    route_all_by_org: bool,
     /// Legacy: category to table mapping (for backwards compatibility)
     category_to_table: FxHashMap<String, String>,
     /// Whether DLQ is enabled
@@ -59,11 +79,20 @@ impl Router {
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
 
+        // Convert routed_orgs Vec to FxHashSet for O(1) lookups
+        let routed_orgs: FxHashSet<String> = config.routed_orgs
+            .iter()
+            .cloned()
+            .collect();
+
         Self {
             db_fields: config.db_fields.clone(),
             table_fields: config.table_fields.clone(),
             default_db: config.default_db.clone(),
             default_table: config.default_table.clone(),
+            org_id_field: config.org_id_field.clone(),
+            routed_orgs,
+            route_all_by_org: config.route_all_by_org,
             category_to_table,
             dlq_enabled: config.dlq.enabled,
         }
@@ -88,10 +117,50 @@ impl Router {
     }
 
     /// Extract the database name from the payload
+    ///
+    /// Logic:
+    /// 1. If route_all_by_org=true: extract from org_id_field → use as database
+    /// 2. If db_fields empty: use default_db (shared schema)
+    /// 3. Extract from db_fields, check if in routed_orgs allowlist
+    /// 4. Fall back to default_db
     #[inline]
     pub fn extract_db(&self, payload: &[u8]) -> String {
-        self.extract_first_match(payload, &self.db_fields)
-            .unwrap_or_else(|| self.default_db.clone())
+        // Route all by org: extract org_id and use as database
+        if self.route_all_by_org {
+            if let Some(ref field) = self.org_id_field {
+                if let Some(org_id) = self.extract_single_field(payload, field) {
+                    return org_id;
+                }
+            }
+            // No org_id found, fall back to default
+            return self.default_db.clone();
+        }
+
+        // db_fields empty = always use default (shared schema)
+        if self.db_fields.is_empty() {
+            return self.default_db.clone();
+        }
+
+        // Extract from db_fields
+        if let Some(org_id) = self.extract_first_match(payload, &self.db_fields) {
+            // Check if org_id is in routed_orgs allowlist
+            if self.routed_orgs.contains(&org_id) {
+                return org_id;
+            }
+        }
+
+        // Fall back to default database
+        self.default_db.clone()
+    }
+
+    /// Extract a single field from payload (helper for org_id_field)
+    #[inline]
+    fn extract_single_field(&self, payload: &[u8], field: &str) -> Option<String> {
+        if field.contains('.') {
+            extract_nested_field_json(payload, field)
+        } else {
+            extract_field_json(payload, field)
+        }
     }
 
     /// Extract the table name from the payload
@@ -141,10 +210,46 @@ impl Router {
     ///
     /// Returns Cow::Borrowed for non-escaped strings (zero-copy from payload),
     /// Cow::Owned for escaped strings or when using default.
+    /// Uses same logic as extract_db() for consistency.
     #[inline]
     fn extract_db_cow<'a>(&'a self, payload: &'a [u8]) -> Cow<'a, str> {
-        self.extract_first_match_cow(payload, &self.db_fields)
-            .unwrap_or_else(|| Cow::Borrowed(&self.default_db))
+        // Route all by org: extract org_id and use as database
+        if self.route_all_by_org {
+            if let Some(ref field) = self.org_id_field {
+                if let Some(org_id_cow) = self.extract_single_field_cow(payload, field) {
+                    return org_id_cow;
+                }
+            }
+            // No org_id found, fall back to default
+            return Cow::Borrowed(&self.default_db);
+        }
+
+        // db_fields empty = always use default (shared schema)
+        if self.db_fields.is_empty() {
+            return Cow::Borrowed(&self.default_db);
+        }
+
+        // Extract from db_fields
+        if let Some(org_id_cow) = self.extract_first_match_cow(payload, &self.db_fields) {
+            let org_id_str = org_id_cow.as_ref();
+            // Check if org_id is in routed_orgs allowlist
+            if self.routed_orgs.contains(org_id_str) {
+                return org_id_cow;
+            }
+        }
+
+        // Fall back to default database
+        Cow::Borrowed(&self.default_db)
+    }
+
+    /// Extract a single field with zero-copy (helper for org_id_field)
+    #[inline]
+    fn extract_single_field_cow<'a>(&self, payload: &'a [u8], field: &str) -> Option<Cow<'a, str>> {
+        if field.contains('.') {
+            extract_nested_field_json_cow(payload, field)
+        } else {
+            extract_field_json_cow(payload, field)
+        }
     }
 
     /// Zero-copy extract table from raw payload.
@@ -222,11 +327,37 @@ impl Router {
     /// Extract db from an already-parsed Value (avoids re-parsing)
     ///
     /// Returns borrowed reference when using default, owned when from payload.
+    /// Uses same logic as extract_db() for consistency.
     #[inline]
     fn extract_db_from_value<'a>(&'a self, value: &'a Value) -> Cow<'a, str> {
-        self.extract_first_match_from_value(value, &self.db_fields)
-            .map(Cow::Borrowed)
-            .unwrap_or_else(|| Cow::Borrowed(&self.default_db))
+        // Route all by org: extract org_id and use as database
+        if self.route_all_by_org {
+            if let Some(ref field) = self.org_id_field {
+                if let Some(org_id) = self.get_nested_field(value, field) {
+                    if let Some(s) = org_id.as_str() {
+                        return Cow::Borrowed(s);
+                    }
+                }
+            }
+            // No org_id found, fall back to default
+            return Cow::Borrowed(&self.default_db);
+        }
+
+        // db_fields empty = always use default (shared schema)
+        if self.db_fields.is_empty() {
+            return Cow::Borrowed(&self.default_db);
+        }
+
+        // Extract from db_fields
+        if let Some(org_id) = self.extract_first_match_from_value(value, &self.db_fields) {
+            // Check if org_id is in routed_orgs allowlist
+            if self.routed_orgs.contains(org_id) {
+                return Cow::Borrowed(org_id);
+            }
+        }
+
+        // Fall back to default database
+        Cow::Borrowed(&self.default_db)
     }
 
     /// Extract table from an already-parsed Value (avoids re-parsing)
@@ -288,6 +419,31 @@ impl Router {
 
         RouteResult::Table(build_db_table_string(&self.default_db, table))
     }
+
+    /// Extract org_id for _org_id field (from parsed Value)
+    ///
+    /// Used by transformer to populate _org_id column for row-level security.
+    /// Returns None if org_id_field not configured or field not found.
+    #[inline]
+    pub fn extract_org_id_from_value<'a>(&self, value: &'a Value) -> Option<&'a str> {
+        let field = self.org_id_field.as_ref()?;
+        self.get_nested_field(value, field)?.as_str()
+    }
+
+    /// Extract org_id for _org_id field (from raw bytes)
+    ///
+    /// Used by transformer to populate _org_id column for row-level security.
+    /// Returns None if org_id_field not configured or field not found.
+    #[inline]
+    pub fn extract_org_id(&self, payload: &[u8]) -> Option<String> {
+        let field = self.org_id_field.as_ref()?;
+        self.extract_single_field(payload, field)
+    }
+
+    /// Get the configured org_id field name (if any)
+    pub fn org_id_field(&self) -> Option<&str> {
+        self.org_id_field.as_deref()
+    }
 }
 
 /// Build "db.table" string efficiently with pre-allocated capacity.
@@ -305,13 +461,19 @@ fn build_db_table_string(db: &str, table: &str) -> String {
 impl Default for Router {
     fn default() -> Self {
         Self {
-            db_fields: vec!["org_id".to_string()],
+            // NEW default: db_fields empty = shared schema (all to common.*)
+            db_fields: vec![],
             table_fields: vec![
                 "event_category".to_string(),
                 "tags.event_category".to_string(),
             ],
             default_db: "common".to_string(),
             default_table: "common".to_string(),
+            // Extract org_id for _org_id column (RLS)
+            org_id_field: Some("org_id".to_string()),
+            // No per-org routing by default (shared schema)
+            routed_orgs: FxHashSet::default(),
+            route_all_by_org: false,
             category_to_table: FxHashMap::default(),
             dlq_enabled: true,
         }
@@ -336,6 +498,9 @@ mod tests {
             ],
             default_db: "common".to_string(),
             default_table: "common".to_string(),
+            org_id_field: Some("org_id".to_string()),
+            routed_orgs: vec![], // Old behaviour: all orgs get own DB (use route_all_by_org)
+            route_all_by_org: true, // Simulate old default behaviour for these tests
             category_to_table,
             mapping_file: None,
             dlq: crate::config::DlqConfig {
@@ -418,13 +583,22 @@ mod tests {
 
     #[test]
     fn test_extract_db() {
+        // NEW default: shared schema (db_fields empty)
         let router = Router::default();
 
         let p1 = br#"{"org_id": "acme", "event_category": "auth"}"#;
-        assert_eq!(router.extract_db(p1), "acme".to_string());
+        assert_eq!(router.extract_db(p1), "common".to_string()); // NEW: goes to common
 
         let p2 = br#"{"event_category": "auth"}"#;
         assert_eq!(router.extract_db(p2), "common".to_string());
+
+        // OLD behaviour: route_all_by_org = true
+        let mut config = test_config();
+        config.route_all_by_org = true;
+        let router_old = Router::new(&config);
+
+        assert_eq!(router_old.extract_db(p1), "acme".to_string());
+        assert_eq!(router_old.extract_db(p2), "common".to_string()); // No org_id
     }
 
     #[test]
@@ -447,7 +621,9 @@ mod tests {
     #[test]
     fn test_custom_db_fields() {
         let mut config = test_config();
+        config.route_all_by_org = false; // Disable route_all_by_org for this test
         config.db_fields = vec!["tenant_id".to_string(), "org_id".to_string()];
+        config.routed_orgs = vec!["tenant1".to_string(), "acme".to_string()]; // Allowlist
 
         let router = Router::new(&config);
 
@@ -464,12 +640,21 @@ mod tests {
             router.route(p2),
             RouteResult::Table("acme.events_auth".to_string())
         );
+
+        // Not in allowlist → common
+        let p3 = br#"{"org_id": "other", "event_category": "auth"}"#;
+        assert_eq!(
+            router.route(p3),
+            RouteResult::Table("common.events_auth".to_string())
+        );
     }
 
     #[test]
     fn test_nested_db_field() {
         let mut config = test_config();
+        config.route_all_by_org = false; // Disable route_all_by_org
         config.db_fields = vec!["metadata.org_id".to_string(), "org_id".to_string()];
+        config.routed_orgs = vec!["nested_org".to_string()]; // Allowlist
 
         let router = Router::new(&config);
 
@@ -598,5 +783,91 @@ mod tests {
 
         // Should still route correctly (value is "acme\ncorp" with actual newline)
         assert!(matches!(result, RouteResult::Table(ref s) if s.contains("auth")));
+    }
+
+    #[test]
+    fn test_shared_schema_default() {
+        // Default behaviour: all to common database
+        let router = Router::default();
+
+        let p1 = br#"{"org_id": "acme", "event_category": "auth"}"#;
+        let p2 = br#"{"org_id": "bigcorp", "event_category": "api"}"#;
+        let p3 = br#"{"event_category": "network"}"#;
+
+        // All go to common.*
+        assert_eq!(router.route(p1), RouteResult::Table("common.auth".to_string()));
+        assert_eq!(router.route(p2), RouteResult::Table("common.api".to_string()));
+        assert_eq!(router.route(p3), RouteResult::Table("common.network".to_string()));
+    }
+
+    #[test]
+    fn test_routed_orgs_allowlist() {
+        // Allowlist: only specific orgs get own database
+        let mut config = RoutingConfig::default();
+        config.table_fields = vec!["event_category".to_string()];
+        config.db_fields = vec!["org_id".to_string()];
+        config.routed_orgs = vec!["acme".to_string(), "bigcorp".to_string()];
+        config.route_all_by_org = false;
+
+        let router = Router::new(&config);
+
+        let p1 = br#"{"org_id": "acme", "event_category": "auth"}"#;
+        let p2 = br#"{"org_id": "bigcorp", "event_category": "api"}"#;
+        let p3 = br#"{"org_id": "other", "event_category": "network"}"#;
+
+        // acme and bigcorp get own DB
+        assert_eq!(router.route(p1), RouteResult::Table("acme.auth".to_string()));
+        assert_eq!(router.route(p2), RouteResult::Table("bigcorp.api".to_string()));
+
+        // other goes to common
+        assert_eq!(router.route(p3), RouteResult::Table("common.network".to_string()));
+    }
+
+    #[test]
+    fn test_route_all_by_org() {
+        // Route ALL orgs to own databases
+        let mut config = RoutingConfig::default();
+        config.table_fields = vec!["event_category".to_string()];
+        config.org_id_field = Some("org_id".to_string());
+        config.route_all_by_org = true;
+
+        let router = Router::new(&config);
+
+        let p1 = br#"{"org_id": "acme", "event_category": "auth"}"#;
+        let p2 = br#"{"org_id": "customer123", "event_category": "api"}"#;
+
+        // Each org gets own database
+        assert_eq!(router.route(p1), RouteResult::Table("acme.auth".to_string()));
+        assert_eq!(router.route(p2), RouteResult::Table("customer123.api".to_string()));
+    }
+
+    #[test]
+    fn test_extract_org_id_from_value() {
+        let router = Router::default();
+
+        let value1 = serde_json::json!({"org_id": "acme", "event_category": "auth"});
+        assert_eq!(router.extract_org_id_from_value(&value1), Some("acme"));
+
+        let value2 = serde_json::json!({"event_category": "auth"});
+        assert_eq!(router.extract_org_id_from_value(&value2), None);
+
+        // Nested org_id
+        let mut config = RoutingConfig::default();
+        config.org_id_field = Some("tenant.id".to_string());
+        let router2 = Router::new(&config);
+
+        let value3 = serde_json::json!({"tenant": {"id": "acme"}, "event_category": "auth"});
+        assert_eq!(router2.extract_org_id_from_value(&value3), Some("acme"));
+    }
+
+    #[test]
+    fn test_extract_org_id_bytes() {
+        let router = Router::default();
+
+        let p1 = br#"{"org_id": "acme", "event_category": "auth"}"#;
+        assert_eq!(router.extract_org_id(p1), Some("acme".to_string()));
+
+        let p2 = br#"{"event_category": "auth"}"#;
+        assert_eq!(router.extract_org_id(p2), None);
     }
 }

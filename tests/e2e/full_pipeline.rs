@@ -84,6 +84,9 @@ async fn test_full_pipeline_e2e() {
         default_table: table_name.clone(),
         category_to_table: Default::default(),
         mapping_file: None,
+        org_id_field: Some("org_id".to_string()),
+        routed_orgs: vec![],
+        route_all_by_org: true,
         dlq: DlqConfig::default(),
     };
 
@@ -251,6 +254,9 @@ async fn test_pipeline_multi_table_routing() {
         .into_iter()
         .collect(),
         mapping_file: None,
+        org_id_field: Some("org_id".to_string()),
+        routed_orgs: vec![],
+        route_all_by_org: true,
         dlq: DlqConfig::default(),
     };
 
@@ -364,6 +370,9 @@ async fn test_pipeline_with_flattening() {
         default_table: table_name.clone(),
         category_to_table: Default::default(),
         mapping_file: None,
+        org_id_field: Some("org_id".to_string()),
+        routed_orgs: vec![],
+        route_all_by_org: true,
         dlq: DlqConfig::default(),
     };
 
@@ -520,6 +529,9 @@ async fn test_pipeline_dlq_routing() {
         default_table: "".to_string(),
         category_to_table: Default::default(),
         mapping_file: None,
+        org_id_field: Some("org_id".to_string()),
+        routed_orgs: vec![],
+        route_all_by_org: true,
         dlq: DlqConfig::default(),
     };
 

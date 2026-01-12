@@ -334,9 +334,17 @@ impl Orchestrator {
             }
         };
 
+        // Step 3.5: Extract org_id for _org_id field (Common Header v2 - RLS)
+        // Clone the str to avoid borrowing value (which we need to move into transform)
+        let org_id_owned = router.extract_org_id_from_value(&value).map(|s| s.to_string());
+
         // Step 4: Transform (flatten, timestamp validation, _tags extraction, logjson capture, routing field removal)
-        // Pass raw payload for logjson capture (Common Header v2)
-        let transform_result = transformer.transform_with_raw(value, &msg.payload)?;
+        // Pass raw payload for logjson capture and org_id for _org_id field (Common Header v2)
+        let transform_result = transformer.transform_with_raw(
+            value,
+            &msg.payload,
+            org_id_owned.as_deref(),
+        )?;
 
         // Step 5: Push to per-table buffer
         // Each table has its own ArrowBatchBuilder for schema uniformity.
