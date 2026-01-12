@@ -326,7 +326,7 @@ impl Transformer {
     #[inline]
     fn sanitize_key_owned(&self, key: String) -> String {
         // Preserve system fields that start with underscore
-        if key == self.tags_output || key == self.logjson_output {
+        if key == self.tags_output || key == self.logjson_output || key == self.org_id_output {
             return key;
         }
 
