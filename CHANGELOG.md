@@ -1,3 +1,10 @@
+# [1.2.0](https://github.com/hypersec-io/dfe-loader-clickhouse/compare/v1.1.0...v1.2.0) (2026-01-12)
+
+
+### Features
+
+* add _org_id field and shared schema routing for RLS ([4c232c0](https://github.com/hypersec-io/dfe-loader-clickhouse/commit/4c232c0ccc94ef6fbfbf9b684065b18bd1fd6e5b))
+
 # [1.1.0](https://github.com/hypersec-io/dfe-loader-clickhouse/compare/v1.0.0...v1.1.0) (2026-01-07)
 
 
