@@ -148,6 +148,25 @@ impl ArrowClickHouseClient {
             .map_err(|e| crate::Error::ClickHouse(format!("Query failed: {}", e)))
     }
 
+    /// Execute a SELECT query and return Arrow RecordBatches
+    pub async fn select(&self, sql: &str) -> Result<Vec<RecordBatch>> {
+        use futures::TryStreamExt;
+
+        debug!(sql = %sql, "Executing SELECT query via Arrow client");
+        let response = self.client
+            .query(sql, None)
+            .await
+            .map_err(|e| crate::Error::ClickHouse(format!("SELECT query failed: {}", e)))?;
+
+        // Collect all batches from the response stream
+        let batches: Vec<RecordBatch> = response
+            .try_collect()
+            .await
+            .map_err(|e| crate::Error::ClickHouse(format!("Failed to collect query results: {}", e)))?;
+
+        Ok(batches)
+    }
+
     /// Check if a table exists by trying to fetch its schema
     pub async fn table_exists(&self, table: &str) -> Result<bool> {
         match self.fetch_schema(table).await {

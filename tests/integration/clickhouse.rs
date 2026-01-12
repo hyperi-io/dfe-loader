@@ -171,6 +171,15 @@ async fn test_clickhouse_insert_arrow() {
     assert!(result.is_ok(), "Insert failed: {:?}", result.err());
     eprintln!("✓ Inserted 2 rows via Arrow in {:?}", elapsed);
 
+    // Query back to verify data was inserted correctly
+    let count_sql = format!("SELECT COUNT(*) as count FROM {}", table_name);
+    let count_result = client.select(&count_sql).await.expect("Count query failed");
+    assert!(!count_result.is_empty(), "No batches returned from count query");
+    let count_batch = &count_result[0];
+    let count_col = count_batch.column(0).as_any().downcast_ref::<UInt64Array>().expect("Count should be UInt64");
+    assert_eq!(count_col.value(0), 2, "Should have 2 rows after first insert");
+    eprintln!("✓ Query verification: confirmed 2 rows in table");
+
     // Insert larger batch (1000 rows)
     let categories_list = ["auth", "api", "web", "mobile"];
     let ids: Vec<u64> = (0..1000).collect();
@@ -195,6 +204,14 @@ async fn test_clickhouse_insert_arrow() {
     let count = result.unwrap();
     eprintln!("✓ Inserted {} rows via Arrow in {:?} ({:.0} rows/sec)", count, elapsed, count as f64 / elapsed.as_secs_f64());
 
+    // Query back to verify total row count
+    let count_sql = format!("SELECT COUNT(*) as count FROM {}", table_name);
+    let count_result = client.select(&count_sql).await.expect("Count query failed");
+    let count_batch = &count_result[0];
+    let count_col = count_batch.column(0).as_any().downcast_ref::<UInt64Array>().expect("Count should be UInt64");
+    assert_eq!(count_col.value(0), 1002, "Should have 1002 rows total (2 + 1000)");
+    eprintln!("✓ Query verification: confirmed 1002 rows total");
+
     // Insert even larger batch (5000 rows)
     let categories5 = ["auth", "api", "web", "mobile", "backend"];
     let ids: Vec<u64> = (1000..6000).collect();
@@ -218,6 +235,21 @@ async fn test_clickhouse_insert_arrow() {
     assert!(result.is_ok(), "Large batch insert failed: {:?}", result.err());
     let count = result.unwrap();
     eprintln!("✓ Inserted {} rows via Arrow in {:?} ({:.0} rows/sec)", count, elapsed, count as f64 / elapsed.as_secs_f64());
+
+    // Query back to verify final row count and data integrity
+    let count_sql = format!("SELECT COUNT(*) as count FROM {}", table_name);
+    let count_result = client.select(&count_sql).await.expect("Count query failed");
+    let count_batch = &count_result[0];
+    let count_col = count_batch.column(0).as_any().downcast_ref::<UInt64Array>().expect("Count should be UInt64");
+    assert_eq!(count_col.value(0), 6002, "Should have 6002 rows total (2 + 1000 + 5000)");
+    eprintln!("✓ Query verification: confirmed 6002 rows total");
+
+    // Verify specific data by category
+    let category_sql = format!("SELECT category, COUNT(*) as count FROM {} GROUP BY category ORDER BY category", table_name);
+    let category_result = client.select(&category_sql).await.expect("Category query failed");
+    let category_batch = &category_result[0];
+    assert!(category_batch.num_rows() >= 4, "Should have at least 4 categories");
+    eprintln!("✓ Query verification: confirmed data can be queried by category");
 
     // Cleanup
     let start = std::time::Instant::now();

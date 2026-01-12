@@ -436,5 +436,29 @@ async fn test_realistic_event_table() {
         count as f64 / elapsed.as_secs_f64()
     );
 
+    // Query back to verify row count
+    let count_sql = format!("SELECT COUNT(*) as count FROM {}", table_name);
+    let count_result = client.select(&count_sql).await.expect("Count query failed");
+    let count_batch = &count_result[0];
+    let count_col = count_batch.column(0).as_any().downcast_ref::<UInt64Array>().expect("Count should be UInt64");
+    assert_eq!(count_col.value(0), row_count as u64, "Should have {} rows", row_count);
+    eprintln!("✓ Query verification: confirmed {} rows", row_count);
+
+    // Verify org_id distribution
+    let org_sql = format!("SELECT org_id, COUNT(*) as count FROM {} GROUP BY org_id ORDER BY org_id", table_name);
+    let org_result = client.select(&org_sql).await.expect("Org query failed");
+    let org_batch = &org_result[0];
+    assert_eq!(org_batch.num_rows(), orgs.len(), "Should have {} distinct orgs", orgs.len());
+    eprintln!("✓ Query verification: confirmed {} distinct orgs", orgs.len());
+
+    // Verify nullable field handling
+    let null_sql = format!("SELECT COUNT(*) as count FROM {} WHERE user_id IS NULL", table_name);
+    let null_result = client.select(&null_sql).await.expect("Null query failed");
+    let null_batch = &null_result[0];
+    let null_col = null_batch.column(0).as_any().downcast_ref::<UInt64Array>().expect("Count should be UInt64");
+    let expected_nulls = (row_count / 10) as u64;
+    assert_eq!(null_col.value(0), expected_nulls, "Should have {} NULL user_ids", expected_nulls);
+    eprintln!("✓ Query verification: confirmed {} NULL user_ids", expected_nulls);
+
     drop_test_table(&client, &table_name).await;
 }

@@ -1,5 +1,8 @@
 //! Shared test utilities and fixtures
 
+pub mod containers;
+pub mod metrics;
+
 use std::env;
 use std::sync::Arc;
 use std::time::Duration;
@@ -325,4 +328,172 @@ pub async fn drop_test_table(client: &ArrowClickHouseClient, table_name: &str) {
     let _ = client
         .query(&format!("DROP TABLE IF EXISTS {}", table_name))
         .await;
+}
+
+/// Execute query and return row count from a table
+///
+/// # Arguments
+/// * `client` - ClickHouse client
+/// * `table` - Table name (can include database: "db.table")
+/// * `where_clause` - Optional WHERE condition (without "WHERE" keyword)
+///
+/// # Returns
+/// Number of rows matching the query
+pub async fn query_count(
+    client: &ArrowClickHouseClient,
+    table: &str,
+    where_clause: Option<&str>,
+) -> Result<usize, String> {
+    let sql = match where_clause {
+        Some(w) => format!("SELECT COUNT(*) as count FROM {} WHERE {}", table, w),
+        None => format!("SELECT COUNT(*) as count FROM {}", table),
+    };
+
+    let batch = client
+        .select(&sql)
+        .await
+        .map_err(|e| format!("Query failed: {}", e))?;
+
+    if batch.is_empty() {
+        return Ok(0);
+    }
+
+    // Extract count from first row of first batch
+    let first_batch = &batch[0];
+    if first_batch.num_rows() == 0 {
+        return Ok(0);
+    }
+
+    let count_col = first_batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<UInt64Array>()
+        .ok_or_else(|| "COUNT(*) did not return UInt64".to_string())?;
+
+    Ok(count_col.value(0) as usize)
+}
+
+/// Execute query and return first row as HashMap<String, String>
+///
+/// All values are converted to strings for simplicity in test assertions.
+///
+/// # Returns
+/// Some(HashMap) if rows exist, None if no rows
+pub async fn query_one(
+    client: &ArrowClickHouseClient,
+    sql: &str,
+) -> Result<Option<std::collections::HashMap<String, String>>, String> {
+    use std::collections::HashMap;
+
+    let batch = client
+        .select(sql)
+        .await
+        .map_err(|e| format!("Query failed: {}", e))?;
+
+    if batch.is_empty() {
+        return Ok(None);
+    }
+
+    let first_batch = &batch[0];
+    if first_batch.num_rows() == 0 {
+        return Ok(None);
+    }
+
+    let mut row = HashMap::new();
+    let schema = first_batch.schema();
+
+    for (col_idx, field) in schema.fields().iter().enumerate() {
+        let col_name = field.name().clone();
+        let array = first_batch.column(col_idx);
+
+        // Convert first value to string
+        let value_str = match array.data_type() {
+            DataType::Utf8 => {
+                if let Some(arr) = array.as_any().downcast_ref::<StringArray>() {
+                    arr.value(0).to_string()
+                } else {
+                    "".to_string()
+                }
+            }
+            DataType::UInt64 => {
+                if let Some(arr) = array.as_any().downcast_ref::<UInt64Array>() {
+                    arr.value(0).to_string()
+                } else {
+                    "".to_string()
+                }
+            }
+            DataType::Int64 => {
+                if let Some(arr) = array.as_any().downcast_ref::<Int64Array>() {
+                    arr.value(0).to_string()
+                } else {
+                    "".to_string()
+                }
+            }
+            DataType::Float64 => {
+                if let Some(arr) = array.as_any().downcast_ref::<Float64Array>() {
+                    arr.value(0).to_string()
+                } else {
+                    "".to_string()
+                }
+            }
+            DataType::Timestamp(TimeUnit::Millisecond, _) => {
+                if let Some(arr) = array.as_any().downcast_ref::<TimestampMillisecondArray>() {
+                    arr.value(0).to_string()
+                } else {
+                    "".to_string()
+                }
+            }
+            _ => {
+                // For other types, use Debug formatting
+                format!("{:?}", array)
+            }
+        };
+
+        row.insert(col_name, value_str);
+    }
+
+    Ok(Some(row))
+}
+
+/// Convert Unix timestamp (milliseconds) to Arrow TimestampMillisecondArray
+///
+/// # Arguments
+/// * `timestamps` - Vector of Unix timestamps in milliseconds
+///
+/// # Returns
+/// Arc<dyn Array> containing TimestampMillisecondArray
+pub fn unix_ms_to_arrow_timestamp(timestamps: Vec<i64>) -> ArrayRef {
+    Arc::new(TimestampMillisecondArray::from(timestamps))
+}
+
+/// Generate sample events with proper Arrow-compatible timestamps
+///
+/// # Arguments
+/// * `count` - Number of events to generate
+///
+/// # Returns
+/// Vector of HashMaps suitable for conversion to Arrow RecordBatch
+pub fn generate_events_with_timestamps(
+    count: usize,
+) -> Vec<std::collections::HashMap<String, Value>> {
+    use std::collections::HashMap;
+
+    let base_time = chrono::Utc::now().timestamp_millis();
+
+    (0..count)
+        .map(|i| {
+            let mut event = HashMap::new();
+            event.insert("id".to_string(), json!(i as u64));
+            event.insert(
+                "timestamp".to_string(),
+                json!(base_time + (i as i64 * 1000)),
+            );
+            event.insert(
+                "action".to_string(),
+                json!(format!("action_{}", i % 10)),
+            );
+            event.insert("value".to_string(), json!(i as f64 * 1.5));
+            event
+        })
+        .collect()
 }
