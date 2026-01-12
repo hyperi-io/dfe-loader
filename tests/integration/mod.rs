@@ -8,5 +8,6 @@ mod errors;
 mod inserter;
 mod kafka;
 mod offset;
+mod property;
 mod rls;
 mod schema;

@@ -139,3 +139,4 @@ default = []
 jemalloc = []  # Enable jemalloc allocator
 transport-memory = ["hs-rustlib/transport-memory"]  # Memory transport for unit tests
 transport-zenoh = ["hs-rustlib/transport-zenoh"]    # Zenoh transport for dev/test
+testcontainers = []  # Enable testcontainers for CI/CD (Docker required)

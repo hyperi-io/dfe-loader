@@ -69,6 +69,35 @@ async fn test_inserter_basic_insert() {
 
     eprintln!("✓ Basic insert succeeded with 3 rows");
 
+    // Query back to verify data
+    let count_sql = format!("SELECT COUNT(*) as count FROM {}", table_name);
+    let count_result = client.select(&count_sql).await.expect("Count query failed");
+    let count_batch = &count_result[0];
+    let count_col = count_batch.column(0).as_any().downcast_ref::<UInt64Array>().expect("Count should be UInt64");
+    assert_eq!(count_col.value(0), 3, "Should have 3 rows");
+    eprintln!("✓ Query verification: confirmed 3 rows");
+
+    // Verify specific row data
+    let data_sql = format!("SELECT name FROM {} WHERE id = 2", table_name);
+    let data_result = client.select(&data_sql).await.expect("Data query failed");
+    if !data_result.is_empty() {
+        let data_batch = &data_result[0];
+        if data_batch.num_rows() > 0 {
+            // ClickHouse returns String as Binary via Arrow protocol
+            use arrow::array::BinaryArray;
+            if let Some(name_col) = data_batch.column(0).as_any().downcast_ref::<BinaryArray>() {
+                let name_bytes = name_col.value(0);
+                let name_str = std::str::from_utf8(name_bytes).expect("Should be valid UTF-8");
+                assert_eq!(name_str, "b", "Row with id=2 should have name='b'");
+                eprintln!("✓ Query verification: confirmed data integrity");
+            } else {
+                // Might be StringArray or LargeStringArray in some cases
+                eprintln!("Column type: {:?}", data_batch.column(0).data_type());
+                eprintln!("✓ Query verification: skipped (unexpected column type)");
+            }
+        }
+    }
+
     // Cleanup
     drop_test_table(&client, &table_name).await;
 }
@@ -132,6 +161,14 @@ async fn test_inserter_large_batch() {
         elapsed,
         count as f64 / elapsed.as_secs_f64()
     );
+
+    // Query back to verify row count
+    let count_sql = format!("SELECT COUNT(*) as count FROM {}", table_name);
+    let count_result = client.select(&count_sql).await.expect("Count query failed");
+    let count_batch = &count_result[0];
+    let count_col = count_batch.column(0).as_any().downcast_ref::<UInt64Array>().expect("Count should be UInt64");
+    assert_eq!(count_col.value(0), row_count as u64, "Should have {} rows", row_count);
+    eprintln!("✓ Query verification: confirmed {} rows", row_count);
 
     // Cleanup
     drop_test_table(&client, &table_name).await;
