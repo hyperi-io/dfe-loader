@@ -607,87 +607,147 @@ Located at k8s.tyrell.com.au with:
 
 ---
 
-## Current Session (2025-12-29)
+## Current Session (2026-01-13)
 
 ### Accomplished
 
-1. **Transport Abstraction in hs-rustlib** (commit 8156e33)
-   - `Transport` trait with async send/recv/commit methods
-   - `MemoryTransport` - tokio::mpsc for unit tests
-   - `KafkaTransport` - rdkafka wrapper with SASL/TLS, HyperSec defaults
-   - `ZenohTransport` - Zenoh 1.x with SHM support
-   - `PayloadFormat` auto-detection (JSON/MsgPack by first byte)
-   - Feature flags: `transport-memory`, `transport-kafka`, `transport-zenoh`
-   - 52 tests passing
+**Tier 2 Test Infrastructure Enhancement - Complete** (commit 2521324)
 
-2. **Transport Integration in dfe-loader** (commit 2e4beb1)
-   - `TransportAdapter` wrapping KafkaTransport
-   - `MemoryTransportAdapter` for unit testing (no infrastructure)
-   - Updated `Orchestrator` to use TransportAdapter
-   - `flush_batches_transport()` with async offset commits
-   - Zero-copy message handling (payload moved, Arc<str> topic shared)
-   - Batch receiving (RECV_BATCH_SIZE = 100)
+1. **Fixture Builder Library** (1,191 lines)
+   - `tests/fixtures/events.rs` - EventBuilder, BatchEventBuilder for test data generation
+   - `tests/fixtures/config.rs` - Builders for BufferConfig, ClickHouseConfig, RoutingConfig, TimestampConfig, MetadataConfig
+   - `tests/fixtures/arrow_schema.rs` - ArrowSchemaBuilder + pre-defined schemas (event, RLS, auth, API)
+   - `tests/fixtures/ddl.rs` - DdlBuilder + DDL template functions for ClickHouse tables
+   - Builder pattern eliminates test code duplication
 
-3. **Unit Tests with MemoryTransport** (15 tests)
-   - Memory adapter: inject/recv, keys, batch, close
-   - Message processing: JSON format detection, routing
-   - Transform: flattening, routing field removal
-   - Buffer: accumulation, flush threshold
-   - E2E flow: full pipeline without ClickHouse
+2. **Query-Back Verification Pattern**
+   - Updated `tests/integration/clickhouse.rs` - 3 levels of verification (count after each batch, category GROUP BY)
+   - Updated `tests/integration/inserter.rs` - Row count + data integrity with Binary array handling
+   - Updated `tests/integration/datatypes.rs` - Row count + org distribution + NULL field verification
+   - Added `query_count()` and `query_one()` helpers to `tests/common/mod.rs`
+   - **Critical insight**: ClickHouse returns String as Binary via Arrow protocol
 
-### Files Modified in dfe-loader
+3. **Property-Based Tests** (11 new tests)
+   - Created `tests/integration/property.rs` using proptest
+   - Routing: arbitrary org_ids, nested fields, extraction (3 tests)
+   - Transformation: underscore fields, nested flattening, type handling (3 tests)
+   - Buffer: accumulation, multiple tables (2 tests)
+   - Timestamp: edge cases (1970-3000), RFC3339 strings (2 tests)
+   - Catches edge cases manual tests miss
 
-| File | Change |
-| ---- | ------ |
-| `src/kafka/transport.rs` | New - TransportAdapter + MemoryTransportAdapter |
-| `src/kafka/mod.rs` | Export MemoryTransportAdapter |
-| `src/pipeline/orchestrator.rs` | Use TransportAdapter, batch recv, async commit |
-| `tests/unit/transport.rs` | New - 15 MemoryTransport tests |
-| `tests/unit/mod.rs` | New - Unit test module |
-| `tests/integration_tests.rs` | Add unit module (transport-memory feature) |
-| `Cargo.toml` | Add hs-rustlib, transport-memory/zenoh features |
+4. **Performance Metrics Infrastructure**
+   - Created `tests/common/metrics.rs` (430 lines) - MetricsSnapshot system
+   - Created `tests/performance_example.rs` - Working example with baseline/current comparison
+   - Created `tests/PERFORMANCE_TESTING.md` - Documentation
+   - Auto-detects improvements vs regressions (latency↓=good, throughput↑=good)
+   - Generates JSON snapshots + Markdown reports
 
-### Key Design Decisions
+5. **Testcontainers Infrastructure**
+   - Created `tests/common/containers.rs` - Docker-based test isolation
+   - Added `testcontainers` feature flag to Cargo.toml
+   - Ready for CI/CD (not yet integrated into tests - future work)
 
-1. **Zero-copy in hot path**: Payload moved (not copied), topic uses Arc<str> clone
-2. **At-least-once delivery**: Removed enable.idempotence, using acks=all + retries
-3. **HyperSec defaults**: 10K batch size, lz4 compression, matched Python kafkaplus
-4. **Batch receiving**: Process 100 messages per recv() call for efficiency
-5. **Preserve sonic-rs**: Keep local hot-path parsing (not hs-rustlib payload utils)
+6. **Fixed RLS Test**
+   - Updated `tests/integration/rls.rs` - Explicit Arrow schema instead of JSON inference
+   - Added comprehensive query-back verification (total count, per-org counts, specific actions)
+   - Removed `#[ignore]` marker - now passing consistently
+   - **Root cause**: JSON schema inference creates String type instead of Timestamp type
+
+7. **Comprehensive Documentation**
+   - Created `tests/TESTING.md` (547 lines) covering:
+     - Test structure (unit/integration/property/performance)
+     - Testing patterns (query-back, explicit schemas, fixtures)
+     - Best practices and common issues
+     - Running tests and configuration
+     - Future enhancements (Tier 3)
+
+8. **Test Fixes**
+   - Fixed `tests/common/metrics.rs` - Floating-point comparison for latency delta
+   - Fixed `tests/performance_example.rs` - Exclude histogram bucket counts from regression detection
+
+### Key Files Created
+
+| File                               | Lines | Purpose                          |
+| ---------------------------------- | ----- | -------------------------------- |
+| `tests/fixtures/events.rs`         | 255   | Event data builders              |
+| `tests/fixtures/config.rs`         | 366   | Configuration builders           |
+| `tests/fixtures/arrow_schema.rs`   | 264   | Arrow schema builders            |
+| `tests/fixtures/ddl.rs`            | 306   | ClickHouse DDL builders          |
+| `tests/common/metrics.rs`          | 430   | Performance metrics snapshots    |
+| `tests/integration/property.rs`    | 330   | Property-based tests             |
+| `tests/TESTING.md`                 | 547   | Testing documentation            |
+| `tests/PERFORMANCE_TESTING.md`     | 147   | Performance testing guide        |
+
+### Critical Insights
+
+1. **ClickHouse Arrow Protocol Quirk**: String columns returned as Binary type
+
+   ```rust
+   use arrow::array::BinaryArray;
+   if let Some(col) = batch.column(0).as_any().downcast_ref::<BinaryArray>() {
+       let value = std::str::from_utf8(col.value(0))?;
+   }
+   ```
+
+2. **Explicit Schemas Required**: JSON schema inference fails for timestamps
+
+   ```rust
+   // ❌ BAD - JSON inference creates String type
+   let batch = json_batch_to_arrow(&rows)?;
+
+   // ✅ GOOD - Explicit schema with TimestampMillisecondArray
+   let schema = Arc::new(Schema::new(vec![
+       Field::new("timestamp", DataType::Timestamp(TimeUnit::Millisecond, None), false),
+   ]));
+   let batch = RecordBatch::try_new(schema, columns)?;
+   ```
+
+3. **Query Verification Catches Silent Failures**: INSERT row count can succeed even if data is malformed
 
 ### Git State
 
 - **Branch:** main
-- **Upstream:** pushed (both repos)
+- **Upstream:** up to date with origin/main
 - **Uncommitted:** clean
-- **Commits:**
-  - hs-rustlib: 8156e33 - feat: add transport abstraction layer
-  - dfe-loader: 2e4beb1 - feat: integrate transport abstraction and add MemoryTransport tests
+- **Commit:** 2521324 - "test: beef up test infrastructure like we mean it"
 
 ### Test Results
 
 ```text
-hs-rustlib: 52 tests passed
-dfe-loader: 277 lib + 15 unit = 292 tests passed
+All 421 tests passing:
+- 294 unit tests
+- 124 integration tests (including 11 property tests)
+- 3 performance tests
+- 11 ignored/optional tests
 ```
 
-### Pending
+### Next Steps (Tier 3 - Future)
 
-- Run Mison benchmarks (awaiting clean CPU environment)
+1. **Row Policy Enforcement Testing** - Multi-user, multi-role ClickHouse policy verification
+2. **Mutation Testing** - cargo-mutants to validate test quality
+3. **Fuzzing** - cargo-fuzz for parser/transformer edge cases
+4. **Chaos Testing** - testcontainers + toxiproxy for failure simulation
 
 ### Session Context Summary
 
-Implemented full transport abstraction layer in hs-rustlib (Kafka/Zenoh/Memory),
-then integrated into dfe-loader-clickhouse with zero-copy design. Created 15 unit
-tests using MemoryTransport that test the full pipeline (parse → route → transform
-→ buffer) without requiring Kafka or ClickHouse infrastructure. All code committed
-and pushed to both repos.
+Completed Tier 2 test infrastructure enhancement from the approved 3-tier plan.
+Built comprehensive fixture library, added query-back verification to all integration
+tests, created 11 property-based tests, implemented performance metrics snapshot
+system, and documented all patterns in TESTING.md. Fixed RLS test by using explicit
+Arrow schemas. All 421 tests passing with production-ready verification patterns.
 
 ---
 
-## Previous Session (2025-12-28)
+## Previous Sessions
 
-### Mison Structural Index - Complete
+### Session 2025-12-29 - Transport Abstraction
+
+- Implemented transport abstraction layer in hs-rustlib (Kafka/Zenoh/Memory)
+- Integrated TransportAdapter into dfe-loader with zero-copy design
+- Created 15 unit tests using MemoryTransport (no infrastructure required)
+- 292 tests passing (277 lib + 15 unit)
+
+### Session 2025-12-28 - Mison Structural Index
 
 - All 39 tests pass, benchmarks ready
 - Single-pass batch extraction O(colons + fields)
@@ -696,7 +756,7 @@ and pushed to both repos.
 
 ---
 
-**Last Updated:** 2025-12-29
+**Last Updated:** 2026-01-13
 **ClickHouse:** 25.12 (native protocol)
-**Version:** 0.13.0-transport-integrated
-**Status:** Transport Abstraction Complete - Benchmarks Pending
+**Version:** 0.13.0-test-infrastructure
+**Status:** Tier 2 Test Infrastructure Complete - 421 Tests Passing

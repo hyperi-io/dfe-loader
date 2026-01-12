@@ -53,6 +53,17 @@ None currently - all critical TODOs completed.
 
 ## Completed
 
+### 2026-01-13: Tier 2 Test Infrastructure Enhancement
+
+- [x] Fixture Builder Library - EventBuilder, ConfigBuilder, SchemaBuilder, DdlBuilder (1,191 lines)
+- [x] Query-Back Verification - All integration tests verify data after INSERT
+- [x] Property-Based Tests - 11 new proptest tests (routing, transform, buffer, timestamp)
+- [x] Performance Metrics - MetricsSnapshot system with auto-detect improvements/regressions
+- [x] Testcontainers Infrastructure - Ready for CI/CD (not yet integrated)
+- [x] Fixed RLS Test - Explicit Arrow schemas, removed `#[ignore]` marker
+- [x] Testing Documentation - TESTING.md (547 lines) + PERFORMANCE_TESTING.md (147 lines)
+- [x] All 421 tests passing (294 unit + 124 integration + 3 performance)
+
 ### 2026-01-07: Code TODOs Cleanup
 
 - [x] DLQ Send integration (already implemented in orchestrator.rs:194-218)
@@ -136,4 +147,4 @@ None currently - all critical TODOs completed.
 
 ---
 
-**Last Updated:** 2026-01-07
+**Last Updated:** 2026-01-13
