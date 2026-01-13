@@ -1,3 +1,10 @@
+## [1.3.1](https://github.com/hypersec-io/dfe-loader-clickhouse/compare/v1.3.0...v1.3.1) (2026-01-13)
+
+
+### Bug Fixes
+
+* update remaining old project name references ([b4be1a0](https://github.com/hypersec-io/dfe-loader-clickhouse/commit/b4be1a0cc145b7aab7383fb5f5dd1a188069c6f5))
+
 # [1.3.0](https://github.com/hypersec-io/dfe-loader/compare/v1.2.1...v1.3.0) (2026-01-13)
 
 
