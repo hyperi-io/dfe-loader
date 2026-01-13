@@ -33,78 +33,6 @@
 
 ---
 
-## Current: Artifactory + hs-rustlib Setup
-
-- [x] **Artifactory Cargo Registry Created** (2026-01-13)
-  - [x] Created hypersec-cargo-local, hypersec-cargo-remote, hypersec-cargo-virtual
-  - [x] Configured sparse index for modern Cargo protocol
-  - [x] Added CI Rust scripts to ci submodule (feat/test-tiers branch)
-  - [x] Documented in STATE.md (Dependency Management section)
-  - [x] Enabled push access for ci submodule in this project
-
-- [ ] **Publish hs-rustlib to Artifactory**
-  - [ ] Add `publish = ["hypersec"]` to hs-rustlib/Cargo.toml
-  - [ ] Push hs-rustlib to trigger CI publish
-  - [ ] Verify version 0.1.0 in Artifactory
-
-- [ ] **Switch to Artifactory dependency**
-  - [ ] Update Cargo.toml: `hs-rustlib = { version = "0.1.0", registry = "hypersec", ... }`
-  - [ ] Remove local path dependency
-  - [ ] Run `cargo update` and verify
-  - [ ] Run full test suite
-
----
-
-## Planned: Library Migration to hs-rustlib
-
-**Full WBS:** `~/.claude/plans/smooth-percolating-locket.md`
-
-**Tier 1 (High Value + Low Effort):**
-
-- [ ] 1.1 Payload Detection Enhancement (366 lines)
-- [ ] 1.2 Type Coercion System (962 lines)
-- [ ] 1.3 JSON Flattening Utilities (565 lines)
-- [ ] 1.4 Schema Cache (492 lines)
-- [ ] 1.5 Circuit Breaker Pattern (525 lines)
-- [ ] 1.6 Object Pool (429 lines)
-
-**Tier 2 (High Value + Moderate Effort):**
-
-- [ ] 2.1 JSON→Arrow Bridge (799 lines)
-- [ ] 2.2 Mison JSON Processing (3,254 lines)
-- [ ] 2.3 Enrichment Modules (1,871 lines)
-
-**Tier 3 (Consolidation):**
-
-- [ ] 3.1 Config Module Consolidation
-- [ ] 3.2 Metrics Server Consolidation
-- [ ] 3.3 Logger Consolidation
-- [ ] 3.4 Transport Consolidation
-
-**Final Cleanup:**
-
-- [ ] 4.1 Remove Redundant Code
-- [ ] 4.2 Documentation
-- [ ] 4.3 Handover Documentation (CRITICAL)
-
----
-
-## Planned: Project Rename
-
-**Full WBS:** `~/.claude/plans/smooth-percolating-locket.md`
-
-- [ ] Phase 1: Preparation (backup branch, notify team)
-- [ ] Phase 2: Build System (Cargo.toml, Cargo.lock)
-- [ ] Phase 3: Source Code (src/*.rs)
-- [ ] Phase 4: Tests and Benchmarks
-- [ ] Phase 5: Documentation (*.md files)
-- [ ] Phase 6: Configuration (yaml, CI)
-- [ ] Phase 7: Repository Rename (GitHub, local)
-- [ ] Phase 8: External References
-- [ ] Phase 9: Verification (rg returns 0 results)
-
----
-
 ## Code TODOs (from source)
 
 None currently - all critical TODOs completed.
@@ -124,6 +52,21 @@ None currently - all critical TODOs completed.
 ---
 
 ## Completed
+
+### 2026-01-13: Project Rename & WBS Tier 1
+
+- [x] **Project Rename Complete** - dfe-loader-clickhouse → dfe-loader
+  - All 45 files updated (Cargo.toml, imports, docs, configs)
+  - Backup branch: `pre-rename-backup`
+  - All 280 library + 124 integration tests passing
+
+- [x] **WBS Tier 1 Assessment Complete**
+  - 1.1 Payload Detection → Migrated to hs-rustlib (366 lines)
+  - 1.2-1.6 → Stay in dfe-loader (ClickHouse/app-specific)
+
+- [x] **hs-rustlib v0.2.0 Published to Artifactory**
+  - Added stateful FormatDetector with FormatMode
+  - dfe-loader using registry dependency (not local path)
 
 ### 2026-01-13: Tier 2 Test Infrastructure Enhancement
 
