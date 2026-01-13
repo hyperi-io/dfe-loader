@@ -6,7 +6,7 @@
 //! reliably on all filesystem types including S3, NFS, and FUSE mounts.
 //!
 //! ```ignore
-//! use dfe_loader_clickhouse::config::{Config, SharedConfig, ConfigWatcher, WatcherConfig};
+//! use dfe_loader::config::{Config, SharedConfig, ConfigWatcher, WatcherConfig};
 //!
 //! let config = Config::load(Some("config.yaml"))?;
 //! let shared = SharedConfig::new(config);

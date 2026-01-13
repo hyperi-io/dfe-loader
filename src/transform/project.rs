@@ -1,4 +1,4 @@
-// Project:   dfe-loader-clickhouse
+// Project:   dfe-loader
 // File:      project.rs
 // Purpose:   Project JSON fields to match ClickHouse schema
 // Language:  Rust

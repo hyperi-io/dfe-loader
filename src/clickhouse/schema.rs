@@ -1,4 +1,4 @@
-// Project:   dfe-loader-clickhouse
+// Project:   dfe-loader
 // File:      schema.rs
 // Purpose:   Schema caching for ClickHouse tables
 // Language:  Rust

@@ -8,11 +8,11 @@ use arrow::array::{ArrayRef, Float64Array, RecordBatch, StringArray, UInt64Array
 use arrow::datatypes::{DataType, Field, Schema};
 use serde_json::json;
 
-use dfe_loader_clickhouse::buffer::BufferManager;
-use dfe_loader_clickhouse::config::{BufferConfig, DlqConfig, RoutingConfig};
-use dfe_loader_clickhouse::payload::{FormatDetector, FormatMode};
-use dfe_loader_clickhouse::routing::{RouteResult, Router};
-use dfe_loader_clickhouse::transform::Transformer;
+use dfe_loader::buffer::BufferManager;
+use dfe_loader::config::{BufferConfig, DlqConfig, RoutingConfig};
+use dfe_loader::payload::{FormatDetector, FormatMode};
+use dfe_loader::routing::{RouteResult, Router};
+use dfe_loader::transform::Transformer;
 
 use crate::common::{
     check_clickhouse_reachable, create_test_client, drop_test_table, load_dotenv,
@@ -532,8 +532,8 @@ async fn test_error_empty_batch_insert() {
 
 #[tokio::test]
 async fn test_error_invalid_clickhouse_host() {
-    use dfe_loader_clickhouse::clickhouse::ArrowClickHouseClient;
-    use dfe_loader_clickhouse::config::ClickHouseConfig;
+    use dfe_loader::clickhouse::ArrowClickHouseClient;
+    use dfe_loader::config::ClickHouseConfig;
 
     let config = ClickHouseConfig {
         hosts: vec!["invalid-host-12345.example.com:9000".to_string()],

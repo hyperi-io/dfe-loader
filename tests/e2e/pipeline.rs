@@ -6,11 +6,11 @@ use std::env;
 
 use serde_json::json;
 
-use dfe_loader_clickhouse::buffer::BufferManager;
-use dfe_loader_clickhouse::config::{BufferConfig, DlqConfig, RoutingConfig};
-use dfe_loader_clickhouse::payload::{FormatDetector, FormatMode};
-use dfe_loader_clickhouse::routing::Router;
-use dfe_loader_clickhouse::transform::Transformer;
+use dfe_loader::buffer::BufferManager;
+use dfe_loader::config::{BufferConfig, DlqConfig, RoutingConfig};
+use dfe_loader::payload::{FormatDetector, FormatMode};
+use dfe_loader::routing::Router;
+use dfe_loader::transform::Transformer;
 
 /// Skip test if no full test environment available
 fn skip_if_no_env() -> bool {
@@ -81,12 +81,12 @@ async fn test_routing_and_buffer() {
     for (payload, expected_table) in messages {
         let route = router.route(payload);
         match route {
-            dfe_loader_clickhouse::routing::RouteResult::Table(table) => {
+            dfe_loader::routing::RouteResult::Table(table) => {
                 assert_eq!(table, expected_table);
                 let data = sonic_rs::from_slice::<serde_json::Value>(payload).unwrap();
                 buffer_manager.push(&table, data.as_object().unwrap().clone(), None);
             }
-            dfe_loader_clickhouse::routing::RouteResult::Dlq(_) => {
+            dfe_loader::routing::RouteResult::Dlq(_) => {
                 panic!("Should not route to DLQ with default_table set");
             }
         }
@@ -105,7 +105,7 @@ async fn test_format_detection() {
     let json_payload = br#"{"event": "test"}"#;
     let result = detector.check_and_detect(json_payload);
     assert!(result.is_ok());
-    assert_eq!(result.unwrap(), dfe_loader_clickhouse::payload::PayloadFormat::Json);
+    assert_eq!(result.unwrap(), dfe_loader::payload::PayloadFormat::Json);
 
     // Force JSON mode
     let json_detector = FormatDetector::with_mode(FormatMode::ForceJson);
@@ -160,7 +160,7 @@ async fn test_full_pipeline_e2e() {
 #[tokio::test]
 async fn test_metrics_server_integration() {
     use std::sync::Arc;
-    use dfe_loader_clickhouse::metrics::{Metrics, ServerState};
+    use dfe_loader::metrics::{Metrics, ServerState};
 
     let metrics = Metrics::new();
     metrics.record_received();

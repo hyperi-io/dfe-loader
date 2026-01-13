@@ -8,8 +8,8 @@ use std::time::Duration;
 use arrow::array::{ArrayRef, Float64Array, RecordBatch, StringArray, UInt64Array};
 use arrow::datatypes::{DataType, Field, Schema};
 
-use dfe_loader_clickhouse::clickhouse::{Inserter, InserterConfig};
-use dfe_loader_clickhouse::clickhouse::circuit_breaker::{CircuitBreaker, CircuitBreakerConfig};
+use dfe_loader::clickhouse::{Inserter, InserterConfig};
+use dfe_loader::clickhouse::circuit_breaker::{CircuitBreaker, CircuitBreakerConfig};
 
 use crate::common::{create_test_client, drop_test_table, unique_table_name};
 use crate::skip_if_no_clickhouse;
@@ -402,7 +402,7 @@ async fn test_inserter_batch_salvage() {
     skip_if_no_clickhouse!();
 
     use compact_str::CompactString;
-    use dfe_loader_clickhouse::buffer::FlushBatch;
+    use dfe_loader::buffer::FlushBatch;
 
     let client = match create_test_client().await {
         Some(c) => Arc::new(c),

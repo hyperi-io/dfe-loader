@@ -10,8 +10,8 @@ use std::time::Duration;
 use tempfile::TempDir;
 use tokio::time::timeout;
 
-use dfe_loader_clickhouse::config::{Config, SharedConfig};
-use dfe_loader_clickhouse::config::watcher::{ConfigWatcher, WatcherConfig};
+use dfe_loader::config::{Config, SharedConfig};
+use dfe_loader::config::watcher::{ConfigWatcher, WatcherConfig};
 
 // ============================================================================
 // SharedConfig Tests

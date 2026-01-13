@@ -13,7 +13,7 @@ use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Through
 use serde_json::Value;
 use sonic_rs::JsonValueTrait;
 
-use dfe_loader_clickhouse::mison::{
+use dfe_loader::mison::{
     FieldExtractor, MisonBatchProcessor, SchemaExtractor, StructuralIndex,
 };
 

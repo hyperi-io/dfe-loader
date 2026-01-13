@@ -9,16 +9,16 @@ use arrow::array::{ArrayRef, Float64Array, RecordBatch, StringArray, UInt64Array
 use arrow::datatypes::{DataType, Field, Schema};
 use serde_json::json;
 
-use dfe_loader_clickhouse::buffer::{BufferManager, KafkaOffset};
-use dfe_loader_clickhouse::clickhouse::ArrowClickHouseClient;
-use dfe_loader_clickhouse::config::{
+use dfe_loader::buffer::{BufferManager, KafkaOffset};
+use dfe_loader::clickhouse::ArrowClickHouseClient;
+use dfe_loader::config::{
     BufferConfig, DlqConfig, FieldSanitizationConfig, MetadataConfig, RoutingConfig,
     TimestampDqConfig,
 };
-use dfe_loader_clickhouse::metrics::Metrics;
-use dfe_loader_clickhouse::payload::{FormatDetector, FormatMode};
-use dfe_loader_clickhouse::routing::{RouteResult, Router};
-use dfe_loader_clickhouse::transform::Transformer;
+use dfe_loader::metrics::Metrics;
+use dfe_loader::payload::{FormatDetector, FormatMode};
+use dfe_loader::routing::{RouteResult, Router};
+use dfe_loader::transform::Transformer;
 
 use crate::common::{
     check_clickhouse_reachable, create_test_client, drop_test_table, get_clickhouse_config,
@@ -508,7 +508,7 @@ async fn test_pipeline_format_detection() {
     // JSON payload
     let json_payload = br#"{"event": "test", "id": 1}"#;
     let format = detector.check_and_detect(json_payload).unwrap();
-    assert_eq!(format, dfe_loader_clickhouse::payload::PayloadFormat::Json);
+    assert_eq!(format, dfe_loader::payload::PayloadFormat::Json);
 
     // Force JSON mode rejects non-JSON
     let json_only_detector = FormatDetector::with_mode(FormatMode::ForceJson);

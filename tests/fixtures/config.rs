@@ -1,6 +1,6 @@
 //! Configuration fixture builders
 
-use dfe_loader_clickhouse::config::{
+use dfe_loader::config::{
     BufferConfig, ClickHouseConfig, DlqConfig, KafkaConfig, MetadataConfig, RoutingConfig,
     TimestampConfig,
 };

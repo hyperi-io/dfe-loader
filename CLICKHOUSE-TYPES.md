@@ -355,7 +355,7 @@ Timezone stored in column metadata, not per-value. All values in column share ti
 
 ---
 
-## Implementation Priority for dfe-loader-clickhouse
+## Implementation Priority for dfe-loader
 
 ### Phase 1: Critical Missing Types
 1. **JSON** - Production GA, key for event data

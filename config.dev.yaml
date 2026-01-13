@@ -1,4 +1,4 @@
-# Development configuration for dfe-loader-clickhouse
+# Development configuration for dfe-loader
 # Uses minimal memory footprint to avoid impacting dev environment
 #
 # Usage: ./loader --config config.dev.yaml

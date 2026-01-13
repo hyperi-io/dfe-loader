@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use dfe_loader_clickhouse::buffer::KafkaOffset;
+use dfe_loader::buffer::KafkaOffset;
 
 // ============================================================================
 // Unit Tests for Offset Tracking Logic
@@ -268,8 +268,8 @@ fn test_offset_batch_collection() {
 
 #[test]
 fn test_buffer_offset_accumulation() {
-    use dfe_loader_clickhouse::buffer::BufferManager;
-    use dfe_loader_clickhouse::config::BufferConfig;
+    use dfe_loader::buffer::BufferManager;
+    use dfe_loader::config::BufferConfig;
     use serde_json::json;
 
     let mut buffer_manager = BufferManager::new(&BufferConfig {
@@ -306,8 +306,8 @@ fn test_buffer_offset_accumulation() {
 
 #[test]
 fn test_buffer_mixed_offset_tracking() {
-    use dfe_loader_clickhouse::buffer::BufferManager;
-    use dfe_loader_clickhouse::config::BufferConfig;
+    use dfe_loader::buffer::BufferManager;
+    use dfe_loader::config::BufferConfig;
     use serde_json::json;
 
     let mut buffer_manager = BufferManager::new(&BufferConfig {

@@ -1,4 +1,4 @@
-# Example configuration for dfe-loader-clickhouse (Rust)
+# Example configuration for dfe-loader (Rust)
 # Copy to config.yaml and modify as needed
 #
 # Configuration cascade (highest to lowest priority):

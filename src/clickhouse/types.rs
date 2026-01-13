@@ -1,4 +1,4 @@
-// Project:   dfe-loader-clickhouse
+// Project:   dfe-loader
 // File:      types.rs
 // Purpose:   ClickHouse type parsing (runtime, not compiled)
 // Language:  Rust

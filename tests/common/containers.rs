@@ -12,7 +12,7 @@ mod testcontainers_impl {
     use testcontainers_modules::clickhouse::ClickHouse as ClickHouseImage;
     use testcontainers_modules::kafka::Kafka as KafkaImage;
 
-    use dfe_loader_clickhouse::config::{ClickHouseConfig, KafkaConfig};
+    use dfe_loader::config::{ClickHouseConfig, KafkaConfig};
 
     /// Test infrastructure with isolated Docker containers
     pub struct TestInfrastructure {

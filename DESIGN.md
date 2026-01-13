@@ -1,4 +1,4 @@
-# Design Document: dfe-loader-clickhouse
+# Design Document: dfe-loader
 
 **Version:** 2.1 (Arrow Architecture + Transport Abstraction)
 **Date:** 2025-12-29
@@ -623,7 +623,7 @@ graph TB
         P --> MP
     end
 
-    subgraph "dfe-loader-clickhouse"
+    subgraph "dfe-loader"
         O[Orchestrator]
         R[Router]
         B[BufferManager]

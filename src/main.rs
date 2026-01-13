@@ -1,4 +1,4 @@
-//! CLI entry point for dfe-loader-clickhouse
+//! CLI entry point for dfe-loader
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -7,9 +7,9 @@ use clap::Parser;
 use tokio::signal;
 use tracing::{error, info, warn};
 
-use dfe_loader_clickhouse::config::Config;
-use dfe_loader_clickhouse::metrics::{run_server, Metrics, ServerState};
-use dfe_loader_clickhouse::pipeline::Orchestrator;
+use dfe_loader::config::Config;
+use dfe_loader::metrics::{run_server, Metrics, ServerState};
+use dfe_loader::pipeline::Orchestrator;
 
 #[derive(Parser, Debug)]
 #[command(name = "loader")]
@@ -88,7 +88,7 @@ async fn main() -> anyhow::Result<()> {
         kafka_brokers = ?config.kafka.brokers,
         clickhouse_hosts = ?config.clickhouse.hosts,
         payload_format = %config.payload.format,
-        "Starting dfe-loader-clickhouse"
+        "Starting dfe-loader"
     );
 
     // Initialize metrics

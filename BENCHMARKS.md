@@ -1,6 +1,6 @@
 # CPU Cost Guide
 
-**Baseline benchmarks for dfe-loader-clickhouse performance optimization.**
+**Baseline benchmarks for dfe-loader performance optimization.**
 
 Last updated: 2025-12-28
 Platform: AMD64 Linux (Fedora 42)
