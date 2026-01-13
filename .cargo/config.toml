@@ -8,3 +8,26 @@ rustflags = ["-C", "target-cpu=native"]
 
 # Limit parallel jobs to reduce memory usage (optional, can be overridden with CARGO_BUILD_JOBS)
 # jobs = 2
+
+# =============================================================================
+# HyperSec Private Cargo Registry (Artifactory)
+# =============================================================================
+#
+# The 'hypersec' registry hosts internal crates like hs-rustlib.
+# Authentication is handled via ~/.cargo/credentials.toml
+#
+# To set up credentials:
+#   1. Get token: jf config export hypersec-token | base64 -d | jq -r '.accessToken'
+#   2. Add to ~/.cargo/credentials.toml:
+#      [registries.hypersec]
+#      token = "Bearer <your-token>"
+#
+# Or use cargo-login (if available):
+#   cargo login --registry hypersec
+
+[registries.hypersec]
+index = "sparse+https://hypersec.jfrog.io/artifactory/api/cargo/hypersec-cargo-virtual/index/"
+
+# Uncomment to make hypersec the default for publishing
+# [registry]
+# default = "hypersec"
