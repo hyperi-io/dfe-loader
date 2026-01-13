@@ -5,12 +5,12 @@
 
 use serde_json::json;
 
-use dfe_loader_clickhouse::buffer::{BufferManager, KafkaOffset};
-use dfe_loader_clickhouse::config::{BufferConfig, FieldSanitizationConfig, MetadataConfig, RoutingConfig, TimestampDqConfig};
-use dfe_loader_clickhouse::kafka::{KafkaMessage, MemoryTransportAdapter};
-use dfe_loader_clickhouse::payload::{FormatDetector, FormatMode};
-use dfe_loader_clickhouse::routing::{RouteResult, Router};
-use dfe_loader_clickhouse::transform::Transformer;
+use dfe_loader::buffer::{BufferManager, KafkaOffset};
+use dfe_loader::config::{BufferConfig, FieldSanitizationConfig, MetadataConfig, RoutingConfig, TimestampDqConfig};
+use dfe_loader::kafka::{KafkaMessage, MemoryTransportAdapter};
+use dfe_loader::payload::{FormatDetector, FormatMode};
+use dfe_loader::routing::{RouteResult, Router};
+use dfe_loader::transform::Transformer;
 
 // ============================================================================
 // MemoryTransportAdapter Tests
@@ -124,7 +124,7 @@ async fn test_json_message_processing() {
     // Verify format detection
     let format_detector = FormatDetector::with_mode(FormatMode::Auto);
     let format = format_detector.check_and_detect(&msg.payload).unwrap();
-    assert!(matches!(format, dfe_loader_clickhouse::payload::PayloadFormat::Json));
+    assert!(matches!(format, dfe_loader::payload::PayloadFormat::Json));
 
     // Parse the payload
     let value: serde_json::Value = sonic_rs::from_slice(&msg.payload).unwrap();

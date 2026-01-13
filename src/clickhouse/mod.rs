@@ -1,4 +1,4 @@
-// Project:   dfe-loader-clickhouse
+// Project:   dfe-loader
 // File:      mod.rs
 // Purpose:   ClickHouse client abstraction
 // Language:  Rust

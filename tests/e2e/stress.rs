@@ -9,8 +9,8 @@ use arrow::array::{ArrayRef, Float64Array, RecordBatch, StringArray, UInt64Array
 use arrow::datatypes::{DataType, Field, Schema};
 use serde_json::json;
 
-use dfe_loader_clickhouse::buffer::{BufferManager, KafkaOffset};
-use dfe_loader_clickhouse::config::BufferConfig;
+use dfe_loader::buffer::{BufferManager, KafkaOffset};
+use dfe_loader::config::BufferConfig;
 
 use crate::common::{
     check_clickhouse_reachable, create_test_client, drop_test_table, load_dotenv,

@@ -8,7 +8,7 @@
 
 ## Overview
 
-The S3 Loader is a companion service to dfe-loader-clickhouse that:
+The S3 Loader is a companion service to dfe-loader that:
 
 1. Consumes from the same transport layer (Kafka/Zenoh)
 2. Writes directly to S3-compatible object storage
@@ -20,7 +20,7 @@ The S3 Loader is a companion service to dfe-loader-clickhouse that:
 ## Architecture Context
 
 ```text
-                    ┌──► dfe-loader-clickhouse ──► ClickHouse (query)
+                    ┌──► dfe-loader ──► ClickHouse (query)
 Transport ──────────┤
 (Kafka/Zenoh)       └──► dfe-loader-s3 ──────────► S3/MinIO (archive)
 ```
@@ -87,15 +87,15 @@ s3://bucket/
 
 ## Dependencies
 
-- `hs-rustlib` transport module (shared with dfe-loader-clickhouse)
+- `hs-rustlib` transport module (shared with dfe-loader)
 - `arrow` + `parquet` crates for Parquet writing
 - `aws-sdk-s3` or `object_store` crate for S3 API
 
 ---
 
-## Out of Scope for dfe-loader-clickhouse
+## Out of Scope for dfe-loader
 
-This project is explicitly separate from dfe-loader-clickhouse to:
+This project is explicitly separate from dfe-loader to:
 
 1. Keep ClickHouse loader focused and simple
 2. Allow independent deployment and scaling

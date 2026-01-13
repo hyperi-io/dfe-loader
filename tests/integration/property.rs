@@ -6,10 +6,10 @@ use proptest::prelude::*;
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
 
-use dfe_loader_clickhouse::buffer::BufferManager;
-use dfe_loader_clickhouse::config::{BufferConfig, RoutingConfig, DlqConfig};
-use dfe_loader_clickhouse::routing::{Router, RouteResult};
-use dfe_loader_clickhouse::transform::Transformer;
+use dfe_loader::buffer::BufferManager;
+use dfe_loader::config::{BufferConfig, RoutingConfig, DlqConfig};
+use dfe_loader::routing::{Router, RouteResult};
+use dfe_loader::transform::Transformer;
 
 // ============================================================================
 // Routing Property Tests

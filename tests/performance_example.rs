@@ -10,7 +10,7 @@ use prometheus::Registry;
 
 mod common;
 use common::metrics::MetricsSnapshot;
-use dfe_loader_clickhouse::metrics::Metrics;
+use dfe_loader::metrics::Metrics;
 
 #[test]
 fn example_metrics_snapshot_workflow() {

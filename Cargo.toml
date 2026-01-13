@@ -1,5 +1,5 @@
 [package]
-name = "dfe-loader-clickhouse"
+name = "dfe-loader"
 version = "1.3.0"
 edition = "2021"
 authors = ["Hypersec"]
@@ -8,7 +8,7 @@ license = "Proprietary"
 rust-version = "1.75"
 
 [lib]
-name = "dfe_loader_clickhouse"
+name = "dfe_loader"
 path = "src/lib.rs"
 
 [[bin]]

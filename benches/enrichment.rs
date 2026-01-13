@@ -3,9 +3,9 @@
 //! Measures CPU cost per operation for GeoIP, Reputation, and Risk scoring.
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
-use dfe_loader_clickhouse::enrich::geoip::{GeoIpEnricher, GeoIpResult};
-use dfe_loader_clickhouse::enrich::reputation::{ReputationEnricher, ThreatSource, ThreatType};
-use dfe_loader_clickhouse::enrich::risk::{RiskInput, RiskPreset, RiskScorer};
+use dfe_loader::enrich::geoip::{GeoIpEnricher, GeoIpResult};
+use dfe_loader::enrich::reputation::{ReputationEnricher, ThreatSource, ThreatType};
+use dfe_loader::enrich::risk::{RiskInput, RiskPreset, RiskScorer};
 use std::net::IpAddr;
 
 // Sample IPs for benchmarking
@@ -203,7 +203,7 @@ fn bench_risk_from_enrichment(c: &mut Criterion) {
         ..Default::default()
     };
 
-    let rep_result = dfe_loader_clickhouse::enrich::reputation::ReputationResult {
+    let rep_result = dfe_loader::enrich::reputation::ReputationResult {
         is_vpn: true,
         is_anonymizer: true,
         threat_type: ThreatType::Vpn,

@@ -4,8 +4,8 @@
 
 use std::env;
 
-use dfe_loader_clickhouse::config::{DlqConfig, KafkaConfig, SaslConfig, SaslMechanism};
-use dfe_loader_clickhouse::kafka::{DlqMessage, DlqProducer, DlqRoutingMode};
+use dfe_loader::config::{DlqConfig, KafkaConfig, SaslConfig, SaslMechanism};
+use dfe_loader::kafka::{DlqMessage, DlqProducer, DlqRoutingMode};
 
 use crate::common::{check_kafka_reachable, load_dotenv};
 

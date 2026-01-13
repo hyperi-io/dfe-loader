@@ -9,10 +9,10 @@ use arrow::array::RecordBatch;
 use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 use serde_json::json;
 
-use dfe_loader_clickhouse::buffer::BufferManager;
-use dfe_loader_clickhouse::config::{BufferConfig, DlqConfig, RoutingConfig};
-use dfe_loader_clickhouse::routing::Router;
-use dfe_loader_clickhouse::transform::Transformer;
+use dfe_loader::buffer::BufferManager;
+use dfe_loader::config::{BufferConfig, DlqConfig, RoutingConfig};
+use dfe_loader::routing::Router;
+use dfe_loader::transform::Transformer;
 
 use crate::common::{create_test_client, drop_test_table};
 
@@ -47,7 +47,7 @@ async fn test_org_id_field_population() {
 
     // Route the message
     let route = router.route(&payload);
-    assert!(matches!(route, dfe_loader_clickhouse::routing::RouteResult::Table(_)));
+    assert!(matches!(route, dfe_loader::routing::RouteResult::Table(_)));
 
     // Extract org_id before transform
     let value: serde_json::Value = serde_json::from_slice(&payload).unwrap();
@@ -140,7 +140,7 @@ async fn test_shared_schema_multiple_orgs() {
         let value: serde_json::Value = serde_json::from_slice(&payload).unwrap();
 
         let route = router.route(&payload);
-        if let dfe_loader_clickhouse::routing::RouteResult::Table(table) = route {
+        if let dfe_loader::routing::RouteResult::Table(table) = route {
             // All should route to same table (shared schema)
             assert_eq!(table, "common.events_auth");
 

@@ -13,13 +13,13 @@ use criterion::{
 };
 use serde_json::{Map, Value};
 
-use dfe_loader_clickhouse::payload::parse::{
+use dfe_loader::payload::parse::{
     extract_field_json, extract_field_json_cow,
     extract_nested_field_json, extract_nested_field_json_cow,
     parse_payload,
 };
-use dfe_loader_clickhouse::routing::Router;
-use dfe_loader_clickhouse::transform::{flatten_value_owned, Transformer};
+use dfe_loader::routing::Router;
+use dfe_loader::transform::{flatten_value_owned, Transformer};
 
 // Sample payloads of varying sizes
 const SMALL_PAYLOAD: &[u8] = br#"{"org_id":"acme","event_category":"auth","user_id":123}"#;

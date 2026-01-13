@@ -14,12 +14,12 @@ use arrow::array::{
 use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 use serde_json::{json, Value};
 
-use dfe_loader_clickhouse::clickhouse::ArrowClickHouseClient;
-use dfe_loader_clickhouse::config::{ClickHouseConfig, KafkaConfig, SaslConfig, SaslMechanism};
+use dfe_loader::clickhouse::ArrowClickHouseClient;
+use dfe_loader::config::{ClickHouseConfig, KafkaConfig, SaslConfig, SaslMechanism};
 
 /// Load environment variables from .env file
 pub fn load_dotenv() {
-    let _ = dotenvy::from_path("/projects/dfe-loader-clickhouse/.env");
+    let _ = dotenvy::from_path("/projects/dfe-loader/.env");
 }
 
 /// Check if external test environment is configured

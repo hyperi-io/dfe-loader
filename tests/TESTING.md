@@ -1,6 +1,6 @@
 # Testing Guide
 
-This document describes the testing infrastructure, patterns, and best practices for the dfe-loader-clickhouse project.
+This document describes the testing infrastructure, patterns, and best practices for the dfe-loader project.
 
 ---
 

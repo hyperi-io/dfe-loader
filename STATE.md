@@ -1,6 +1,6 @@
 # Project State
 
-**Project:** dfe-loader-clickhouse
+**Project:** dfe-loader
 **Purpose:** High-performance Kafka to ClickHouse data loader (Rust port of Go clickhouse-loader)
 **Status:** Arrow-Only Pipeline Complete with SIMD Optimizations
 **Reference:** Feature parity (or better) with `/projects/clickhouse-loader` (Go version)
@@ -81,7 +81,7 @@ cd ai && git remote set-url --push origin https://github.com/hypersec-io/ai.git
 
 **Projects with push access enabled:**
 
-- `/projects/dfe-loader-clickhouse/ci` - Enabled 2026-01-13 (on feat/test-tiers branch)
+- `/projects/dfe-loader/ci` - Enabled 2026-01-13 (on feat/test-tiers branch)
 - `/projects/dfe-loader` - Enable after rename
 
 ---
@@ -687,7 +687,7 @@ Work stopped at: Need to switch to hs-rustlib project to add `publish = ["hypers
 
 **1. WBS Planning Complete**
 - Created detailed WBS for library migration to hs-rustlib (~9,500 lines, 52% of codebase)
-- Created detailed WBS for project rename (dfe-loader-clickhouse → dfe-loader)
+- Created detailed WBS for project rename (dfe-loader → dfe-loader)
 - Full plan saved to `~/.claude/plans/smooth-percolating-locket.md`
 - Added handover documentation requirements (4.3) and project switching protocol
 

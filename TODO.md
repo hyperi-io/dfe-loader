@@ -1,4 +1,4 @@
-# TODO - dfe-loader-clickhouse
+# TODO - dfe-loader
 
 **Project Goal:** High-performance Kafka to ClickHouse data loader (Rust port)
 

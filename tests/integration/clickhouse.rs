@@ -8,12 +8,12 @@ use std::sync::Arc;
 
 use arrow::array::{Float64Array, RecordBatch, StringArray, UInt64Array};
 use arrow::datatypes::{DataType, Field, Schema};
-use dfe_loader_clickhouse::clickhouse::ArrowClickHouseClient;
-use dfe_loader_clickhouse::config::ClickHouseConfig;
+use dfe_loader::clickhouse::ArrowClickHouseClient;
+use dfe_loader::config::ClickHouseConfig;
 
 fn load_dotenv() {
     // Load from project root .env file
-    let _ = dotenvy::from_path("/projects/dfe-loader-clickhouse/.env");
+    let _ = dotenvy::from_path("/projects/dfe-loader/.env");
 }
 
 /// Skip test if no ClickHouse available

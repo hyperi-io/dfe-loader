@@ -1,4 +1,4 @@
-//! dfe-loader-clickhouse: High-performance Kafka to ClickHouse data loader
+//! dfe-loader: High-performance Kafka to ClickHouse data loader
 //!
 //! This library provides a pipeline for consuming JSON/MessagePack events from Kafka,
 //! transforming them, and inserting into ClickHouse with high throughput.

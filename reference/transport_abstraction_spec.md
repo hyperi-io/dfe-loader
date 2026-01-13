@@ -2,7 +2,7 @@
 
 ## Overview
 
-A pluggable transport layer in `hs-rustlib` that allows dfe-loader-clickhouse to receive
+A pluggable transport layer in `hs-rustlib` that allows dfe-loader to receive
 messages from multiple sources without code changes. The transport is **payload-agnostic** -
 it delivers raw bytes (JSON or MsgPack) without any envelope or framing.
 
@@ -276,7 +276,7 @@ transport-memory = ["transport"]            # In-memory (no deps)
 
 ---
 
-## Integration with dfe-loader-clickhouse
+## Integration with dfe-loader
 
 ### Config
 

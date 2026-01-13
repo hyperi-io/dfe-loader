@@ -11,7 +11,7 @@
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use serde_json::{json, Map, Value};
 
-use dfe_loader_clickhouse::transform::{
+use dfe_loader::transform::{
     flatten_value_owned, ArrowBatchBuilder, BatchFlattener, TimestampValidator,
 };
 
@@ -249,7 +249,7 @@ fn bench_allocation_patterns(c: &mut Criterion) {
 
     group.bench_function("extract_with_alloc", |b| {
         b.iter(|| {
-            use dfe_loader_clickhouse::payload::parse::extract_field_json;
+            use dfe_loader::payload::parse::extract_field_json;
             let _ = extract_field_json(black_box(payload), "org_id");
             let _ = extract_field_json(black_box(payload), "event_category");
         })

@@ -46,7 +46,7 @@ ESH ──HTTP POST──► RECEIVER ──Transport──► LOADER ──► 
 
 ## Dependencies
 
-- `hs-rustlib` transport module (shared with dfe-loader-clickhouse)
+- `hs-rustlib` transport module (shared with dfe-loader)
 
 ---
 

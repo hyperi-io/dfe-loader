@@ -14,7 +14,7 @@ Before making performance changes, capture a baseline:
 
 ```rust
 use common::metrics::MetricsSnapshot;
-use dfe_loader_clickhouse::metrics::Metrics;
+use dfe_loader::metrics::Metrics;
 
 // Run your workload
 let metrics = Metrics::new();
@@ -128,7 +128,7 @@ The metrics snapshot system works with existing criterion benchmarks:
 ```rust
 // benches/pipeline.rs
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use dfe_loader_clickhouse::metrics::Metrics;
+use dfe_loader::metrics::Metrics;
 use common::metrics::MetricsSnapshot;
 
 fn bench_pipeline(c: &mut Criterion) {
@@ -231,7 +231,7 @@ loader_insert_latency_seconds_bucket
 Ensure you're in a git repository:
 
 ```bash
-cd /projects/dfe-loader-clickhouse
+cd /projects/dfe-loader
 git status
 ```
 

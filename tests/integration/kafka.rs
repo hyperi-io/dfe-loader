@@ -4,11 +4,11 @@
 
 use std::env;
 
-use dfe_loader_clickhouse::config::{KafkaConfig, SaslConfig, SaslMechanism};
-use dfe_loader_clickhouse::kafka::Consumer;
+use dfe_loader::config::{KafkaConfig, SaslConfig, SaslMechanism};
+use dfe_loader::kafka::Consumer;
 
 fn load_dotenv() {
-    let _ = dotenvy::from_path("/projects/dfe-loader-clickhouse/.env");
+    let _ = dotenvy::from_path("/projects/dfe-loader/.env");
 }
 
 /// Skip test if no Kafka available
