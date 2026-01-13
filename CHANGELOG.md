@@ -1,3 +1,10 @@
+# [1.3.0](https://github.com/hypersec-io/dfe-loader-clickhouse/compare/v1.2.1...v1.3.0) (2026-01-13)
+
+
+### Features
+
+* switch hs-rustlib to Artifactory registry dependency ([d6bf74d](https://github.com/hypersec-io/dfe-loader-clickhouse/commit/d6bf74d78bd3d806ea3edf694d9221a232540fa4))
+
 ## [1.2.1](https://github.com/hypersec-io/dfe-loader-clickhouse/compare/v1.2.0...v1.2.1) (2026-01-12)
 
 
