@@ -18,6 +18,74 @@ export CARGO_BUILD_JOBS=2
 
 ---
 
+## Dependency Management
+
+### hs-rustlib via Artifactory (MANDATORY)
+
+**hs-rustlib MUST be consumed via Artifactory, NOT local path.**
+
+```toml
+# ✅ CORRECT - Via Artifactory private registry
+hs-rustlib = { version = "x.y.z", registry = "hypersec", features = ["transport-kafka"] }
+
+# ❌ WRONG - Local path (development only, never commit)
+# hs-rustlib = { path = "../hs-rustlib", features = ["transport-kafka"] }
+```
+
+### Artifactory Configuration
+
+| Component | Value |
+|-----------|-------|
+| JFrog Domain | `hypersec.jfrog.io` |
+| Registry Name | `hypersec` |
+| Virtual Repo | `hypersec-cargo-virtual` |
+| Local Repo | `hypersec-cargo-local` |
+| Index URL | `sparse+https://hypersec.jfrog.io/artifactory/api/cargo/hypersec-cargo-virtual/index/` |
+
+### Local Setup
+
+1. **Configure registry** in `.cargo/config.toml` (already done in this project):
+   ```toml
+   [registries.hypersec]
+   index = "sparse+https://hypersec.jfrog.io/artifactory/api/cargo/hypersec-cargo-virtual/index/"
+   ```
+
+2. **Set credentials** in `~/.cargo/credentials.toml`:
+   ```toml
+   [registries.hypersec]
+   token = "Bearer <your-artifactory-token>"
+   ```
+
+   Get token: `jf config export hypersec-token | base64 -d | jq -r '.accessToken'`
+
+### Version Update Workflow
+
+1. Make changes in `/projects/hs-rustlib`
+2. Commit and push to hs-rustlib repo
+3. CI builds and publishes new version to Artifactory
+4. Update dfe-loader `Cargo.toml` with new version: `hs-rustlib = { version = "0.2.0", ... }`
+5. Run `cargo update -p hs-rustlib` to pull from Artifactory
+6. Test and commit
+
+### Submodule Push Access
+
+By default, CI/AI submodules are read-only (`no-push`). To enable push access:
+
+```bash
+# Enable push for ci submodule (run once per clone)
+cd ci && git remote set-url --push origin https://github.com/hypersec-io/ci.git
+
+# Enable push for ai submodule
+cd ai && git remote set-url --push origin https://github.com/hypersec-io/ai.git
+```
+
+**Projects with push access enabled:**
+
+- `/projects/dfe-loader-clickhouse/ci` - Enabled 2026-01-13 (on feat/test-tiers branch)
+- `/projects/dfe-loader` - Enable after rename
+
+---
+
 ## Development Principles
 
 1. **Clean Arrow approach**: Don't munge existing code patterns into new Arrow approach if a clean rewrite or restructure is better
@@ -609,7 +677,89 @@ Located at k8s.tyrell.com.au with:
 
 ## Current Session (2026-01-13)
 
-### Accomplished
+### In Progress
+
+**Artifactory + hs-rustlib Migration Setup**
+
+Work stopped at: Need to switch to hs-rustlib project to add `publish = ["hypersec"]` and push to trigger CI publishing. Once hs-rustlib is published to Artifactory, can update Cargo.toml here to use registry instead of local path.
+
+### Accomplished This Session
+
+**1. WBS Planning Complete**
+- Created detailed WBS for library migration to hs-rustlib (~9,500 lines, 52% of codebase)
+- Created detailed WBS for project rename (dfe-loader-clickhouse → dfe-loader)
+- Full plan saved to `~/.claude/plans/smooth-percolating-locket.md`
+- Added handover documentation requirements (4.3) and project switching protocol
+
+**2. Artifactory Cargo Registry Created**
+- Created `hypersec-cargo-local` (private crates)
+- Created `hypersec-cargo-remote` (crates.io proxy)
+- Created `hypersec-cargo-virtual` (combined, sparse index enabled)
+- Configured local `~/.cargo/credentials.toml` with JFrog token
+- Updated `.cargo/config.toml` with hypersec registry
+
+**3. CI Rust Support Added** (pushed to /projects/ci feat/test-tiers branch)
+- Updated `config/org.sh` with CARGO_REPO, ARTIFACTORY_CARGO_URL variables
+- Updated `defaults.yaml` with rust quality tools (fmt, clippy, audit, deny)
+- Created `scripts/languages/rust/` with 6 scripts:
+  - setup.sh, quality.sh, test.sh, build.sh, publish.sh, verify-publish.sh
+- Language detection already supports Rust via Cargo.toml
+
+**4. STATE.md Updated**
+- Added "Dependency Management" section documenting Artifactory setup
+- Documented version update workflow
+- Listed projects with push access
+
+### Key Files Modified
+
+| File | Description |
+|------|-------------|
+| `STATE.md` | Added Dependency Management section |
+| `TODO.md` | Added WBS tasks for migration and rename |
+| `.cargo/config.toml` | Added hypersec registry configuration |
+| `/projects/ci/config/org.sh` | Added Cargo repository variables |
+| `/projects/ci/defaults.yaml` | Added Rust quality tools |
+| `/projects/ci/scripts/languages/rust/*` | 6 new CI scripts |
+
+### Decisions Made
+
+1. **hs-rustlib via Artifactory ONLY** - No local path dependencies in committed code
+2. **Migration before rename** - Option B from WBS: complete Tier 1 migration, then rename
+3. **Sparse index for Cargo** - Using modern sparse protocol, not git index
+4. **Projects with push access** - /projects/ci and /projects/dfe-loader explicitly allowed
+
+### Next Steps
+
+1. **Switch to hs-rustlib project** (NEW Claude Code session):
+   - Add `publish = ["hypersec"]` to Cargo.toml
+   - Ensure CI can publish to Artifactory
+   - Push to trigger initial publish
+
+2. **Return here after hs-rustlib published**:
+   - Update Cargo.toml: `hs-rustlib = { version = "0.1.0", registry = "hypersec", ... }`
+   - Run `cargo update` to verify
+   - Run tests
+
+3. **Begin WBS 1 Tier 1** - Migrate modules to hs-rustlib
+
+### Git State
+
+- **Branch:** main
+- **Upstream:** up to date (TODO.md has uncommitted changes)
+- **Uncommitted:** M TODO.md, M STATE.md, M .cargo/config.toml
+- **Staged:** none
+
+### Session Context Summary
+
+Set up complete Artifactory Cargo infrastructure for hs-rustlib publishing. Created
+Cargo repositories in JFrog, added Rust CI pipeline to /projects/ci, configured
+local Cargo credentials. WBS plans created for both library migration and project
+rename. **BLOCKED:** hs-rustlib must be published to Artifactory before we can
+remove the local path dependency. Next action: switch to hs-rustlib project.
+
+---
+
+## Previous Session (2026-01-13 - Earlier)
 
 **Tier 2 Test Infrastructure Enhancement - Complete** (commit 2521324)
 
