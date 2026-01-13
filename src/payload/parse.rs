@@ -13,7 +13,7 @@
 
 use sonic_rs::{JsonValueTrait, LazyValue, get_from_slice};
 
-use crate::payload::detect::{detect_format, PayloadFormat};
+use crate::payload::{detect_format, PayloadFormat};
 use crate::Result;
 
 /// Parse a payload into a serde_json::Value.
