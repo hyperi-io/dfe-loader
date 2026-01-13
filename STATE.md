@@ -677,85 +677,84 @@ Located at k8s.tyrell.com.au with:
 
 ## Current Session (2026-01-13)
 
-### In Progress
-
-**Artifactory + hs-rustlib Migration Setup**
-
-Work stopped at: Need to switch to hs-rustlib project to add `publish = ["hypersec"]` and push to trigger CI publishing. Once hs-rustlib is published to Artifactory, can update Cargo.toml here to use registry instead of local path.
-
 ### Accomplished This Session
 
-**1. WBS Planning Complete**
-- Created detailed WBS for library migration to hs-rustlib (~9,500 lines, 52% of codebase)
-- Created detailed WBS for project rename (dfe-loader → dfe-loader)
-- Full plan saved to `~/.claude/plans/smooth-percolating-locket.md`
-- Added handover documentation requirements (4.3) and project switching protocol
+#### WBS Tier 1 Assessment Complete
 
-**2. Artifactory Cargo Registry Created**
-- Created `hypersec-cargo-local` (private crates)
-- Created `hypersec-cargo-remote` (crates.io proxy)
-- Created `hypersec-cargo-virtual` (combined, sparse index enabled)
-- Configured local `~/.cargo/credentials.toml` with JFrog token
-- Updated `.cargo/config.toml` with hypersec registry
+Evaluated all 6 Tier 1 modules for migration to hs-rustlib:
 
-**3. CI Rust Support Added** (pushed to /projects/ci feat/test-tiers branch)
-- Updated `config/org.sh` with CARGO_REPO, ARTIFACTORY_CARGO_URL variables
-- Updated `defaults.yaml` with rust quality tools (fmt, clippy, audit, deny)
-- Created `scripts/languages/rust/` with 6 scripts:
-  - setup.sh, quality.sh, test.sh, build.sh, publish.sh, verify-publish.sh
-- Language detection already supports Rust via Cargo.toml
+| Module                  | Lines | Decision        | Reason                                  |
+| ----------------------- | ----- | --------------- | --------------------------------------- |
+| 1.1 Payload Detection   | 366   | ✅ **Migrated** | Generic format detection                |
+| 1.2 Type Coercion       | 962   | **Stay**        | ClickHouse-specific types               |
+| 1.3 JSON Flattening     | 565   | **Stay**        | Application-specific pipeline           |
+| 1.4 Schema Cache        | 492   | **Stay**        | ClickHouse schema caching               |
+| 1.5 Circuit Breaker     | 525   | **Stay**        | Simple pattern, trivial to reimplement  |
+| 1.6 Object Pool         | 429   | **Stay**        | Has app-specific types (KafkaOffset)    |
 
-**4. STATE.md Updated**
-- Added "Dependency Management" section documenting Artifactory setup
-- Documented version update workflow
-- Listed projects with push access
+Only 1.1 was genuinely reusable. The rest are either tightly coupled to ClickHouse or simple enough that any project would implement their own.
+
+#### Project Rename Complete
+
+Renamed dfe-loader-clickhouse → dfe-loader:
+
+- 45+ files updated across source, tests, docs, and configs
+- Cargo.toml package name: `dfe-loader`, lib name: `dfe_loader`
+- All `use dfe_loader_clickhouse::*` → `use dfe_loader::*`
+- Comprehensive audit performed to catch edge cases
+- Backup branch: `pre-rename-backup`
+- All 280 library + 124 integration tests passing
+
+#### hs-rustlib v0.2.0 Published to Artifactory
+
+- Added stateful `FormatDetector` with `FormatMode` enum
+- Published via `cargo publish --registry hypersec`
+- dfe-loader now using registry dependency (not local path)
 
 ### Key Files Modified
 
 | File | Description |
 |------|-------------|
-| `STATE.md` | Added Dependency Management section |
-| `TODO.md` | Added WBS tasks for migration and rename |
-| `.cargo/config.toml` | Added hypersec registry configuration |
-| `/projects/ci/config/org.sh` | Added Cargo repository variables |
-| `/projects/ci/defaults.yaml` | Added Rust quality tools |
-| `/projects/ci/scripts/languages/rust/*` | 6 new CI scripts |
+| `Cargo.toml` | Renamed to dfe-loader, hs-rustlib v0.2.0 via registry |
+| `Cargo.lock` | Regenerated with new name |
+| `src/lib.rs`, `src/main.rs` | Updated module docs |
+| `src/payload/mod.rs` | Re-exports from hs-rustlib |
+| `tests/**/*.rs` | Updated all imports |
+| `benches/**/*.rs` | Updated all imports |
+| `*.md` files | Updated project references |
+| `.cargo/config.toml` | Updated header comment |
+| `.github/workflows/*.yml` | Updated project header |
+| `.env.example` | Updated header comment |
+| `TODO.md` | Cleaned up, documented completion |
 
 ### Decisions Made
 
-1. **hs-rustlib via Artifactory ONLY** - No local path dependencies in committed code
-2. **Migration before rename** - Option B from WBS: complete Tier 1 migration, then rename
-3. **Sparse index for Cargo** - Using modern sparse protocol, not git index
-4. **Projects with push access** - /projects/ci and /projects/dfe-loader explicitly allowed
-
-### Next Steps
-
-1. **Switch to hs-rustlib project** (NEW Claude Code session):
-   - Add `publish = ["hypersec"]` to Cargo.toml
-   - Ensure CI can publish to Artifactory
-   - Push to trigger initial publish
-
-2. **Return here after hs-rustlib published**:
-   - Update Cargo.toml: `hs-rustlib = { version = "0.1.0", registry = "hypersec", ... }`
-   - Run `cargo update` to verify
-   - Run tests
-
-3. **Begin WBS 1 Tier 1** - Migrate modules to hs-rustlib
+1. **Tier 1 modules stay in dfe-loader** - Only 1.1 Payload Detection was generic enough to migrate
+2. **Completed rename before Tier 2** - Clean project name going forward
+3. **Historical reference in TODO.md** - Kept one line documenting the rename
 
 ### Git State
 
 - **Branch:** main
-- **Upstream:** up to date (TODO.md has uncommitted changes)
-- **Uncommitted:** M TODO.md, M STATE.md, M .cargo/config.toml
-- **Staged:** none
+- **Upstream:** up to date with origin/main
+- **Uncommitted:** clean
+- **Commits:**
+  - `b4be1a0` - fix: update remaining old project name references
+  - `02e966b` - docs: update TODO.md with completed WBS tasks
+  - `2108891` - refactor: rename project dfe-loader-clickhouse → dfe-loader
+
+### Next Steps
+
+1. **Mison Benchmark Validation** - Run on dedicated host when CPU available
+2. **Performance Validation** - Benchmark transport integration
+3. **Production Load Testing** - Test against k8s.tyrell.com.au
 
 ### Session Context Summary
 
-Set up complete Artifactory Cargo infrastructure for hs-rustlib publishing. Created
-Cargo repositories in JFrog, added Rust CI pipeline to /projects/ci, configured
-local Cargo credentials. WBS plans created for both library migration and project
-rename. **BLOCKED:** hs-rustlib must be published to Artifactory before we can
-remove the local path dependency. Next action: switch to hs-rustlib project.
+Completed WBS Tier 1 assessment (only 1.1 migrated) and full project rename from
+dfe-loader-clickhouse to dfe-loader. Comprehensive audit ensured all 45+ files
+were updated. hs-rustlib v0.2.0 published to Artifactory with format detection.
+All 280 lib + 124 integration tests passing.
 
 ---
 
