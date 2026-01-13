@@ -1,4 +1,4 @@
-# Project:      dfe-loader-clickhouse
+# Project:      dfe-loader
 # File:         .github/workflows/semantic-release.yml
 # Purpose:      Create version tags using semantic-release
 # License:      LicenseRef-HyperSec-EULA
