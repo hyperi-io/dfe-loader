@@ -22,7 +22,7 @@ tokio-util = { version = ">=0.7", features = ["rt"] }
 
 # Transport abstraction (Kafka/Zenoh/Memory) from hs-rustlib
 # Published to Artifactory hypersec-cargo registry
-hs-rustlib = { version = "0.1.0", registry = "hypersec", features = ["transport-kafka"] }
+hs-rustlib = { version = "0.2.0", registry = "hypersec", features = ["transport-kafka"] }
 
 # Kafka (SASL/SCRAM required for auth) - also needed for DLQ producer
 rdkafka = { version = ">=0.38", features = ["cmake-build", "ssl", "sasl"] }

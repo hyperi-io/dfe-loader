@@ -1405,7 +1405,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users 0.5.2",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1962,9 +1962,9 @@ dependencies = [
 
 [[package]]
 name = "hs-rustlib"
-version = "0.1.0"
+version = "0.2.0"
 source = "sparse+https://hypersec.jfrog.io/artifactory/api/cargo/hypersec-cargo-virtual/index/"
-checksum = "ef3b68d4814d9d3115061e1364ad26be5728694a9205dc4e9b82e5baee8b23c3"
+checksum = "ca12b6e8619bb3bfe66dab8359e49e970bf98dceb53a069a3145049d386ece0c"
 dependencies = [
  "async-trait",
  "chrono",
@@ -3576,7 +3576,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9120690fafc389a67ba3803df527d0ec9cbbc9cc45e4cc20b332996dfb672425"
 dependencies = [
  "anyhow",
- "itertools 0.14.0",
+ "itertools 0.13.0",
  "proc-macro2",
  "quote",
  "syn 2.0.111",
@@ -4271,7 +4271,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
