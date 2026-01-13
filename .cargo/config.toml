@@ -1,4 +1,4 @@
-# Cargo build configuration for dfe-loader-clickhouse
+# Cargo build configuration for dfe-loader
 #
 # Enable native CPU features for SIMD optimizations in sonic-rs and arrow.
 # This is REQUIRED for sonic-rs to use AVX2/SSE4.2 SIMD instructions.
