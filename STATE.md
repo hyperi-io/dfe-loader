@@ -1,4 +1,4 @@
-# Project State
+update # Project State
 
 **Project:** dfe-loader
 **Purpose:** High-performance Kafka to ClickHouse data loader (Rust port of Go clickhouse-loader)
@@ -679,96 +679,71 @@ Located at k8s.tyrell.com.au with:
 
 ### Accomplished This Session
 
-#### ClickHouse Module Migration to hs-rustlib
+#### Artifactory Registry Publishing Complete
 
-Migrated core ClickHouse client functionality to hs-rustlib:
+Published all crates to HyperSec Artifactory private registry:
 
-| Component | Destination | Status |
-|-----------|-------------|--------|
-| `ArrowClickHouseClient` | `hs-rustlib/src/clickhouse/client.rs` | ✅ Migrated |
-| `ClickHouseConfig` | `hs-rustlib/src/clickhouse/config.rs` | ✅ Migrated |
-| `ParsedType`, `ColumnInfo`, `TableSchema` | `hs-rustlib/src/clickhouse/types.rs` | ✅ Migrated |
-| `ClickHouseError` | `hs-rustlib/src/clickhouse/error.rs` | ✅ Migrated |
-| Embedded `clickhouse-arrow` fork | Removed (now git dependency) | ✅ Removed |
+| Crate | Version | Registry | Status |
+|-------|---------|----------|--------|
+| `clickhouse-arrow-derive` | 0.3.0 | hypersec | ✅ Published |
+| `clickhouse-arrow` | 0.3.0 | hypersec | ✅ Published |
+| `hs-rustlib` | 0.3.0 | hypersec | ✅ Published |
 
-**What stays in dfe-loader:**
+#### Private CI for clickhouse-arrow Fork
 
-- `Inserter` - Binary-split salvage, batch retry logic
-- `CircuitBreaker` - Per-table failure detection
-- `SchemaCache` - TTL caching with background refresh
+Created workflow dispatch pattern for private CI on public fork:
 
-#### Removed Embedded clickhouse-arrow Fork
+- Created [ci/.github/workflows/clickhouse-arrow.yml](ci/.github/workflows/clickhouse-arrow.yml)
+- Triggers: `repository_dispatch`, `workflow_dispatch`, `schedule` (daily 06:00 UTC)
+- Public fork stays clean for upstream PRs
+- Private CI runs from hypersec-io/ci repo
 
-- Deleted entire `crates/clickhouse-arrow/` directory (~66,000 lines)
-- hs-rustlib now uses git dependency: `https://github.com/hypersec-io/clickhouse-arrow`
-- Significantly cleaner project structure
+#### hs-rustlib Registry Dependency
 
-#### Release Build Optimizations
+Updated hs-rustlib to consume clickhouse-arrow from registry instead of git:
 
-Added pure-Rust optimizations for Linux x86_64/aarch64:
+```toml
+# Before (git dependency - can't publish)
+clickhouse-arrow = { git = "https://github.com/hypersec-io/clickhouse-arrow", ... }
 
-| Optimization | Location | Effect |
-|--------------|----------|--------|
-| `target-cpu=x86-64-v3` | `.cargo/config.toml` | AVX2 SIMD for x86_64 |
-| `target-cpu=generic` | `.cargo/config.toml` | NEON baseline for ARM64 |
-| `target-cpu=native` | `.cargo/config.toml` | Best local dev performance |
-| `lto = "thin"` | `Cargo.toml` | Link-time optimization |
-| `codegen-units = 1` | `Cargo.toml` | Better inlining |
-| `panic = "abort"` | `Cargo.toml` | No unwinding overhead |
-| `strip = true` | `Cargo.toml` | Smaller binary (18MB) |
-| `jemalloc` feature | `Cargo.toml` | Optional allocator |
-| `mimalloc` feature | `Cargo.toml` | Optional allocator |
-
-#### Binary Naming Convention
-
-- Renamed binary from `loader` to `dfe-loader`
-- Created `scripts/build-release.sh` for arch-suffixed builds
-- Output: `dfe-loader-x86_64-linux`, `dfe-loader-aarch64-linux`
+# After (registry dependency - publishable)
+clickhouse-arrow = { version = "0.3.0", registry = "hypersec", ... }
+```
 
 ### Key Files Modified
 
 | File | Description |
 |------|-------------|
-| `Cargo.toml` | Binary renamed, allocator features, PGO docs |
-| `.cargo/config.toml` | Per-target CPU optimizations |
-| `src/main.rs` | Global allocator config, command name |
-| `src/error.rs` | Added `From<ClickHouseError>` impl |
-| `src/config/loader.rs` | Added config conversion to hs-rustlib types |
-| `src/clickhouse/mod.rs` | Re-exports from hs-rustlib |
-| `src/clickhouse/inserter.rs` | Updated error handling |
-| `src/pipeline/orchestrator.rs` | Config conversion for Arrow client |
-| `tests/integration/*.rs` | Updated to use hs-rustlib types |
-| `scripts/build-release.sh` | New release build script |
-| `crates/clickhouse-arrow/` | **DELETED** (66K lines) |
+| `/projects/hs-rustlib/Cargo.toml` | Registry dependency for clickhouse-arrow |
+| `/projects/dfe-loader/ci/.github/workflows/clickhouse-arrow.yml` | New CI workflow |
+| `/projects/clickhouse-arrow-publish/Cargo.toml` | Version 0.3.0, registry config |
+| `/projects/clickhouse-arrow-publish/clickhouse-arrow/Cargo.toml` | Derive via registry |
+| `/projects/clickhouse-arrow-publish/.cargo/config.toml` | Hypersec registry config |
 
 ### Decisions Made
 
-1. **Pure Rust toolchain** - Rejected mold/clang linker for KISS principle
-2. **Arch-suffixed binaries** - `dfe-loader-x86_64-linux` convention
-3. **Config conversion via From trait** - Clean bridge between dfe-loader and hs-rustlib types
-4. **Keep resilience in dfe-loader** - Inserter, CircuitBreaker, SchemaCache stay local
+1. **Registry over git dependencies** - Required for cargo publish to work
+2. **Workflow dispatch pattern** - Private CI without polluting public fork
+3. **Version 0.3.0** - Aligned clickhouse-arrow, derive, and hs-rustlib versions
 
 ### Git State
 
 - **Branch:** main
 - **Upstream:** up to date with origin/main
-- **Uncommitted:** ~199 files changed (migration + removal of embedded fork)
-  - Modified: `.cargo/config.toml`, `Cargo.toml`, `Cargo.lock`, `src/main.rs`, `src/error.rs`, etc.
-  - Deleted: Entire `crates/clickhouse-arrow/` directory
-  - Added: `scripts/build-release.sh`
+- **Uncommitted:** ci submodule updated (new workflow) - `ci | 2 +-`
 
 ### Next Steps
 
-1. **Commit migration changes** - Large commit with ClickHouse migration
-2. **Run full test suite** - Verify all 400+ tests pass
-3. **Publish hs-rustlib update** - If clickhouse module changes need publishing
+1. **Update dfe-loader** - Use `hs-rustlib = { version = "0.3.0", registry = "hypersec" }`
+2. **Commit ci submodule** - Record new clickhouse-arrow workflow
+3. **Test integration** - Verify dfe-loader works with registry dependencies
 
 ### Session Context Summary
 
-Migrated ClickHouse client module to hs-rustlib, removed embedded clickhouse-arrow
-fork (~66K lines), added release build optimizations with per-target CPU flags,
-and established proper binary naming convention. Changes are uncommitted pending
-full test verification.
+Completed Artifactory publishing pipeline for clickhouse-arrow fork and hs-rustlib.
+All three crates (clickhouse-arrow-derive, clickhouse-arrow, hs-rustlib) now at
+v0.3.0 in hypersec registry. Created private CI workflow for the public fork.
+dfe-loader can now consume hs-rustlib with clickhouse feature from Artifactory.
 
 ---
 
@@ -919,7 +894,7 @@ Arrow schemas. All 421 tests passing with production-ready verification patterns
 
 ---
 
-**Last Updated:** 2026-01-13
+**Last Updated:** 2026-01-14
 **ClickHouse:** 25.12 (native protocol)
 **Version:** 0.13.0-test-infrastructure
-**Status:** Tier 2 Test Infrastructure Complete - 421 Tests Passing
+**Status:** Artifactory Publishing Complete - All Crates v0.3.0
