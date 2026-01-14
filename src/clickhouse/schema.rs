@@ -24,8 +24,7 @@ use parking_lot::RwLock;
 use rustc_hash::FxHashMap;
 use tracing::{debug, error, info, warn};
 
-use crate::clickhouse::types::TableSchema;
-use crate::clickhouse::ArrowClickHouseClient;
+use crate::clickhouse::{ArrowClickHouseClient, TableSchema};
 
 /// Cached schema with timestamp and metadata
 struct CachedSchema {
@@ -344,8 +343,7 @@ pub type SharedSchemaCache = Arc<SchemaCache>;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::clickhouse::types::ParsedType;
-    use crate::clickhouse::ColumnInfo;
+    use crate::clickhouse::{ColumnInfo, ParsedType};
 
     fn make_test_schema(table: &str) -> TableSchema {
         TableSchema {

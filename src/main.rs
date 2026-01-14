@@ -1,5 +1,20 @@
 //! CLI entry point for dfe-loader
 
+// =============================================================================
+// Global Allocator Configuration
+// =============================================================================
+// Use jemalloc or mimalloc for better performance than system allocator.
+// Enable with: cargo build --release --features jemalloc
+//          or: cargo build --release --features mimalloc
+
+#[cfg(feature = "jemalloc")]
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
+#[cfg(feature = "mimalloc")]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -12,7 +27,7 @@ use dfe_loader::metrics::{run_server, Metrics, ServerState};
 use dfe_loader::pipeline::Orchestrator;
 
 #[derive(Parser, Debug)]
-#[command(name = "loader")]
+#[command(name = "dfe-loader")]
 #[command(about = "High-performance Kafka to ClickHouse data loader")]
 #[command(version)]
 struct Args {

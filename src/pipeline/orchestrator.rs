@@ -81,7 +81,9 @@ impl Orchestrator {
         info!(transport = transport.name(), "Transport initialized");
 
         // Create Arrow client for native protocol inserts and schema queries
-        let arrow_client = Arc::new(ArrowClickHouseClient::new(&self.config.clickhouse).await?);
+        // Convert from dfe-loader ClickHouseConfig to hs-rustlib ClickHouseConfig
+        let ch_config: hs_rustlib::clickhouse::ClickHouseConfig = (&self.config.clickhouse).into();
+        let arrow_client = Arc::new(ArrowClickHouseClient::new(&ch_config).await?);
 
         // Inserter uses Arrow-only path
         let inserter = Inserter::new(arrow_client, InserterConfig::default());
