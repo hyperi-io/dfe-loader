@@ -675,90 +675,104 @@ Located at k8s.tyrell.com.au with:
 
 ---
 
-## Current Session (2026-01-13)
+## Current Session (2026-01-14)
 
 ### Accomplished This Session
 
-#### WBS Tier 1 Assessment Complete
+#### ClickHouse Module Migration to hs-rustlib
 
-Evaluated all 6 Tier 1 modules for migration to hs-rustlib:
+Migrated core ClickHouse client functionality to hs-rustlib:
 
-| Module                  | Lines | Decision        | Reason                                  |
-| ----------------------- | ----- | --------------- | --------------------------------------- |
-| 1.1 Payload Detection   | 366   | ✅ **Migrated** | Generic format detection                |
-| 1.2 Type Coercion       | 962   | **Stay**        | ClickHouse-specific types               |
-| 1.3 JSON Flattening     | 565   | **Stay**        | Application-specific pipeline           |
-| 1.4 Schema Cache        | 492   | **Stay**        | ClickHouse schema caching               |
-| 1.5 Circuit Breaker     | 525   | **Stay**        | Simple pattern, trivial to reimplement  |
-| 1.6 Object Pool         | 429   | **Stay**        | Has app-specific types (KafkaOffset)    |
+| Component | Destination | Status |
+|-----------|-------------|--------|
+| `ArrowClickHouseClient` | `hs-rustlib/src/clickhouse/client.rs` | ✅ Migrated |
+| `ClickHouseConfig` | `hs-rustlib/src/clickhouse/config.rs` | ✅ Migrated |
+| `ParsedType`, `ColumnInfo`, `TableSchema` | `hs-rustlib/src/clickhouse/types.rs` | ✅ Migrated |
+| `ClickHouseError` | `hs-rustlib/src/clickhouse/error.rs` | ✅ Migrated |
+| Embedded `clickhouse-arrow` fork | Removed (now git dependency) | ✅ Removed |
 
-Only 1.1 was genuinely reusable. The rest are either tightly coupled to ClickHouse or simple enough that any project would implement their own.
+**What stays in dfe-loader:**
 
-#### Project Rename Complete
+- `Inserter` - Binary-split salvage, batch retry logic
+- `CircuitBreaker` - Per-table failure detection
+- `SchemaCache` - TTL caching with background refresh
 
-Renamed dfe-loader-clickhouse → dfe-loader:
+#### Removed Embedded clickhouse-arrow Fork
 
-- 45+ files updated across source, tests, docs, and configs
-- Cargo.toml package name: `dfe-loader`, lib name: `dfe_loader`
-- All `use dfe_loader_clickhouse::*` → `use dfe_loader::*`
-- Comprehensive audit performed to catch edge cases
-- Backup branch: `pre-rename-backup`
-- All 280 library + 124 integration tests passing
+- Deleted entire `crates/clickhouse-arrow/` directory (~66,000 lines)
+- hs-rustlib now uses git dependency: `https://github.com/hypersec-io/clickhouse-arrow`
+- Significantly cleaner project structure
 
-#### hs-rustlib v0.2.0 Published to Artifactory
+#### Release Build Optimizations
 
-- Added stateful `FormatDetector` with `FormatMode` enum
-- Published via `cargo publish --registry hypersec`
-- dfe-loader now using registry dependency (not local path)
+Added pure-Rust optimizations for Linux x86_64/aarch64:
+
+| Optimization | Location | Effect |
+|--------------|----------|--------|
+| `target-cpu=x86-64-v3` | `.cargo/config.toml` | AVX2 SIMD for x86_64 |
+| `target-cpu=generic` | `.cargo/config.toml` | NEON baseline for ARM64 |
+| `target-cpu=native` | `.cargo/config.toml` | Best local dev performance |
+| `lto = "thin"` | `Cargo.toml` | Link-time optimization |
+| `codegen-units = 1` | `Cargo.toml` | Better inlining |
+| `panic = "abort"` | `Cargo.toml` | No unwinding overhead |
+| `strip = true` | `Cargo.toml` | Smaller binary (18MB) |
+| `jemalloc` feature | `Cargo.toml` | Optional allocator |
+| `mimalloc` feature | `Cargo.toml` | Optional allocator |
+
+#### Binary Naming Convention
+
+- Renamed binary from `loader` to `dfe-loader`
+- Created `scripts/build-release.sh` for arch-suffixed builds
+- Output: `dfe-loader-x86_64-linux`, `dfe-loader-aarch64-linux`
 
 ### Key Files Modified
 
 | File | Description |
 |------|-------------|
-| `Cargo.toml` | Renamed to dfe-loader, hs-rustlib v0.2.0 via registry |
-| `Cargo.lock` | Regenerated with new name |
-| `src/lib.rs`, `src/main.rs` | Updated module docs |
-| `src/payload/mod.rs` | Re-exports from hs-rustlib |
-| `tests/**/*.rs` | Updated all imports |
-| `benches/**/*.rs` | Updated all imports |
-| `*.md` files | Updated project references |
-| `.cargo/config.toml` | Updated header comment |
-| `.github/workflows/*.yml` | Updated project header |
-| `.env.example` | Updated header comment |
-| `TODO.md` | Cleaned up, documented completion |
+| `Cargo.toml` | Binary renamed, allocator features, PGO docs |
+| `.cargo/config.toml` | Per-target CPU optimizations |
+| `src/main.rs` | Global allocator config, command name |
+| `src/error.rs` | Added `From<ClickHouseError>` impl |
+| `src/config/loader.rs` | Added config conversion to hs-rustlib types |
+| `src/clickhouse/mod.rs` | Re-exports from hs-rustlib |
+| `src/clickhouse/inserter.rs` | Updated error handling |
+| `src/pipeline/orchestrator.rs` | Config conversion for Arrow client |
+| `tests/integration/*.rs` | Updated to use hs-rustlib types |
+| `scripts/build-release.sh` | New release build script |
+| `crates/clickhouse-arrow/` | **DELETED** (66K lines) |
 
 ### Decisions Made
 
-1. **Tier 1 modules stay in dfe-loader** - Only 1.1 Payload Detection was generic enough to migrate
-2. **Completed rename before Tier 2** - Clean project name going forward
-3. **Historical reference in TODO.md** - Kept one line documenting the rename
+1. **Pure Rust toolchain** - Rejected mold/clang linker for KISS principle
+2. **Arch-suffixed binaries** - `dfe-loader-x86_64-linux` convention
+3. **Config conversion via From trait** - Clean bridge between dfe-loader and hs-rustlib types
+4. **Keep resilience in dfe-loader** - Inserter, CircuitBreaker, SchemaCache stay local
 
 ### Git State
 
 - **Branch:** main
 - **Upstream:** up to date with origin/main
-- **Uncommitted:** clean
-- **Commits:**
-  - `b4be1a0` - fix: update remaining old project name references
-  - `02e966b` - docs: update TODO.md with completed WBS tasks
-  - `2108891` - refactor: rename project dfe-loader-clickhouse → dfe-loader
+- **Uncommitted:** ~199 files changed (migration + removal of embedded fork)
+  - Modified: `.cargo/config.toml`, `Cargo.toml`, `Cargo.lock`, `src/main.rs`, `src/error.rs`, etc.
+  - Deleted: Entire `crates/clickhouse-arrow/` directory
+  - Added: `scripts/build-release.sh`
 
 ### Next Steps
 
-1. **Mison Benchmark Validation** - Run on dedicated host when CPU available
-2. **Performance Validation** - Benchmark transport integration
-3. **Production Load Testing** - Test against k8s.tyrell.com.au
+1. **Commit migration changes** - Large commit with ClickHouse migration
+2. **Run full test suite** - Verify all 400+ tests pass
+3. **Publish hs-rustlib update** - If clickhouse module changes need publishing
 
 ### Session Context Summary
 
-Completed WBS Tier 1 assessment (only 1.1 migrated) and full project rename from
-dfe-loader-clickhouse to dfe-loader. Comprehensive audit ensured all 45+ files
-were updated. hs-rustlib v0.2.0 published to Artifactory with format detection.
-All 280 lib + 124 integration tests passing.
+Migrated ClickHouse client module to hs-rustlib, removed embedded clickhouse-arrow
+fork (~66K lines), added release build optimizations with per-target CPU flags,
+and established proper binary naming convention. Changes are uncommitted pending
+full test verification.
 
 ---
 
-## Previous Session (2026-01-13 - Earlier)
+## Previous Session (2026-01-13)
 
 **Tier 2 Test Infrastructure Enhancement - Complete** (commit 2521324)
 

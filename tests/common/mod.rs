@@ -307,7 +307,9 @@ pub async fn create_test_client() -> Option<ArrowClickHouseClient> {
     }
 
     let config = get_clickhouse_config();
-    ArrowClickHouseClient::new(&config).await.ok()
+    // Convert dfe-loader config to hs-rustlib config
+    let ch_config: hs_rustlib::clickhouse::ClickHouseConfig = (&config).into();
+    ArrowClickHouseClient::new(&ch_config).await.ok()
 }
 
 /// Create a test table and return cleanup function

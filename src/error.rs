@@ -51,5 +51,11 @@ impl From<String> for Error {
     }
 }
 
+impl From<hs_rustlib::clickhouse::ClickHouseError> for Error {
+    fn from(err: hs_rustlib::clickhouse::ClickHouseError) -> Self {
+        Error::ClickHouse(err.to_string())
+    }
+}
+
 /// Result type alias using our Error
 pub type Result<T> = std::result::Result<T, Error>;

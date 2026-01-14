@@ -84,6 +84,11 @@ fn get_test_config() -> ClickHouseConfig {
     }
 }
 
+/// Convert dfe-loader config to hs-rustlib config for ArrowClickHouseClient
+fn to_ch_config(config: &ClickHouseConfig) -> hs_rustlib::clickhouse::ClickHouseConfig {
+    config.into()
+}
+
 #[tokio::test]
 async fn test_clickhouse_connect() {
     if skip_if_no_clickhouse() {
@@ -93,7 +98,7 @@ async fn test_clickhouse_connect() {
 
     let config = get_test_config();
     let start = std::time::Instant::now();
-    let result = ArrowClickHouseClient::new(&config).await;
+    let result = ArrowClickHouseClient::new(&to_ch_config(&config)).await;
 
     match result {
         Ok(client) => {
@@ -118,7 +123,7 @@ async fn test_clickhouse_insert_arrow() {
     }
 
     let config = get_test_config();
-    let client = match ArrowClickHouseClient::new(&config).await {
+    let client = match ArrowClickHouseClient::new(&to_ch_config(&config)).await {
         Ok(c) => c,
         Err(e) => {
             panic!("ClickHouse connection failed: {}", e);
@@ -265,7 +270,7 @@ async fn test_clickhouse_table_exists() {
     }
 
     let config = get_test_config();
-    let client = match ArrowClickHouseClient::new(&config).await {
+    let client = match ArrowClickHouseClient::new(&to_ch_config(&config)).await {
         Ok(c) => c,
         Err(e) => {
             eprintln!("Skipping test: ClickHouse connection failed: {}", e);
@@ -291,7 +296,7 @@ async fn test_clickhouse_variant_type_support() {
     }
 
     let config = get_test_config();
-    let client = match ArrowClickHouseClient::new(&config).await {
+    let client = match ArrowClickHouseClient::new(&to_ch_config(&config)).await {
         Ok(c) => c,
         Err(e) => {
             eprintln!("Skipping test: ClickHouse connection failed: {}", e);

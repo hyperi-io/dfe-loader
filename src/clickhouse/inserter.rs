@@ -153,9 +153,11 @@ impl Inserter {
             }
         }
 
-        Err(last_error.unwrap_or_else(|| {
-            crate::Error::Buffer("Max retries exceeded".into())
-        }))
+        // Convert ClickHouseError to crate::Error, with fallback if no error captured
+        Err(match last_error {
+            Some(e) => e.into(),
+            None => crate::Error::Buffer("Max retries exceeded".into()),
+        })
     }
 
     /// Insert a FlushBatch with batch salvage on failure

@@ -12,7 +12,7 @@ name = "dfe_loader"
 path = "src/lib.rs"
 
 [[bin]]
-name = "loader"
+name = "dfe-loader"
 path = "src/main.rs"
 
 [dependencies]
@@ -20,16 +20,17 @@ path = "src/main.rs"
 tokio = { version = ">=1.48", features = ["full"] }
 tokio-util = { version = ">=0.7", features = ["rt"] }
 
-# Transport abstraction (Kafka/Zenoh/Memory) from hs-rustlib
+# Shared library with transport abstraction and ClickHouse client
 # Published to Artifactory hypersec-cargo registry
-hs-rustlib = { version = "0.2.0", registry = "hypersec", features = ["transport-kafka"] }
+# Using path for development - switch to registry after publishing
+hs-rustlib = { path = "../hs-rustlib", features = ["transport-kafka", "clickhouse"] }
 
 # Kafka (SASL/SCRAM required for auth) - also needed for DLQ producer
 rdkafka = { version = ">=0.38", features = ["cmake-build", "ssl", "sasl"] }
 
-# ClickHouse Arrow client - using local fork with Variant/Dynamic/Nested types
+# ClickHouse Arrow client - via hs-rustlib (hypersec-io/clickhouse-arrow fork)
 # Native Arrow protocol for efficient columnar inserts
-clickhouse-arrow = { path = "crates/clickhouse-arrow/clickhouse-arrow", default-features = false, features = ["serde", "pool"] }
+# Note: clickhouse-arrow comes transitively via hs-rustlib's clickhouse feature
 
 # Arrow for columnar data handling
 arrow = { version = ">=54.0", features = ["prettyprint"] }
@@ -60,9 +61,12 @@ hyper = { version = ">=1.8", features = ["server", "http1"] }
 hyper-util = { version = ">=0.1", features = ["tokio"] }
 http-body-util = ">=0.1"
 
-# Memory management
-tikv-jemalloc-ctl = ">=0.6"
-tikv-jemallocator = ">=0.6"
+# Memory management - alternative allocators for performance
+# jemalloc: Good for long-running servers with large allocations
+tikv-jemalloc-ctl = { version = ">=0.6", optional = true }
+tikv-jemallocator = { version = ">=0.6", optional = true }
+# mimalloc: Often faster for mixed workloads, better security hardening
+mimalloc = { version = ">=0.1", optional = true }
 
 # GeoIP enrichment (mmap for long-running apps, simdutf8 for SIMD UTF-8 validation)
 maxminddb = { version = ">=0.24", features = ["mmap", "simdutf8"] }
@@ -126,10 +130,37 @@ name = "mison"
 harness = false
 
 [profile.release]
-lto = "thin"
-codegen-units = 1
-panic = "abort"
-strip = true
+lto = "thin"           # Link-time optimization (use "fat" for max perf, slower compile)
+codegen-units = 1      # Single codegen unit for better optimization
+panic = "abort"        # Smaller binary, no unwinding overhead
+strip = true           # Remove debug symbols
+opt-level = 3          # Maximum optimization (default for release, explicit for clarity)
+
+# =============================================================================
+# Advanced Optimization Options (Manual)
+# =============================================================================
+#
+# 1. Profile-Guided Optimization (PGO) - 10-20% improvement:
+#    cargo install cargo-pgo
+#    cargo pgo build
+#    ./target/x86_64-unknown-linux-gnu/release/dfe-loader  # Run with real workload
+#    cargo pgo optimize
+#
+# 2. BOLT Post-Link Optimization (additional 5-15% on top of PGO):
+#    cargo pgo bolt build
+#    ./target/x86_64-unknown-linux-gnu/release/dfe-loader-bolt-instrumented  # Run workload
+#    cargo pgo bolt optimize
+#
+# 3. Combined PGO + BOLT:
+#    cargo pgo optimize
+#    cargo pgo bolt optimize --with-pgo
+#
+# 4. Fat LTO (slower compile, sometimes faster runtime):
+#    Change lto = "thin" to lto = "fat"
+#
+# References:
+# - https://github.com/Kobzol/cargo-pgo
+# - https://nnethercote.github.io/perf-book/build-configuration.html
 
 [profile.bench]
 inherits = "release"
@@ -137,7 +168,11 @@ debug = true
 
 [features]
 default = []
-jemalloc = []  # Enable jemalloc allocator
+# Alternative allocators (choose one for production)
+jemalloc = ["dep:tikv-jemallocator", "dep:tikv-jemalloc-ctl"]  # Best for large allocations, long-running
+mimalloc = ["dep:mimalloc"]  # Often faster, better security, consistent performance
+# Transport backends
 transport-memory = ["hs-rustlib/transport-memory"]  # Memory transport for unit tests
 transport-zenoh = ["hs-rustlib/transport-zenoh"]    # Zenoh transport for dev/test
+# Testing
 testcontainers = []  # Enable testcontainers for CI/CD (Docker required)

@@ -298,6 +298,19 @@ impl Default for ClickHouseConfig {
     }
 }
 
+impl From<&ClickHouseConfig> for hs_rustlib::clickhouse::ClickHouseConfig {
+    fn from(cfg: &ClickHouseConfig) -> Self {
+        hs_rustlib::clickhouse::ClickHouseConfig {
+            hosts: cfg.hosts.clone(),
+            database: cfg.database.clone(),
+            username: cfg.username.clone(),
+            password: cfg.password.clone(),
+            connect_timeout_ms: 5000,  // Default timeout
+            request_timeout_ms: 30000, // Default timeout
+        }
+    }
+}
+
 // ============================================================================
 // Payload Configuration
 // ============================================================================

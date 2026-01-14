@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use dfe_loader::clickhouse::schema::{SchemaCache, SchemaCacheConfig};
-use dfe_loader::clickhouse::types::{ColumnInfo, ParsedType, TableSchema};
+use dfe_loader::clickhouse::{ColumnInfo, ParsedType, TableSchema};
 
 use crate::common::{create_test_client, drop_test_table, unique_table_name};
 use crate::skip_if_no_clickhouse;
