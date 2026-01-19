@@ -546,7 +546,7 @@ async fn test_error_invalid_clickhouse_host() {
     };
 
     // Convert dfe-loader config to hs-rustlib config
-    let ch_config: hs_rustlib::clickhouse::ClickHouseConfig = (&config).into();
+    let ch_config: hs_rustlib::clickhouse_arrow::ClickHouseConfig = (&config).into();
     let result = ArrowClickHouseClient::new(&ch_config).await;
     assert!(result.is_err());
     eprintln!("✓ Invalid host error: {:?}", result.err().unwrap());
