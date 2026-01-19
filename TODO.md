@@ -38,14 +38,6 @@
 
 ---
 
-## Next: hs-rustlib Dependency Fix
-
-- [ ] **Fix hs-rustlib async_trait dependency** - Blocking compilation
-  - Transport feature needs async_trait in Cargo.toml
-  - Once fixed, run full test suite
-
----
-
 ## Code TODOs (from source)
 
 None currently - all critical TODOs completed.
@@ -86,6 +78,10 @@ None currently - all critical TODOs completed.
   - `LowCardinality(String)` for `_org_id` - dictionary encoding
   - `timestamp` with minmax index for event time queries
   - `timestamp_load` as primary query filter (not `timestamp`)
+
+- [x] **Fixed hs-rustlib async_trait dependency** - Added to transport feature
+  - Commit `bbf1ea1` in hs-rustlib
+  - All 283 unit + 124 integration tests passing
 
 ### 2026-01-13: Project Rename & WBS Tier 1
 

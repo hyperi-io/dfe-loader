@@ -726,9 +726,35 @@ INDEX idx_timestamp timestamp TYPE minmax    -- event time queries
 4. Monthly + org partitions acceptable for <100 orgs
 5. Text search configurable (default ON) with version-based index selection
 
-### Blocked By
+### Fixes Applied
 
-- **hs-rustlib async_trait dependency** - Transport feature needs async_trait in Cargo.toml
+- **hs-rustlib async_trait dependency** - Fixed by adding `async-trait` to transport feature (commit `bbf1ea1`)
+- **Test files clickhouse import** - Updated 3 test files to use `clickhouse_arrow` module path
+- **Schema CSV type** - Changed `_org_id` from `LowCardinality(String)` to `String` (CSV = logical type, DDL = storage type)
+
+### Git State
+
+**dfe-loader:**
+
+- **Branch:** main
+- **Upstream:** ahead by 3 commits (not pushed)
+- **Commits:**
+  - `b593600` fix: update test files to use clickhouse_arrow module path
+  - `e698b25` docs: update STATE.md with auto-initialization session progress
+  - `d52ce40` feat: add auto-initialization for Kafka topics and ClickHouse schema
+
+**hs-rustlib:**
+
+- **Branch:** main
+- **Upstream:** ahead by 1 commit (not pushed)
+- **Commits:**
+  - `bbf1ea1` fix: add async-trait to transport feature dependencies
+
+### Test Results
+
+- **283 unit tests** - all passing
+- **124 integration tests** - all passing
+- **3 performance tests** - all passing
 
 ### Key Files Modified
 
@@ -749,7 +775,8 @@ Implemented auto-initialization feature ensuring the happy path always works.
 On startup, dfe-loader now auto-creates Kafka topics, ClickHouse database/table,
 and text search index. Engine selection (SharedMergeTree/Replicated/MergeTree)
 is auto-detected from ClickHouse capabilities. Schema optimized for multi-tenant
-RLS queries with _org_id first in ORDER BY. Blocked on hs-rustlib async_trait fix.
+RLS queries with _org_id first in ORDER BY. Fixed hs-rustlib async_trait dependency
+and all tests pass. Ready to push both repos.
 
 ---
 
