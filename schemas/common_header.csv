@@ -1,0 +1,8 @@
+column,type,default,nullable,codec,comment
+timestamp_load,DateTime64(3),now64(3),false,Delta/ZSTD(1),Load time - primary query filter
+timestamp,DateTime64(3),,false,Delta/ZSTD(1),Event occurrence time (minmax indexed)
+_uuid,UUID,generateUUIDv7(),false,,Unique event ID UUIDv7 (time-ordered)
+_org_id,String,,false,ZSTD(1),Organisation ID for RLS (first in ORDER BY)
+logoriginal,String,,true,ZSTD(3),Original log line (text search when enabled)
+logjson,JSON,,true,ZSTD(3),Complete Kafka message as JSON
+_tags,JSON,,true,ZSTD(3),Metadata and collector/agent info
