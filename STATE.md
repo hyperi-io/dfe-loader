@@ -675,9 +675,87 @@ Located at k8s.tyrell.com.au with:
 
 ---
 
-## Current Session (2026-01-14)
+## Current Session (2026-01-19)
 
 ### Accomplished This Session
+
+#### Auto-Initialization & Schema Optimization
+
+Implemented comprehensive auto-initialization for happy path setup:
+
+**New Files:**
+- `schemas/common_table.sql` - DDL template with `{db}`, `{table}`, `{engine}` placeholders
+- `schemas/common_header.csv` - Field definitions (column, type, default, nullable, codec, comment)
+- `src/schema/mod.rs` - Schema module with compile-time embedding and capability detection
+
+**Config (`src/config/loader.rs`):**
+```toml
+[auto_init]
+enabled = true           # Master switch (default: true)
+create_topics = true     # Kafka topic creation
+create_database = true   # ClickHouse database creation
+create_table = true      # ClickHouse table creation
+create_text_index = true # Text search index on logoriginal
+topic_partitions = 3
+topic_replication_factor = 1
+```
+
+**Engine Auto-Detection (`src/pipeline/auto_init.rs`):**
+1. Queries `SELECT version()` for ClickHouse version
+2. Queries `system.table_engines` for SharedMergeTree availability
+3. Queries `system.clusters` for clustered deployment
+4. Selection: SharedMergeTree → ReplicatedMergeTree → MergeTree
+
+**Text Search Index:**
+- `full_text(0)` on ClickHouse 25.1+ (GA)
+- `ngrambf_v1(3, 256, 2, 0)` bloom filter fallback for older versions
+- Added via `ALTER TABLE ... ADD INDEX` after table creation
+
+**Optimized Schema (based on query pattern analysis):**
+```sql
+ORDER BY (_org_id, timestamp_load, _uuid)    -- org first for RLS
+PARTITION BY (toYYYYMM(timestamp_load), _org_id)  -- monthly + org
+LowCardinality(String) for _org_id           -- dictionary encoding
+INDEX idx_timestamp timestamp TYPE minmax    -- event time queries
+```
+
+**Key Design Decisions:**
+1. `_org_id` first in ORDER BY - every query uses org_id for RLS
+2. `timestamp_load` is primary query filter (not `timestamp`)
+3. `timestamp` gets minmax index for event time range queries
+4. Monthly + org partitions acceptable for <100 orgs
+5. Text search configurable (default ON) with version-based index selection
+
+### Blocked By
+
+- **hs-rustlib async_trait dependency** - Transport feature needs async_trait in Cargo.toml
+
+### Key Files Modified
+
+| File | Description |
+|------|-------------|
+| `src/config/loader.rs` | Added `AutoInitConfig` struct |
+| `src/config/mod.rs` | Re-exported `AutoInitConfig` |
+| `src/schema/mod.rs` | New schema module (320 lines) |
+| `src/pipeline/auto_init.rs` | New auto-initializer (460 lines) |
+| `src/pipeline/mod.rs` | Re-exported `AutoInitializer` |
+| `src/pipeline/orchestrator.rs` | Wired up auto-init at startup |
+| `schemas/common_table.sql` | DDL template with engine placeholder |
+| `schemas/common_header.csv` | Field definitions |
+
+### Session Context Summary
+
+Implemented auto-initialization feature ensuring the happy path always works.
+On startup, dfe-loader now auto-creates Kafka topics, ClickHouse database/table,
+and text search index. Engine selection (SharedMergeTree/Replicated/MergeTree)
+is auto-detected from ClickHouse capabilities. Schema optimized for multi-tenant
+RLS queries with _org_id first in ORDER BY. Blocked on hs-rustlib async_trait fix.
+
+---
+
+## Previous Session (2026-01-14)
+
+### Accomplished That Session
 
 #### Artifactory Registry Publishing Complete
 

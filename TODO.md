@@ -23,6 +23,11 @@
 
 ## Next: Performance Validation
 
+- [ ] **Full Rust async optimisation review** - Hot path + operations branches
+  - Review async/await patterns for unnecessary overhead
+  - Check for blocking operations in async contexts
+  - Audit tokio spawn vs direct await decisions
+
 - [ ] **Benchmark transport integration** - Verify no performance regression
   - Compare before/after throughput with Kafka
   - Test with MemoryTransport for baseline
@@ -30,6 +35,14 @@
 - [ ] **Production load testing** - Real-world validation
   - Test against k8s.tyrell.com.au environment
   - Monitor memory usage under sustained load
+
+---
+
+## Next: hs-rustlib Dependency Fix
+
+- [ ] **Fix hs-rustlib async_trait dependency** - Blocking compilation
+  - Transport feature needs async_trait in Cargo.toml
+  - Once fixed, run full test suite
 
 ---
 
@@ -52,6 +65,27 @@ None currently - all critical TODOs completed.
 ---
 
 ## Completed
+
+### 2026-01-19: Auto-Initialization & Schema Optimization
+
+- [x] **Auto-initialize mode** - Ensure happy path always works
+  - Kafka topic creation with graceful permission failure
+  - ClickHouse database/table creation from embedded DDL
+  - Engine auto-detection: SharedMergeTree → ReplicatedMergeTree → MergeTree
+  - Text search index: full_text (25.1+) or ngrambf bloom filter fallback
+  - Config: `auto_init.enabled`, `create_topics`, `create_database`, `create_table`, `create_text_index`
+
+- [x] **Schema module with compile-time embedding**
+  - `schemas/common_table.sql` - DDL template with `{db}`, `{table}`, `{engine}`
+  - `schemas/common_header.csv` - Field definitions
+  - `src/schema/mod.rs` - `render_ddl_with_engine()`, `ClusterCapabilities`, `TableEngine`
+
+- [x] **Optimized ClickHouse schema** (based on query pattern analysis)
+  - `ORDER BY (_org_id, timestamp_load, _uuid)` - org first for RLS
+  - `PARTITION BY (toYYYYMM(timestamp_load), _org_id)` - monthly + org (<100 orgs)
+  - `LowCardinality(String)` for `_org_id` - dictionary encoding
+  - `timestamp` with minmax index for event time queries
+  - `timestamp_load` as primary query filter (not `timestamp`)
 
 ### 2026-01-13: Project Rename & WBS Tier 1
 
