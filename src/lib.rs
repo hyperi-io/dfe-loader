@@ -14,6 +14,7 @@ pub mod mison;
 pub mod payload;
 pub mod pipeline;
 pub mod routing;
+pub mod schema;
 pub mod transform;
 
 pub use error::{Error, Result};

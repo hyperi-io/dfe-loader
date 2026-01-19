@@ -27,7 +27,7 @@ pub mod inserter;
 pub mod schema;
 
 // Re-export core types from hs-rustlib
-pub use hs_rustlib::clickhouse::{
+pub use hs_rustlib::clickhouse_arrow::{
     default_value_for_category, is_null_string, ArrowClickHouseClient, ClickHouseConfig,
     ClickHouseError, ColumnInfo, ParsedType, SharedArrowClient, TableSchema, NULL_STRINGS,
 };

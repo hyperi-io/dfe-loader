@@ -51,8 +51,8 @@ impl From<String> for Error {
     }
 }
 
-impl From<hs_rustlib::clickhouse::ClickHouseError> for Error {
-    fn from(err: hs_rustlib::clickhouse::ClickHouseError) -> Self {
+impl From<hs_rustlib::clickhouse_arrow::ClickHouseError> for Error {
+    fn from(err: hs_rustlib::clickhouse_arrow::ClickHouseError) -> Self {
         Error::ClickHouse(err.to_string())
     }
 }

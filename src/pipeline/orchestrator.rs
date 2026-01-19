@@ -20,9 +20,9 @@ use crate::buffer::{BufferManager, FlushBatch, KafkaOffset};
 use crate::clickhouse::{ArrowClickHouseClient, Inserter, InserterConfig};
 use crate::config::Config;
 use crate::kafka::{DlqMessage, DlqProducer, KafkaMessage, TransportAdapter};
-// Note: Consumer removed - now using TransportAdapter for transport abstraction
 use crate::metrics::Metrics;
 use crate::payload::{FormatDetector, FormatMode, PayloadFormat};
+use crate::pipeline::AutoInitializer;
 use crate::routing::{RouteResult, Router};
 use crate::transform::Transformer;
 use crate::Result;
@@ -76,13 +76,17 @@ impl Orchestrator {
     pub async fn run(&mut self) -> Result<()> {
         info!("Starting pipeline orchestrator");
 
+        // Run auto-initialization (creates topics, database, table if configured)
+        let initializer = AutoInitializer::new(&self.config);
+        initializer.run().await?;
+
         // Initialize transport adapter (wraps hs-rustlib KafkaTransport)
         let transport = TransportAdapter::new(&self.config.kafka).await?;
         info!(transport = transport.name(), "Transport initialized");
 
         // Create Arrow client for native protocol inserts and schema queries
         // Convert from dfe-loader ClickHouseConfig to hs-rustlib ClickHouseConfig
-        let ch_config: hs_rustlib::clickhouse::ClickHouseConfig = (&self.config.clickhouse).into();
+        let ch_config: hs_rustlib::clickhouse_arrow::ClickHouseConfig = (&self.config.clickhouse).into();
         let arrow_client = Arc::new(ArrowClickHouseClient::new(&ch_config).await?);
 
         // Inserter uses Arrow-only path

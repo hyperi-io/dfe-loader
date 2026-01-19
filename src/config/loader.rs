@@ -32,6 +32,7 @@ pub struct Config {
     pub metadata: MetadataConfig,
     pub coercion: CoercionConfig,
     pub schema: SchemaConfig,
+    pub auto_init: AutoInitConfig,
 }
 
 impl Default for Config {
@@ -50,6 +51,7 @@ impl Default for Config {
             metadata: MetadataConfig::default(),
             coercion: CoercionConfig::default(),
             schema: SchemaConfig::default(),
+            auto_init: AutoInitConfig::default(),
         }
     }
 }
@@ -298,9 +300,9 @@ impl Default for ClickHouseConfig {
     }
 }
 
-impl From<&ClickHouseConfig> for hs_rustlib::clickhouse::ClickHouseConfig {
+impl From<&ClickHouseConfig> for hs_rustlib::clickhouse_arrow::ClickHouseConfig {
     fn from(cfg: &ClickHouseConfig) -> Self {
-        hs_rustlib::clickhouse::ClickHouseConfig {
+        hs_rustlib::clickhouse_arrow::ClickHouseConfig {
             hosts: cfg.hosts.clone(),
             database: cfg.database.clone(),
             username: cfg.username.clone(),
@@ -727,6 +729,63 @@ impl Default for SchemaConfig {
         Self {
             cache_ttl_secs: 300, // 5 minutes
             refresh_on_error: true,
+        }
+    }
+}
+
+// ============================================================================
+// Auto-Initialization Configuration
+// ============================================================================
+
+/// Auto-initialization configuration
+///
+/// When enabled (default), the loader will attempt to create missing
+/// infrastructure on startup:
+/// - Kafka topics (if create_topics is true)
+/// - ClickHouse database (if create_database is true)
+/// - ClickHouse table (if create_table is true)
+/// - Text search index on logoriginal (if create_text_index is true)
+///
+/// Creation failures are logged as warnings but do not prevent startup.
+/// This ensures the happy path always works without manual setup.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AutoInitConfig {
+    /// Master switch for auto-initialization (default: true)
+    pub enabled: bool,
+
+    /// Attempt to create Kafka source topics if they don't exist
+    /// Gracefully fails if lacking permissions (logs warning, continues)
+    pub create_topics: bool,
+
+    /// Number of partitions for auto-created topics
+    pub topic_partitions: i32,
+
+    /// Replication factor for auto-created topics
+    pub topic_replication_factor: i32,
+
+    /// Attempt to create the default ClickHouse database
+    pub create_database: bool,
+
+    /// Attempt to create the default ClickHouse table
+    pub create_table: bool,
+
+    /// Add text search index on logoriginal column (default: true)
+    /// Uses full_text index on ClickHouse 25.1+, falls back to ngrambf bloom filter
+    /// Note: Adds ~10-30% CPU overhead on inserts when enabled
+    pub create_text_index: bool,
+}
+
+impl Default for AutoInitConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            create_topics: true,
+            topic_partitions: 3,
+            topic_replication_factor: 1,
+            create_database: true,
+            create_table: true,
+            create_text_index: true,
         }
     }
 }

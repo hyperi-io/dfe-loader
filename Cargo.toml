@@ -23,7 +23,7 @@ tokio-util = { version = ">=0.7", features = ["rt"] }
 # Shared library with transport abstraction and ClickHouse client
 # Published to Artifactory hypersec-cargo registry
 # Using path for development - switch to registry after publishing
-hs-rustlib = { path = "../hs-rustlib", features = ["transport-kafka", "clickhouse"] }
+hs-rustlib = { path = "../hs-rustlib", features = ["transport-kafka", "clickhouse-arrow"] }
 
 # Kafka (SASL/SCRAM required for auth) - also needed for DLQ producer
 rdkafka = { version = ">=0.38", features = ["cmake-build", "ssl", "sasl"] }
