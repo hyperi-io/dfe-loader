@@ -29,12 +29,37 @@
 //! - `{db}` - Database name
 //! - `{table}` - Table name
 //! - `{engine}` - Table engine (auto-detected or specified)
+//! - `{table_comment}` - Table-level tags (see Table Tags below)
+//!
+//! ## Table Tags
+//!
+//! Tables support metadata tags stored in the COMMENT field, using the same
+//! `@tag: key=value` syntax as the column expression language:
+//!
+//! ```sql
+//! COMMENT '@schema_source: core | @schema_version: 2 | @created_by: dfe-loader'
+//! ```
+//!
+//! **Standard tags:**
+//! - `@schema_source` - `core` (pre-supplied) or absent/`user` (user-created)
+//! - `@schema_version` - Schema version number for migrations
+//! - `@created_by` - Tool that created the table
+//!
+//! Query tables by tag:
+//! ```sql
+//! SELECT database, name, comment
+//! FROM system.tables
+//! WHERE comment LIKE '%@schema_source: core%'
+//! ```
 //!
 //! ```ignore
-//! use dfe_loader::schema::{render_ddl_with_engine, TableEngine};
+//! use dfe_loader::schema::{render_ddl_with_engine, TableEngine, TableTags};
 //!
-//! let ddl = render_ddl_with_engine("common", "events", TableEngine::SharedMergeTree);
+//! let tags = TableTags::core();
+//! let ddl = render_ddl_with_tags("common", "events", TableEngine::SharedMergeTree, &tags);
 //! ```
+
+use std::collections::BTreeMap;
 
 /// Common table DDL template (ClickHouse)
 ///
@@ -42,6 +67,7 @@
 /// - `{db}` - Database name
 /// - `{table}` - Table name
 /// - `{engine}` - Table engine clause
+/// - `{table_comment}` - Table-level tags
 pub const COMMON_TABLE_DDL: &str = include_str!("../../schemas/common_table.sql");
 
 /// Common header field definitions (CSV format)
@@ -90,6 +116,132 @@ impl std::fmt::Display for TableEngine {
             TableEngine::ReplicatedMergeTree => write!(f, "ReplicatedMergeTree"),
             TableEngine::MergeTree => write!(f, "MergeTree"),
         }
+    }
+}
+
+/// Table-level tags stored in ClickHouse COMMENT field
+///
+/// Uses `@tag: key=value` syntax similar to column expression language.
+/// Tags are separated by ` | ` (pipe with spaces) for readability.
+///
+/// # Example
+///
+/// ```
+/// use dfe_loader::schema::TableTags;
+///
+/// let tags = TableTags::core()
+///     .with("custom_field", "custom_value");
+///
+/// assert_eq!(tags.to_comment(), "@schema_source: core | @schema_version: 2 | @custom_field: custom_value");
+/// ```
+#[derive(Debug, Clone, Default)]
+pub struct TableTags {
+    /// Key-value pairs (ordered for deterministic output)
+    tags: BTreeMap<String, String>,
+}
+
+impl TableTags {
+    /// Create empty tags
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Create tags for core (pre-supplied) schemas
+    ///
+    /// Sets:
+    /// - `@schema_source: core`
+    /// - `@schema_version: 2`
+    pub fn core() -> Self {
+        Self::new()
+            .with("schema_source", "core")
+            .with("schema_version", "2")
+    }
+
+    /// Create tags for user-created schemas
+    ///
+    /// Sets:
+    /// - `@schema_source: user`
+    /// - `@schema_version: 1`
+    pub fn user() -> Self {
+        Self::new()
+            .with("schema_source", "user")
+            .with("schema_version", "1")
+    }
+
+    /// Add a tag (builder pattern)
+    pub fn with(mut self, key: &str, value: &str) -> Self {
+        self.tags.insert(key.to_string(), value.to_string());
+        self
+    }
+
+    /// Add a tag in-place
+    pub fn set(&mut self, key: &str, value: &str) {
+        self.tags.insert(key.to_string(), value.to_string());
+    }
+
+    /// Get a tag value
+    pub fn get(&self, key: &str) -> Option<&str> {
+        self.tags.get(key).map(|s| s.as_str())
+    }
+
+    /// Check if a tag exists
+    pub fn has(&self, key: &str) -> bool {
+        self.tags.contains_key(key)
+    }
+
+    /// Remove a tag
+    pub fn remove(&mut self, key: &str) -> Option<String> {
+        self.tags.remove(key)
+    }
+
+    /// Check if tags are empty
+    pub fn is_empty(&self) -> bool {
+        self.tags.is_empty()
+    }
+
+    /// Number of tags
+    pub fn len(&self) -> usize {
+        self.tags.len()
+    }
+
+    /// Iterate over tags
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.tags.iter().map(|(k, v)| (k.as_str(), v.as_str()))
+    }
+
+    /// Format as ClickHouse COMMENT string
+    ///
+    /// Uses `@key: value` syntax, separated by ` | `
+    pub fn to_comment(&self) -> String {
+        self.tags
+            .iter()
+            .map(|(k, v)| format!("@{}: {}", k, v))
+            .collect::<Vec<_>>()
+            .join(" | ")
+    }
+
+    /// Parse tags from a ClickHouse COMMENT string
+    ///
+    /// Expects `@key: value` pairs separated by ` | `
+    pub fn from_comment(comment: &str) -> Self {
+        let mut tags = BTreeMap::new();
+
+        for part in comment.split(" | ") {
+            let part = part.trim();
+            if let Some(stripped) = part.strip_prefix('@') {
+                if let Some((key, value)) = stripped.split_once(':') {
+                    tags.insert(key.trim().to_string(), value.trim().to_string());
+                }
+            }
+        }
+
+        Self { tags }
+    }
+}
+
+impl std::fmt::Display for TableTags {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.to_comment())
     }
 }
 
@@ -183,10 +335,16 @@ pub fn render_ddl(db: &str, table: &str) -> String {
 
 /// Render the common table DDL with specified engine
 pub fn render_ddl_with_engine(db: &str, table: &str, engine: TableEngine) -> String {
+    render_ddl_with_tags(db, table, engine, &TableTags::core())
+}
+
+/// Render the common table DDL with specified engine and tags
+pub fn render_ddl_with_tags(db: &str, table: &str, engine: TableEngine, tags: &TableTags) -> String {
     COMMON_TABLE_DDL
         .replace("{db}", db)
         .replace("{table}", table)
         .replace("{engine}", &engine.to_engine_clause(db, table))
+        .replace("{table_comment}", &tags.to_comment())
 }
 
 /// Render DDL with full capability detection
@@ -259,16 +417,26 @@ pub struct HeaderField {
     pub default: Option<String>,
     pub nullable: bool,
     pub codec: Option<String>,
+    pub source: String,
     pub comment: String,
 }
 
 /// Parse the common header CSV into field definitions
+///
+/// CSV format: column,type,default,nullable,codec,source,comment
+///
+/// Source expression language:
+/// - `@source: field_name` - Copy from source field
+/// - `@source: field_name | now()` - Copy from source, fallback to now()
+/// - `@source: first(a/b/c)` - First non-null from list (/ separator)
+/// - `@generated: expression` - Generated by ClickHouse DEFAULT
+/// - `@captured: description` - Captured from raw payload
 pub fn parse_common_header() -> Vec<HeaderField> {
     let mut fields = Vec::new();
 
     for line in COMMON_HEADER_CSV.lines().skip(1) {
         let parts: Vec<&str> = line.split(',').collect();
-        if parts.len() >= 6 {
+        if parts.len() >= 7 {
             fields.push(HeaderField {
                 column: parts[0].to_string(),
                 data_type: parts[1].to_string(),
@@ -283,7 +451,8 @@ pub fn parse_common_header() -> Vec<HeaderField> {
                 } else {
                     Some(parts[4].to_string())
                 },
-                comment: parts[5].to_string(),
+                source: parts[5].to_string(),
+                comment: parts[6].to_string(),
             });
         }
     }
@@ -293,17 +462,17 @@ pub fn parse_common_header() -> Vec<HeaderField> {
 
 /// Required (non-nullable) columns that must be present in every insert
 pub fn required_columns() -> Vec<&'static str> {
-    vec!["timestamp", "_org_id"]
+    vec!["_timestamp", "_org_id"]
 }
 
 /// Columns with ClickHouse DEFAULT values (can be omitted from inserts)
 pub fn default_columns() -> Vec<&'static str> {
-    vec!["timestamp_load", "_uuid"]
+    vec!["_timestamp_load", "_uuid"]
 }
 
 /// Nullable columns (can be null or omitted)
 pub fn nullable_columns() -> Vec<&'static str> {
-    vec!["logoriginal", "logjson", "_tags"]
+    vec!["_timestamp_received", "_raw", "_json", "_tags"]
 }
 
 #[cfg(test)]
@@ -406,37 +575,123 @@ mod tests {
         let fields = parse_common_header();
         assert!(!fields.is_empty());
 
-        let timestamp = fields.iter().find(|f| f.column == "timestamp").unwrap();
+        let timestamp = fields.iter().find(|f| f.column == "_timestamp").unwrap();
         assert_eq!(timestamp.data_type, "DateTime64(3)");
         assert!(!timestamp.nullable);
+        assert_eq!(timestamp.source, "@source: timestamp | now()");
 
         let org_id = fields.iter().find(|f| f.column == "_org_id").unwrap();
         assert_eq!(org_id.data_type, "String");
         assert!(!org_id.nullable);
+        assert_eq!(org_id.source, "@source: org_id");
 
-        let logjson = fields.iter().find(|f| f.column == "logjson").unwrap();
-        assert!(logjson.nullable);
+        let json_field = fields.iter().find(|f| f.column == "_json").unwrap();
+        assert!(json_field.nullable);
+        assert_eq!(json_field.source, "@captured: raw_payload as JSON");
+
+        let tags_field = fields.iter().find(|f| f.column == "_tags").unwrap();
+        assert!(tags_field.nullable);
+        assert_eq!(tags_field.source, "@source: first(tags/_tags/meta/metadata.tags)");
     }
 
     #[test]
     fn test_required_columns() {
         let required = required_columns();
-        assert!(required.contains(&"timestamp"));
+        assert!(required.contains(&"_timestamp"));
         assert!(required.contains(&"_org_id"));
     }
 
     #[test]
     fn test_default_columns() {
         let defaults = default_columns();
-        assert!(defaults.contains(&"timestamp_load"));
+        assert!(defaults.contains(&"_timestamp_load"));
         assert!(defaults.contains(&"_uuid"));
     }
 
     #[test]
     fn test_nullable_columns() {
         let nullable = nullable_columns();
-        assert!(nullable.contains(&"logoriginal"));
-        assert!(nullable.contains(&"logjson"));
+        assert!(nullable.contains(&"_timestamp_received"));
+        assert!(nullable.contains(&"_raw"));
+        assert!(nullable.contains(&"_json"));
         assert!(nullable.contains(&"_tags"));
+    }
+
+    #[test]
+    fn test_table_tags_core() {
+        let tags = TableTags::core();
+        assert_eq!(tags.get("schema_source"), Some("core"));
+        assert_eq!(tags.get("schema_version"), Some("2"));
+        assert!(tags.has("schema_source"));
+        assert!(!tags.has("nonexistent"));
+    }
+
+    #[test]
+    fn test_table_tags_user() {
+        let tags = TableTags::user();
+        assert_eq!(tags.get("schema_source"), Some("user"));
+        assert_eq!(tags.get("schema_version"), Some("1"));
+    }
+
+    #[test]
+    fn test_table_tags_custom() {
+        let tags = TableTags::new()
+            .with("schema_source", "core")
+            .with("custom_tag", "custom_value");
+
+        assert_eq!(tags.len(), 2);
+        assert_eq!(tags.get("custom_tag"), Some("custom_value"));
+    }
+
+    #[test]
+    fn test_table_tags_to_comment() {
+        let tags = TableTags::core();
+        let comment = tags.to_comment();
+
+        // BTreeMap maintains sorted order
+        assert!(comment.contains("@schema_source: core"));
+        assert!(comment.contains("@schema_version: 2"));
+        assert!(comment.contains(" | "));
+    }
+
+    #[test]
+    fn test_table_tags_from_comment() {
+        let comment = "@schema_source: core | @schema_version: 2 | @custom: value";
+        let tags = TableTags::from_comment(comment);
+
+        assert_eq!(tags.get("schema_source"), Some("core"));
+        assert_eq!(tags.get("schema_version"), Some("2"));
+        assert_eq!(tags.get("custom"), Some("value"));
+        assert_eq!(tags.len(), 3);
+    }
+
+    #[test]
+    fn test_table_tags_roundtrip() {
+        let original = TableTags::core().with("extra", "data");
+        let comment = original.to_comment();
+        let parsed = TableTags::from_comment(&comment);
+
+        assert_eq!(original.get("schema_source"), parsed.get("schema_source"));
+        assert_eq!(original.get("schema_version"), parsed.get("schema_version"));
+        assert_eq!(original.get("extra"), parsed.get("extra"));
+    }
+
+    #[test]
+    fn test_render_ddl_with_tags() {
+        let tags = TableTags::core();
+        let ddl = render_ddl_with_tags("common", "events", TableEngine::MergeTree, &tags);
+
+        assert!(ddl.contains("common.events"));
+        assert!(ddl.contains("MergeTree()"));
+        assert!(ddl.contains("@schema_source: core"));
+        assert!(ddl.contains("@schema_version: 2"));
+        assert!(ddl.contains("COMMENT"));
+    }
+
+    #[test]
+    fn test_render_ddl_includes_core_tags() {
+        // render_ddl_with_engine should now include core tags by default
+        let ddl = render_ddl_with_engine("common", "events", TableEngine::MergeTree);
+        assert!(ddl.contains("@schema_source: core"));
     }
 }
