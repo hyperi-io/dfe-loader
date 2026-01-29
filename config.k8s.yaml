@@ -1,0 +1,65 @@
+# K8s test environment configuration for dfe-loader
+# Host: k8s.tyrell.com.au (10.1.2.240)
+#
+# Usage: ./target/release/dfe-loader --config config.k8s.yaml
+
+kafka:
+  brokers:
+    - k8s.tyrell.com.au:30092
+  group: dfe-loader-test
+  topics:
+    - events
+  client_id: dfe-loader-test
+  sasl:
+    enabled: true
+    mechanism: scram_sha512
+    username: loader
+    password: TyrellPOC2024
+
+clickhouse:
+  hosts:
+    - k8s.tyrell.com.au:30900
+  database: benchmark
+  username: default
+  password: TyrellPOC2024
+  protocol: native
+  tables:
+    - events
+
+routing:
+  db_fields: []  # Shared schema - all to default_db
+  table_fields:
+    - event_category
+    - tags.event_category
+  default_db: benchmark
+  default_table: events
+  dlq:
+    enabled: true
+    topic_suffix: ".dlq"
+
+buffer:
+  flush_bytes: 1048576    # 1MB
+  flush_rows: 10000
+  flush_age_secs: 5
+
+memory:
+  limit_bytes: 134217728  # 128MB
+  pressure_threshold: 0.8
+
+metrics:
+  enabled: true
+  address: "0.0.0.0:9090"
+
+logging:
+  level: info
+  format: text
+
+timestamp_dq:
+  enabled: true
+  max_future_seconds: 600
+  invalid_action: replace_with_now
+  correct_known_bad: true
+
+schema:
+  cache_ttl_secs: 300
+  refresh_on_error: true

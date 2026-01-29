@@ -11,8 +11,13 @@ use crate::transform::timestamp::{TimestampResult, TimestampValidator};
 use crate::Result;
 
 /// Static field names (avoids allocation per message)
-static TIMESTAMP_FIELD: &str = "timestamp";
-static TIMESTAMP_COLLECTOR_FIELD: &str = "timestamp_collector";
+/// Input field names - what we read from source data
+static TIMESTAMP_INPUT_FIELD: &str = "timestamp";
+static TIMESTAMP_RECEIVED_INPUT_FIELD: &str = "timestamp_received";
+/// Output field names - all common header fields use underscore prefix
+static TIMESTAMP_OUTPUT_FIELD: &str = "_timestamp";
+static TIMESTAMP_RECEIVED_OUTPUT_FIELD: &str = "_timestamp_received";
+static TIMESTAMP_COLLECTOR_FIELD: &str = "_timestamp_collector";
 
 /// Transform result with metadata
 pub struct TransformResult {
@@ -148,9 +153,10 @@ impl Transformer {
             obj
         };
 
-        // Step 3: Validate/correct timestamp (uses static field name)
-        if let Some(ts_value) = data.get(TIMESTAMP_FIELD) {
-            let ts_result = match ts_value {
+        // Step 3: Validate/correct timestamp
+        // Read from input field (timestamp), remove it, write to output field (_timestamp)
+        if let Some(ts_value) = data.remove(TIMESTAMP_INPUT_FIELD) {
+            let ts_result = match &ts_value {
                 Value::String(s) => self.timestamp_validator.validate_with_now(s, now),
                 Value::Number(n) => {
                     if let Some(i) = n.as_i64() {
@@ -164,23 +170,23 @@ impl Transformer {
 
             match ts_result {
                 TimestampResult::Valid(dt) => {
-                    data.insert(TIMESTAMP_FIELD.into(), Value::String(dt.to_rfc3339()));
+                    data.insert(TIMESTAMP_OUTPUT_FIELD.into(), Value::String(dt.to_rfc3339()));
                 }
                 TimestampResult::Corrected(dt, reason) => {
                     warnings.get_or_insert_with(Vec::new).push(reason);
-                    data.insert(TIMESTAMP_FIELD.into(), Value::String(dt.to_rfc3339()));
+                    data.insert(TIMESTAMP_OUTPUT_FIELD.into(), Value::String(dt.to_rfc3339()));
                 }
                 TimestampResult::Invalid(reason) => {
                     warnings.get_or_insert_with(Vec::new).push(reason);
                     // OPTIMIZATION: Lazy format - only format now() if we actually need it
                     let ts = now_str.get_or_insert_with(|| now.to_rfc3339()).clone();
-                    data.insert(TIMESTAMP_FIELD.into(), Value::String(ts));
+                    data.insert(TIMESTAMP_OUTPUT_FIELD.into(), Value::String(ts));
                 }
             }
         } else {
             // No timestamp field - inject current time (lazy format)
             let ts = now_str.get_or_insert_with(|| now.to_rfc3339()).clone();
-            data.insert(TIMESTAMP_FIELD.into(), Value::String(ts));
+            data.insert(TIMESTAMP_OUTPUT_FIELD.into(), Value::String(ts));
         }
 
         // Step 4: Extract collector timestamp if present
@@ -189,6 +195,12 @@ impl Transformer {
             if let Some(ts) = data.remove(&self.collector_timestamp_path) {
                 data.insert(TIMESTAMP_COLLECTOR_FIELD.into(), ts);
             }
+        }
+
+        // Step 4b: Extract timestamp_received if present (nullable)
+        // This is when the receiver/loader received the event
+        if let Some(ts) = data.remove(TIMESTAMP_RECEIVED_INPUT_FIELD) {
+            data.insert(TIMESTAMP_RECEIVED_OUTPUT_FIELD.into(), ts);
         }
 
         // Step 5: Add logjson (raw payload as JSON string for JSON column)
@@ -322,11 +334,21 @@ impl Transformer {
     /// When sanitization needed, applies transformations.
     ///
     /// Note: Keys starting with underscore (like _tags, _uuid) are preserved
-    /// when they are system fields (output field names from config).
+    /// when they are system fields (output field names from config or common header).
     #[inline]
     fn sanitize_key_owned(&self, key: String) -> String {
         // Preserve system fields that start with underscore
-        if key == self.tags_output || key == self.logjson_output || key == self.org_id_output {
+        // These are common header fields that must not be sanitized
+        if key == self.tags_output
+            || key == self.logjson_output
+            || key == self.org_id_output
+            || key == TIMESTAMP_OUTPUT_FIELD         // _timestamp
+            || key == TIMESTAMP_RECEIVED_OUTPUT_FIELD // _timestamp_received
+            || key == TIMESTAMP_COLLECTOR_FIELD      // _timestamp_collector
+            || key == "_timestamp_load"              // ClickHouse DEFAULT
+            || key == "_uuid"                        // ClickHouse DEFAULT
+            || key == "_raw"                         // Original log line
+        {
             return key;
         }
 
@@ -413,7 +435,7 @@ impl Default for Transformer {
             drop_tags: false,
 
             capture_logjson: true,
-            logjson_output: "logjson".to_string(),
+            logjson_output: "_json".to_string(),
 
             remove_routing_fields: true,
             routing_db_fields: vec!["org_id".to_string()],
@@ -469,9 +491,14 @@ mod tests {
         });
 
         let result = transformer.transform(input).unwrap();
-        assert!(result.data.contains_key("timestamp"));
-        assert!(result.data.contains_key("version"));
+
+        // @timestamp gets sanitized to "timestamp" AFTER timestamp processing,
+        // so _timestamp is injected with current time and @timestamp becomes "timestamp"
+        assert!(result.data.contains_key("_timestamp")); // injected current time
+        assert!(result.data.contains_key("timestamp")); // sanitized from @timestamp
+        assert!(result.data.contains_key("version")); // sanitized from @version
         assert!(!result.data.contains_key("@timestamp"));
+        assert!(!result.data.contains_key("@version"));
     }
 
     #[test]
@@ -518,8 +545,8 @@ mod tests {
 
         let result = transformer.transform_with_raw(value, raw, None).unwrap();
 
-        // logjson should contain the raw payload
-        assert!(result.data.contains_key("logjson"));
+        // _json should contain the raw payload
+        assert!(result.data.contains_key("_json"));
     }
 
     #[test]

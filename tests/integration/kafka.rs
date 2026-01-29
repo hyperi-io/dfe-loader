@@ -7,6 +7,19 @@ use std::env;
 use dfe_loader::config::{KafkaConfig, SaslConfig, SaslMechanism};
 use dfe_loader::kafka::Consumer;
 
+/// Convert SaslMechanism to the string format used in config
+fn mechanism_to_string(m: SaslMechanism) -> String {
+    match m {
+        SaslMechanism::None => "none",
+        SaslMechanism::Plain => "plain",
+        SaslMechanism::ScramSha256 => "scram_sha_256",
+        SaslMechanism::ScramSha512 => "scram_sha_512",
+        SaslMechanism::OAuthBearer => "oauthbearer",
+        SaslMechanism::AwsMskIam => "aws_msk_iam",
+    }
+    .to_string()
+}
+
 fn load_dotenv() {
     let _ = dotenvy::from_path("/projects/dfe-loader/.env");
 }
@@ -69,7 +82,7 @@ fn get_test_config() -> KafkaConfig {
         };
         Some(SaslConfig {
             enabled: true,
-            mechanism,
+            mechanism: mechanism_to_string(mechanism),
             username: env::var("KAFKA_SASL_USER").unwrap_or_default(),
             password: env::var("KAFKA_SASL_PASSWORD").unwrap_or_default(),
             ..Default::default()
@@ -149,7 +162,7 @@ async fn test_kafka_sasl_config() {
     let mut config = get_test_config();
     config.sasl = Some(SaslConfig {
         enabled: true,
-        mechanism: SaslMechanism::ScramSha256,
+        mechanism: "scram_sha_256".to_string(),
         username: "testuser".to_string(),
         password: "testpass".to_string(),
         ..Default::default()
@@ -159,5 +172,5 @@ async fn test_kafka_sasl_config() {
     assert!(config.sasl.is_some());
     let sasl = config.sasl.unwrap();
     assert!(sasl.enabled);
-    assert_eq!(sasl.mechanism, SaslMechanism::ScramSha256);
+    assert_eq!(sasl.mechanism(), SaslMechanism::ScramSha256);
 }

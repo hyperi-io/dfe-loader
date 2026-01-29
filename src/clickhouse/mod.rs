@@ -12,27 +12,36 @@
 //!
 //! ## Architecture
 //!
-//! Core client and types are provided by `hs-rustlib::clickhouse`:
-//! - `ArrowClickHouseClient` - Arrow protocol client
+//! Core client and types:
+//! - `ArrowClickHouseClient` - Arrow protocol client (native or HTTP)
 //! - `ParsedType`, `ColumnInfo`, `TableSchema` - Type system
+//! - `ClickHouseConfig` - Connection configuration
 //!
-//! Resilience features are dfe-loader specific:
+//! Resilience features:
 //! - `Inserter` - Batch insert with binary-split salvage
 //! - `CircuitBreaker` - Per-table failure detection
 //! - `SchemaCache` - TTL-based schema caching
 
-// Local modules (dfe-loader specific resilience)
+// Core client modules
+pub mod client;
+pub mod config;
+pub mod error;
+pub mod types;
+
+// Resilience modules
 pub mod circuit_breaker;
 pub mod inserter;
 pub mod schema;
 
-// Re-export core types from hs-rustlib
-pub use hs_rustlib::clickhouse_arrow::{
-    default_value_for_category, is_null_string, ArrowClickHouseClient, ClickHouseConfig,
-    ClickHouseError, ColumnInfo, ParsedType, SharedArrowClient, TableSchema, NULL_STRINGS,
+// Re-export core types
+pub use client::{ArrowClickHouseClient, NativeArrowClient, SharedArrowClient};
+pub use config::{ClickHouseConfig, Transport};
+pub use error::{ClickHouseError, ErrorCategory, ServerError, Severity};
+pub use types::{
+    default_value_for_category, is_null_string, ColumnInfo, ParsedType, TableSchema, NULL_STRINGS,
 };
 
-// Export local resilience modules
+// Export resilience modules
 pub use circuit_breaker::{CircuitBreaker, CircuitBreakerConfig, CircuitBreakerStats, CircuitState};
 pub use inserter::{FailedRow, InsertResult, Inserter, InserterConfig};
 pub use schema::{SchemaCache, SchemaCacheConfig, SchemaCacheStats, SharedSchemaCache};

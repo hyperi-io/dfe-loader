@@ -469,8 +469,9 @@ async fn test_inserter_batch_salvage() {
 #[test]
 fn test_inserter_config_defaults() {
     let config = InserterConfig::default();
-    assert_eq!(config.max_retries, 3);
-    assert_eq!(config.retry_delay_ms, 1000);
+    assert_eq!(config.max_retries, 5);
+    assert_eq!(config.base_retry_delay_ms, 100);
+    assert_eq!(config.max_retry_delay_ms, 30_000);
     assert!(config.enable_salvage);
     assert_eq!(config.max_salvage_depth, 20);
     assert_eq!(config.max_concurrent_inserts, 8);

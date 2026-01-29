@@ -104,11 +104,12 @@ impl Default for ArrowSchemaBuilder {
 
 /// Common schemas for testing
 
-/// Standard event schema (timestamp + _org_id + common fields)
+/// Standard event schema (_timestamp + _org_id + common fields)
 pub fn event_schema() -> Arc<Schema> {
     ArrowSchemaBuilder::new()
-        .with_timestamp("timestamp", false)
-        .with_timestamp("timestamp_load", false)
+        .with_timestamp("_timestamp", false)
+        .with_timestamp("_timestamp_load", false)
+        .with_timestamp("_timestamp_received", true)
         .with_uuid("_uuid", false)
         .with_string("_org_id", false)
         .with_string("event_category", false)
@@ -116,10 +117,10 @@ pub fn event_schema() -> Arc<Schema> {
         .build()
 }
 
-/// RLS test schema (timestamp + _org_id + action + user_id)
+/// RLS test schema (_timestamp + _org_id + action + user_id)
 pub fn rls_schema() -> Arc<Schema> {
     ArrowSchemaBuilder::new()
-        .with_timestamp("timestamp", false)
+        .with_timestamp("_timestamp", false)
         .with_string("_org_id", false)
         .with_string("action", false)
         .with_uint32("user_id", false)
@@ -129,7 +130,7 @@ pub fn rls_schema() -> Arc<Schema> {
 /// Authentication event schema
 pub fn auth_schema() -> Arc<Schema> {
     ArrowSchemaBuilder::new()
-        .with_timestamp("timestamp", false)
+        .with_timestamp("_timestamp", false)
         .with_string("_org_id", false)
         .with_string("event_category", false)
         .with_string("action", false)
@@ -143,7 +144,7 @@ pub fn auth_schema() -> Arc<Schema> {
 /// API event schema
 pub fn api_schema() -> Arc<Schema> {
     ArrowSchemaBuilder::new()
-        .with_timestamp("timestamp", false)
+        .with_timestamp("_timestamp", false)
         .with_string("_org_id", false)
         .with_string("event_category", false)
         .with_string("endpoint", false)
@@ -155,10 +156,10 @@ pub fn api_schema() -> Arc<Schema> {
         .build()
 }
 
-/// Minimal schema (just timestamp and _org_id)
+/// Minimal schema (just _timestamp and _org_id)
 pub fn minimal_schema() -> Arc<Schema> {
     ArrowSchemaBuilder::new()
-        .with_timestamp("timestamp", false)
+        .with_timestamp("_timestamp", false)
         .with_string("_org_id", false)
         .build()
 }
@@ -195,17 +196,18 @@ mod tests {
     #[test]
     fn test_event_schema() {
         let schema = event_schema();
-        assert_eq!(schema.fields().len(), 6);
-        assert_eq!(schema.field(0).name(), "timestamp");
-        assert_eq!(schema.field(2).name(), "_uuid");
-        assert_eq!(schema.field(3).name(), "_org_id");
+        assert_eq!(schema.fields().len(), 7);
+        assert_eq!(schema.field(0).name(), "_timestamp");
+        assert_eq!(schema.field(2).name(), "_timestamp_received");
+        assert_eq!(schema.field(3).name(), "_uuid");
+        assert_eq!(schema.field(4).name(), "_org_id");
     }
 
     #[test]
     fn test_rls_schema() {
         let schema = rls_schema();
         assert_eq!(schema.fields().len(), 4);
-        assert_eq!(schema.field(0).name(), "timestamp");
+        assert_eq!(schema.field(0).name(), "_timestamp");
         assert_eq!(schema.field(1).name(), "_org_id");
         assert_eq!(schema.field(2).name(), "action");
         assert_eq!(schema.field(3).name(), "user_id");
@@ -234,7 +236,7 @@ mod tests {
     fn test_minimal_schema() {
         let schema = minimal_schema();
         assert_eq!(schema.fields().len(), 2);
-        assert_eq!(schema.field(0).name(), "timestamp");
+        assert_eq!(schema.field(0).name(), "_timestamp");
         assert_eq!(schema.field(1).name(), "_org_id");
     }
 }

@@ -19,7 +19,7 @@ impl DdlBuilder {
             table: table.to_string(),
             engine: "MergeTree()".to_string(),
             columns: Vec::new(),
-            order_by: vec!["timestamp".to_string()],
+            order_by: vec!["_timestamp".to_string()],
             partition_by: None,
         }
     }
@@ -205,35 +205,36 @@ impl DdlBuilder {
 /// Standard event table DDL (Common Header v2 schema)
 pub fn event_table_ddl(database: &str, table: &str) -> String {
     DdlBuilder::new(database, table)
-        .with_timestamp("timestamp", false, None)
-        .with_timestamp("timestamp_load", false, Some("now64(3)"))
+        .with_timestamp("_timestamp", false, None)
+        .with_timestamp("_timestamp_load", false, Some("now64(3)"))
+        .with_timestamp("_timestamp_received", true, None)
         .with_uuid("_uuid", false, Some("generateUUIDv7()"))
         .with_string("_org_id", false)
-        .with_string("logoriginal", true)
-        .with_json("logjson", true)
+        .with_string("_raw", true)
+        .with_json("_json", true)
         .with_json("_tags", true)
         .engine("MergeTree()")
-        .order_by(vec!["timestamp", "_org_id"])
-        .partition_by("toYYYYMM(timestamp)")
+        .order_by(vec!["_timestamp", "_org_id"])
+        .partition_by("toYYYYMM(_timestamp)")
         .build()
 }
 
 /// RLS test table DDL
 pub fn rls_table_ddl(database: &str, table: &str) -> String {
     DdlBuilder::new(database, table)
-        .with_timestamp("timestamp", false, None)
+        .with_timestamp("_timestamp", false, None)
         .with_string("_org_id", false)
         .with_string("action", false)
         .with_uint32("user_id", false)
         .engine("MergeTree()")
-        .order_by(vec!["timestamp"])
+        .order_by(vec!["_timestamp"])
         .build()
 }
 
 /// Auth events table DDL
 pub fn auth_table_ddl(database: &str, table: &str) -> String {
     DdlBuilder::new(database, table)
-        .with_timestamp("timestamp", false, None)
+        .with_timestamp("_timestamp", false, None)
         .with_string("_org_id", false)
         .with_string("event_category", false)
         .with_string("action", false)
@@ -242,15 +243,15 @@ pub fn auth_table_ddl(database: &str, table: &str) -> String {
         .with_string("user_agent", true)
         .with_bool("success", false)
         .engine("MergeTree()")
-        .order_by(vec!["timestamp", "_org_id", "user_id"])
-        .partition_by("toYYYYMM(timestamp)")
+        .order_by(vec!["_timestamp", "_org_id", "user_id"])
+        .partition_by("toYYYYMM(_timestamp)")
         .build()
 }
 
 /// API events table DDL
 pub fn api_table_ddl(database: &str, table: &str) -> String {
     DdlBuilder::new(database, table)
-        .with_timestamp("timestamp", false, None)
+        .with_timestamp("_timestamp", false, None)
         .with_string("_org_id", false)
         .with_string("event_category", false)
         .with_string("endpoint", false)
@@ -260,8 +261,8 @@ pub fn api_table_ddl(database: &str, table: &str) -> String {
         .with_uint64("bytes_sent", false)
         .with_uint64("bytes_received", false)
         .engine("MergeTree()")
-        .order_by(vec!["timestamp", "_org_id"])
-        .partition_by("toYYYYMM(timestamp)")
+        .order_by(vec!["_timestamp", "_org_id"])
+        .partition_by("toYYYYMM(_timestamp)")
         .build()
 }
 
@@ -272,17 +273,17 @@ mod tests {
     #[test]
     fn test_ddl_builder() {
         let ddl = DdlBuilder::new("test", "events")
-            .with_timestamp("timestamp", false, None)
+            .with_timestamp("_timestamp", false, None)
             .with_string("org_id", false)
             .with_uint32("count", true)
-            .order_by(vec!["timestamp"])
+            .order_by(vec!["_timestamp"])
             .build();
 
         assert!(ddl.contains("CREATE TABLE IF NOT EXISTS test.events"));
-        assert!(ddl.contains("timestamp DateTime64(3)"));
+        assert!(ddl.contains("_timestamp DateTime64(3)"));
         assert!(ddl.contains("org_id String"));
         assert!(ddl.contains("count Nullable(UInt32)"));
-        assert!(ddl.contains("ORDER BY (timestamp)"));
+        assert!(ddl.contains("ORDER BY (_timestamp)"));
     }
 
     #[test]
@@ -290,15 +291,16 @@ mod tests {
         let ddl = event_table_ddl("common", "events");
 
         assert!(ddl.contains("CREATE TABLE IF NOT EXISTS common.events"));
-        assert!(ddl.contains("timestamp DateTime64(3)"));
-        assert!(ddl.contains("timestamp_load DateTime64(3) DEFAULT now64(3)"));
+        assert!(ddl.contains("_timestamp DateTime64(3)"));
+        assert!(ddl.contains("_timestamp_load DateTime64(3) DEFAULT now64(3)"));
+        assert!(ddl.contains("_timestamp_received Nullable(DateTime64(3))"));
         assert!(ddl.contains("_uuid UUID DEFAULT generateUUIDv7()"));
         assert!(ddl.contains("_org_id String"));
-        assert!(ddl.contains("logoriginal Nullable(String)"));
-        assert!(ddl.contains("logjson Nullable(JSON)"));
+        assert!(ddl.contains("_raw Nullable(String)"));
+        assert!(ddl.contains("_json Nullable(JSON)"));
         assert!(ddl.contains("_tags Nullable(JSON)"));
-        assert!(ddl.contains("ORDER BY (timestamp, _org_id)"));
-        assert!(ddl.contains("PARTITION BY toYYYYMM(timestamp)"));
+        assert!(ddl.contains("ORDER BY (_timestamp, _org_id)"));
+        assert!(ddl.contains("PARTITION BY toYYYYMM(_timestamp)"));
     }
 
     #[test]
@@ -306,11 +308,11 @@ mod tests {
         let ddl = rls_table_ddl("test", "rls_events");
 
         assert!(ddl.contains("CREATE TABLE IF NOT EXISTS test.rls_events"));
-        assert!(ddl.contains("timestamp DateTime64(3)"));
+        assert!(ddl.contains("_timestamp DateTime64(3)"));
         assert!(ddl.contains("_org_id String"));
         assert!(ddl.contains("action String"));
         assert!(ddl.contains("user_id UInt32"));
-        assert!(ddl.contains("ORDER BY (timestamp)"));
+        assert!(ddl.contains("ORDER BY (_timestamp)"));
     }
 
     #[test]
@@ -321,7 +323,7 @@ mod tests {
         assert!(ddl.contains("user_id UInt64"));
         assert!(ddl.contains("ip_address Nullable(String)"));
         assert!(ddl.contains("success Bool"));
-        assert!(ddl.contains("ORDER BY (timestamp, _org_id, user_id)"));
+        assert!(ddl.contains("ORDER BY (_timestamp, _org_id, user_id)"));
     }
 
     #[test]
@@ -347,10 +349,10 @@ mod tests {
     #[test]
     fn test_partition_by() {
         let ddl = DdlBuilder::new("test", "events")
-            .with_timestamp("timestamp", false, None)
-            .partition_by("toYYYYMMDD(timestamp)")
+            .with_timestamp("_timestamp", false, None)
+            .partition_by("toYYYYMMDD(_timestamp)")
             .build();
 
-        assert!(ddl.contains("PARTITION BY toYYYYMMDD(timestamp)"));
+        assert!(ddl.contains("PARTITION BY toYYYYMMDD(_timestamp)"));
     }
 }

@@ -157,11 +157,12 @@ impl<'a> AutoInitializer<'a> {
         // SASL config
         if let Some(ref sasl) = kafka_config.sasl {
             if sasl.enabled {
-                if let Some(mechanism) = sasl.mechanism.as_rdkafka_mechanism() {
+                let mech = sasl.mechanism();
+                if let Some(mechanism) = mech.as_rdkafka_mechanism() {
                     client_config.set("sasl.mechanism", mechanism);
                     client_config.set("security.protocol", "SASL_PLAINTEXT");
 
-                    if sasl.mechanism.requires_credentials() {
+                    if mech.requires_credentials() {
                         client_config.set("sasl.username", &sasl.username);
                         client_config.set("sasl.password", &sasl.password);
                     }
@@ -277,7 +278,7 @@ impl<'a> AutoInitializer<'a> {
         let routing = &self.config.routing;
 
         // Connect to ClickHouse
-        let ch_config: hs_rustlib::clickhouse_arrow::ClickHouseConfig =
+        let ch_config: crate::clickhouse::ClickHouseConfig =
             (&self.config.clickhouse).into();
         let client = ArrowClickHouseClient::new(&ch_config).await?;
 
@@ -332,7 +333,7 @@ impl<'a> AutoInitializer<'a> {
             }
         }
 
-        // Add text search index on logoriginal
+        // Add text search index on _raw
         if auto_init.create_text_index {
             let index_type = if capabilities.full_text_index {
                 "full_text"
@@ -340,7 +341,7 @@ impl<'a> AutoInitializer<'a> {
                 "ngrambf_v1"
             };
 
-            let add_index_sql = add_text_index_ddl(db, table, "logoriginal", &capabilities);
+            let add_index_sql = add_text_index_ddl(db, table, "_raw", &capabilities);
 
             info!(
                 table = %format!("{}.{}", db, table),

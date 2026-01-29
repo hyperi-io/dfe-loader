@@ -3,9 +3,16 @@
 //! Handles batch inserts with retry logic using Arrow RecordBatch.
 //! Uses clickhouse-arrow for native Arrow protocol inserts.
 //!
-//! ## Batch Salvage
+//! ## Error Classification
 //!
-//! When a batch insert fails, the inserter uses binary-split salvage:
+//! Errors are classified to determine retry strategy:
+//! - **Transient** (Server/Protocol): Geometric backoff retry, never DLQ
+//! - **Data**: Binary-split salvage to isolate bad rows, DLQ those rows only
+//! - **Fatal**: Don't retry, fail immediately
+//!
+//! ## Batch Salvage (Data Errors Only)
+//!
+//! When a batch insert fails with a DATA error:
 //! 1. Split the failed batch in half
 //! 2. Recursively retry each half
 //! 3. Continue splitting until single-row failure is identified
@@ -22,14 +29,19 @@ use tracing::{debug, error, info, warn};
 use crate::buffer::arrow::KafkaOffset;
 use crate::buffer::FlushBatch;
 use crate::clickhouse::circuit_breaker::CircuitBreaker;
+use crate::clickhouse::error::ErrorCategory;
 use crate::clickhouse::ArrowClickHouseClient;
 use crate::Result;
 
 /// Configuration for the inserter
 pub struct InserterConfig {
+    /// Maximum retries for transient errors (geometric backoff)
     pub max_retries: u32,
-    pub retry_delay_ms: u64,
-    /// Enable batch salvage on insert failure
+    /// Base delay for geometric backoff (doubles each retry)
+    pub base_retry_delay_ms: u64,
+    /// Maximum delay cap for backoff (prevents excessive waits)
+    pub max_retry_delay_ms: u64,
+    /// Enable batch salvage on data errors
     pub enable_salvage: bool,
     /// Maximum depth for binary-split salvage (prevents infinite recursion)
     pub max_salvage_depth: u32,
@@ -40,12 +52,24 @@ pub struct InserterConfig {
 impl Default for InserterConfig {
     fn default() -> Self {
         Self {
-            max_retries: 3,
-            retry_delay_ms: 1000,
+            max_retries: 5,
+            base_retry_delay_ms: 100,    // Start at 100ms
+            max_retry_delay_ms: 30_000,  // Cap at 30 seconds
             enable_salvage: true,
             max_salvage_depth: 20, // 2^20 = 1M rows max batch size
             max_concurrent_inserts: 8, // Reasonable default for ClickHouse
         }
+    }
+}
+
+impl InserterConfig {
+    /// Calculate backoff delay for a given attempt (geometric backoff).
+    ///
+    /// Delay = min(base * 2^attempt, max_delay)
+    #[must_use]
+    pub fn backoff_delay(&self, attempt: u32) -> Duration {
+        let delay_ms = self.base_retry_delay_ms.saturating_mul(1 << attempt.min(16));
+        Duration::from_millis(delay_ms.min(self.max_retry_delay_ms))
     }
 }
 
@@ -85,12 +109,18 @@ pub struct FailedRow {
 /// Handles batch inserts to ClickHouse with retry logic
 ///
 /// Uses native Arrow protocol via clickhouse-arrow for efficient columnar inserts.
-/// Supports batch salvage for recovering from partial failures.
+///
+/// ## Error Handling Strategy
+///
+/// - **Transient errors** (overload, network): Geometric backoff retry
+/// - **Data errors** (type mismatch, corrupt): Binary-split salvage → DLQ bad rows
+/// - **Fatal errors** (auth, schema): Fail immediately, no retry
 pub struct Inserter {
     /// Arrow client for native protocol inserts
     arrow_client: Arc<ArrowClickHouseClient>,
     max_retries: u32,
-    retry_delay: Duration,
+    base_retry_delay_ms: u64,
+    max_retry_delay_ms: u64,
     enable_salvage: bool,
     max_salvage_depth: u32,
     /// Semaphore for limiting concurrent inserts
@@ -111,12 +141,19 @@ impl Inserter {
         Self {
             arrow_client,
             max_retries: config.max_retries,
-            retry_delay: Duration::from_millis(config.retry_delay_ms),
+            base_retry_delay_ms: config.base_retry_delay_ms,
+            max_retry_delay_ms: config.max_retry_delay_ms,
             enable_salvage: config.enable_salvage,
             max_salvage_depth: config.max_salvage_depth,
             semaphore,
             circuit_breaker: None,
         }
+    }
+
+    /// Calculate backoff delay for a given attempt.
+    fn backoff_delay(&self, attempt: u32) -> Duration {
+        let delay_ms = self.base_retry_delay_ms.saturating_mul(1 << attempt.min(16));
+        Duration::from_millis(delay_ms.min(self.max_retry_delay_ms))
     }
 
     /// Set the circuit breaker for per-table failure detection
@@ -125,18 +162,17 @@ impl Inserter {
         self
     }
 
-    /// Insert an Arrow RecordBatch into a table with retry
+    /// Insert an Arrow RecordBatch into a table with error-aware retry.
+    ///
+    /// - **Transient errors**: Geometric backoff retry up to max_retries
+    /// - **Data errors**: Returns immediately (caller should salvage)
+    /// - **Fatal errors**: Returns immediately (no retry)
     ///
     /// Does not perform salvage - use `insert_with_salvage` for that.
     pub async fn insert_arrow(&self, table: &str, batch: RecordBatch) -> Result<usize> {
         let mut last_error = None;
 
         for attempt in 0..=self.max_retries {
-            if attempt > 0 {
-                warn!(table = %table, attempt = attempt, "Retrying insert");
-                sleep(self.retry_delay).await;
-            }
-
             match self.arrow_client.insert(table, batch.clone()).await {
                 Ok(count) => {
                     debug!(
@@ -147,39 +183,115 @@ impl Inserter {
                     return Ok(count);
                 }
                 Err(e) => {
-                    error!(table = %table, attempt = attempt, error = %e, "Insert failed");
-                    last_error = Some(e);
+                    let category = e.category();
+
+                    match category {
+                        ErrorCategory::Transient | ErrorCategory::Unknown => {
+                            // Transient error - backoff and retry
+                            if attempt < self.max_retries {
+                                let delay = self.backoff_delay(attempt);
+                                warn!(
+                                    table = %table,
+                                    attempt = attempt,
+                                    delay_ms = delay.as_millis(),
+                                    error = %e,
+                                    "Transient error, backing off"
+                                );
+                                sleep(delay).await;
+                                last_error = Some(e);
+                                continue;
+                            }
+                            // Max retries exhausted
+                            error!(
+                                table = %table,
+                                attempts = self.max_retries + 1,
+                                error = %e,
+                                "Max retries exhausted for transient error"
+                            );
+                            last_error = Some(e);
+                        }
+
+                        ErrorCategory::Data => {
+                            // Data error - don't retry, caller should salvage
+                            debug!(
+                                table = %table,
+                                error = %e,
+                                "Data error, returning for salvage"
+                            );
+                            return Err(e.into());
+                        }
+
+                        ErrorCategory::Fatal => {
+                            // Fatal error - don't retry
+                            error!(
+                                table = %table,
+                                error = %e,
+                                "Fatal error, not retrying"
+                            );
+                            return Err(e.into());
+                        }
+                    }
                 }
             }
         }
 
-        // Convert ClickHouseError to crate::Error, with fallback if no error captured
+        // Convert ClickHouseError to crate::Error
         Err(match last_error {
             Some(e) => e.into(),
             None => crate::Error::Buffer("Max retries exceeded".into()),
         })
     }
 
-    /// Insert a FlushBatch with batch salvage on failure
+    /// Insert a FlushBatch with error-aware retry and salvage.
     ///
-    /// If the batch fails to insert, uses binary-split salvage to identify
-    /// and isolate failing rows. Returns successfully inserted count and
-    /// list of failed rows for DLQ routing.
+    /// Error handling strategy:
+    /// - **Transient errors**: Retried with geometric backoff (handled by `insert_arrow`)
+    /// - **Data errors**: Binary-split salvage to isolate bad rows for DLQ
+    /// - **Fatal errors**: Fail entire batch (no salvage, no DLQ)
+    ///
+    /// Returns successfully inserted count and list of failed rows for DLQ routing.
     pub async fn insert_with_salvage(&self, batch: FlushBatch) -> InsertResult {
         let table = batch.table;
         let record_batch = batch.batch;
         let offsets = batch.offsets;
         let num_rows = record_batch.num_rows();
 
-        // Try initial insert
+        // Try initial insert (handles transient retries internally)
         match self.insert_arrow(&table, record_batch.clone()).await {
             Ok(count) => {
                 return InsertResult::success(count);
             }
             Err(e) => {
-                if !self.enable_salvage || num_rows <= 1 {
-                    // Salvage disabled or single row - all rows failed
+                // Check if this is a data error (salvageable) or something else
+                let is_data_error = matches!(
+                    e,
+                    crate::Error::ClickHouse(ref msg) if {
+                        // Check the underlying error category
+                        let ch_err = crate::clickhouse::ClickHouseError::Insert(msg.clone());
+                        ch_err.is_data_error()
+                    }
+                ) || e.to_string().to_lowercase().contains("type mismatch")
+                  || e.to_string().to_lowercase().contains("incorrect data")
+                  || e.to_string().to_lowercase().contains("cannot parse");
+
+                if !self.enable_salvage || num_rows <= 1 || !is_data_error {
+                    // Salvage disabled, single row, or non-data error - fail all rows
                     let reason = e.to_string();
+                    let is_fatal = e.to_string().to_lowercase().contains("unknown table")
+                        || e.to_string().to_lowercase().contains("access denied");
+
+                    if is_fatal {
+                        // Fatal error - don't send to DLQ, just fail
+                        error!(
+                            table = %table,
+                            rows = num_rows,
+                            error = %e,
+                            "Fatal error, batch failed (not sending to DLQ)"
+                        );
+                        return InsertResult::with_failures(0, Vec::new());
+                    }
+
+                    // Transient error after max retries - fail all rows but mark for DLQ
                     let failed: Vec<FailedRow> = (0..num_rows)
                         .map(|i| FailedRow {
                             row_index: i,
@@ -194,12 +306,12 @@ impl Inserter {
                     table = %table,
                     rows = num_rows,
                     error = %e,
-                    "Insert failed, starting batch salvage"
+                    "Data error, starting batch salvage to isolate bad rows"
                 );
             }
         }
 
-        // Binary-split salvage
+        // Binary-split salvage (only for data errors)
         let mut inserted = 0;
         let mut failed = Vec::new();
 
@@ -353,7 +465,8 @@ impl Inserter {
         for batch in batches {
             let arrow_client = self.arrow_client.clone();
             let max_retries = self.max_retries;
-            let retry_delay = self.retry_delay;
+            let base_retry_delay_ms = self.base_retry_delay_ms;
+            let max_retry_delay_ms = self.max_retry_delay_ms;
             let enable_salvage = self.enable_salvage;
             let max_salvage_depth = self.max_salvage_depth;
             let table = batch.table.to_string();
@@ -369,7 +482,8 @@ impl Inserter {
                 let inserter = Inserter {
                     arrow_client,
                     max_retries,
-                    retry_delay,
+                    base_retry_delay_ms,
+                    max_retry_delay_ms,
                     enable_salvage,
                     max_salvage_depth,
                     semaphore: None, // Child inserter doesn't need its own semaphore
@@ -413,7 +527,8 @@ impl Inserter {
         for batch in batches {
             let arrow_client = self.arrow_client.clone();
             let max_retries = self.max_retries;
-            let retry_delay = self.retry_delay;
+            let base_retry_delay_ms = self.base_retry_delay_ms;
+            let max_retry_delay_ms = self.max_retry_delay_ms;
             let enable_salvage = self.enable_salvage;
             let max_salvage_depth = self.max_salvage_depth;
             let semaphore = self.semaphore.clone();
@@ -428,7 +543,8 @@ impl Inserter {
                 let inserter = Inserter {
                     arrow_client,
                     max_retries,
-                    retry_delay,
+                    base_retry_delay_ms,
+                    max_retry_delay_ms,
                     enable_salvage,
                     max_salvage_depth,
                     semaphore: None,
@@ -460,8 +576,8 @@ mod tests {
     #[test]
     fn test_inserter_config_default() {
         let config = InserterConfig::default();
-        assert_eq!(config.max_retries, 3);
-        assert_eq!(config.retry_delay_ms, 1000);
+        assert_eq!(config.max_retries, 5);
+        assert_eq!(config.base_retry_delay_ms, 100);
         assert!(config.enable_salvage);
         assert_eq!(config.max_salvage_depth, 20);
     }
@@ -508,5 +624,35 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(unlimited.max_concurrent_inserts, 0);
+    }
+
+    #[test]
+    fn test_backoff_delay_geometric() {
+        let config = InserterConfig {
+            base_retry_delay_ms: 100,
+            max_retry_delay_ms: 30_000,
+            ..Default::default()
+        };
+
+        // Geometric backoff: 100, 200, 400, 800, 1600, 3200, ...
+        assert_eq!(config.backoff_delay(0), Duration::from_millis(100));
+        assert_eq!(config.backoff_delay(1), Duration::from_millis(200));
+        assert_eq!(config.backoff_delay(2), Duration::from_millis(400));
+        assert_eq!(config.backoff_delay(3), Duration::from_millis(800));
+        assert_eq!(config.backoff_delay(4), Duration::from_millis(1600));
+        assert_eq!(config.backoff_delay(5), Duration::from_millis(3200));
+    }
+
+    #[test]
+    fn test_backoff_delay_capped() {
+        let config = InserterConfig {
+            base_retry_delay_ms: 100,
+            max_retry_delay_ms: 1000, // Cap at 1 second
+            ..Default::default()
+        };
+
+        // Should cap at 1000ms
+        assert_eq!(config.backoff_delay(10), Duration::from_millis(1000));
+        assert_eq!(config.backoff_delay(20), Duration::from_millis(1000));
     }
 }

@@ -87,8 +87,9 @@ impl Default for KafkaConfig {
 }
 
 /// SASL authentication mechanism
+///
+/// Config file values (case-insensitive): none, plain, scram_sha_256, scram_sha_512, oauthbearer, aws_msk_iam
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "SCREAMING-KEBAB-CASE")]
 #[allow(clippy::upper_case_acronyms)]
 pub enum SaslMechanism {
     /// No authentication (dev/test only - full admin access)
@@ -156,8 +157,9 @@ impl std::fmt::Display for SaslMechanism {
 pub struct SaslConfig {
     /// Enable SASL authentication
     pub enabled: bool,
-    /// SASL mechanism to use
-    pub mechanism: SaslMechanism,
+    /// SASL mechanism (none, plain, scram_sha_256, scram_sha_512, oauthbearer, aws_msk_iam)
+    #[serde(default = "default_mechanism_string")]
+    pub mechanism: String,
 
     // --- Username/Password auth (PLAIN, SCRAM-*) ---
     pub username: String,
@@ -188,11 +190,15 @@ pub struct SaslConfig {
     pub aws_profile: Option<String>,
 }
 
+fn default_mechanism_string() -> String {
+    "scram_sha_512".to_string()
+}
+
 impl Default for SaslConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            mechanism: SaslMechanism::default(),
+            mechanism: default_mechanism_string(),
             username: String::new(),
             password: String::new(),
             oauth_token_endpoint: None,
@@ -210,22 +216,36 @@ impl Default for SaslConfig {
 }
 
 impl SaslConfig {
+    /// Parse the mechanism string into a SaslMechanism enum
+    pub fn mechanism(&self) -> SaslMechanism {
+        match self.mechanism.to_lowercase().replace('-', "_").as_str() {
+            "none" => SaslMechanism::None,
+            "plain" => SaslMechanism::Plain,
+            "scram_sha_256" | "scram_sha256" => SaslMechanism::ScramSha256,
+            "scram_sha_512" | "scram_sha512" => SaslMechanism::ScramSha512,
+            "oauthbearer" | "oauth" => SaslMechanism::OAuthBearer,
+            "aws_msk_iam" | "awsmskiam" => SaslMechanism::AwsMskIam,
+            _ => SaslMechanism::ScramSha512, // Default
+        }
+    }
+
     /// Validate the SASL configuration based on mechanism
     pub fn validate(&self) -> std::result::Result<(), String> {
         if !self.enabled {
             return Ok(());
         }
 
-        match self.mechanism {
+        let mech = self.mechanism();
+        match mech {
             SaslMechanism::None => {
                 // No validation needed - this is explicitly insecure
             }
             SaslMechanism::Plain | SaslMechanism::ScramSha256 | SaslMechanism::ScramSha512 => {
                 if self.username.is_empty() {
-                    return Err(format!("{} requires username", self.mechanism));
+                    return Err(format!("{} requires username", mech));
                 }
                 if self.password.is_empty() {
-                    return Err(format!("{} requires password", self.mechanism));
+                    return Err(format!("{} requires password", mech));
                 }
             }
             SaslMechanism::OAuthBearer => {
@@ -300,15 +320,24 @@ impl Default for ClickHouseConfig {
     }
 }
 
-impl From<&ClickHouseConfig> for hs_rustlib::clickhouse_arrow::ClickHouseConfig {
+impl From<&ClickHouseConfig> for crate::clickhouse::ClickHouseConfig {
     fn from(cfg: &ClickHouseConfig) -> Self {
-        hs_rustlib::clickhouse_arrow::ClickHouseConfig {
+        let transport = match cfg.protocol.to_lowercase().as_str() {
+            "http" => crate::clickhouse::Transport::Http,
+            _ => crate::clickhouse::Transport::Native,
+        };
+        let tls = cfg.tls.as_ref().map_or(false, |t| t.enabled);
+
+        crate::clickhouse::ClickHouseConfig {
             hosts: cfg.hosts.clone(),
+            transport,
             database: cfg.database.clone(),
             username: cfg.username.clone(),
             password: cfg.password.clone(),
+            tls,
             connect_timeout_ms: 5000,  // Default timeout
             request_timeout_ms: 30000, // Default timeout
+            compression: true,         // Enable by default for HTTP
         }
     }
 }
@@ -610,7 +639,7 @@ impl Default for MetadataConfig {
 
             // logjson capture defaults
             capture_logjson: true,
-            logjson_output: "logjson".to_string(),
+            logjson_output: "_json".to_string(),
 
             // Routing field removal defaults
             remove_routing_fields: true,
@@ -993,7 +1022,7 @@ mod tests {
     fn test_sasl_config_disabled_no_validation() {
         let config = SaslConfig {
             enabled: false,
-            mechanism: SaslMechanism::ScramSha512,
+            mechanism: "scram_sha_512".to_string(),
             username: String::new(), // Empty but OK because disabled
             password: String::new(),
             ..Default::default()
@@ -1005,7 +1034,7 @@ mod tests {
     fn test_sasl_config_none_no_credentials_needed() {
         let config = SaslConfig {
             enabled: true,
-            mechanism: SaslMechanism::None,
+            mechanism: "none".to_string(),
             username: String::new(),
             password: String::new(),
             ..Default::default()
@@ -1017,7 +1046,7 @@ mod tests {
     fn test_sasl_config_scram_requires_username() {
         let config = SaslConfig {
             enabled: true,
-            mechanism: SaslMechanism::ScramSha512,
+            mechanism: "scram_sha_512".to_string(),
             username: String::new(),
             password: "secret".to_string(),
             ..Default::default()
@@ -1031,7 +1060,7 @@ mod tests {
     fn test_sasl_config_scram_requires_password() {
         let config = SaslConfig {
             enabled: true,
-            mechanism: SaslMechanism::ScramSha512,
+            mechanism: "scram_sha_512".to_string(),
             username: "user".to_string(),
             password: String::new(),
             ..Default::default()
@@ -1045,7 +1074,7 @@ mod tests {
     fn test_sasl_config_scram_valid() {
         let config = SaslConfig {
             enabled: true,
-            mechanism: SaslMechanism::ScramSha512,
+            mechanism: "scram_sha_512".to_string(),
             username: "user".to_string(),
             password: "secret".to_string(),
             ..Default::default()
@@ -1057,7 +1086,7 @@ mod tests {
     fn test_sasl_config_plain_valid() {
         let config = SaslConfig {
             enabled: true,
-            mechanism: SaslMechanism::Plain,
+            mechanism: "plain".to_string(),
             username: "user".to_string(),
             password: "secret".to_string(),
             ..Default::default()
@@ -1069,7 +1098,7 @@ mod tests {
     fn test_sasl_config_oauth_requires_endpoint() {
         let config = SaslConfig {
             enabled: true,
-            mechanism: SaslMechanism::OAuthBearer,
+            mechanism: "oauthbearer".to_string(),
             oauth_token_endpoint: None,
             oauth_client_id: Some("client".to_string()),
             ..Default::default()
@@ -1083,7 +1112,7 @@ mod tests {
     fn test_sasl_config_oauth_requires_client_id() {
         let config = SaslConfig {
             enabled: true,
-            mechanism: SaslMechanism::OAuthBearer,
+            mechanism: "oauthbearer".to_string(),
             oauth_token_endpoint: Some("https://auth.example.com/token".to_string()),
             oauth_client_id: None,
             ..Default::default()
@@ -1097,7 +1126,7 @@ mod tests {
     fn test_sasl_config_oauth_valid() {
         let config = SaslConfig {
             enabled: true,
-            mechanism: SaslMechanism::OAuthBearer,
+            mechanism: "oauthbearer".to_string(),
             oauth_token_endpoint: Some("https://auth.example.com/token".to_string()),
             oauth_client_id: Some("my-client".to_string()),
             oauth_client_secret: Some("secret".to_string()),
@@ -1111,7 +1140,7 @@ mod tests {
     fn test_sasl_config_aws_iam_requires_region() {
         let config = SaslConfig {
             enabled: true,
-            mechanism: SaslMechanism::AwsMskIam,
+            mechanism: "aws_msk_iam".to_string(),
             aws_region: None,
             ..Default::default()
         };
@@ -1125,7 +1154,7 @@ mod tests {
         // AWS IAM can use instance profile/environment for credentials
         let config = SaslConfig {
             enabled: true,
-            mechanism: SaslMechanism::AwsMskIam,
+            mechanism: "aws_msk_iam".to_string(),
             aws_region: Some("ap-southeast-2".to_string()),
             ..Default::default()
         };
@@ -1136,7 +1165,7 @@ mod tests {
     fn test_sasl_config_aws_iam_valid_with_explicit_creds() {
         let config = SaslConfig {
             enabled: true,
-            mechanism: SaslMechanism::AwsMskIam,
+            mechanism: "aws_msk_iam".to_string(),
             aws_region: Some("ap-southeast-2".to_string()),
             aws_access_key_id: Some("AKIAIOSFODNN7EXAMPLE".to_string()),
             aws_secret_access_key: Some("wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY".to_string()),

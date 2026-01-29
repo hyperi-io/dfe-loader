@@ -14,5 +14,9 @@ pub use arrow::{
 pub use coerce::Coercer;
 pub use flatten::{flatten, flatten_value, flatten_value_owned, BatchFlattener, BatchFlattenStats};
 pub use project::{project, ProjectedData, Projector};
-pub use timestamp::{validate_timestamp, TimestampResult, TimestampValidator};
+pub use timestamp::{
+    clamp_timestamp_ms, clamp_timestamp_ms_nano, is_valid_datetime64_ms,
+    validate_timestamp, TimestampResult, TimestampValidator,
+    MIN_DATETIME64_MS, MAX_DATETIME64_MS, MAX_DATETIME64_NANO_MS,
+};
 pub use transformer::{TransformResult, Transformer};
