@@ -1,8 +1,9 @@
-column,type,default,nullable,codec,comment
-timestamp_load,DateTime64(3),now64(3),false,Delta/ZSTD(1),Load time - primary query filter
-timestamp,DateTime64(3),,false,Delta/ZSTD(1),Event occurrence time (minmax indexed)
-_uuid,UUID,generateUUIDv7(),false,,Unique event ID UUIDv7 (time-ordered)
-_org_id,String,,false,ZSTD(1),Organisation ID for RLS (first in ORDER BY)
-logoriginal,String,,true,ZSTD(3),Original log line (text search when enabled)
-logjson,JSON,,true,ZSTD(3),Complete Kafka message as JSON
-_tags,JSON,,true,ZSTD(3),Metadata and collector/agent info
+column,type,default,nullable,codec,source,comment
+_timestamp_load,DateTime64(3),now64(3),false,Delta/ZSTD(1),@generated: now64(3),Load time - primary query filter
+_timestamp,DateTime64(3),,false,Delta/ZSTD(1),@source: timestamp | now(),Event occurrence time (minmax indexed)
+_timestamp_received,DateTime64(3),,true,Delta/ZSTD(1),@source: timestamp_received,When receiver/loader received the event
+_uuid,UUID,generateUUIDv7(),false,,@generated: generateUUIDv7(),Unique event ID UUIDv7 (time-ordered)
+_org_id,String,,false,ZSTD(1),@source: org_id,Organisation ID for RLS (first in ORDER BY)
+_raw,String,,true,ZSTD(3),@captured: raw_payload,Original log line (text search when enabled)
+_json,JSON,,true,ZSTD(3),@captured: raw_payload as JSON,Complete Kafka message as JSON
+_tags,JSON,,true,ZSTD(3),@source: first(tags/_tags/meta/metadata.tags),Metadata and collector/agent info

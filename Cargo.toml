@@ -20,17 +20,17 @@ path = "src/main.rs"
 tokio = { version = ">=1.48", features = ["full"] }
 tokio-util = { version = ">=0.7", features = ["rt"] }
 
-# Shared library with transport abstraction and ClickHouse client
+# Shared library with transport abstraction
 # Published to Artifactory hypersec-cargo registry
-# Using path for development - switch to registry after publishing
-hs-rustlib = { path = "../hs-rustlib", features = ["transport-kafka", "clickhouse-arrow"] }
+hs-rustlib = { version = ">=1.2.2", registry = "hypersec", features = ["transport-kafka"] }
 
 # Kafka (SASL/SCRAM required for auth) - also needed for DLQ producer
 rdkafka = { version = ">=0.38", features = ["cmake-build", "ssl", "sasl"] }
 
-# ClickHouse Arrow client - via hs-rustlib (hypersec-io/clickhouse-arrow fork)
+# ClickHouse Arrow client (hypersec-io/clickhouse-arrow fork)
 # Native Arrow protocol for efficient columnar inserts
-# Note: clickhouse-arrow comes transitively via hs-rustlib's clickhouse feature
+clickhouse-arrow = { version = ">=0.4.0", registry = "hypersec", features = ["http"] }
+futures-util = ">=0.3"  # For stream handling with clickhouse-arrow
 
 # Arrow for columnar data handling
 arrow = { version = ">=54.0", features = ["prettyprint"] }
@@ -167,7 +167,9 @@ inherits = "release"
 debug = true
 
 [features]
-default = []
+default = ["http"]
+# ClickHouse HTTP transport (enable for proxied/load-balanced deployments)
+http = ["clickhouse-arrow/http"]
 # Alternative allocators (choose one for production)
 jemalloc = ["dep:tikv-jemallocator", "dep:tikv-jemalloc-ctl"]  # Best for large allocations, long-running
 mimalloc = ["dep:mimalloc"]  # Often faster, better security, consistent performance

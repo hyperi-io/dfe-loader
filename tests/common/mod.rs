@@ -15,7 +15,7 @@ use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 use serde_json::{json, Value};
 
 use dfe_loader::clickhouse::ArrowClickHouseClient;
-use dfe_loader::config::{ClickHouseConfig, KafkaConfig, SaslConfig, SaslMechanism};
+use dfe_loader::config::{ClickHouseConfig, KafkaConfig, SaslConfig};
 
 /// Load environment variables from .env file
 pub fn load_dotenv() {
@@ -174,14 +174,14 @@ pub fn get_kafka_config() -> KafkaConfig {
             .unwrap_or_default()
             .as_str()
         {
-            "PLAIN" => SaslMechanism::Plain,
-            "SCRAM-SHA-256" => SaslMechanism::ScramSha256,
-            "SCRAM-SHA-512" | "" => SaslMechanism::ScramSha512,
-            _ => SaslMechanism::ScramSha512,
+            "PLAIN" => "plain",
+            "SCRAM-SHA-256" => "scram_sha_256",
+            "SCRAM-SHA-512" | "" => "scram_sha_512",
+            _ => "scram_sha_512",
         };
         Some(SaslConfig {
             enabled: true,
-            mechanism,
+            mechanism: mechanism.to_string(),
             username: env::var("KAFKA_SASL_USER").unwrap_or_default(),
             password: env::var("KAFKA_SASL_PASSWORD").unwrap_or_default(),
             ..Default::default()
@@ -307,8 +307,8 @@ pub async fn create_test_client() -> Option<ArrowClickHouseClient> {
     }
 
     let config = get_clickhouse_config();
-    // Convert dfe-loader config to hs-rustlib config
-    let ch_config: hs_rustlib::clickhouse_arrow::ClickHouseConfig = (&config).into();
+    // Convert dfe-loader config to clickhouse client config
+    let ch_config: dfe_loader::clickhouse::ClickHouseConfig = (&config).into();
     ArrowClickHouseClient::new(&ch_config).await.ok()
 }
 

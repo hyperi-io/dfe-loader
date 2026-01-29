@@ -85,8 +85,8 @@ impl Orchestrator {
         info!(transport = transport.name(), "Transport initialized");
 
         // Create Arrow client for native protocol inserts and schema queries
-        // Convert from dfe-loader ClickHouseConfig to hs-rustlib ClickHouseConfig
-        let ch_config: hs_rustlib::clickhouse_arrow::ClickHouseConfig = (&self.config.clickhouse).into();
+        // Convert from dfe-loader config::ClickHouseConfig to clickhouse::ClickHouseConfig
+        let ch_config: crate::clickhouse::ClickHouseConfig = (&self.config.clickhouse).into();
         let arrow_client = Arc::new(ArrowClickHouseClient::new(&ch_config).await?);
 
         // Inserter uses Arrow-only path
@@ -120,7 +120,7 @@ impl Orchestrator {
         );
 
         // Determine format mode from config
-        let format_mode = FormatMode::from_str(&self.config.payload.format)
+        let format_mode = FormatMode::parse(&self.config.payload.format)
             .unwrap_or(FormatMode::Auto);
         let format_detector = FormatDetector::with_mode(format_mode);
 

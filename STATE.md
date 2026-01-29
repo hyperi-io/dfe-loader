@@ -243,15 +243,17 @@ Two options (configurable via ENV/config cascade):
 ## Common Header Schema (v2 - Minimal)
 
 The destination tables have a minimal required schema. All other fields are dynamic.
+**All fields use underscore prefix** to avoid name collisions with source data.
 
 | Column | Type | Default | Nullable | Notes |
 |--------|------|---------|----------|-------|
-| `timestamp` | DateTime64(3) | - | **NO** | Event occurrence time (milliseconds) |
-| `timestamp_load` | DateTime64(3) | `now64(3)` | **NO** | Load time (ClickHouse DEFAULT) |
+| `_timestamp` | DateTime64(3) | - | **NO** | Event occurrence time (milliseconds) |
+| `_timestamp_load` | DateTime64(3) | `now64(3)` | **NO** | Load time (ClickHouse DEFAULT) |
+| `_timestamp_received` | DateTime64(3) | - | YES | When receiver/loader received the event |
 | `_uuid` | UUID | `generateUUIDv7()` | **NO** | Unique event ID. UUIDv7 (time-ordered) |
 | `_org_id` | String | - | **NO** | Organisation ID for multi-tenancy and RLS |
-| `logoriginal` | String | - | YES | Original unparsed log line |
-| `logjson` | JSON | - | YES | Complete Kafka message as JSON type |
+| `_raw` | String | - | YES | Original unparsed log line |
+| `_json` | JSON | - | YES | Complete Kafka message as JSON type |
 | `_tags` | JSON | - | YES | Meta info + collector/agent info as JSON |
 
 ### Routing and Multi-Tenancy Fields
@@ -282,36 +284,44 @@ drop_tags = false
 
 ### Implementation Requirements
 
-1. **`timestamp`** (NOT NULLABLE)
+1. **`_timestamp`** (NOT NULLABLE)
    - DateTime64(3) for millisecond precision
-   - Copy-from field logic using source metadata
+   - Reads from `timestamp` in source, writes to `_timestamp` in destination
    - Fallback to `now64(3)` if missing/invalid
    - Already implemented in `TimestampValidator`
 
-2. **`timestamp_load`** (NOT NULLABLE)
+2. **`_timestamp_load`** (NOT NULLABLE)
    - DateTime64(3) for millisecond precision
    - ClickHouse DEFAULT `now64(3)` - loader omits field
    - Note: All rows in a batch get same timestamp (acceptable)
 
-3. **`_uuid`** (NOT NULLABLE, was `event_hash`)
-   - Renamed to `_uuid` (underscore prefix avoids collision with source data)
+3. **`_timestamp_received`** (NULLABLE)
+   - DateTime64(3) for millisecond precision
+   - Reads from `timestamp_received` in source, writes to `_timestamp_received` in destination
+   - Only present if source includes this field (e.g., set by receiver/loader)
+
+4. **`_uuid`** (NOT NULLABLE, was `event_hash`)
+   - Underscore prefix avoids collision with source data
    - Auto-generate UUIDv7, ignore any incoming value
    - Time-ordered (sortable), unique per event
    - Let ClickHouse generate via DEFAULT `generateUUIDv7()`
 
-4. **`_org_id`** (NOT NULLABLE) - **NEW in v2**
+5. **`_org_id`** (NOT NULLABLE)
    - String field extracted from source data (configurable via `org_id_field`)
    - Required for row-level security (RLS) in shared schema deployments
    - Injected by Transformer during processing
    - Used by ClickHouse row policies for data isolation
    - See `reference/clickhouse_rls.md` for row policy setup
 
-5. **`logjson`** - **NEW**
+6. **`_json`** (was `logjson`)
    - Store complete original Kafka message as JSON
    - Capture before any transformation
 
-6. **`_tags`** - **CHANGED** (was `tags`)
-   - Renamed to `_tags` (underscore prefix avoids collision)
+7. **`_raw`** (was `logoriginal`)
+   - Original unparsed log line for text search
+   - Full-text indexed when enabled
+
+8. **`_tags`** (was `tags`)
    - Config-driven source field list (first match wins)
    - Optional: `drop_tags = true` to not store after routing extraction
    - Stored as JSON column (not flattened)
@@ -675,20 +685,105 @@ Located at k8s.tyrell.com.au with:
 
 ---
 
-## Current Session (2026-01-19)
+## Current Session (2026-01-21)
 
 ### Accomplished This Session
+
+#### Registry Migration Complete
+
+Migrated dfe-loader from local path dependencies to Artifactory registry:
+
+**Published to hypersec registry:**
+
+| Crate | Version | Status |
+|-------|---------|--------|
+| `clickhouse-arrow-derive` | 0.4.2 | ✅ Published |
+| `clickhouse-arrow` | 0.4.2 | ✅ Published |
+| `hs-rustlib` | 1.2.2 | ✅ Published |
+
+**Cargo.toml updated:**
+
+```toml
+# Before (local paths)
+hs-rustlib = { path = "../hs-rustlib", features = ["transport-kafka"] }
+clickhouse-arrow = { path = "../clickhouse-arrow/clickhouse-arrow", features = ["http"] }
+
+# After (registry)
+hs-rustlib = { version = ">=1.2.2", registry = "hypersec", features = ["transport-kafka"] }
+clickhouse-arrow = { version = ">=0.4.0", registry = "hypersec", features = ["http"] }
+```
+
+**clickhouse-arrow project updated:**
+
+- Added hypersec registry to `.cargo/config.toml`
+- Updated derive dependency to use registry: `clickhouse-arrow-derive = { version = ">=0.4.0", registry = "hypersec" }`
+- Committed: `bb45984` fix: use hypersec registry for derive dependency and add registry config
+
+### Fixes Applied
+
+- **FormatMode API change** - hs-rustlib 1.2.2 renamed `from_str()` to `parse()`. Fixed in `orchestrator.rs:123`
+
+### Git State
+
+**dfe-loader:**
+
+- **Branch:** main
+- **Upstream:** ahead by 4 commits (not pushed)
+- **Uncommitted:** 10 modified files (registry migration + API fix)
+  - `Cargo.toml`, `Cargo.lock` - Registry dependencies
+  - `src/pipeline/orchestrator.rs` - FormatMode::parse() fix
+  - Plus 7 other modified files from previous session
+
+**clickhouse-arrow:**
+
+- **Branch:** main
+- **Upstream:** 1 commit ahead (bb45984)
+- **Clean:** All changes committed
+
+### Test Results
+
+- **301 library tests** - all passing
+- Build successful with registry dependencies
+
+### Key Files Modified This Session
+
+| File | Description |
+|------|-------------|
+| `Cargo.toml` | Registry deps for hs-rustlib & clickhouse-arrow |
+| `Cargo.lock` | Updated with registry versions |
+| `src/pipeline/orchestrator.rs` | FormatMode::from_str → parse() |
+
+### Next Steps
+
+1. Commit dfe-loader changes (registry migration + API fix)
+2. Push dfe-loader (4 commits ahead)
+3. Push clickhouse-arrow (1 commit ahead)
+
+### Session Context Summary
+
+Migrated dfe-loader to use clickhouse-arrow and hs-rustlib from hypersec Artifactory
+registry instead of local paths. Published clickhouse-arrow 0.4.2 and hs-rustlib 1.2.2
+to registry. Fixed API breaking change (FormatMode::from_str → parse). All 301 tests
+passing. Ready to commit and push.
+
+---
+
+## Previous Session (2026-01-19)
+
+### Accomplished That Session
 
 #### Auto-Initialization & Schema Optimization
 
 Implemented comprehensive auto-initialization for happy path setup:
 
 **New Files:**
+
 - `schemas/common_table.sql` - DDL template with `{db}`, `{table}`, `{engine}` placeholders
 - `schemas/common_header.csv` - Field definitions (column, type, default, nullable, codec, comment)
 - `src/schema/mod.rs` - Schema module with compile-time embedding and capability detection
 
 **Config (`src/config/loader.rs`):**
+
 ```toml
 [auto_init]
 enabled = true           # Master switch (default: true)
@@ -701,82 +796,25 @@ topic_replication_factor = 1
 ```
 
 **Engine Auto-Detection (`src/pipeline/auto_init.rs`):**
+
 1. Queries `SELECT version()` for ClickHouse version
 2. Queries `system.table_engines` for SharedMergeTree availability
 3. Queries `system.clusters` for clustered deployment
 4. Selection: SharedMergeTree → ReplicatedMergeTree → MergeTree
 
 **Text Search Index:**
+
 - `full_text(0)` on ClickHouse 25.1+ (GA)
 - `ngrambf_v1(3, 256, 2, 0)` bloom filter fallback for older versions
 - Added via `ALTER TABLE ... ADD INDEX` after table creation
 
-**Optimized Schema (based on query pattern analysis):**
-```sql
-ORDER BY (_org_id, timestamp_load, _uuid)    -- org first for RLS
-PARTITION BY (toYYYYMM(timestamp_load), _org_id)  -- monthly + org
-LowCardinality(String) for _org_id           -- dictionary encoding
-INDEX idx_timestamp timestamp TYPE minmax    -- event time queries
-```
-
 **Key Design Decisions:**
+
 1. `_org_id` first in ORDER BY - every query uses org_id for RLS
 2. `timestamp_load` is primary query filter (not `timestamp`)
 3. `timestamp` gets minmax index for event time range queries
 4. Monthly + org partitions acceptable for <100 orgs
 5. Text search configurable (default ON) with version-based index selection
-
-### Fixes Applied
-
-- **hs-rustlib async_trait dependency** - Fixed by adding `async-trait` to transport feature (commit `bbf1ea1`)
-- **Test files clickhouse import** - Updated 3 test files to use `clickhouse_arrow` module path
-- **Schema CSV type** - Changed `_org_id` from `LowCardinality(String)` to `String` (CSV = logical type, DDL = storage type)
-
-### Git State
-
-**dfe-loader:**
-
-- **Branch:** main
-- **Upstream:** ahead by 3 commits (not pushed)
-- **Commits:**
-  - `b593600` fix: update test files to use clickhouse_arrow module path
-  - `e698b25` docs: update STATE.md with auto-initialization session progress
-  - `d52ce40` feat: add auto-initialization for Kafka topics and ClickHouse schema
-
-**hs-rustlib:**
-
-- **Branch:** main
-- **Upstream:** ahead by 1 commit (not pushed)
-- **Commits:**
-  - `bbf1ea1` fix: add async-trait to transport feature dependencies
-
-### Test Results
-
-- **283 unit tests** - all passing
-- **124 integration tests** - all passing
-- **3 performance tests** - all passing
-
-### Key Files Modified
-
-| File | Description |
-|------|-------------|
-| `src/config/loader.rs` | Added `AutoInitConfig` struct |
-| `src/config/mod.rs` | Re-exported `AutoInitConfig` |
-| `src/schema/mod.rs` | New schema module (320 lines) |
-| `src/pipeline/auto_init.rs` | New auto-initializer (460 lines) |
-| `src/pipeline/mod.rs` | Re-exported `AutoInitializer` |
-| `src/pipeline/orchestrator.rs` | Wired up auto-init at startup |
-| `schemas/common_table.sql` | DDL template with engine placeholder |
-| `schemas/common_header.csv` | Field definitions |
-
-### Session Context Summary
-
-Implemented auto-initialization feature ensuring the happy path always works.
-On startup, dfe-loader now auto-creates Kafka topics, ClickHouse database/table,
-and text search index. Engine selection (SharedMergeTree/Replicated/MergeTree)
-is auto-detected from ClickHouse capabilities. Schema optimized for multi-tenant
-RLS queries with _org_id first in ORDER BY. Fixed hs-rustlib async_trait dependency
-and all tests pass. Ready to push both repos.
 
 ---
 
@@ -999,7 +1037,7 @@ Arrow schemas. All 421 tests passing with production-ready verification patterns
 
 ---
 
-**Last Updated:** 2026-01-14
+**Last Updated:** 2026-01-21
 **ClickHouse:** 25.12 (native protocol)
-**Version:** 0.13.0-test-infrastructure
-**Status:** Artifactory Publishing Complete - All Crates v0.3.0
+**Version:** 1.3.1
+**Status:** Registry Migration Complete - clickhouse-arrow 0.4.2, hs-rustlib 1.2.2

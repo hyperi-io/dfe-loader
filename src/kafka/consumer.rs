@@ -78,9 +78,10 @@ impl Consumer {
 
         // SASL authentication
         if let Some(ref sasl) = config.sasl {
-            if sasl.enabled && sasl.mechanism != SaslMechanism::None {
+            let mechanism = sasl.mechanism();
+            if sasl.enabled && mechanism != SaslMechanism::None {
                 // Set SASL mechanism
-                if let Some(mech) = sasl.mechanism.as_rdkafka_mechanism() {
+                if let Some(mech) = mechanism.as_rdkafka_mechanism() {
                     client_config.set("sasl.mechanism", mech);
                 }
 
@@ -88,14 +89,14 @@ impl Consumer {
                 client_config.set("security.protocol", "SASL_PLAINTEXT");
 
                 // Username/password auth (PLAIN, SCRAM-*)
-                if sasl.mechanism.requires_credentials() {
+                if mechanism.requires_credentials() {
                     client_config
                         .set("sasl.username", &sasl.username)
                         .set("sasl.password", &sasl.password);
                 }
 
                 // OAuth configuration
-                if sasl.mechanism.is_oauth() {
+                if mechanism.is_oauth() {
                     // Note: OAuth token refresh needs a callback - for now set static token
                     // TODO: Implement OIDC token fetch callback
                     if let Some(ref endpoint) = sasl.oauth_token_endpoint {
@@ -116,7 +117,7 @@ impl Consumer {
                 }
 
                 // AWS MSK IAM configuration
-                if sasl.mechanism.is_aws_iam() {
+                if mechanism.is_aws_iam() {
                     // AWS MSK IAM uses OAUTHBEARER with a custom callback
                     // For rdkafka, this requires the aws-msk-iam-sasl-signer library
                     // Set the AWS region; credentials come from env/profile/explicit
@@ -127,7 +128,7 @@ impl Consumer {
                     }
                 }
 
-                info!(mechanism = %sasl.mechanism, "SASL authentication enabled");
+                info!(mechanism = %mechanism, "SASL authentication enabled");
             }
         }
 

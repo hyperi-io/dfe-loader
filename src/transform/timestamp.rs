@@ -1,8 +1,45 @@
 //! Timestamp validation and correction
 //!
 //! Validates timestamps and corrects known bad values.
+//!
+//! ## ClickHouse DateTime64 Bounds
+//!
+//! ClickHouse DateTime64 has absolute limits:
+//! - Minimum: 1900-01-01 00:00:00 UTC
+//! - Maximum: 2299-12-31 23:59:59 UTC (precision 8), or 2262-04-11 for precision 9
+//!
+//! Timestamps outside this range will cause insert errors.
 
 use chrono::{DateTime, NaiveDateTime, TimeZone, Utc};
+
+/// Minimum timestamp for ClickHouse DateTime64 (1900-01-01 00:00:00 UTC)
+pub const MIN_DATETIME64_MS: i64 = -2_208_988_800_000;
+
+/// Maximum timestamp for ClickHouse DateTime64 precision 8 (2299-12-31 23:59:59 UTC)
+pub const MAX_DATETIME64_MS: i64 = 10_413_791_999_000;
+
+/// Maximum timestamp for ClickHouse DateTime64 precision 9 (2262-04-11 23:47:16 UTC)
+pub const MAX_DATETIME64_NANO_MS: i64 = 9_223_339_708_000;
+
+/// Clamp a millisecond timestamp to ClickHouse DateTime64 bounds.
+///
+/// This is a cheap operation (~2ns) that prevents DateTime64 overflow errors.
+#[inline]
+pub fn clamp_timestamp_ms(ts_ms: i64) -> i64 {
+    ts_ms.clamp(MIN_DATETIME64_MS, MAX_DATETIME64_MS)
+}
+
+/// Clamp a millisecond timestamp to DateTime64(9) nanosecond precision bounds.
+#[inline]
+pub fn clamp_timestamp_ms_nano(ts_ms: i64) -> i64 {
+    ts_ms.clamp(MIN_DATETIME64_MS, MAX_DATETIME64_NANO_MS)
+}
+
+/// Check if a millisecond timestamp is within ClickHouse DateTime64 bounds.
+#[inline]
+pub fn is_valid_datetime64_ms(ts_ms: i64) -> bool {
+    ts_ms >= MIN_DATETIME64_MS && ts_ms <= MAX_DATETIME64_MS
+}
 
 use crate::config::TimestampDqConfig;
 
@@ -272,5 +309,44 @@ mod tests {
             TimestampResult::Valid(_) | TimestampResult::Corrected(_, _) => {}
             TimestampResult::Invalid(e) => panic!("Expected valid or corrected: {}", e),
         }
+    }
+
+    #[test]
+    fn test_clamp_timestamp_within_bounds() {
+        // Normal timestamp (2024-01-01) should pass through unchanged
+        let ts = 1704067200000_i64;
+        assert_eq!(clamp_timestamp_ms(ts), ts);
+    }
+
+    #[test]
+    fn test_clamp_timestamp_too_old() {
+        // Year 1800 should clamp to 1900
+        let ts = -5_364_662_400_000_i64; // ~1800
+        assert_eq!(clamp_timestamp_ms(ts), MIN_DATETIME64_MS);
+    }
+
+    #[test]
+    fn test_clamp_timestamp_too_new() {
+        // Year 2500 should clamp to 2299
+        let ts = 16_725_225_600_000_i64; // ~2500
+        assert_eq!(clamp_timestamp_ms(ts), MAX_DATETIME64_MS);
+    }
+
+    #[test]
+    fn test_is_valid_datetime64_bounds() {
+        // Valid: 2024-01-01
+        assert!(is_valid_datetime64_ms(1704067200000));
+
+        // Invalid: 1800
+        assert!(!is_valid_datetime64_ms(-5_364_662_400_000));
+
+        // Invalid: 2500
+        assert!(!is_valid_datetime64_ms(16_725_225_600_000));
+
+        // Edge: exactly at min
+        assert!(is_valid_datetime64_ms(MIN_DATETIME64_MS));
+
+        // Edge: exactly at max
+        assert!(is_valid_datetime64_ms(MAX_DATETIME64_MS));
     }
 }

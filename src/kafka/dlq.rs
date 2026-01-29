@@ -82,13 +82,14 @@ impl DlqProducer {
 
         // SASL authentication (same as consumer)
         if let Some(ref sasl) = kafka_config.sasl {
-            if sasl.enabled && sasl.mechanism != SaslMechanism::None {
-                if let Some(mech) = sasl.mechanism.as_rdkafka_mechanism() {
+            let mechanism = sasl.mechanism();
+            if sasl.enabled && mechanism != SaslMechanism::None {
+                if let Some(mech) = mechanism.as_rdkafka_mechanism() {
                     client_config.set("sasl.mechanism", mech);
                 }
                 client_config.set("security.protocol", "SASL_PLAINTEXT");
 
-                if sasl.mechanism.requires_credentials() {
+                if mechanism.requires_credentials() {
                     client_config
                         .set("sasl.username", &sasl.username)
                         .set("sasl.password", &sasl.password);

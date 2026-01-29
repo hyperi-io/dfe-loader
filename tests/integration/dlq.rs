@@ -4,7 +4,7 @@
 
 use std::env;
 
-use dfe_loader::config::{DlqConfig, KafkaConfig, SaslConfig, SaslMechanism};
+use dfe_loader::config::{DlqConfig, KafkaConfig, SaslConfig};
 use dfe_loader::kafka::{DlqMessage, DlqProducer, DlqRoutingMode};
 
 use crate::common::{check_kafka_reachable, load_dotenv};
@@ -38,14 +38,14 @@ fn get_kafka_config() -> KafkaConfig {
             .unwrap_or_default()
             .as_str()
         {
-            "PLAIN" => SaslMechanism::Plain,
-            "SCRAM-SHA-256" => SaslMechanism::ScramSha256,
-            "SCRAM-SHA-512" | "" => SaslMechanism::ScramSha512,
-            _ => SaslMechanism::ScramSha512,
+            "PLAIN" => "plain",
+            "SCRAM-SHA-256" => "scram_sha_256",
+            "SCRAM-SHA-512" | "" => "scram_sha_512",
+            _ => "scram_sha_512",
         };
         Some(SaslConfig {
             enabled: true,
-            mechanism,
+            mechanism: mechanism.to_string(),
             username: env::var("KAFKA_SASL_USER").unwrap_or_default(),
             password: env::var("KAFKA_SASL_PASSWORD").unwrap_or_default(),
             ..Default::default()

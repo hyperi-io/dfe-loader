@@ -84,8 +84,8 @@ fn get_test_config() -> ClickHouseConfig {
     }
 }
 
-/// Convert dfe-loader config to hs-rustlib config for ArrowClickHouseClient
-fn to_ch_config(config: &ClickHouseConfig) -> hs_rustlib::clickhouse_arrow::ClickHouseConfig {
+/// Convert dfe-loader config to clickhouse client config for ArrowClickHouseClient
+fn to_ch_config(config: &ClickHouseConfig) -> dfe_loader::clickhouse::ClickHouseConfig {
     config.into()
 }
 

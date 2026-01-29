@@ -194,15 +194,15 @@ async fn test_org_id_insert_to_clickhouse() {
     let create_ddl = format!(
         r#"
         CREATE TABLE IF NOT EXISTS test.{table_name} (
-            timestamp DateTime64(3),
-            timestamp_load DateTime64(3) DEFAULT now64(3),
+            _timestamp DateTime64(3),
+            _timestamp_load DateTime64(3) DEFAULT now64(3),
             _uuid UUID DEFAULT generateUUIDv7(),
             _org_id String,
             action String,
             user_id UInt32
         )
         ENGINE = MergeTree()
-        ORDER BY (timestamp, _org_id, _uuid)
+        ORDER BY (_timestamp, _org_id, _uuid)
         PARTITION BY _org_id
         "#
     );
@@ -211,7 +211,7 @@ async fn test_org_id_insert_to_clickhouse() {
 
     // Create explicit Arrow schema matching ClickHouse DDL
     let schema = Arc::new(Schema::new(vec![
-        Field::new("timestamp", DataType::Timestamp(TimeUnit::Millisecond, None), false),
+        Field::new("_timestamp", DataType::Timestamp(TimeUnit::Millisecond, None), false),
         Field::new("_org_id", DataType::Utf8, false),
         Field::new("action", DataType::Utf8, false),
         Field::new("user_id", DataType::UInt32, false),

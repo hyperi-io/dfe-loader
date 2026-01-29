@@ -283,8 +283,8 @@ proptest! {
                 "Should handle timestamp from {}-{:02}-{:02}", year, month, day);
 
             let data = result.unwrap().data;
-            prop_assert!(data.contains_key("timestamp"),
-                "Timestamp should be preserved");
+            prop_assert!(data.contains_key("_timestamp"),
+                "Timestamp should be preserved as _timestamp");
         }
     }
 
