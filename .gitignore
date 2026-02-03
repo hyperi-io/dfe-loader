@@ -20,3 +20,12 @@ coverage/
 # Added by cargo
 
 /target
+target/
+**/*.rs.bk
+*.pdb
+*.profraw
+*.profdata
+coverage-html/
+coverage.lcov
+.cargo/
+!.cargo/config.toml
