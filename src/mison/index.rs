@@ -6,8 +6,8 @@
 //! Based on Mison Section 4: STRUCTURAL INDEX
 
 use super::simd::{
-    build_character_bitmaps, extract_rightmost_one, remove_rightmost_one,
-    smear_rightmost_one, popcount, WORD_SIZE,
+    build_character_bitmaps, extract_rightmost_one, popcount, remove_rightmost_one,
+    smear_rightmost_one, WORD_SIZE,
 };
 
 /// Maximum nesting depth supported
@@ -112,8 +112,7 @@ impl StructuralIndex {
         }
 
         // Step 2: Build structural quote bitmap (exclude escaped quotes)
-        let structural_quotes =
-            Self::build_structural_quotes(&quote_bitmaps, &backslash_bitmaps);
+        let structural_quotes = Self::build_structural_quotes(&quote_bitmaps, &backslash_bitmaps);
 
         // Step 3: Build string mask bitmap
         let string_mask = Self::build_string_mask(&structural_quotes);
@@ -285,12 +284,10 @@ impl StructuralIndex {
         let word_count = colons.len();
 
         // Initialize leveled bitmaps - start empty
-        let mut leveled_colons: Vec<Vec<u64>> = (0..max_level)
-            .map(|_| vec![0u64; word_count])
-            .collect();
-        let mut leveled_commas: Vec<Vec<u64>> = (0..max_level)
-            .map(|_| vec![0u64; word_count])
-            .collect();
+        let mut leveled_colons: Vec<Vec<u64>> =
+            (0..max_level).map(|_| vec![0u64; word_count]).collect();
+        let mut leveled_commas: Vec<Vec<u64>> =
+            (0..max_level).map(|_| vec![0u64; word_count]).collect();
 
         let mut current_level = 0usize;
         let mut max_depth_seen = 0usize;
@@ -502,8 +499,7 @@ impl<'a> Iterator for ColonIterator<'a> {
         loop {
             if self.current_bits != 0 {
                 let bit = extract_rightmost_one(self.current_bits);
-                let offset =
-                    self.current_word * WORD_SIZE + popcount(bit.wrapping_sub(1)) as usize;
+                let offset = self.current_word * WORD_SIZE + popcount(bit.wrapping_sub(1)) as usize;
                 self.current_bits = remove_rightmost_one(self.current_bits);
 
                 if offset >= self.start && offset < self.end {

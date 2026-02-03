@@ -280,7 +280,13 @@ pub fn create_complex_batch(row_count: usize) -> RecordBatch {
     let ids: Vec<u64> = (0..row_count as u64).collect();
     let names: Vec<String> = (0..row_count).map(|i| format!("item_{}", i)).collect();
     let scores: Vec<Option<f64>> = (0..row_count)
-        .map(|i| if i % 3 == 0 { None } else { Some(i as f64 * 2.5) })
+        .map(|i| {
+            if i % 3 == 0 {
+                None
+            } else {
+                Some(i as f64 * 2.5)
+            }
+        })
         .collect();
     let counts: Vec<Option<i64>> = (0..row_count)
         .map(|i| if i % 5 == 0 { None } else { Some(i as i64) })
@@ -490,10 +496,7 @@ pub fn generate_events_with_timestamps(
                 "timestamp".to_string(),
                 json!(base_time + (i as i64 * 1000)),
             );
-            event.insert(
-                "action".to_string(),
-                json!(format!("action_{}", i % 10)),
-            );
+            event.insert("action".to_string(), json!(format!("action_{}", i % 10)));
             event.insert("value".to_string(), json!(i as f64 * 1.5));
             event
         })

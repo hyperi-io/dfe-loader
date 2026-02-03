@@ -178,9 +178,7 @@ impl SchemaCache {
             "wrong number of columns",
         ];
 
-        let is_schema_error = schema_error_patterns
-            .iter()
-            .any(|p| error.contains(p));
+        let is_schema_error = schema_error_patterns.iter().any(|p| error.contains(p));
 
         if is_schema_error {
             warn!(
@@ -201,7 +199,8 @@ impl SchemaCache {
         let count = schemas.len();
         schemas.clear();
         if count > 0 {
-            self.invalidations.fetch_add(count as u64, Ordering::Relaxed);
+            self.invalidations
+                .fetch_add(count as u64, Ordering::Relaxed);
             info!(count = count, "All schema caches invalidated");
         }
     }

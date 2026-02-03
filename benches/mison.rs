@@ -13,9 +13,7 @@ use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Through
 use serde_json::Value;
 use sonic_rs::JsonValueTrait;
 
-use dfe_loader::mison::{
-    FieldExtractor, MisonBatchProcessor, SchemaExtractor, StructuralIndex,
-};
+use dfe_loader::mison::{FieldExtractor, MisonBatchProcessor, SchemaExtractor, StructuralIndex};
 
 /// Simple event with top-level fields
 fn simple_event() -> Vec<u8> {
@@ -249,10 +247,9 @@ fn bench_routing(c: &mut Criterion) {
     // Existing sonic-rs get_from_slice approach
     group.bench_function("sonic_get_from_slice", |b| {
         b.iter(|| {
-            let org_id: Option<String> =
-                sonic_rs::get_from_slice(black_box(&simple), &["org_id"])
-                    .ok()
-                    .and_then(|v: sonic_rs::LazyValue| v.as_str().map(|s| s.to_string()));
+            let org_id: Option<String> = sonic_rs::get_from_slice(black_box(&simple), &["org_id"])
+                .ok()
+                .and_then(|v: sonic_rs::LazyValue| v.as_str().map(|s| s.to_string()));
             let category: Option<String> =
                 sonic_rs::get_from_slice(black_box(&simple), &["event_category"])
                     .ok()
@@ -363,12 +360,34 @@ fn bench_many_fields(c: &mut Criterion) {
         b.iter(|| {
             let value: Value = sonic_rs::from_slice(black_box(&filebeat)).unwrap();
             // Extract 15 fields
-            let ts = value.get("@timestamp").and_then(|v| v.as_str()).map(|s| s.to_string());
-            let agent = value.get("agent").and_then(|v| v.get("name")).and_then(|v| v.as_str()).map(|s| s.to_string());
-            let host = value.get("host").and_then(|v| v.get("name")).and_then(|v| v.as_str()).map(|s| s.to_string());
-            let msg = value.get("message").and_then(|v| v.as_str()).map(|s| s.to_string());
-            let src_ip = value.get("source").and_then(|v| v.get("ip")).and_then(|v| v.as_str()).map(|s| s.to_string());
-            let user = value.get("user").and_then(|v| v.get("name")).and_then(|v| v.as_str()).map(|s| s.to_string());
+            let ts = value
+                .get("@timestamp")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let agent = value
+                .get("agent")
+                .and_then(|v| v.get("name"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let host = value
+                .get("host")
+                .and_then(|v| v.get("name"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let msg = value
+                .get("message")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let src_ip = value
+                .get("source")
+                .and_then(|v| v.get("ip"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let user = value
+                .get("user")
+                .and_then(|v| v.get("name"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
             // ... more fields
             black_box((ts, agent, host, msg, src_ip, user))
         })
@@ -399,17 +418,52 @@ fn bench_many_fields(c: &mut Criterion) {
             let value: Value = sonic_rs::from_slice(black_box(&large)).unwrap();
             // Extract many fields
             let mut results = Vec::with_capacity(30);
-            for field in &["org_id", "event_category", "timestamp", "user_id", "session_id",
-                          "request_id", "action", "method", "path", "status_code",
-                          "response_time_ms", "bytes_sent", "bytes_received", "user_agent",
-                          "client_ip", "server_ip", "datacenter", "service", "version",
-                          "environment", "trace_id", "span_id", "parent_span_id",
-                          "risk_score", "threat_level", "authenticated"] {
-                results.push(value.get(*field).and_then(|v| v.as_str()).map(|s| s.to_string()));
+            for field in &[
+                "org_id",
+                "event_category",
+                "timestamp",
+                "user_id",
+                "session_id",
+                "request_id",
+                "action",
+                "method",
+                "path",
+                "status_code",
+                "response_time_ms",
+                "bytes_sent",
+                "bytes_received",
+                "user_agent",
+                "client_ip",
+                "server_ip",
+                "datacenter",
+                "service",
+                "version",
+                "environment",
+                "trace_id",
+                "span_id",
+                "parent_span_id",
+                "risk_score",
+                "threat_level",
+                "authenticated",
+            ] {
+                results.push(
+                    value
+                        .get(*field)
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string()),
+                );
             }
             // Nested fields
-            let country = value.get("geo").and_then(|v| v.get("country")).and_then(|v| v.as_str()).map(|s| s.to_string());
-            let region = value.get("geo").and_then(|v| v.get("region")).and_then(|v| v.as_str()).map(|s| s.to_string());
+            let country = value
+                .get("geo")
+                .and_then(|v| v.get("country"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let region = value
+                .get("geo")
+                .and_then(|v| v.get("region"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
             results.push(country);
             results.push(region);
             black_box(results)
@@ -442,8 +496,14 @@ fn bench_many_fields(c: &mut Criterion) {
             let mut results = Vec::with_capacity(100);
             for data in &filebeat_batch {
                 let value: Value = sonic_rs::from_slice(black_box(*data)).unwrap();
-                let ts = value.get("@timestamp").and_then(|v| v.as_str()).map(|s| s.to_string());
-                let msg = value.get("message").and_then(|v| v.as_str()).map(|s| s.to_string());
+                let ts = value
+                    .get("@timestamp")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                let msg = value
+                    .get("message")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
                 results.push((ts, msg));
             }
             black_box(results)

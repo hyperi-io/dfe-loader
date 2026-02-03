@@ -339,7 +339,12 @@ pub fn render_ddl_with_engine(db: &str, table: &str, engine: TableEngine) -> Str
 }
 
 /// Render the common table DDL with specified engine and tags
-pub fn render_ddl_with_tags(db: &str, table: &str, engine: TableEngine, tags: &TableTags) -> String {
+pub fn render_ddl_with_tags(
+    db: &str,
+    table: &str,
+    engine: TableEngine,
+    tags: &TableTags,
+) -> String {
     COMMON_TABLE_DDL
         .replace("{db}", db)
         .replace("{table}", table)
@@ -401,7 +406,12 @@ pub fn add_text_index_fulltext_ddl(db: &str, table: &str, column: &str) -> Strin
 }
 
 /// DDL to add the appropriate text index based on capabilities
-pub fn add_text_index_ddl(db: &str, table: &str, column: &str, capabilities: &ClusterCapabilities) -> String {
+pub fn add_text_index_ddl(
+    db: &str,
+    table: &str,
+    column: &str,
+    capabilities: &ClusterCapabilities,
+) -> String {
     if capabilities.full_text_index {
         add_text_index_fulltext_ddl(db, table, column)
     } else {
@@ -591,7 +601,10 @@ mod tests {
 
         let tags_field = fields.iter().find(|f| f.column == "_tags").unwrap();
         assert!(tags_field.nullable);
-        assert_eq!(tags_field.source, "@source: first(tags/_tags/meta/metadata.tags)");
+        assert_eq!(
+            tags_field.source,
+            "@source: first(tags/_tags/meta/metadata.tags)"
+        );
     }
 
     #[test]

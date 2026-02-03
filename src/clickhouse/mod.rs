@@ -42,6 +42,8 @@ pub use types::{
 };
 
 // Export resilience modules
-pub use circuit_breaker::{CircuitBreaker, CircuitBreakerConfig, CircuitBreakerStats, CircuitState};
+pub use circuit_breaker::{
+    CircuitBreaker, CircuitBreakerConfig, CircuitBreakerStats, CircuitState,
+};
 pub use inserter::{FailedRow, InsertResult, Inserter, InserterConfig};
 pub use schema::{SchemaCache, SchemaCacheConfig, SchemaCacheStats, SharedSchemaCache};

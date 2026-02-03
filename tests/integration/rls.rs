@@ -20,7 +20,7 @@ use crate::common::{create_test_client, drop_test_table};
 #[tokio::test]
 async fn test_org_id_field_population() {
     let routing_config = RoutingConfig {
-        db_fields: vec![],  // Shared schema - no per-org routing
+        db_fields: vec![], // Shared schema - no per-org routing
         table_fields: vec!["category".to_string()],
         default_db: "common".to_string(),
         default_table: "events".to_string(),
@@ -51,15 +51,22 @@ async fn test_org_id_field_population() {
 
     // Extract org_id before transform
     let value: serde_json::Value = serde_json::from_slice(&payload).unwrap();
-    let org_id_owned = router.extract_org_id_from_value(&value).map(|s| s.to_string());
+    let org_id_owned = router
+        .extract_org_id_from_value(&value)
+        .map(|s| s.to_string());
     assert_eq!(org_id_owned.as_deref(), Some("acme"));
 
     // Transform with org_id
-    let result = transformer.transform_with_raw(value, &payload, org_id_owned.as_deref()).unwrap();
+    let result = transformer
+        .transform_with_raw(value, &payload, org_id_owned.as_deref())
+        .unwrap();
 
     // Verify _org_id field is present
     assert!(result.data.contains_key("_org_id"));
-    assert_eq!(result.data.get("_org_id").unwrap().as_str().unwrap(), "acme");
+    assert_eq!(
+        result.data.get("_org_id").unwrap().as_str().unwrap(),
+        "acme"
+    );
 
     // Verify original org_id is removed (routing field removal)
     assert!(!result.data.contains_key("org_id"));
@@ -73,7 +80,7 @@ async fn test_org_id_custom_field_name() {
         table_fields: vec!["event_type".to_string()],
         default_db: "common".to_string(),
         default_table: "events".to_string(),
-        org_id_field: Some("tenant_id".to_string()),  // Custom field name
+        org_id_field: Some("tenant_id".to_string()), // Custom field name
         routed_orgs: vec![],
         route_all_by_org: false,
         category_to_table: HashMap::new(),
@@ -93,29 +100,36 @@ async fn test_org_id_custom_field_name() {
     let payload = serde_json::to_vec(&msg).unwrap();
     let value: serde_json::Value = serde_json::from_slice(&payload).unwrap();
 
-    let org_id_owned = router.extract_org_id_from_value(&value).map(|s| s.to_string());
+    let org_id_owned = router
+        .extract_org_id_from_value(&value)
+        .map(|s| s.to_string());
     assert_eq!(org_id_owned.as_deref(), Some("bigcorp"));
 
-    let result = transformer.transform_with_raw(value, &payload, org_id_owned.as_deref()).unwrap();
+    let result = transformer
+        .transform_with_raw(value, &payload, org_id_owned.as_deref())
+        .unwrap();
 
     // _org_id should be populated from tenant_id
-    assert_eq!(result.data.get("_org_id").unwrap().as_str().unwrap(), "bigcorp");
+    assert_eq!(
+        result.data.get("_org_id").unwrap().as_str().unwrap(),
+        "bigcorp"
+    );
 }
 
 /// Test shared schema routing with multiple orgs
 #[tokio::test]
 async fn test_shared_schema_multiple_orgs() {
     let routing_config = RoutingConfig {
-        db_fields: vec![],  // Empty = shared schema
+        db_fields: vec![], // Empty = shared schema
         table_fields: vec!["category".to_string()],
         default_db: "common".to_string(),
         default_table: "events".to_string(),
         org_id_field: Some("org_id".to_string()),
         routed_orgs: vec![],
         route_all_by_org: false,
-        category_to_table: [
-            ("auth".to_string(), "events_auth".to_string()),
-        ].into_iter().collect(),
+        category_to_table: [("auth".to_string(), "events_auth".to_string())]
+            .into_iter()
+            .collect(),
         mapping_file: None,
         dlq: DlqConfig::default(),
     };
@@ -144,8 +158,12 @@ async fn test_shared_schema_multiple_orgs() {
             // All should route to same table (shared schema)
             assert_eq!(table, "common.events_auth");
 
-            let org_id_owned = router.extract_org_id_from_value(&value).map(|s| s.to_string());
-            let result = transformer.transform_with_raw(value, &payload, org_id_owned.as_deref()).unwrap();
+            let org_id_owned = router
+                .extract_org_id_from_value(&value)
+                .map(|s| s.to_string());
+            let result = transformer
+                .transform_with_raw(value, &payload, org_id_owned.as_deref())
+                .unwrap();
 
             // Each should have its own org_id
             assert!(result.data.contains_key("_org_id"));
@@ -156,7 +174,7 @@ async fn test_shared_schema_multiple_orgs() {
 
     // All messages buffered to same table
     assert_eq!(buffer.pending_rows(), 3);
-    assert_eq!(buffer.stats().table_count, 1);  // Single table
+    assert_eq!(buffer.stats().table_count, 1); // Single table
 }
 
 /// Integration test: Insert data with _org_id and verify storage
@@ -165,10 +183,10 @@ async fn test_shared_schema_multiple_orgs() {
 /// Uses explicit Arrow schema to avoid timestamp conversion issues.
 #[tokio::test]
 async fn test_org_id_insert_to_clickhouse() {
-    use arrow::array::{StringArray, TimestampMillisecondArray, UInt32Array};
-    use arrow::array::ArrayRef;
-    use arrow::datatypes::{DataType, TimeUnit};
     use crate::common::query_count;
+    use arrow::array::ArrayRef;
+    use arrow::array::{StringArray, TimestampMillisecondArray, UInt32Array};
+    use arrow::datatypes::{DataType, TimeUnit};
 
     // Skip if no ClickHouse available
     let client = match create_test_client().await {
@@ -183,7 +201,10 @@ async fn test_org_id_insert_to_clickhouse() {
 
     // Ensure test database exists
     if let Err(e) = client.query("CREATE DATABASE IF NOT EXISTS test").await {
-        eprintln!("Skipping RLS ClickHouse test: cannot create test database: {}", e);
+        eprintln!(
+            "Skipping RLS ClickHouse test: cannot create test database: {}",
+            e
+        );
         return;
     }
 
@@ -207,11 +228,18 @@ async fn test_org_id_insert_to_clickhouse() {
         "#
     );
 
-    client.query(&create_ddl).await.expect("Failed to create table");
+    client
+        .query(&create_ddl)
+        .await
+        .expect("Failed to create table");
 
     // Create explicit Arrow schema matching ClickHouse DDL
     let schema = Arc::new(Schema::new(vec![
-        Field::new("_timestamp", DataType::Timestamp(TimeUnit::Millisecond, None), false),
+        Field::new(
+            "_timestamp",
+            DataType::Timestamp(TimeUnit::Millisecond, None),
+            false,
+        ),
         Field::new("_org_id", DataType::Utf8, false),
         Field::new("action", DataType::Utf8, false),
         Field::new("user_id", DataType::UInt32, false),
@@ -222,9 +250,9 @@ async fn test_org_id_insert_to_clickhouse() {
         schema,
         vec![
             Arc::new(TimestampMillisecondArray::from(vec![
-                1705315200000_i64,  // 2024-01-15 10:00:00
-                1705315500000_i64,  // 2024-01-15 10:05:00
-                1705315800000_i64,  // 2024-01-15 10:10:00
+                1705315200000_i64, // 2024-01-15 10:00:00
+                1705315500000_i64, // 2024-01-15 10:05:00
+                1705315800000_i64, // 2024-01-15 10:10:00
             ])) as ArrayRef,
             Arc::new(StringArray::from(vec!["acme", "bigcorp", "acme"])) as ArrayRef,
             Arc::new(StringArray::from(vec!["login", "logout", "view"])) as ArrayRef,

@@ -170,11 +170,17 @@ impl Transformer {
 
             match ts_result {
                 TimestampResult::Valid(dt) => {
-                    data.insert(TIMESTAMP_OUTPUT_FIELD.into(), Value::String(dt.to_rfc3339()));
+                    data.insert(
+                        TIMESTAMP_OUTPUT_FIELD.into(),
+                        Value::String(dt.to_rfc3339()),
+                    );
                 }
                 TimestampResult::Corrected(dt, reason) => {
                     warnings.get_or_insert_with(Vec::new).push(reason);
-                    data.insert(TIMESTAMP_OUTPUT_FIELD.into(), Value::String(dt.to_rfc3339()));
+                    data.insert(
+                        TIMESTAMP_OUTPUT_FIELD.into(),
+                        Value::String(dt.to_rfc3339()),
+                    );
                 }
                 TimestampResult::Invalid(reason) => {
                     warnings.get_or_insert_with(Vec::new).push(reason);
@@ -266,7 +272,11 @@ impl Transformer {
     }
 
     /// Get a nested field from a Map using dot notation
-    fn get_nested_field_from_map<'a>(&self, obj: &'a Map<String, Value>, path: &str) -> Option<&'a Value> {
+    fn get_nested_field_from_map<'a>(
+        &self,
+        obj: &'a Map<String, Value>,
+        path: &str,
+    ) -> Option<&'a Value> {
         // Fast path: no dot means simple field access
         if !path.contains('.') {
             return obj.get(path);
@@ -347,7 +357,8 @@ impl Transformer {
             || key == TIMESTAMP_COLLECTOR_FIELD      // _timestamp_collector
             || key == "_timestamp_load"              // ClickHouse DEFAULT
             || key == "_uuid"                        // ClickHouse DEFAULT
-            || key == "_raw"                         // Original log line
+            || key == "_raw"
+        // Original log line
         {
             return key;
         }

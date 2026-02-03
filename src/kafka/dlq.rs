@@ -24,7 +24,7 @@ use rdkafka::producer::{FutureProducer, FutureRecord};
 use rdkafka::ClientConfig;
 use tracing::{debug, error, info};
 
-use crate::config::{KafkaConfig, DlqConfig, SaslMechanism};
+use crate::config::{DlqConfig, KafkaConfig, SaslMechanism};
 use crate::Result;
 
 /// DLQ routing mode
@@ -118,7 +118,8 @@ impl DlqProducer {
             }
         }
 
-        let producer: FutureProducer = client_config.create()
+        let producer: FutureProducer = client_config
+            .create()
             .map_err(|e| crate::Error::Kafka(format!("Failed to create DLQ producer: {}", e)))?;
 
         info!(suffix = %dlq_config.topic_suffix, "DLQ producer initialized");
@@ -295,8 +296,14 @@ mod tests {
         let suffix = ".dlq";
         let common = "common.dlq";
 
-        assert_eq!(compute_dlq_topic(mode, suffix, common, Some("acme.auth")), "acme.auth.dlq");
-        assert_eq!(compute_dlq_topic(mode, suffix, common, Some("db.events")), "db.events.dlq");
+        assert_eq!(
+            compute_dlq_topic(mode, suffix, common, Some("acme.auth")),
+            "acme.auth.dlq"
+        );
+        assert_eq!(
+            compute_dlq_topic(mode, suffix, common, Some("db.events")),
+            "db.events.dlq"
+        );
         assert_eq!(compute_dlq_topic(mode, suffix, common, None), "common.dlq");
     }
 
@@ -306,9 +313,18 @@ mod tests {
         let suffix = ".dlq";
         let common = "all-errors.dlq";
 
-        assert_eq!(compute_dlq_topic(mode, suffix, common, Some("acme.auth")), "all-errors.dlq");
-        assert_eq!(compute_dlq_topic(mode, suffix, common, Some("db.events")), "all-errors.dlq");
-        assert_eq!(compute_dlq_topic(mode, suffix, common, None), "all-errors.dlq");
+        assert_eq!(
+            compute_dlq_topic(mode, suffix, common, Some("acme.auth")),
+            "all-errors.dlq"
+        );
+        assert_eq!(
+            compute_dlq_topic(mode, suffix, common, Some("db.events")),
+            "all-errors.dlq"
+        );
+        assert_eq!(
+            compute_dlq_topic(mode, suffix, common, None),
+            "all-errors.dlq"
+        );
     }
 
     #[test]

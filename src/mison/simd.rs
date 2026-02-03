@@ -303,10 +303,8 @@ fn neon_to_bitmask(cmp: uint8x16_t) -> u16 {
 
         // Pack pairs of bytes: take bit 0 of each byte
         // Use the vsli approach to merge adjacent bits
-        let powers: uint8x16_t = vld1q_u8([
-            1, 2, 4, 8, 16, 32, 64, 128,
-            1, 2, 4, 8, 16, 32, 64, 128,
-        ].as_ptr());
+        let powers: uint8x16_t =
+            vld1q_u8([1, 2, 4, 8, 16, 32, 64, 128, 1, 2, 4, 8, 16, 32, 64, 128].as_ptr());
 
         // Multiply each bit position by its power of 2
         let weighted = vmulq_u8(shifted, powers);

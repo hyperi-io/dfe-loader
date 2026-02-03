@@ -38,8 +38,8 @@ use tracing::{debug, info, warn};
 use crate::clickhouse::ArrowClickHouseClient;
 use crate::config::{Config, KafkaConfig};
 use crate::schema::{
-    add_text_index_ddl, render_ddl_with_engine, ClusterCapabilities,
-    DETECT_CLUSTER_SQL, DETECT_SHARED_MERGE_TREE_SQL, DETECT_VERSION_SQL,
+    add_text_index_ddl, render_ddl_with_engine, ClusterCapabilities, DETECT_CLUSTER_SQL,
+    DETECT_SHARED_MERGE_TREE_SQL, DETECT_VERSION_SQL,
 };
 use crate::Result;
 
@@ -213,9 +213,17 @@ impl<'a> AutoInitializer<'a> {
                 if let Some(batch) = batches.first() {
                     if batch.num_rows() > 0 {
                         // Try to extract as string
-                        if let Some(col) = batch.column(0).as_any().downcast_ref::<arrow::array::StringArray>() {
+                        if let Some(col) = batch
+                            .column(0)
+                            .as_any()
+                            .downcast_ref::<arrow::array::StringArray>()
+                        {
                             col.value(0).to_string()
-                        } else if let Some(col) = batch.column(0).as_any().downcast_ref::<arrow::array::BinaryArray>() {
+                        } else if let Some(col) = batch
+                            .column(0)
+                            .as_any()
+                            .downcast_ref::<arrow::array::BinaryArray>()
+                        {
                             String::from_utf8_lossy(col.value(0)).to_string()
                         } else {
                             "unknown".to_string()
@@ -278,8 +286,7 @@ impl<'a> AutoInitializer<'a> {
         let routing = &self.config.routing;
 
         // Connect to ClickHouse
-        let ch_config: crate::clickhouse::ClickHouseConfig =
-            (&self.config.clickhouse).into();
+        let ch_config: crate::clickhouse::ClickHouseConfig = (&self.config.clickhouse).into();
         let client = ArrowClickHouseClient::new(&ch_config).await?;
 
         // Get database and table names from routing config

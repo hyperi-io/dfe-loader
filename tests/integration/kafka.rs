@@ -42,7 +42,10 @@ fn skip_if_no_kafka() -> bool {
     match first_broker.to_socket_addrs() {
         Ok(mut addrs) => {
             if let Some(socket_addr) = addrs.next() {
-                match std::net::TcpStream::connect_timeout(&socket_addr, std::time::Duration::from_secs(3)) {
+                match std::net::TcpStream::connect_timeout(
+                    &socket_addr,
+                    std::time::Duration::from_secs(3),
+                ) {
                     Ok(_) => {
                         eprintln!("Kafka reachable at {} ({})", first_broker, socket_addr);
                         false
@@ -72,7 +75,10 @@ fn get_test_config() -> KafkaConfig {
 
     // Use .env SASL settings
     let sasl = if env::var("KAFKA_SASL_USER").is_ok() || env::var("KAFKA_SASL_MECHANISM").is_ok() {
-        let mechanism = match env::var("KAFKA_SASL_MECHANISM").unwrap_or_default().as_str() {
+        let mechanism = match env::var("KAFKA_SASL_MECHANISM")
+            .unwrap_or_default()
+            .as_str()
+        {
             "PLAIN" => SaslMechanism::Plain,
             "SCRAM-SHA-256" => SaslMechanism::ScramSha256,
             "SCRAM-SHA-512" | "" => SaslMechanism::ScramSha512,
@@ -91,11 +97,16 @@ fn get_test_config() -> KafkaConfig {
         None
     };
 
-    eprintln!("Config: brokers={}, group={}, sasl={}", brokers, group, sasl.is_some());
+    eprintln!(
+        "Config: brokers={}, group={}, sasl={}",
+        brokers,
+        group,
+        sasl.is_some()
+    );
 
     KafkaConfig {
         brokers: brokers.split(',').map(|s| s.to_string()).collect(),
-        topics: vec!["test-events".to_string()],  // Default test topic
+        topics: vec!["test-events".to_string()], // Default test topic
         group,
         topic_regex: None,
         client_id: "integration-test".to_string(),

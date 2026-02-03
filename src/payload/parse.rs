@@ -11,7 +11,7 @@
 //! For full document processing (flattening, transformation), use `parse_payload`
 //! which does a full DOM parse.
 
-use sonic_rs::{JsonValueTrait, LazyValue, get_from_slice};
+use sonic_rs::{get_from_slice, JsonValueTrait, LazyValue};
 
 use crate::payload::{detect_format, PayloadFormat};
 use crate::Result;
@@ -29,9 +29,7 @@ pub fn parse_payload(payload: &[u8]) -> Result<serde_json::Value> {
     match format {
         PayloadFormat::Json => parse_json(payload),
         PayloadFormat::MessagePack => parse_msgpack(payload),
-        PayloadFormat::Unknown => Err(crate::Error::Json(
-            "Unknown payload format".into()
-        )),
+        PayloadFormat::Unknown => Err(crate::Error::Json("Unknown payload format".into())),
     }
 }
 
@@ -119,7 +117,10 @@ pub fn extract_nested_field_json(payload: &[u8], path: &str) -> Option<String> {
 /// `Cow<str>` - Borrowed for non-escaped, Owned for escaped strings.
 /// None if field not found or not a string.
 #[inline]
-pub fn extract_field_json_cow<'a>(payload: &'a [u8], field: &str) -> Option<std::borrow::Cow<'a, str>> {
+pub fn extract_field_json_cow<'a>(
+    payload: &'a [u8],
+    field: &str,
+) -> Option<std::borrow::Cow<'a, str>> {
     use std::borrow::Cow;
 
     let lazy: LazyValue = get_from_slice(payload, &[field]).ok()?;
@@ -135,7 +136,7 @@ pub fn extract_field_json_cow<'a>(payload: &'a [u8], field: &str) -> Option<std:
     match raw_cow {
         Cow::Borrowed(s) if s.len() >= 2 => {
             // Check if the string contains escape sequences
-            let inner = &s[1..s.len()-1];
+            let inner = &s[1..s.len() - 1];
             if inner.contains('\\') {
                 // Has escapes - need to parse. Use as_str() which handles unescaping.
                 lazy.as_str().map(|s| Cow::Owned(s.to_string()))
@@ -146,7 +147,7 @@ pub fn extract_field_json_cow<'a>(payload: &'a [u8], field: &str) -> Option<std:
         }
         Cow::Owned(s) if s.len() >= 2 => {
             // Owned case (from FastStr) - strip quotes and check escapes
-            let inner = &s[1..s.len()-1];
+            let inner = &s[1..s.len() - 1];
             if inner.contains('\\') {
                 lazy.as_str().map(|s| Cow::Owned(s.to_string()))
             } else {
@@ -169,7 +170,10 @@ pub fn extract_field_json_cow<'a>(payload: &'a [u8], field: &str) -> Option<std:
 /// # Returns
 /// `Cow<str>` - Borrowed for non-escaped, Owned for escaped strings.
 #[inline]
-pub fn extract_nested_field_json_cow<'a>(payload: &'a [u8], path: &str) -> Option<std::borrow::Cow<'a, str>> {
+pub fn extract_nested_field_json_cow<'a>(
+    payload: &'a [u8],
+    path: &str,
+) -> Option<std::borrow::Cow<'a, str>> {
     use std::borrow::Cow;
 
     let parts: Vec<&str> = path.split('.').collect();
@@ -188,7 +192,7 @@ pub fn extract_nested_field_json_cow<'a>(payload: &'a [u8], path: &str) -> Optio
 
     match raw_cow {
         Cow::Borrowed(s) if s.len() >= 2 => {
-            let inner = &s[1..s.len()-1];
+            let inner = &s[1..s.len() - 1];
             if inner.contains('\\') {
                 lazy.as_str().map(|s| Cow::Owned(s.to_string()))
             } else {
@@ -196,7 +200,7 @@ pub fn extract_nested_field_json_cow<'a>(payload: &'a [u8], path: &str) -> Optio
             }
         }
         Cow::Owned(s) if s.len() >= 2 => {
-            let inner = &s[1..s.len()-1];
+            let inner = &s[1..s.len() - 1];
             if inner.contains('\\') {
                 lazy.as_str().map(|s| Cow::Owned(s.to_string()))
             } else {
@@ -233,7 +237,10 @@ mod tests {
     #[test]
     fn test_extract_field_json() {
         let payload = br#"{"event_category": "api", "user": "test"}"#;
-        assert_eq!(extract_field_json(payload, "event_category"), Some("api".to_string()));
+        assert_eq!(
+            extract_field_json(payload, "event_category"),
+            Some("api".to_string())
+        );
         assert_eq!(extract_field_json(payload, "missing"), None);
     }
 

@@ -18,8 +18,8 @@ use serde_json::Value;
 
 use crate::config::RoutingConfig;
 use crate::payload::parse::{
-    extract_field_json, extract_field_json_cow,
-    extract_nested_field_json, extract_nested_field_json_cow,
+    extract_field_json, extract_field_json_cow, extract_nested_field_json,
+    extract_nested_field_json_cow,
 };
 
 /// Route result with destination info
@@ -74,16 +74,14 @@ impl Router {
     /// Create a new router from config
     pub fn new(config: &RoutingConfig) -> Self {
         // Convert HashMap to FxHashMap for faster lookups
-        let category_to_table: FxHashMap<String, String> = config.category_to_table
+        let category_to_table: FxHashMap<String, String> = config
+            .category_to_table
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
 
         // Convert routed_orgs Vec to FxHashSet for O(1) lookups
-        let routed_orgs: FxHashSet<String> = config.routed_orgs
-            .iter()
-            .cloned()
-            .collect();
+        let routed_orgs: FxHashSet<String> = config.routed_orgs.iter().cloned().collect();
 
         Self {
             db_fields: config.db_fields.clone(),
@@ -166,7 +164,8 @@ impl Router {
     /// Extract the table name from the payload
     #[inline]
     pub fn extract_table(&self, payload: &[u8]) -> String {
-        let table = self.extract_first_match(payload, &self.table_fields)
+        let table = self
+            .extract_first_match(payload, &self.table_fields)
             .unwrap_or_else(|| self.default_table.clone());
 
         // Check legacy category_to_table mapping
@@ -277,7 +276,11 @@ impl Router {
     ///
     /// Returns Cow::Borrowed for non-escaped strings, Cow::Owned for escaped.
     #[inline]
-    fn extract_first_match_cow<'a>(&self, payload: &'a [u8], fields: &[String]) -> Option<Cow<'a, str>> {
+    fn extract_first_match_cow<'a>(
+        &self,
+        payload: &'a [u8],
+        fields: &[String],
+    ) -> Option<Cow<'a, str>> {
         for field in fields {
             let value = if field.contains('.') {
                 extract_nested_field_json_cow(payload, field)
@@ -317,7 +320,11 @@ impl Router {
             }
             // Use defaults for empty values
             let db = if db.is_empty() { &self.default_db } else { db };
-            let table = if table.is_empty() { &self.default_table } else { table };
+            let table = if table.is_empty() {
+                &self.default_table
+            } else {
+                table
+            };
             return RouteResult::Table(build_db_table_string(db, table));
         }
 
@@ -365,7 +372,8 @@ impl Router {
     /// Returns borrowed reference when possible, owned when mapped.
     #[inline]
     fn extract_table_from_value<'a>(&'a self, value: &'a Value) -> Cow<'a, str> {
-        let table = self.extract_first_match_from_value(value, &self.table_fields)
+        let table = self
+            .extract_first_match_from_value(value, &self.table_fields)
             .unwrap_or(&self.default_table);
 
         // Check legacy category_to_table mapping
@@ -380,7 +388,11 @@ impl Router {
     ///
     /// Returns borrowed `&str` from the Value to avoid allocation.
     #[inline]
-    fn extract_first_match_from_value<'a>(&self, value: &'a Value, fields: &[String]) -> Option<&'a str> {
+    fn extract_first_match_from_value<'a>(
+        &self,
+        value: &'a Value,
+        fields: &[String],
+    ) -> Option<&'a str> {
         for field in fields {
             if let Some(val) = self.get_nested_field(value, field) {
                 if let Some(s) = val.as_str() {
@@ -537,7 +549,8 @@ mod tests {
     fn test_router_nested_table_field() {
         let router = Router::new(&test_config());
         // No event_category at top level, but tags.event_category exists
-        let payload = br#"{"org_id": "tenant1", "tags": {"event_category": "api"}, "user_id": 123}"#;
+        let payload =
+            br#"{"org_id": "tenant1", "tags": {"event_category": "api"}, "user_id": 123}"#;
 
         assert_eq!(
             router.route(payload),
@@ -795,9 +808,18 @@ mod tests {
         let p3 = br#"{"event_category": "network"}"#;
 
         // All go to common.*
-        assert_eq!(router.route(p1), RouteResult::Table("common.auth".to_string()));
-        assert_eq!(router.route(p2), RouteResult::Table("common.api".to_string()));
-        assert_eq!(router.route(p3), RouteResult::Table("common.network".to_string()));
+        assert_eq!(
+            router.route(p1),
+            RouteResult::Table("common.auth".to_string())
+        );
+        assert_eq!(
+            router.route(p2),
+            RouteResult::Table("common.api".to_string())
+        );
+        assert_eq!(
+            router.route(p3),
+            RouteResult::Table("common.network".to_string())
+        );
     }
 
     #[test]
@@ -816,11 +838,20 @@ mod tests {
         let p3 = br#"{"org_id": "other", "event_category": "network"}"#;
 
         // acme and bigcorp get own DB
-        assert_eq!(router.route(p1), RouteResult::Table("acme.auth".to_string()));
-        assert_eq!(router.route(p2), RouteResult::Table("bigcorp.api".to_string()));
+        assert_eq!(
+            router.route(p1),
+            RouteResult::Table("acme.auth".to_string())
+        );
+        assert_eq!(
+            router.route(p2),
+            RouteResult::Table("bigcorp.api".to_string())
+        );
 
         // other goes to common
-        assert_eq!(router.route(p3), RouteResult::Table("common.network".to_string()));
+        assert_eq!(
+            router.route(p3),
+            RouteResult::Table("common.network".to_string())
+        );
     }
 
     #[test]
@@ -837,8 +868,14 @@ mod tests {
         let p2 = br#"{"org_id": "customer123", "event_category": "api"}"#;
 
         // Each org gets own database
-        assert_eq!(router.route(p1), RouteResult::Table("acme.auth".to_string()));
-        assert_eq!(router.route(p2), RouteResult::Table("customer123.api".to_string()));
+        assert_eq!(
+            router.route(p1),
+            RouteResult::Table("acme.auth".to_string())
+        );
+        assert_eq!(
+            router.route(p2),
+            RouteResult::Table("customer123.api".to_string())
+        );
     }
 
     #[test]

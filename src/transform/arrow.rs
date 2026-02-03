@@ -97,7 +97,9 @@ impl ArrowBatchBuilder {
             return Ok(None);
         }
 
-        let dest = self.destination.as_ref()
+        let dest = self
+            .destination
+            .as_ref()
             .map(|d| d.as_ref())
             .unwrap_or("unknown");
 
@@ -240,7 +242,8 @@ fn json_batch_to_arrow_direct(
     let mut columns: Vec<ArrayRef> = Vec::with_capacity(column_types.len() + 1);
 
     // Build _destination column - all rows share same destination
-    let mut dest_builder = StringBuilder::with_capacity(pending.len(), pending.len() * destination.len());
+    let mut dest_builder =
+        StringBuilder::with_capacity(pending.len(), pending.len() * destination.len());
     for _ in pending {
         dest_builder.append_value(destination);
     }
@@ -263,10 +266,7 @@ fn json_batch_to_arrow_direct(
 /// Try to use arrow-json for high-performance conversion
 ///
 /// Falls back to manual conversion if schema inference fails.
-pub fn json_to_arrow_with_schema(
-    json_strings: &[&str],
-    schema: SchemaRef,
-) -> Result<RecordBatch> {
+pub fn json_to_arrow_with_schema(json_strings: &[&str], schema: SchemaRef) -> Result<RecordBatch> {
     // Use arrow-json ReaderBuilder for SIMD-accelerated parsing
     let json_concat = json_strings.join("\n");
     let cursor = std::io::Cursor::new(json_concat.as_bytes());
@@ -478,7 +478,9 @@ impl SimdBatchBuilder {
         let data_batch = json_bytes_to_arrow_simd(&self.buffer, schema.clone())?;
 
         // Add _destination column - use shared destination
-        let dest = self.destination.as_ref()
+        let dest = self
+            .destination
+            .as_ref()
             .map(|d| d.as_ref())
             .unwrap_or("unknown");
         let batch = add_destination_column_shared(data_batch, dest, self.record_count)?;
@@ -495,8 +497,13 @@ impl SimdBatchBuilder {
 ///
 /// Optimized for per-table buffers where all rows share the same destination.
 #[inline]
-fn add_destination_column_shared(batch: RecordBatch, destination: &str, row_count: usize) -> Result<RecordBatch> {
-    let mut fields: Vec<Arc<Field>> = vec![Arc::new(Field::new("_destination", DataType::Utf8, false))];
+fn add_destination_column_shared(
+    batch: RecordBatch,
+    destination: &str,
+    row_count: usize,
+) -> Result<RecordBatch> {
+    let mut fields: Vec<Arc<Field>> =
+        vec![Arc::new(Field::new("_destination", DataType::Utf8, false))];
     fields.extend(batch.schema().fields().iter().cloned());
 
     let schema = Arc::new(Schema::new(fields));
@@ -785,9 +792,11 @@ mod tests {
 
     #[test]
     fn test_simd_empty_input() {
-        let schema = Arc::new(Schema::new(vec![
-            Arc::new(Field::new("id", DataType::Int64, true)),
-        ]));
+        let schema = Arc::new(Schema::new(vec![Arc::new(Field::new(
+            "id",
+            DataType::Int64,
+            true,
+        ))]));
 
         let batch = json_bytes_to_arrow_simd(b"", schema.clone()).unwrap();
         assert_eq!(batch.num_rows(), 0);

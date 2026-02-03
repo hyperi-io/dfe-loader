@@ -97,7 +97,8 @@ impl ParsedType {
         if let Some(inner) = Self::extract_wrapper(&type_str, "Map") {
             if let Some((key, value)) = Self::split_type_args(&inner) {
                 result.base = "Map".to_string();
-                result.map_types = Some((Box::new(Self::parse(&key)), Box::new(Self::parse(&value))));
+                result.map_types =
+                    Some((Box::new(Self::parse(&key)), Box::new(Self::parse(&value))));
                 return result;
             }
         }
@@ -108,9 +109,9 @@ impl ParsedType {
             if let Some(inner) = Self::extract_wrapper(&type_str, "DateTime64") {
                 let parts: Vec<&str> = inner.splitn(2, ',').collect();
                 result.precision = parts.first().and_then(|p| p.trim().parse().ok());
-                result.timezone = parts.get(1).map(|tz| {
-                    tz.trim().trim_matches('\'').trim_matches('"').to_string()
-                });
+                result.timezone = parts
+                    .get(1)
+                    .map(|tz| tz.trim().trim_matches('\'').trim_matches('"').to_string());
             }
             return result;
         }
@@ -208,7 +209,10 @@ impl ParsedType {
                 '(' => depth += 1,
                 ')' => depth -= 1,
                 ',' if depth == 0 => {
-                    return Some((inner[..i].trim().to_string(), inner[i + 1..].trim().to_string()));
+                    return Some((
+                        inner[..i].trim().to_string(),
+                        inner[i + 1..].trim().to_string(),
+                    ));
                 }
                 _ => {}
             }
@@ -267,7 +271,9 @@ impl ParsedType {
             "Enum8" | "Enum16" => "Enum",
 
             // Geo types
-            "Point" | "Ring" | "Polygon" | "MultiPolygon" | "LineString" | "MultiLineString" => "Geo",
+            "Point" | "Ring" | "Polygon" | "MultiPolygon" | "LineString" | "MultiLineString" => {
+                "Geo"
+            }
 
             // Unknown - fallback to String (safe coercion)
             _ => "String",
@@ -292,10 +298,7 @@ impl ParsedType {
     /// Check if this is a date/time type.
     #[must_use]
     pub fn is_datetime(&self) -> bool {
-        matches!(
-            self.coercer_category(),
-            "Date" | "DateTime" | "DateTime64"
-        )
+        matches!(self.coercer_category(), "Date" | "DateTime" | "DateTime64")
     }
 
     /// Check if this is an IP address type.
@@ -408,7 +411,19 @@ pub fn default_value_for_category(category: &str) -> &'static str {
 
 /// Common null string representations to recognise.
 pub const NULL_STRINGS: &[&str] = &[
-    "null", "NULL", "Null", "None", "nil", "undefined", "\\N", "<null>", "NA", "N/A", "n/a", "NaN", "",
+    "null",
+    "NULL",
+    "Null",
+    "None",
+    "nil",
+    "undefined",
+    "\\N",
+    "<null>",
+    "NA",
+    "N/A",
+    "n/a",
+    "NaN",
+    "",
 ];
 
 /// Check if a string value represents null.
@@ -506,7 +521,10 @@ mod tests {
         assert_eq!(ParsedType::parse("JSON").coercer_category(), "JSON");
 
         // Unknown type falls back to String
-        assert_eq!(ParsedType::parse("SomeNewType").coercer_category(), "String");
+        assert_eq!(
+            ParsedType::parse("SomeNewType").coercer_category(),
+            "String"
+        );
     }
 
     #[test]

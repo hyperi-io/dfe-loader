@@ -39,7 +39,10 @@ fn skip_if_no_clickhouse() -> bool {
     match addr.to_socket_addrs() {
         Ok(mut addrs) => {
             if let Some(socket_addr) = addrs.next() {
-                match std::net::TcpStream::connect_timeout(&socket_addr, std::time::Duration::from_secs(3)) {
+                match std::net::TcpStream::connect_timeout(
+                    &socket_addr,
+                    std::time::Duration::from_secs(3),
+                ) {
                     Ok(_) => {
                         eprintln!("ClickHouse reachable at {} ({})", addr, socket_addr);
                         false
@@ -71,7 +74,10 @@ fn get_test_config() -> ClickHouseConfig {
     let password = env::var("CLICKHOUSE_PASSWORD").unwrap_or_default();
 
     let host_with_port = format!("{}:{}", host, port);
-    eprintln!("Config: host={}, db={}, user={}", host_with_port, database, username);
+    eprintln!(
+        "Config: host={}, db={}, user={}",
+        host_with_port, database, username
+    );
 
     ClickHouseConfig {
         hosts: vec![host_with_port],
@@ -131,7 +137,10 @@ async fn test_clickhouse_insert_arrow() {
     };
 
     // Create a test table
-    let table_name = format!("test_insert_{}", uuid::Uuid::new_v4().to_string().replace('-', ""));
+    let table_name = format!(
+        "test_insert_{}",
+        uuid::Uuid::new_v4().to_string().replace('-', "")
+    );
     let create_sql = format!(
         "CREATE TABLE IF NOT EXISTS {} (
             id UInt64,
@@ -143,7 +152,10 @@ async fn test_clickhouse_insert_arrow() {
     );
 
     let start = std::time::Instant::now();
-    client.query(&create_sql).await.expect("Failed to create table");
+    client
+        .query(&create_sql)
+        .await
+        .expect("Failed to create table");
     eprintln!("✓ Created table '{}' in {:?}", table_name, start.elapsed());
 
     // Create Arrow schema matching the table
@@ -168,7 +180,8 @@ async fn test_clickhouse_insert_arrow() {
             Arc::new(categories),
             Arc::new(values),
         ],
-    ).expect("Failed to create RecordBatch");
+    )
+    .expect("Failed to create RecordBatch");
 
     let start = std::time::Instant::now();
     let result = client.insert(&table_name, batch).await;
@@ -179,10 +192,21 @@ async fn test_clickhouse_insert_arrow() {
     // Query back to verify data was inserted correctly
     let count_sql = format!("SELECT COUNT(*) as count FROM {}", table_name);
     let count_result = client.select(&count_sql).await.expect("Count query failed");
-    assert!(!count_result.is_empty(), "No batches returned from count query");
+    assert!(
+        !count_result.is_empty(),
+        "No batches returned from count query"
+    );
     let count_batch = &count_result[0];
-    let count_col = count_batch.column(0).as_any().downcast_ref::<UInt64Array>().expect("Count should be UInt64");
-    assert_eq!(count_col.value(0), 2, "Should have 2 rows after first insert");
+    let count_col = count_batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<UInt64Array>()
+        .expect("Count should be UInt64");
+    assert_eq!(
+        count_col.value(0),
+        2,
+        "Should have 2 rows after first insert"
+    );
     eprintln!("✓ Query verification: confirmed 2 rows in table");
 
     // Insert larger batch (1000 rows)
@@ -200,21 +224,35 @@ async fn test_clickhouse_insert_arrow() {
             Arc::new(StringArray::from(cats)),
             Arc::new(Float64Array::from(vals)),
         ],
-    ).expect("Failed to create RecordBatch");
+    )
+    .expect("Failed to create RecordBatch");
 
     let start = std::time::Instant::now();
     let result = client.insert(&table_name, batch).await;
     let elapsed = start.elapsed();
     assert!(result.is_ok(), "Batch insert failed: {:?}", result.err());
     let count = result.unwrap();
-    eprintln!("✓ Inserted {} rows via Arrow in {:?} ({:.0} rows/sec)", count, elapsed, count as f64 / elapsed.as_secs_f64());
+    eprintln!(
+        "✓ Inserted {} rows via Arrow in {:?} ({:.0} rows/sec)",
+        count,
+        elapsed,
+        count as f64 / elapsed.as_secs_f64()
+    );
 
     // Query back to verify total row count
     let count_sql = format!("SELECT COUNT(*) as count FROM {}", table_name);
     let count_result = client.select(&count_sql).await.expect("Count query failed");
     let count_batch = &count_result[0];
-    let count_col = count_batch.column(0).as_any().downcast_ref::<UInt64Array>().expect("Count should be UInt64");
-    assert_eq!(count_col.value(0), 1002, "Should have 1002 rows total (2 + 1000)");
+    let count_col = count_batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<UInt64Array>()
+        .expect("Count should be UInt64");
+    assert_eq!(
+        count_col.value(0),
+        1002,
+        "Should have 1002 rows total (2 + 1000)"
+    );
     eprintln!("✓ Query verification: confirmed 1002 rows total");
 
     // Insert even larger batch (5000 rows)
@@ -232,33 +270,63 @@ async fn test_clickhouse_insert_arrow() {
             Arc::new(StringArray::from(cats)),
             Arc::new(Float64Array::from(vals)),
         ],
-    ).expect("Failed to create RecordBatch");
+    )
+    .expect("Failed to create RecordBatch");
 
     let start = std::time::Instant::now();
     let result = client.insert(&table_name, batch).await;
     let elapsed = start.elapsed();
-    assert!(result.is_ok(), "Large batch insert failed: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "Large batch insert failed: {:?}",
+        result.err()
+    );
     let count = result.unwrap();
-    eprintln!("✓ Inserted {} rows via Arrow in {:?} ({:.0} rows/sec)", count, elapsed, count as f64 / elapsed.as_secs_f64());
+    eprintln!(
+        "✓ Inserted {} rows via Arrow in {:?} ({:.0} rows/sec)",
+        count,
+        elapsed,
+        count as f64 / elapsed.as_secs_f64()
+    );
 
     // Query back to verify final row count and data integrity
     let count_sql = format!("SELECT COUNT(*) as count FROM {}", table_name);
     let count_result = client.select(&count_sql).await.expect("Count query failed");
     let count_batch = &count_result[0];
-    let count_col = count_batch.column(0).as_any().downcast_ref::<UInt64Array>().expect("Count should be UInt64");
-    assert_eq!(count_col.value(0), 6002, "Should have 6002 rows total (2 + 1000 + 5000)");
+    let count_col = count_batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<UInt64Array>()
+        .expect("Count should be UInt64");
+    assert_eq!(
+        count_col.value(0),
+        6002,
+        "Should have 6002 rows total (2 + 1000 + 5000)"
+    );
     eprintln!("✓ Query verification: confirmed 6002 rows total");
 
     // Verify specific data by category
-    let category_sql = format!("SELECT category, COUNT(*) as count FROM {} GROUP BY category ORDER BY category", table_name);
-    let category_result = client.select(&category_sql).await.expect("Category query failed");
+    let category_sql = format!(
+        "SELECT category, COUNT(*) as count FROM {} GROUP BY category ORDER BY category",
+        table_name
+    );
+    let category_result = client
+        .select(&category_sql)
+        .await
+        .expect("Category query failed");
     let category_batch = &category_result[0];
-    assert!(category_batch.num_rows() >= 4, "Should have at least 4 categories");
+    assert!(
+        category_batch.num_rows() >= 4,
+        "Should have at least 4 categories"
+    );
     eprintln!("✓ Query verification: confirmed data can be queried by category");
 
     // Cleanup
     let start = std::time::Instant::now();
-    client.query(&format!("DROP TABLE IF EXISTS {}", table_name)).await.expect("Failed to drop");
+    client
+        .query(&format!("DROP TABLE IF EXISTS {}", table_name))
+        .await
+        .expect("Failed to drop");
     eprintln!("✓ Dropped table in {:?}", start.elapsed());
 }
 
@@ -317,7 +385,10 @@ async fn test_clickhouse_variant_type_support() {
     }
 
     // Try to create a table with Variant type (requires 24.x+)
-    let table_name = format!("test_variant_{}", uuid::Uuid::new_v4().to_string().replace('-', ""));
+    let table_name = format!(
+        "test_variant_{}",
+        uuid::Uuid::new_v4().to_string().replace('-', "")
+    );
 
     // First, enable experimental types and create table
     let create_sql = format!(
@@ -335,7 +406,10 @@ async fn test_clickhouse_variant_type_support() {
             eprintln!("✓ Created table with Variant type: {}", table_name);
         }
         Err(e) => {
-            eprintln!("✗ Failed to create Variant table (ClickHouse may be < 24.x): {}", e);
+            eprintln!(
+                "✗ Failed to create Variant table (ClickHouse may be < 24.x): {}",
+                e
+            );
             return;
         }
     }
@@ -344,6 +418,8 @@ async fn test_clickhouse_variant_type_support() {
     eprintln!("✓ Variant table created successfully (DDL test)");
 
     // Cleanup
-    let _ = client.query(&format!("DROP TABLE IF EXISTS {}", table_name)).await;
+    let _ = client
+        .query(&format!("DROP TABLE IF EXISTS {}", table_name))
+        .await;
     eprintln!("✓ Cleaned up Variant test table");
 }

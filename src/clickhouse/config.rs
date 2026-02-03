@@ -165,7 +165,11 @@ impl ClickHouseConfig {
 
     /// Set credentials.
     #[must_use]
-    pub fn with_credentials(mut self, username: impl Into<String>, password: impl Into<String>) -> Self {
+    pub fn with_credentials(
+        mut self,
+        username: impl Into<String>,
+        password: impl Into<String>,
+    ) -> Self {
         self.username = username.into();
         self.password = password.into();
         self
@@ -264,13 +268,22 @@ mod tests {
     #[test]
     fn test_primary_endpoint() {
         let config = ClickHouseConfig::new("localhost", "db");
-        assert_eq!(config.primary_endpoint(), Some("localhost:9000".to_string()));
+        assert_eq!(
+            config.primary_endpoint(),
+            Some("localhost:9000".to_string())
+        );
 
         let config = ClickHouseConfig::new("localhost:9001", "db");
-        assert_eq!(config.primary_endpoint(), Some("localhost:9001".to_string()));
+        assert_eq!(
+            config.primary_endpoint(),
+            Some("localhost:9001".to_string())
+        );
 
         let config = ClickHouseConfig::http("localhost", "db");
-        assert_eq!(config.primary_endpoint(), Some("localhost:8123".to_string()));
+        assert_eq!(
+            config.primary_endpoint(),
+            Some("localhost:8123".to_string())
+        );
     }
 
     #[test]

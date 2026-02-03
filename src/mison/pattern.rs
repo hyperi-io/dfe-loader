@@ -136,9 +136,7 @@ impl PatternTree {
             } else {
                 // Field moved - update expected index if new position is more common
                 // Simple heuristic: switch if we've seen the new position more often
-                if pattern.observation_count > 10
-                    && pattern.confidence() < 0.5
-                {
+                if pattern.observation_count > 10 && pattern.confidence() < 0.5 {
                     pattern.expected_index = field_index;
                     pattern.success_count = 1;
                     pattern.observation_count = 1;
@@ -151,10 +149,8 @@ impl PatternTree {
                 self.evict_lowest_confidence();
             }
 
-            self.patterns.insert(
-                key,
-                FieldPattern::new(path.to_vec(), field_index),
-            );
+            self.patterns
+                .insert(key, FieldPattern::new(path.to_vec(), field_index));
         }
     }
 

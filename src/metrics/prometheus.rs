@@ -85,17 +85,11 @@ impl Metrics {
         .unwrap();
 
         // Buffer gauges
-        let buffer_rows = Gauge::with_opts(Opts::new(
-            "loader_buffer_rows",
-            "Current rows buffered",
-        ))
-        .unwrap();
+        let buffer_rows =
+            Gauge::with_opts(Opts::new("loader_buffer_rows", "Current rows buffered")).unwrap();
 
-        let buffer_bytes = Gauge::with_opts(Opts::new(
-            "loader_buffer_bytes",
-            "Current bytes buffered",
-        ))
-        .unwrap();
+        let buffer_bytes =
+            Gauge::with_opts(Opts::new("loader_buffer_bytes", "Current bytes buffered")).unwrap();
 
         let buffer_tables = Gauge::with_opts(Opts::new(
             "loader_buffer_tables",
@@ -109,7 +103,9 @@ impl Metrics {
                 "loader_insert_latency_seconds",
                 "Insert batch latency in seconds",
             )
-            .buckets(vec![0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0]),
+            .buckets(vec![
+                0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
+            ]),
         )
         .unwrap();
 
@@ -138,19 +134,31 @@ impl Metrics {
         .unwrap();
 
         // Register all metrics
-        registry.register(Box::new(messages_received.clone())).unwrap();
-        registry.register(Box::new(messages_processed.clone())).unwrap();
+        registry
+            .register(Box::new(messages_received.clone()))
+            .unwrap();
+        registry
+            .register(Box::new(messages_processed.clone()))
+            .unwrap();
         registry.register(Box::new(messages_dlq.clone())).unwrap();
-        registry.register(Box::new(messages_by_table.clone())).unwrap();
-        registry.register(Box::new(batches_flushed.clone())).unwrap();
+        registry
+            .register(Box::new(messages_by_table.clone()))
+            .unwrap();
+        registry
+            .register(Box::new(batches_flushed.clone()))
+            .unwrap();
         registry.register(Box::new(rows_inserted.clone())).unwrap();
         registry.register(Box::new(insert_errors.clone())).unwrap();
-        registry.register(Box::new(offsets_committed.clone())).unwrap();
+        registry
+            .register(Box::new(offsets_committed.clone()))
+            .unwrap();
         registry.register(Box::new(buffer_rows.clone())).unwrap();
         registry.register(Box::new(buffer_bytes.clone())).unwrap();
         registry.register(Box::new(buffer_tables.clone())).unwrap();
         registry.register(Box::new(insert_latency.clone())).unwrap();
-        registry.register(Box::new(insert_latency_by_table.clone())).unwrap();
+        registry
+            .register(Box::new(insert_latency_by_table.clone()))
+            .unwrap();
         registry.register(Box::new(memory_used.clone())).unwrap();
         registry.register(Box::new(kafka_lag.clone())).unwrap();
 

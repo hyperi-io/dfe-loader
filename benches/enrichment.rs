@@ -133,8 +133,18 @@ fn bench_reputation_prefix_match(c: &mut Criterion) {
     let enricher = ReputationEnricher::new();
 
     // Add prefixes that will match
-    enricher.add_prefix("8.0.0.0".parse().unwrap(), 8, ThreatType::Datacenter, ThreatSource::Custom);
-    enricher.add_prefix("1.0.0.0".parse().unwrap(), 8, ThreatType::Vpn, ThreatSource::Custom);
+    enricher.add_prefix(
+        "8.0.0.0".parse().unwrap(),
+        8,
+        ThreatType::Datacenter,
+        ThreatSource::Custom,
+    );
+    enricher.add_prefix(
+        "1.0.0.0".parse().unwrap(),
+        8,
+        ThreatType::Vpn,
+        ThreatSource::Custom,
+    );
 
     c.bench_function("reputation/prefix_match", |b| {
         b.iter(|| {
@@ -224,7 +234,11 @@ fn bench_full_enrichment_pipeline(c: &mut Criterion) {
     let risk = RiskScorer::new();
 
     // Add some blocklist entries
-    reputation.add_ip("8.8.8.8".parse().unwrap(), ThreatType::Scanner, ThreatSource::GreyNoise);
+    reputation.add_ip(
+        "8.8.8.8".parse().unwrap(),
+        ThreatType::Scanner,
+        ThreatSource::GreyNoise,
+    );
 
     let mut group = c.benchmark_group("enrichment_pipeline");
     group.throughput(Throughput::Elements(10)); // 10 IPs per iteration

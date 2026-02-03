@@ -30,16 +30,16 @@ pub enum ThreatType {
     Vpn,
     Proxy,
     Tor,
-    Relay,        // Apple/iCloud Private Relay
-    Datacenter,   // Hosting/cloud provider
-    Residential,  // Residential proxy
-    Botnet,       // Known botnet C2
-    Spam,         // Spam source
-    Scanner,      // Internet scanner/crawler
-    Malware,      // Malware distribution
-    Phishing,     // Phishing source
-    Bruteforce,   // Brute force attacker
-    Exploit,      // Exploit attempts
+    Relay,       // Apple/iCloud Private Relay
+    Datacenter,  // Hosting/cloud provider
+    Residential, // Residential proxy
+    Botnet,      // Known botnet C2
+    Spam,        // Spam source
+    Scanner,     // Internet scanner/crawler
+    Malware,     // Malware distribution
+    Phishing,    // Phishing source
+    Bruteforce,  // Brute force attacker
+    Exploit,     // Exploit attempts
 }
 
 impl ThreatType {
@@ -139,13 +139,23 @@ impl ReputationResult {
     /// Check if any threat was detected
     #[inline]
     pub fn has_threat(&self) -> bool {
-        self.is_vpn || self.is_proxy || self.is_tor || self.is_relay
-            || self.is_datacenter || self.is_residential || self.is_botnet
-            || self.is_spam || self.is_scanner || self.is_malicious
+        self.is_vpn
+            || self.is_proxy
+            || self.is_tor
+            || self.is_relay
+            || self.is_datacenter
+            || self.is_residential
+            || self.is_botnet
+            || self.is_spam
+            || self.is_scanner
+            || self.is_malicious
     }
 
     /// Convert result to a map, filtering to only requested fields
-    pub fn to_schema_map(&self, schema_fields: &[&str]) -> std::collections::HashMap<String, serde_json::Value> {
+    pub fn to_schema_map(
+        &self,
+        schema_fields: &[&str],
+    ) -> std::collections::HashMap<String, serde_json::Value> {
         use serde_json::Value;
         let mut out = std::collections::HashMap::with_capacity(schema_fields.len());
 
@@ -192,8 +202,12 @@ impl ReputationResult {
                         None
                     }
                 }
-                "abuse_score" => out.insert(field.to_string(), Value::Number(self.abuse_score.into())),
-                "risk_score" => out.insert(field.to_string(), Value::Number(self.risk_score.into())),
+                "abuse_score" => {
+                    out.insert(field.to_string(), Value::Number(self.abuse_score.into()))
+                }
+                "risk_score" => {
+                    out.insert(field.to_string(), Value::Number(self.risk_score.into()))
+                }
                 _ => None,
             };
         }
@@ -373,12 +387,21 @@ impl ReputationEnricher {
     /// Add a single IP to the blocklist
     pub fn add_ip(&self, ip: IpAddr, threat_type: ThreatType, source: ThreatSource) {
         let mut threats = self.ip_threats.write().unwrap();
-        let info = IpSourceInfo { threat_type, source };
+        let info = IpSourceInfo {
+            threat_type,
+            source,
+        };
         threats.entry(ip).or_insert_with(Vec::new).push(info);
     }
 
     /// Add a CIDR prefix to the blocklist
-    pub fn add_prefix(&self, addr: IpAddr, prefix_len: u8, threat_type: ThreatType, source: ThreatSource) {
+    pub fn add_prefix(
+        &self,
+        addr: IpAddr,
+        prefix_len: u8,
+        threat_type: ThreatType,
+        source: ThreatSource,
+    ) {
         let mut prefixes = self.prefixes.write().unwrap();
         prefixes.push(IpPrefix {
             addr,
@@ -389,7 +412,12 @@ impl ReputationEnricher {
     }
 
     /// Load IPs from a plain text list (one IP or CIDR per line)
-    pub fn load_plain_list(&self, content: &str, threat_type: ThreatType, source: ThreatSource) -> usize {
+    pub fn load_plain_list(
+        &self,
+        content: &str,
+        threat_type: ThreatType,
+        source: ThreatSource,
+    ) -> usize {
         let mut count = 0;
 
         for line in content.lines() {
@@ -402,7 +430,9 @@ impl ReputationEnricher {
 
             // Handle CIDR notation
             if let Some((addr_str, prefix_str)) = line.split_once('/') {
-                if let (Ok(addr), Ok(prefix_len)) = (addr_str.parse::<IpAddr>(), prefix_str.parse::<u8>()) {
+                if let (Ok(addr), Ok(prefix_len)) =
+                    (addr_str.parse::<IpAddr>(), prefix_str.parse::<u8>())
+                {
                     self.add_prefix(addr, prefix_len, threat_type, source);
                     count += 1;
                 }
@@ -512,7 +542,12 @@ impl ReputationEnricher {
 
     /// Apply threat detection to result
     #[inline]
-    fn apply_threat(&self, result: &mut ReputationResult, threat_type: ThreatType, source: ThreatSource) {
+    fn apply_threat(
+        &self,
+        result: &mut ReputationResult,
+        threat_type: ThreatType,
+        source: ThreatSource,
+    ) {
         // Set first threat type/source if not already set
         if result.threat_type == ThreatType::None {
             result.threat_type = threat_type;
@@ -555,7 +590,10 @@ impl ReputationEnricher {
             ThreatType::Scanner => {
                 result.is_scanner = true;
             }
-            ThreatType::Malware | ThreatType::Phishing | ThreatType::Bruteforce | ThreatType::Exploit => {
+            ThreatType::Malware
+            | ThreatType::Phishing
+            | ThreatType::Bruteforce
+            | ThreatType::Exploit => {
                 result.is_malicious = true;
             }
             ThreatType::None => {}
@@ -599,7 +637,10 @@ impl ReputationEnricher {
         }
 
         // Collect entries sorted by access order
-        let mut entries: Vec<_> = cache.iter().map(|(k, v)| (k.clone(), v.access_order)).collect();
+        let mut entries: Vec<_> = cache
+            .iter()
+            .map(|(k, v)| (k.clone(), v.access_order))
+            .collect();
         entries.sort_by_key(|(_, order)| *order);
 
         // Remove oldest entries

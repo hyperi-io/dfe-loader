@@ -8,8 +8,8 @@ use std::time::Duration;
 use arrow::array::{ArrayRef, Float64Array, RecordBatch, StringArray, UInt64Array};
 use arrow::datatypes::{DataType, Field, Schema};
 
-use dfe_loader::clickhouse::{Inserter, InserterConfig};
 use dfe_loader::clickhouse::circuit_breaker::{CircuitBreaker, CircuitBreakerConfig};
+use dfe_loader::clickhouse::{Inserter, InserterConfig};
 
 use crate::common::{create_test_client, drop_test_table, unique_table_name};
 use crate::skip_if_no_clickhouse;
@@ -73,7 +73,11 @@ async fn test_inserter_basic_insert() {
     let count_sql = format!("SELECT COUNT(*) as count FROM {}", table_name);
     let count_result = client.select(&count_sql).await.expect("Count query failed");
     let count_batch = &count_result[0];
-    let count_col = count_batch.column(0).as_any().downcast_ref::<UInt64Array>().expect("Count should be UInt64");
+    let count_col = count_batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<UInt64Array>()
+        .expect("Count should be UInt64");
     assert_eq!(count_col.value(0), 3, "Should have 3 rows");
     eprintln!("✓ Query verification: confirmed 3 rows");
 
@@ -134,7 +138,9 @@ async fn test_inserter_large_batch() {
     ]));
 
     let ids: Vec<u64> = (0..row_count as u64).collect();
-    let events: Vec<String> = (0..row_count).map(|i| format!("event_{}", i % 100)).collect();
+    let events: Vec<String> = (0..row_count)
+        .map(|i| format!("event_{}", i % 100))
+        .collect();
     let values: Vec<f64> = (0..row_count).map(|i| i as f64 * 0.1).collect();
 
     let batch = RecordBatch::try_new(
@@ -151,7 +157,11 @@ async fn test_inserter_large_batch() {
     let result = inserter.insert_arrow(&table_name, batch).await;
     let elapsed = start.elapsed();
 
-    assert!(result.is_ok(), "Large batch insert failed: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "Large batch insert failed: {:?}",
+        result.err()
+    );
     let count = result.unwrap();
     assert_eq!(count, row_count);
 
@@ -166,8 +176,17 @@ async fn test_inserter_large_batch() {
     let count_sql = format!("SELECT COUNT(*) as count FROM {}", table_name);
     let count_result = client.select(&count_sql).await.expect("Count query failed");
     let count_batch = &count_result[0];
-    let count_col = count_batch.column(0).as_any().downcast_ref::<UInt64Array>().expect("Count should be UInt64");
-    assert_eq!(count_col.value(0), row_count as u64, "Should have {} rows", row_count);
+    let count_col = count_batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<UInt64Array>()
+        .expect("Count should be UInt64");
+    assert_eq!(
+        count_col.value(0),
+        row_count as u64,
+        "Should have {} rows",
+        row_count
+    );
     eprintln!("✓ Query verification: confirmed {} rows", row_count);
 
     // Cleanup
@@ -382,12 +401,19 @@ async fn test_concurrent_inserts() {
     let mut total_inserted = 0;
     for handle in handles {
         let result = handle.await.unwrap();
-        assert!(result.is_ok(), "Concurrent insert failed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Concurrent insert failed: {:?}",
+            result.err()
+        );
         total_inserted += result.unwrap();
     }
 
     assert_eq!(total_inserted, 800); // 8 batches * 100 rows
-    eprintln!("✓ Concurrent inserts: {} total rows inserted", total_inserted);
+    eprintln!(
+        "✓ Concurrent inserts: {} total rows inserted",
+        total_inserted
+    );
 
     // Cleanup
     drop_test_table(&client, &table_name).await;
@@ -456,7 +482,10 @@ async fn test_inserter_batch_salvage() {
     assert_eq!(result.inserted, 5);
     assert!(result.failed.is_empty());
 
-    eprintln!("✓ Batch salvage insert succeeded with {} rows", result.inserted);
+    eprintln!(
+        "✓ Batch salvage insert succeeded with {} rows",
+        result.inserted
+    );
 
     // Cleanup
     drop_test_table(&client, &table_name).await;

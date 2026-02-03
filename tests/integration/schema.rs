@@ -33,7 +33,10 @@ fn test_schema(columns: Vec<(&str, &str)>) -> TableSchema {
     TableSchema {
         database: "default".to_string(),
         table: "test".to_string(),
-        columns: columns.into_iter().map(|(n, t)| test_column(n, t)).collect(),
+        columns: columns
+            .into_iter()
+            .map(|(n, t)| test_column(n, t))
+            .collect(),
         comment: String::new(),
     }
 }
@@ -227,7 +230,11 @@ async fn test_schema_introspection_from_clickhouse() {
 
     // Get schema from ClickHouse
     let schema_result = client.fetch_table_schema(&table_name).await;
-    assert!(schema_result.is_ok(), "Failed to get schema: {:?}", schema_result.err());
+    assert!(
+        schema_result.is_ok(),
+        "Failed to get schema: {:?}",
+        schema_result.err()
+    );
 
     let schema = schema_result.unwrap();
     assert_eq!(schema.columns.len(), 6);

@@ -15,8 +15,7 @@ use dfe_loader::routing::{RouteResult, Router};
 use dfe_loader::transform::Transformer;
 
 use crate::common::{
-    check_clickhouse_reachable, create_test_client, drop_test_table, load_dotenv,
-    unique_table_name,
+    check_clickhouse_reachable, create_test_client, drop_test_table, load_dotenv, unique_table_name,
 };
 
 // ============================================================================
@@ -59,10 +58,7 @@ fn test_error_invalid_json() {
                 let parse_result = sonic_rs::from_slice::<serde_json::Value>(payload);
                 // We expect some of these to fail
                 if parse_result.is_err() {
-                    eprintln!(
-                        "Parse error (expected): {:?}",
-                        parse_result.err().unwrap()
-                    );
+                    eprintln!("Parse error (expected): {:?}", parse_result.err().unwrap());
                 }
             }
             Err(e) => {
@@ -77,7 +73,9 @@ fn test_error_msgpack_when_json_forced() {
     let detector = FormatDetector::with_mode(FormatMode::ForceJson);
 
     // MessagePack binary data
-    let msgpack_bytes: &[u8] = &[0x82, 0xa4, b't', b'e', b's', b't', 0xa5, b'v', b'a', b'l', b'u', b'e'];
+    let msgpack_bytes: &[u8] = &[
+        0x82, 0xa4, b't', b'e', b's', b't', 0xa5, b'v', b'a', b'l', b'u', b'e',
+    ];
 
     let result = detector.check_and_detect(msgpack_bytes);
     assert!(result.is_err(), "Should reject msgpack when JSON is forced");
@@ -215,7 +213,10 @@ fn test_error_deeply_nested_json() {
     assert!(result.is_ok());
 
     let output = result.unwrap();
-    eprintln!("✓ Deep nesting handled, keys: {:?}", output.data.keys().collect::<Vec<_>>());
+    eprintln!(
+        "✓ Deep nesting handled, keys: {:?}",
+        output.data.keys().collect::<Vec<_>>()
+    );
 }
 
 #[test]
@@ -256,7 +257,10 @@ fn test_error_special_characters_in_keys() {
     assert!(result.is_ok());
 
     let output = result.unwrap();
-    eprintln!("✓ Special characters in keys: {:?}", output.data.keys().collect::<Vec<_>>());
+    eprintln!(
+        "✓ Special characters in keys: {:?}",
+        output.data.keys().collect::<Vec<_>>()
+    );
 }
 
 // ============================================================================
@@ -292,8 +296,8 @@ fn test_error_inconsistent_schema_in_batch() {
     // Push messages with different schemas to same table
     let messages = vec![
         json!({"id": 1, "name": "alice"}),
-        json!({"id": 2, "age": 30}),  // Different field
-        json!({"id": 3, "name": "bob", "extra": true}),  // Extra field
+        json!({"id": 2, "age": 30}),                    // Different field
+        json!({"id": 3, "name": "bob", "extra": true}), // Extra field
     ];
 
     for msg in messages {
@@ -306,8 +310,11 @@ fn test_error_inconsistent_schema_in_batch() {
 
     // Arrow batch should include all fields as nullable
     let batch = &batches[0].batch;
-    eprintln!("✓ Inconsistent schemas merged: {} columns, {} rows",
-        batch.num_columns(), batch.num_rows());
+    eprintln!(
+        "✓ Inconsistent schemas merged: {} columns, {} rows",
+        batch.num_columns(),
+        batch.num_rows()
+    );
 }
 
 // ============================================================================
@@ -327,9 +334,7 @@ async fn test_error_insert_nonexistent_table() {
     };
 
     // Try to insert to non-existent table
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("id", DataType::UInt64, false),
-    ]));
+    let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::UInt64, false)]));
 
     let batch = RecordBatch::try_new(
         schema,
@@ -501,9 +506,7 @@ async fn test_error_empty_batch_insert() {
     client.query(&ddl).await.expect("Failed to create table");
 
     // Try to insert empty batch
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("id", DataType::UInt64, false),
-    ]));
+    let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::UInt64, false)]));
 
     let batch = RecordBatch::try_new(
         schema,
@@ -573,7 +576,10 @@ fn test_edge_unicode_in_data() {
     assert!(result.is_ok());
 
     let output = result.unwrap();
-    eprintln!("✓ Unicode handled: {:?}", output.data.keys().collect::<Vec<_>>());
+    eprintln!(
+        "✓ Unicode handled: {:?}",
+        output.data.keys().collect::<Vec<_>>()
+    );
 }
 
 #[test]

@@ -30,11 +30,7 @@ impl Coercer {
     ///
     /// Returns the coerced object with values converted to match ClickHouse types.
     /// Fields not in the schema are passed through unchanged.
-    pub fn coerce_record(
-        &self,
-        record: &mut Value,
-        schema: &TableSchema,
-    ) -> Result<()> {
+    pub fn coerce_record(&self, record: &mut Value, schema: &TableSchema) -> Result<()> {
         let obj = match record.as_object_mut() {
             Some(o) => o,
             None => return Ok(()), // Not an object, nothing to coerce
@@ -176,9 +172,7 @@ impl Coercer {
                 }
             }
             Value::Bool(b) => b.to_string(),
-            Value::Array(_) | Value::Object(_) => {
-                serde_json::to_string(value).unwrap_or_default()
-            }
+            Value::Array(_) | Value::Object(_) => serde_json::to_string(value).unwrap_or_default(),
             Value::Null => String::new(),
         };
 
@@ -288,7 +282,9 @@ impl Coercer {
                 })?;
                 Ok(Value::String(self.epoch_to_datetime(ts)))
             }
-            _ => Err(crate::Error::Coercion("Cannot convert to datetime".to_string())),
+            _ => Err(crate::Error::Coercion(
+                "Cannot convert to datetime".to_string(),
+            )),
         }
     }
 
@@ -305,7 +301,9 @@ impl Coercer {
                     return Ok(Value::String(self.epoch_to_datetime64(ts, precision)));
                 }
                 if let Ok(ts) = s.parse::<i64>() {
-                    return Ok(Value::String(self.epoch_to_datetime64(ts as f64, precision)));
+                    return Ok(Value::String(
+                        self.epoch_to_datetime64(ts as f64, precision),
+                    ));
                 }
                 Ok(Value::String(format!("{}.{}", s, "0".repeat(precision))))
             }
@@ -315,15 +313,17 @@ impl Coercer {
                 })?;
                 Ok(Value::String(self.epoch_to_datetime64(ts, precision)))
             }
-            _ => Err(crate::Error::Coercion("Cannot convert to datetime64".to_string())),
+            _ => Err(crate::Error::Coercion(
+                "Cannot convert to datetime64".to_string(),
+            )),
         }
     }
 
     /// Coerce to UUID
     fn coerce_uuid(&self, value: &Value) -> Result<Value> {
-        let s = value.as_str().ok_or_else(|| {
-            crate::Error::Coercion("UUID must be a string".to_string())
-        })?;
+        let s = value
+            .as_str()
+            .ok_or_else(|| crate::Error::Coercion("UUID must be a string".to_string()))?;
         let normalized = self.normalize_uuid(s)?;
         Ok(Value::String(normalized))
     }
@@ -331,11 +331,9 @@ impl Coercer {
     /// Coerce to IPv4
     fn coerce_ipv4(&self, value: &Value) -> Result<Value> {
         match value {
-            Value::String(s) => {
-                Ipv4Addr::from_str(s)
-                    .map(|_| value.clone())
-                    .map_err(|e| crate::Error::Coercion(format!("Invalid IPv4: {}", e)))
-            }
+            Value::String(s) => Ipv4Addr::from_str(s)
+                .map(|_| value.clone())
+                .map_err(|e| crate::Error::Coercion(format!("Invalid IPv4: {}", e))),
             Value::Number(n) => {
                 let num = n.as_u64().ok_or_else(|| {
                     crate::Error::Coercion("Cannot convert number to IPv4".to_string())
@@ -350,11 +348,9 @@ impl Coercer {
     /// Coerce to IPv6
     fn coerce_ipv6(&self, value: &Value) -> Result<Value> {
         match value {
-            Value::String(s) => {
-                Ipv6Addr::from_str(s)
-                    .map(|_| value.clone())
-                    .map_err(|e| crate::Error::Coercion(format!("Invalid IPv6: {}", e)))
-            }
+            Value::String(s) => Ipv6Addr::from_str(s)
+                .map(|_| value.clone())
+                .map_err(|e| crate::Error::Coercion(format!("Invalid IPv6: {}", e))),
             _ => Err(crate::Error::Coercion("Cannot convert to IPv6".to_string())),
         }
     }
@@ -425,7 +421,9 @@ impl Coercer {
                 let s = n.to_string();
                 Ok(Value::String(s))
             }
-            _ => Err(crate::Error::Coercion("Enum must be string or integer".to_string())),
+            _ => Err(crate::Error::Coercion(
+                "Enum must be string or integer".to_string(),
+            )),
         }
     }
 
@@ -446,7 +444,9 @@ impl Coercer {
                     }
                 } else if let Some(f) = n.as_f64() {
                     if f > i64::MAX as f64 || f < i64::MIN as f64 {
-                        Err(crate::Error::Coercion("Float overflow for integer".to_string()))
+                        Err(crate::Error::Coercion(
+                            "Float overflow for integer".to_string(),
+                        ))
                     } else {
                         Ok(f as i64)
                     }
@@ -464,10 +464,15 @@ impl Coercer {
                         return Ok(f as i64);
                     }
                 }
-                Err(crate::Error::Coercion(format!("Cannot parse '{}' as integer", s)))
+                Err(crate::Error::Coercion(format!(
+                    "Cannot parse '{}' as integer",
+                    s
+                )))
             }
             Value::Bool(b) => Ok(if *b { 1 } else { 0 }),
-            _ => Err(crate::Error::Coercion("Cannot convert to integer".to_string())),
+            _ => Err(crate::Error::Coercion(
+                "Cannot convert to integer".to_string(),
+            )),
         }
     }
 
@@ -478,13 +483,17 @@ impl Coercer {
                     Ok(u)
                 } else if let Some(i) = n.as_i64() {
                     if i < 0 {
-                        Err(crate::Error::Coercion("Negative value for unsigned integer".to_string()))
+                        Err(crate::Error::Coercion(
+                            "Negative value for unsigned integer".to_string(),
+                        ))
                     } else {
                         Ok(i as u64)
                     }
                 } else if let Some(f) = n.as_f64() {
                     if f < 0.0 || f > u64::MAX as f64 {
-                        Err(crate::Error::Coercion("Float out of range for unsigned integer".to_string()))
+                        Err(crate::Error::Coercion(
+                            "Float out of range for unsigned integer".to_string(),
+                        ))
                     } else {
                         Ok(f as u64)
                     }
@@ -502,10 +511,15 @@ impl Coercer {
                         return Ok(f as u64);
                     }
                 }
-                Err(crate::Error::Coercion(format!("Cannot parse '{}' as unsigned integer", s)))
+                Err(crate::Error::Coercion(format!(
+                    "Cannot parse '{}' as unsigned integer",
+                    s
+                )))
             }
             Value::Bool(b) => Ok(if *b { 1 } else { 0 }),
-            _ => Err(crate::Error::Coercion("Cannot convert to unsigned integer".to_string())),
+            _ => Err(crate::Error::Coercion(
+                "Cannot convert to unsigned integer".to_string(),
+            )),
         }
     }
 
@@ -514,12 +528,14 @@ impl Coercer {
             Value::Number(n) => n.as_f64().ok_or_else(|| {
                 crate::Error::Coercion("Cannot convert number to float".to_string())
             }),
-            Value::String(s) => {
-                s.trim().parse::<f64>()
-                    .map_err(|_| crate::Error::Coercion(format!("Cannot parse '{}' as float", s)))
-            }
+            Value::String(s) => s
+                .trim()
+                .parse::<f64>()
+                .map_err(|_| crate::Error::Coercion(format!("Cannot parse '{}' as float", s))),
             Value::Bool(b) => Ok(if *b { 1.0 } else { 0.0 }),
-            _ => Err(crate::Error::Coercion("Cannot convert to float".to_string())),
+            _ => Err(crate::Error::Coercion(
+                "Cannot convert to float".to_string(),
+            )),
         }
     }
 
@@ -675,8 +691,14 @@ mod tests {
     #[test]
     fn test_coerce_int_from_bool() {
         let c = default_coercer();
-        assert_eq!(c.coerce_int(&serde_json::json!(true)).unwrap().as_i64(), Some(1));
-        assert_eq!(c.coerce_int(&serde_json::json!(false)).unwrap().as_i64(), Some(0));
+        assert_eq!(
+            c.coerce_int(&serde_json::json!(true)).unwrap().as_i64(),
+            Some(1)
+        );
+        assert_eq!(
+            c.coerce_int(&serde_json::json!(false)).unwrap().as_i64(),
+            Some(0)
+        );
     }
 
     // ========================================================================
@@ -754,25 +776,54 @@ mod tests {
     #[test]
     fn test_coerce_bool_from_bool() {
         let c = default_coercer();
-        assert_eq!(c.coerce_bool(&serde_json::json!(true)).unwrap().as_bool(), Some(true));
-        assert_eq!(c.coerce_bool(&serde_json::json!(false)).unwrap().as_bool(), Some(false));
+        assert_eq!(
+            c.coerce_bool(&serde_json::json!(true)).unwrap().as_bool(),
+            Some(true)
+        );
+        assert_eq!(
+            c.coerce_bool(&serde_json::json!(false)).unwrap().as_bool(),
+            Some(false)
+        );
     }
 
     #[test]
     fn test_coerce_bool_from_int() {
         let c = default_coercer();
-        assert_eq!(c.coerce_bool(&serde_json::json!(1)).unwrap().as_bool(), Some(true));
-        assert_eq!(c.coerce_bool(&serde_json::json!(0)).unwrap().as_bool(), Some(false));
+        assert_eq!(
+            c.coerce_bool(&serde_json::json!(1)).unwrap().as_bool(),
+            Some(true)
+        );
+        assert_eq!(
+            c.coerce_bool(&serde_json::json!(0)).unwrap().as_bool(),
+            Some(false)
+        );
     }
 
     #[test]
     fn test_coerce_bool_from_string() {
         let c = default_coercer();
-        assert_eq!(c.coerce_bool(&serde_json::json!("true")).unwrap().as_bool(), Some(true));
-        assert_eq!(c.coerce_bool(&serde_json::json!("yes")).unwrap().as_bool(), Some(true));
-        assert_eq!(c.coerce_bool(&serde_json::json!("1")).unwrap().as_bool(), Some(true));
-        assert_eq!(c.coerce_bool(&serde_json::json!("false")).unwrap().as_bool(), Some(false));
-        assert_eq!(c.coerce_bool(&serde_json::json!("no")).unwrap().as_bool(), Some(false));
+        assert_eq!(
+            c.coerce_bool(&serde_json::json!("true")).unwrap().as_bool(),
+            Some(true)
+        );
+        assert_eq!(
+            c.coerce_bool(&serde_json::json!("yes")).unwrap().as_bool(),
+            Some(true)
+        );
+        assert_eq!(
+            c.coerce_bool(&serde_json::json!("1")).unwrap().as_bool(),
+            Some(true)
+        );
+        assert_eq!(
+            c.coerce_bool(&serde_json::json!("false"))
+                .unwrap()
+                .as_bool(),
+            Some(false)
+        );
+        assert_eq!(
+            c.coerce_bool(&serde_json::json!("no")).unwrap().as_bool(),
+            Some(false)
+        );
     }
 
     // ========================================================================
@@ -784,7 +835,10 @@ mod tests {
         let c = default_coercer();
         let v = serde_json::json!("550e8400-e29b-41d4-a716-446655440000");
         let result = c.coerce_uuid(&v).unwrap();
-        assert_eq!(result.as_str(), Some("550e8400-e29b-41d4-a716-446655440000"));
+        assert_eq!(
+            result.as_str(),
+            Some("550e8400-e29b-41d4-a716-446655440000")
+        );
     }
 
     #[test]
@@ -792,7 +846,10 @@ mod tests {
         let c = default_coercer();
         let v = serde_json::json!("550e8400e29b41d4a716446655440000");
         let result = c.coerce_uuid(&v).unwrap();
-        assert_eq!(result.as_str(), Some("550e8400-e29b-41d4-a716-446655440000"));
+        assert_eq!(
+            result.as_str(),
+            Some("550e8400-e29b-41d4-a716-446655440000")
+        );
     }
 
     #[test]
@@ -800,7 +857,10 @@ mod tests {
         let c = default_coercer();
         let v = serde_json::json!("{550e8400-e29b-41d4-a716-446655440000}");
         let result = c.coerce_uuid(&v).unwrap();
-        assert_eq!(result.as_str(), Some("550e8400-e29b-41d4-a716-446655440000"));
+        assert_eq!(
+            result.as_str(),
+            Some("550e8400-e29b-41d4-a716-446655440000")
+        );
     }
 
     // ========================================================================
@@ -948,12 +1008,14 @@ mod tests {
         let c = default_coercer();
 
         assert_eq!(
-            c.normalize_uuid("550e8400-e29b-41d4-a716-446655440000").unwrap(),
+            c.normalize_uuid("550e8400-e29b-41d4-a716-446655440000")
+                .unwrap(),
             "550e8400-e29b-41d4-a716-446655440000"
         );
 
         assert_eq!(
-            c.normalize_uuid("550e8400e29b41d4a716446655440000").unwrap(),
+            c.normalize_uuid("550e8400e29b41d4a716446655440000")
+                .unwrap(),
             "550e8400-e29b-41d4-a716-446655440000"
         );
 

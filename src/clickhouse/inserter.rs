@@ -53,10 +53,10 @@ impl Default for InserterConfig {
     fn default() -> Self {
         Self {
             max_retries: 5,
-            base_retry_delay_ms: 100,    // Start at 100ms
-            max_retry_delay_ms: 30_000,  // Cap at 30 seconds
+            base_retry_delay_ms: 100,   // Start at 100ms
+            max_retry_delay_ms: 30_000, // Cap at 30 seconds
             enable_salvage: true,
-            max_salvage_depth: 20, // 2^20 = 1M rows max batch size
+            max_salvage_depth: 20,     // 2^20 = 1M rows max batch size
             max_concurrent_inserts: 8, // Reasonable default for ClickHouse
         }
     }
@@ -68,7 +68,9 @@ impl InserterConfig {
     /// Delay = min(base * 2^attempt, max_delay)
     #[must_use]
     pub fn backoff_delay(&self, attempt: u32) -> Duration {
-        let delay_ms = self.base_retry_delay_ms.saturating_mul(1 << attempt.min(16));
+        let delay_ms = self
+            .base_retry_delay_ms
+            .saturating_mul(1 << attempt.min(16));
         Duration::from_millis(delay_ms.min(self.max_retry_delay_ms))
     }
 }
@@ -152,7 +154,9 @@ impl Inserter {
 
     /// Calculate backoff delay for a given attempt.
     fn backoff_delay(&self, attempt: u32) -> Duration {
-        let delay_ms = self.base_retry_delay_ms.saturating_mul(1 << attempt.min(16));
+        let delay_ms = self
+            .base_retry_delay_ms
+            .saturating_mul(1 << attempt.min(16));
         Duration::from_millis(delay_ms.min(self.max_retry_delay_ms))
     }
 
@@ -271,8 +275,8 @@ impl Inserter {
                         ch_err.is_data_error()
                     }
                 ) || e.to_string().to_lowercase().contains("type mismatch")
-                  || e.to_string().to_lowercase().contains("incorrect data")
-                  || e.to_string().to_lowercase().contains("cannot parse");
+                    || e.to_string().to_lowercase().contains("incorrect data")
+                    || e.to_string().to_lowercase().contains("cannot parse");
 
                 if !self.enable_salvage || num_rows <= 1 || !is_data_error {
                     // Salvage disabled, single row, or non-data error - fail all rows

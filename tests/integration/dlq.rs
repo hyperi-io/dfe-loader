@@ -247,11 +247,7 @@ async fn test_dlq_producer_send_simple() {
 
     match result {
         Ok(topic) => {
-            eprintln!(
-                "✓ DLQ message sent to {} in {:?}",
-                topic,
-                start.elapsed()
-            );
+            eprintln!("✓ DLQ message sent to {} in {:?}", topic, start.elapsed());
             assert_eq!(topic, "test-dlq-integration");
         }
         Err(e) => {

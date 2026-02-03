@@ -6,8 +6,8 @@ use std::sync::Arc;
 
 use arrow::array::{
     ArrayRef, BooleanArray, Date32Array, Float32Array, Float64Array, Int16Array, Int32Array,
-    Int64Array, Int8Array, RecordBatch, StringArray, TimestampMillisecondArray,
-    TimestampMicrosecondArray, UInt16Array, UInt32Array, UInt64Array, UInt8Array,
+    Int64Array, Int8Array, RecordBatch, StringArray, TimestampMicrosecondArray,
+    TimestampMillisecondArray, UInt16Array, UInt32Array, UInt64Array, UInt8Array,
 };
 use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 
@@ -57,11 +57,19 @@ async fn test_integer_types() {
             Arc::new(Int8Array::from(vec![-128, 0, 127])) as ArrayRef,
             Arc::new(Int16Array::from(vec![-32768, 0, 32767])) as ArrayRef,
             Arc::new(Int32Array::from(vec![-2147483648, 0, 2147483647])) as ArrayRef,
-            Arc::new(Int64Array::from(vec![-9223372036854775808i64, 0, 9223372036854775807i64])) as ArrayRef,
+            Arc::new(Int64Array::from(vec![
+                -9223372036854775808i64,
+                0,
+                9223372036854775807i64,
+            ])) as ArrayRef,
             Arc::new(UInt8Array::from(vec![0, 128, 255])) as ArrayRef,
             Arc::new(UInt16Array::from(vec![0, 32768, 65535])) as ArrayRef,
             Arc::new(UInt32Array::from(vec![0, 2147483648, 4294967295])) as ArrayRef,
-            Arc::new(UInt64Array::from(vec![0u64, 9223372036854775808u64, 18446744073709551615u64])) as ArrayRef,
+            Arc::new(UInt64Array::from(vec![
+                0u64,
+                9223372036854775808u64,
+                18446744073709551615u64,
+            ])) as ArrayRef,
         ],
     )
     .unwrap();
@@ -104,7 +112,11 @@ async fn test_float_types() {
         schema,
         vec![
             Arc::new(Float32Array::from(vec![0.0f32, 3.14159f32, -1.5e10f32])) as ArrayRef,
-            Arc::new(Float64Array::from(vec![0.0f64, 3.141592653589793f64, -1.5e100f64])) as ArrayRef,
+            Arc::new(Float64Array::from(vec![
+                0.0f64,
+                3.141592653589793f64,
+                -1.5e100f64,
+            ])) as ArrayRef,
         ],
     )
     .unwrap();
@@ -146,7 +158,11 @@ async fn test_string_types() {
     let batch = RecordBatch::try_new(
         schema,
         vec![
-            Arc::new(StringArray::from(vec!["hello", "world", "test string with unicode: 日本語"])) as ArrayRef,
+            Arc::new(StringArray::from(vec![
+                "hello",
+                "world",
+                "test string with unicode: 日本語",
+            ])) as ArrayRef,
             Arc::new(StringArray::from(vec!["0123456789", "abc", "short"])) as ArrayRef,
         ],
     )
@@ -187,16 +203,32 @@ async fn test_datetime_types() {
     let today = (chrono::Utc::now().timestamp() / 86400) as i32; // Days since epoch
 
     let schema = Arc::new(Schema::new(vec![
-        Field::new("dt64_ms", DataType::Timestamp(TimeUnit::Millisecond, None), false),
-        Field::new("dt64_us", DataType::Timestamp(TimeUnit::Microsecond, None), false),
+        Field::new(
+            "dt64_ms",
+            DataType::Timestamp(TimeUnit::Millisecond, None),
+            false,
+        ),
+        Field::new(
+            "dt64_us",
+            DataType::Timestamp(TimeUnit::Microsecond, None),
+            false,
+        ),
         Field::new("date_col", DataType::Date32, false),
     ]));
 
     let batch = RecordBatch::try_new(
         schema,
         vec![
-            Arc::new(TimestampMillisecondArray::from(vec![now_ms, now_ms + 1000, now_ms + 2000])) as ArrayRef,
-            Arc::new(TimestampMicrosecondArray::from(vec![now_us, now_us + 1000000, now_us + 2000000])) as ArrayRef,
+            Arc::new(TimestampMillisecondArray::from(vec![
+                now_ms,
+                now_ms + 1000,
+                now_ms + 2000,
+            ])) as ArrayRef,
+            Arc::new(TimestampMicrosecondArray::from(vec![
+                now_us,
+                now_us + 1000000,
+                now_us + 2000000,
+            ])) as ArrayRef,
             Arc::new(Date32Array::from(vec![today, today + 1, today + 2])) as ArrayRef,
         ],
     )
@@ -230,15 +262,15 @@ async fn test_boolean_type() {
     );
     client.query(&ddl).await.expect("Failed to create table");
 
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("bool_col", DataType::Boolean, false),
-    ]));
+    let schema = Arc::new(Schema::new(vec![Field::new(
+        "bool_col",
+        DataType::Boolean,
+        false,
+    )]));
 
     let batch = RecordBatch::try_new(
         schema,
-        vec![
-            Arc::new(BooleanArray::from(vec![true, false, true, false])) as ArrayRef,
-        ],
+        vec![Arc::new(BooleanArray::from(vec![true, false, true, false])) as ArrayRef],
     )
     .unwrap();
 
@@ -331,7 +363,9 @@ async fn test_low_cardinality_type() {
     ]));
 
     // Create data with low cardinality (repeated values)
-    let categories = vec!["auth", "api", "web", "auth", "api", "auth", "web", "api", "auth", "web"];
+    let categories = vec![
+        "auth", "api", "web", "auth", "api", "auth", "web", "api", "auth", "web",
+    ];
 
     let batch = RecordBatch::try_new(
         schema,
@@ -343,7 +377,11 @@ async fn test_low_cardinality_type() {
     .unwrap();
 
     let result = client.insert(&table_name, batch).await;
-    assert!(result.is_ok(), "LowCardinality insert failed: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "LowCardinality insert failed: {:?}",
+        result.err()
+    );
     assert_eq!(result.unwrap(), 10);
 
     eprintln!("✓ LowCardinality type insert succeeded");
@@ -386,15 +424,33 @@ async fn test_realistic_event_table() {
     let timestamps: Vec<i64> = (0..row_count).map(|i| now_ms + i as i64 * 100).collect();
     let event_ids: Vec<u64> = (0..row_count as u64).collect();
     let org_ids: Vec<&str> = (0..row_count).map(|i| orgs[i % orgs.len()]).collect();
-    let types: Vec<&str> = (0..row_count).map(|i| event_types[i % event_types.len()]).collect();
-    let user_ids: Vec<Option<u64>> = (0..row_count).map(|i| if i % 10 == 0 { None } else { Some(i as u64 * 100) }).collect();
-    let actions: Vec<String> = (0..row_count).map(|i| format!("action_{}", i % 20)).collect();
+    let types: Vec<&str> = (0..row_count)
+        .map(|i| event_types[i % event_types.len()])
+        .collect();
+    let user_ids: Vec<Option<u64>> = (0..row_count)
+        .map(|i| {
+            if i % 10 == 0 {
+                None
+            } else {
+                Some(i as u64 * 100)
+            }
+        })
+        .collect();
+    let actions: Vec<String> = (0..row_count)
+        .map(|i| format!("action_{}", i % 20))
+        .collect();
     let values: Vec<f64> = (0..row_count).map(|i| i as f64 * 0.1).collect();
     let successes: Vec<bool> = (0..row_count).map(|i| i % 5 != 0).collect();
-    let metadata: Vec<String> = (0..row_count).map(|i| format!("{{\"key\": \"value_{}\"}}", i)).collect();
+    let metadata: Vec<String> = (0..row_count)
+        .map(|i| format!("{{\"key\": \"value_{}\"}}", i))
+        .collect();
 
     let schema = Arc::new(Schema::new(vec![
-        Field::new("timestamp", DataType::Timestamp(TimeUnit::Millisecond, None), false),
+        Field::new(
+            "timestamp",
+            DataType::Timestamp(TimeUnit::Millisecond, None),
+            false,
+        ),
         Field::new("event_id", DataType::UInt64, false),
         Field::new("org_id", DataType::Utf8, false),
         Field::new("event_type", DataType::Utf8, false),
@@ -440,25 +496,60 @@ async fn test_realistic_event_table() {
     let count_sql = format!("SELECT COUNT(*) as count FROM {}", table_name);
     let count_result = client.select(&count_sql).await.expect("Count query failed");
     let count_batch = &count_result[0];
-    let count_col = count_batch.column(0).as_any().downcast_ref::<UInt64Array>().expect("Count should be UInt64");
-    assert_eq!(count_col.value(0), row_count as u64, "Should have {} rows", row_count);
+    let count_col = count_batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<UInt64Array>()
+        .expect("Count should be UInt64");
+    assert_eq!(
+        count_col.value(0),
+        row_count as u64,
+        "Should have {} rows",
+        row_count
+    );
     eprintln!("✓ Query verification: confirmed {} rows", row_count);
 
     // Verify org_id distribution
-    let org_sql = format!("SELECT org_id, COUNT(*) as count FROM {} GROUP BY org_id ORDER BY org_id", table_name);
+    let org_sql = format!(
+        "SELECT org_id, COUNT(*) as count FROM {} GROUP BY org_id ORDER BY org_id",
+        table_name
+    );
     let org_result = client.select(&org_sql).await.expect("Org query failed");
     let org_batch = &org_result[0];
-    assert_eq!(org_batch.num_rows(), orgs.len(), "Should have {} distinct orgs", orgs.len());
-    eprintln!("✓ Query verification: confirmed {} distinct orgs", orgs.len());
+    assert_eq!(
+        org_batch.num_rows(),
+        orgs.len(),
+        "Should have {} distinct orgs",
+        orgs.len()
+    );
+    eprintln!(
+        "✓ Query verification: confirmed {} distinct orgs",
+        orgs.len()
+    );
 
     // Verify nullable field handling
-    let null_sql = format!("SELECT COUNT(*) as count FROM {} WHERE user_id IS NULL", table_name);
+    let null_sql = format!(
+        "SELECT COUNT(*) as count FROM {} WHERE user_id IS NULL",
+        table_name
+    );
     let null_result = client.select(&null_sql).await.expect("Null query failed");
     let null_batch = &null_result[0];
-    let null_col = null_batch.column(0).as_any().downcast_ref::<UInt64Array>().expect("Count should be UInt64");
+    let null_col = null_batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<UInt64Array>()
+        .expect("Count should be UInt64");
     let expected_nulls = (row_count / 10) as u64;
-    assert_eq!(null_col.value(0), expected_nulls, "Should have {} NULL user_ids", expected_nulls);
-    eprintln!("✓ Query verification: confirmed {} NULL user_ids", expected_nulls);
+    assert_eq!(
+        null_col.value(0),
+        expected_nulls,
+        "Should have {} NULL user_ids",
+        expected_nulls
+    );
+    eprintln!(
+        "✓ Query verification: confirmed {} NULL user_ids",
+        expected_nulls
+    );
 
     drop_test_table(&client, &table_name).await;
 }

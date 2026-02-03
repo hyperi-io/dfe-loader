@@ -8,15 +8,12 @@
 //!
 //! Run with: cargo bench --bench pipeline
 
-use criterion::{
-    black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput,
-};
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use serde_json::{Map, Value};
 
 use dfe_loader::payload::parse::{
-    extract_field_json, extract_field_json_cow,
-    extract_nested_field_json, extract_nested_field_json_cow,
-    parse_payload,
+    extract_field_json, extract_field_json_cow, extract_nested_field_json,
+    extract_nested_field_json_cow, parse_payload,
 };
 use dfe_loader::routing::Router;
 use dfe_loader::transform::{flatten_value_owned, Transformer};
@@ -72,9 +69,7 @@ fn bench_field_extraction(c: &mut Criterion) {
 
     // Deep nested field extraction - allocating
     group.bench_function("extract_deep_alloc", |b| {
-        b.iter(|| {
-            extract_nested_field_json(black_box(MEDIUM_PAYLOAD), "tags.collector.hostname")
-        })
+        b.iter(|| extract_nested_field_json(black_box(MEDIUM_PAYLOAD), "tags.collector.hostname"))
     });
 
     // Deep nested field extraction - zero-copy
