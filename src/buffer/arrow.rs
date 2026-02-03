@@ -511,11 +511,7 @@ mod tests {
         let dest_array = StringArray::from(destinations.to_vec());
         let value_array = Int64Array::from(values.to_vec());
 
-        RecordBatch::try_new(
-            schema,
-            vec![Arc::new(dest_array), Arc::new(value_array)],
-        )
-        .unwrap()
+        RecordBatch::try_new(schema, vec![Arc::new(dest_array), Arc::new(value_array)]).unwrap()
     }
 
     #[test]
@@ -533,10 +529,7 @@ mod tests {
     fn test_arrow_buffer_partition() {
         let mut buffer = ArrowBuffer::new(100, 1024 * 1024, 5);
 
-        let batch = create_test_batch(
-            &["table_a", "table_b", "table_a", "table_b"],
-            &[1, 2, 3, 4],
-        );
+        let batch = create_test_batch(&["table_a", "table_b", "table_a", "table_b"], &[1, 2, 3, 4]);
         buffer.push(batch, None);
 
         let (partitioned, chunk_ids) = buffer.partition_pending().unwrap();
@@ -580,11 +573,17 @@ mod tests {
 
         // Mark as failed
         buffer.fail(chunk_id);
-        assert_eq!(buffer.chunks.get(&chunk_id).unwrap().state(), ChunkState::Failed);
+        assert_eq!(
+            buffer.chunks.get(&chunk_id).unwrap().state(),
+            ChunkState::Failed
+        );
 
         // Retry should reset to pending
         buffer.retry_failed();
-        assert_eq!(buffer.chunks.get(&chunk_id).unwrap().state(), ChunkState::Pending);
+        assert_eq!(
+            buffer.chunks.get(&chunk_id).unwrap().state(),
+            ChunkState::Pending
+        );
     }
 
     #[test]

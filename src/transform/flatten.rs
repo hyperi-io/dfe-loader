@@ -63,7 +63,10 @@ fn flatten_recursive(value: &Value, prefix: String, result: &mut Map<String, Val
         }
         Value::Array(arr) => {
             // Convert arrays to JSON string representation
-            result.insert(prefix, Value::String(serde_json::to_string(arr).unwrap_or_default()));
+            result.insert(
+                prefix,
+                Value::String(serde_json::to_string(arr).unwrap_or_default()),
+            );
         }
         _ => {
             // Leaf value (string, number, bool, null)
@@ -77,7 +80,11 @@ fn flatten_recursive(value: &Value, prefix: String, result: &mut Map<String, Val
 /// Reduces allocations by reusing a single String buffer for building prefixes.
 /// The buffer is extended and truncated instead of creating new Strings.
 /// For top-level fields (depth 0), takes ownership of key directly without cloning.
-fn flatten_recursive_owned_buffered(value: Value, prefix_buf: &mut String, result: &mut Map<String, Value>) {
+fn flatten_recursive_owned_buffered(
+    value: Value,
+    prefix_buf: &mut String,
+    result: &mut Map<String, Value>,
+) {
     match value {
         Value::Object(map) => {
             let base_len = prefix_buf.len();
@@ -91,7 +98,10 @@ fn flatten_recursive_owned_buffered(value: Value, prefix_buf: &mut String, resul
                     // Top-level leaf: use key directly without building prefix (zero copy)
                     match val {
                         Value::Array(arr) => {
-                            result.insert(key, Value::String(serde_json::to_string(&arr).unwrap_or_default()));
+                            result.insert(
+                                key,
+                                Value::String(serde_json::to_string(&arr).unwrap_or_default()),
+                            );
                         }
                         _ => {
                             result.insert(key, val);
@@ -115,7 +125,10 @@ fn flatten_recursive_owned_buffered(value: Value, prefix_buf: &mut String, resul
             // Convert arrays to JSON string representation
             // Must clone prefix since we may need it for sibling keys
             let key = prefix_buf.clone();
-            result.insert(key, Value::String(serde_json::to_string(&arr).unwrap_or_default()));
+            result.insert(
+                key,
+                Value::String(serde_json::to_string(&arr).unwrap_or_default()),
+            );
         }
         _ => {
             // Leaf value - must clone prefix since we may need it for sibling keys

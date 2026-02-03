@@ -348,7 +348,7 @@ impl SchemaExtractor {
         for &idx in &top_level_indices {
             if results[idx].is_none() {
                 results[idx] = Some(Err(ExtractError::FieldNotFound(
-                    self.fields[idx].name.clone()
+                    self.fields[idx].name.clone(),
                 )));
             }
         }
@@ -362,7 +362,8 @@ impl SchemaExtractor {
         }
 
         // Convert Option<Result> to Result
-        results.into_iter()
+        results
+            .into_iter()
             .map(|opt| opt.unwrap_or(Err(ExtractError::FieldNotFound("unknown".to_string()))))
             .collect()
     }
@@ -466,7 +467,8 @@ impl SchemaExtractor {
             let is_last = path_idx == field.path.len() - 1;
 
             // Try speculative access first (pattern tree)
-            let value_range = if let Some(hint) = self.pattern_tree.get_hint(&field.path[..=path_idx])
+            let value_range = if let Some(hint) =
+                self.pattern_tree.get_hint(&field.path[..=path_idx])
             {
                 self.try_speculative_access(index, data, level, start, end, path_component, hint)
             } else {
@@ -476,7 +478,9 @@ impl SchemaExtractor {
             // Fall back to sequential search if speculation fails
             let (field_start, field_end) = match value_range {
                 Some(range) => range,
-                None => self.find_field_sequential(index, data, level, start, end, path_component)?,
+                None => {
+                    self.find_field_sequential(index, data, level, start, end, path_component)?
+                }
             };
 
             if is_last {
@@ -746,8 +750,9 @@ impl SchemaExtractor {
             b'n' => Ok(ExtractedValue::Null),
             b'-' | b'0'..=b'9' => {
                 // Parse number
-                let num_str =
-                    std::str::from_utf8(&data[start..end]).map_err(|_| ExtractError::InvalidValue("Invalid UTF-8 in number".to_string()))?;
+                let num_str = std::str::from_utf8(&data[start..end]).map_err(|_| {
+                    ExtractError::InvalidValue("Invalid UTF-8 in number".to_string())
+                })?;
 
                 if num_str.contains('.') || num_str.contains('e') || num_str.contains('E') {
                     let f: f64 = num_str.parse().map_err(|_| {

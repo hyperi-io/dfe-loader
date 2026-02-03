@@ -121,7 +121,9 @@ impl CircuitBreaker {
     /// Returns `true` if request can proceed, `false` if circuit is open.
     pub fn allow_request(&self, table: &str) -> bool {
         let mut circuits = self.circuits.write().unwrap();
-        let circuit = circuits.entry(table.to_string()).or_insert_with(TableCircuit::new);
+        let circuit = circuits
+            .entry(table.to_string())
+            .or_insert_with(TableCircuit::new);
 
         match circuit.state {
             CircuitState::Closed => true,
@@ -142,9 +144,7 @@ impl CircuitBreaker {
                 false
             }
 
-            CircuitState::HalfOpen => {
-                self.allow_half_open_request(circuit, table)
-            }
+            CircuitState::HalfOpen => self.allow_half_open_request(circuit, table),
         }
     }
 
@@ -169,7 +169,9 @@ impl CircuitBreaker {
     /// Record a successful request
     pub fn record_success(&self, table: &str) {
         let mut circuits = self.circuits.write().unwrap();
-        let circuit = circuits.entry(table.to_string()).or_insert_with(TableCircuit::new);
+        let circuit = circuits
+            .entry(table.to_string())
+            .or_insert_with(TableCircuit::new);
 
         match circuit.state {
             CircuitState::Closed => {
@@ -207,7 +209,9 @@ impl CircuitBreaker {
     /// Record a failed request
     pub fn record_failure(&self, table: &str) {
         let mut circuits = self.circuits.write().unwrap();
-        let circuit = circuits.entry(table.to_string()).or_insert_with(TableCircuit::new);
+        let circuit = circuits
+            .entry(table.to_string())
+            .or_insert_with(TableCircuit::new);
 
         match circuit.state {
             CircuitState::Closed => {

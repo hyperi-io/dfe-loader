@@ -15,9 +15,9 @@ use std::time::Duration;
 
 use arrow::array::{Array, RecordBatch};
 use arrow::datatypes::{DataType, SchemaRef};
-use clickhouse_arrow::{ArrowFormat, Client, ClientBuilder};
 #[cfg(feature = "http")]
 use clickhouse_arrow::http::{HttpClient, HttpOptions};
+use clickhouse_arrow::{ArrowFormat, Client, ClientBuilder};
 use futures_util::StreamExt;
 use futures_util::TryStreamExt;
 
@@ -81,9 +81,9 @@ impl ArrowClickHouseClient {
     ///
     /// Returns an error if connection fails.
     pub async fn new(config: &ClickHouseConfig) -> Result<Self> {
-        let endpoint = config.primary_endpoint().ok_or_else(|| {
-            ClickHouseError::Connection("No ClickHouse hosts configured".into())
-        })?;
+        let endpoint = config
+            .primary_endpoint()
+            .ok_or_else(|| ClickHouseError::Connection("No ClickHouse hosts configured".into()))?;
 
         let inner = match config.transport {
             Transport::Native => {
@@ -95,7 +95,9 @@ impl ArrowClickHouseClient {
                     .with_tls(config.tls)
                     .build_arrow()
                     .await
-                    .map_err(|e| ClickHouseError::Connection(format!("Native client connect failed: {e}")))?;
+                    .map_err(|e| {
+                        ClickHouseError::Connection(format!("Native client connect failed: {e}"))
+                    })?;
                 ClientInner::Native(client)
             }
 
@@ -115,8 +117,9 @@ impl ArrowClickHouseClient {
                     options = options.with_credentials(&config.username, &config.password);
                 }
 
-                let client = HttpClient::new(options)
-                    .map_err(|e| ClickHouseError::Connection(format!("HTTP client build failed: {e}")))?;
+                let client = HttpClient::new(options).map_err(|e| {
+                    ClickHouseError::Connection(format!("HTTP client build failed: {e}"))
+                })?;
                 ClientInner::Http(client)
             }
 
@@ -248,7 +251,8 @@ impl ArrowClickHouseClient {
                     .await
                     .map_err(|e| ClickHouseError::Schema(format!("Failed to fetch schema: {e}")))?;
 
-                schemas.get(&tbl)
+                schemas
+                    .get(&tbl)
                     .cloned()
                     .ok_or_else(|| ClickHouseError::Schema(format!("Table '{table}' not found")))
             }
@@ -262,7 +266,8 @@ impl ArrowClickHouseClient {
                     .await
                     .map_err(|e| ClickHouseError::Schema(format!("Failed to fetch schema: {e}")))?;
 
-                batches.first()
+                batches
+                    .first()
                     .map(|b| b.schema())
                     .ok_or_else(|| ClickHouseError::Schema(format!("Table '{table}' not found")))
             }
@@ -276,20 +281,16 @@ impl ArrowClickHouseClient {
     /// Returns an error if the query fails.
     pub async fn query(&self, sql: &str) -> Result<()> {
         match &self.inner {
-            ClientInner::Native(client) => {
-                client
-                    .execute(sql, None)
-                    .await
-                    .map_err(|e| ClickHouseError::Query(format!("Query failed: {e}")))
-            }
+            ClientInner::Native(client) => client
+                .execute(sql, None)
+                .await
+                .map_err(|e| ClickHouseError::Query(format!("Query failed: {e}"))),
 
             #[cfg(feature = "http")]
-            ClientInner::Http(client) => {
-                client
-                    .execute(sql)
-                    .await
-                    .map_err(|e| ClickHouseError::Query(format!("Query failed: {e}")))
-            }
+            ClientInner::Http(client) => client
+                .execute(sql)
+                .await
+                .map_err(|e| ClickHouseError::Query(format!("Query failed: {e}"))),
         }
     }
 
@@ -306,21 +307,18 @@ impl ArrowClickHouseClient {
                     .await
                     .map_err(|e| ClickHouseError::Query(format!("SELECT query failed: {e}")))?;
 
-                let batches: Vec<RecordBatch> = response
-                    .try_collect()
-                    .await
-                    .map_err(|e| ClickHouseError::Query(format!("Failed to collect query results: {e}")))?;
+                let batches: Vec<RecordBatch> = response.try_collect().await.map_err(|e| {
+                    ClickHouseError::Query(format!("Failed to collect query results: {e}"))
+                })?;
 
                 Ok(batches)
             }
 
             #[cfg(feature = "http")]
-            ClientInner::Http(client) => {
-                client
-                    .query(sql)
-                    .await
-                    .map_err(|e| ClickHouseError::Query(format!("SELECT query failed: {e}")))
-            }
+            ClientInner::Http(client) => client
+                .query(sql)
+                .await
+                .map_err(|e| ClickHouseError::Query(format!("SELECT query failed: {e}"))),
         }
     }
 
@@ -331,12 +329,10 @@ impl ArrowClickHouseClient {
     /// Returns an error if the health check fails.
     pub async fn health_check(&self) -> Result<()> {
         match &self.inner {
-            ClientInner::Native(client) => {
-                client
-                    .health_check(true)
-                    .await
-                    .map_err(|e| ClickHouseError::Connection(format!("Health check failed: {e}")))
-            }
+            ClientInner::Native(client) => client
+                .health_check(true)
+                .await
+                .map_err(|e| ClickHouseError::Connection(format!("Health check failed: {e}"))),
 
             #[cfg(feature = "http")]
             ClientInner::Http(client) => {
@@ -389,7 +385,11 @@ impl ArrowClickHouseClient {
 
                 let mut tables = Vec::new();
                 for batch in batches {
-                    if let Some(col) = batch.column(0).as_any().downcast_ref::<arrow::array::StringArray>() {
+                    if let Some(col) = batch
+                        .column(0)
+                        .as_any()
+                        .downcast_ref::<arrow::array::StringArray>()
+                    {
                         for i in 0..col.len() {
                             if let Some(name) = col.value(i).into() {
                                 tables.push(name.to_string());
@@ -524,7 +524,10 @@ mod tests {
         assert_eq!(arrow_type_to_ch_name(&DataType::Int64), "Int64");
         assert_eq!(arrow_type_to_ch_name(&DataType::Utf8), "String");
         assert_eq!(arrow_type_to_ch_name(&DataType::Boolean), "Bool");
-        assert_eq!(arrow_type_to_ch_name(&DataType::FixedSizeBinary(16)), "UUID");
+        assert_eq!(
+            arrow_type_to_ch_name(&DataType::FixedSizeBinary(16)),
+            "UUID"
+        );
         assert_eq!(arrow_type_to_ch_name(&DataType::FixedSizeBinary(4)), "IPv4");
     }
 }

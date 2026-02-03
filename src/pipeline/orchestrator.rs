@@ -120,8 +120,8 @@ impl Orchestrator {
         );
 
         // Determine format mode from config
-        let format_mode = FormatMode::parse(&self.config.payload.format)
-            .unwrap_or(FormatMode::Auto);
+        let format_mode =
+            FormatMode::parse(&self.config.payload.format).unwrap_or(FormatMode::Auto);
         let format_detector = FormatDetector::with_mode(format_mode);
 
         let mut buffer_manager = BufferManager::new(&self.config.buffer);
@@ -275,7 +275,8 @@ impl Orchestrator {
         match buffer_manager.flush_all() {
             Ok(final_batches) if !final_batches.is_empty() => {
                 info!(batches = final_batches.len(), "Flushing remaining buffers");
-                self.flush_batches_transport(&inserter, &transport, final_batches).await;
+                self.flush_batches_transport(&inserter, &transport, final_batches)
+                    .await;
             }
             Ok(_) => {} // No batches to flush
             Err(e) => {
@@ -342,22 +343,21 @@ impl Orchestrator {
 
         // Step 3.5: Extract org_id for _org_id field (Common Header v2 - RLS)
         // Clone the str to avoid borrowing value (which we need to move into transform)
-        let org_id_owned = router.extract_org_id_from_value(&value).map(|s| s.to_string());
+        let org_id_owned = router
+            .extract_org_id_from_value(&value)
+            .map(|s| s.to_string());
 
         // Step 4: Transform (flatten, timestamp validation, _tags extraction, logjson capture, routing field removal)
         // Pass raw payload for logjson capture and org_id for _org_id field (Common Header v2)
-        let transform_result = transformer.transform_with_raw(
-            value,
-            &msg.payload,
-            org_id_owned.as_deref(),
-        )?;
+        let transform_result =
+            transformer.transform_with_raw(value, &msg.payload, org_id_owned.as_deref())?;
 
         // Step 5: Push to per-table buffer
         // Each table has its own ArrowBatchBuilder for schema uniformity.
         // The data stays as JSON Map until the batch is ready, then converts to Arrow.
         // Use with_shared_topic to share the Arc<str> without cloning the string.
         let kafka_offset = KafkaOffset::with_shared_topic(
-            msg.topic.clone(),  // Arc::clone is cheap (just increments refcount)
+            msg.topic.clone(), // Arc::clone is cheap (just increments refcount)
             msg.partition,
             msg.offset,
         );
@@ -380,17 +380,24 @@ impl Orchestrator {
         let batch_count = batches.len();
         let total_rows: usize = batches.iter().map(|b| b.batch.num_rows()).sum();
 
-        debug!(batches = batch_count, rows = total_rows, "Flushing Arrow batches");
+        debug!(
+            batches = batch_count,
+            rows = total_rows,
+            "Flushing Arrow batches"
+        );
 
         // Pre-calculate total offset count for efficient allocation
         let total_offsets: usize = batches.iter().map(|b| b.offsets.len()).sum();
 
         // Collect offsets for commit after successful insert (takes ownership, avoids cloning)
         let mut all_offsets: Vec<KafkaOffset> = Vec::with_capacity(total_offsets);
-        let batches_for_insert: Vec<FlushBatch> = batches.into_iter().map(|mut b| {
-            all_offsets.append(&mut b.offsets);
-            b
-        }).collect();
+        let batches_for_insert: Vec<FlushBatch> = batches
+            .into_iter()
+            .map(|mut b| {
+                all_offsets.append(&mut b.offsets);
+                b
+            })
+            .collect();
 
         let start = Instant::now();
         let results = inserter.insert_batches(batches_for_insert).await;

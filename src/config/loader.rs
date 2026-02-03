@@ -982,10 +982,22 @@ mod tests {
     fn test_sasl_mechanism_rdkafka_mapping() {
         assert_eq!(SaslMechanism::None.as_rdkafka_mechanism(), None);
         assert_eq!(SaslMechanism::Plain.as_rdkafka_mechanism(), Some("PLAIN"));
-        assert_eq!(SaslMechanism::ScramSha256.as_rdkafka_mechanism(), Some("SCRAM-SHA-256"));
-        assert_eq!(SaslMechanism::ScramSha512.as_rdkafka_mechanism(), Some("SCRAM-SHA-512"));
-        assert_eq!(SaslMechanism::OAuthBearer.as_rdkafka_mechanism(), Some("OAUTHBEARER"));
-        assert_eq!(SaslMechanism::AwsMskIam.as_rdkafka_mechanism(), Some("OAUTHBEARER"));
+        assert_eq!(
+            SaslMechanism::ScramSha256.as_rdkafka_mechanism(),
+            Some("SCRAM-SHA-256")
+        );
+        assert_eq!(
+            SaslMechanism::ScramSha512.as_rdkafka_mechanism(),
+            Some("SCRAM-SHA-512")
+        );
+        assert_eq!(
+            SaslMechanism::OAuthBearer.as_rdkafka_mechanism(),
+            Some("OAUTHBEARER")
+        );
+        assert_eq!(
+            SaslMechanism::AwsMskIam.as_rdkafka_mechanism(),
+            Some("OAUTHBEARER")
+        );
     }
 
     #[test]
@@ -1204,8 +1216,12 @@ mod tests {
     #[test]
     fn test_coercion_config_get_coercer_category() {
         let mut config = CoercionConfig::default();
-        config.type_mappings.insert("MyInt".to_string(), "Int".to_string());
-        config.type_mappings.insert("SpecialString".to_string(), "String".to_string());
+        config
+            .type_mappings
+            .insert("MyInt".to_string(), "Int".to_string());
+        config
+            .type_mappings
+            .insert("SpecialString".to_string(), "String".to_string());
 
         // Custom mappings
         assert_eq!(config.get_coercer_category("MyInt"), "Int");

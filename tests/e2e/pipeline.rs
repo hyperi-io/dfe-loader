@@ -58,7 +58,9 @@ async fn test_routing_and_buffer() {
         category_to_table: [
             ("auth".to_string(), "events_auth".to_string()),
             ("api".to_string(), "events_api".to_string()),
-        ].into_iter().collect(),
+        ]
+        .into_iter()
+        .collect(),
         mapping_file: None,
         dlq: DlqConfig::default(),
     };
@@ -73,9 +75,18 @@ async fn test_routing_and_buffer() {
     // Simulate processing messages with org_id for db routing
     // Route result is now "db.table" format
     let messages: Vec<(&[u8], &str)> = vec![
-        (br#"{"org_id": "acme", "category": "auth", "action": "login"}"#.as_slice(), "acme.events_auth"),
-        (br#"{"org_id": "acme", "category": "api", "endpoint": "/users"}"#.as_slice(), "acme.events_api"),
-        (br#"{"org_id": "tenant1", "category": "unknown", "data": "test"}"#.as_slice(), "tenant1.unknown"),
+        (
+            br#"{"org_id": "acme", "category": "auth", "action": "login"}"#.as_slice(),
+            "acme.events_auth",
+        ),
+        (
+            br#"{"org_id": "acme", "category": "api", "endpoint": "/users"}"#.as_slice(),
+            "acme.events_api",
+        ),
+        (
+            br#"{"org_id": "tenant1", "category": "unknown", "data": "test"}"#.as_slice(),
+            "tenant1.unknown",
+        ),
     ];
 
     for (payload, expected_table) in messages {
@@ -121,7 +132,7 @@ async fn test_format_detection() {
 #[tokio::test]
 async fn test_buffer_flush_thresholds() {
     let mut buffer_manager = BufferManager::new(&BufferConfig {
-        flush_rows: 5,      // Flush at 5 rows
+        flush_rows: 5, // Flush at 5 rows
         flush_bytes: 10240,
         flush_age_secs: 60,
     });
@@ -159,8 +170,8 @@ async fn test_full_pipeline_e2e() {
 
 #[tokio::test]
 async fn test_metrics_server_integration() {
-    use std::sync::Arc;
     use dfe_loader::metrics::{Metrics, ServerState};
+    use std::sync::Arc;
 
     let metrics = Metrics::new();
     metrics.record_received();

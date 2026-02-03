@@ -83,12 +83,24 @@ impl GeoIpResult {
                 }
                 "latitude" | "lat" => {
                     if let Some(v) = self.latitude {
-                        out.insert(field.to_string(), Value::Number(serde_json::Number::from_f64(v).unwrap_or(serde_json::Number::from(0))));
+                        out.insert(
+                            field.to_string(),
+                            Value::Number(
+                                serde_json::Number::from_f64(v)
+                                    .unwrap_or(serde_json::Number::from(0)),
+                            ),
+                        );
                     }
                 }
                 "longitude" | "lon" | "lng" => {
                     if let Some(v) = self.longitude {
-                        out.insert(field.to_string(), Value::Number(serde_json::Number::from_f64(v).unwrap_or(serde_json::Number::from(0))));
+                        out.insert(
+                            field.to_string(),
+                            Value::Number(
+                                serde_json::Number::from_f64(v)
+                                    .unwrap_or(serde_json::Number::from(0)),
+                            ),
+                        );
                     }
                 }
                 "timezone" | "tz" => {
@@ -312,7 +324,10 @@ impl GeoIpEnricher {
         }
 
         // Collect entries sorted by access order
-        let mut entries: Vec<_> = cache.iter().map(|(k, v)| (k.clone(), v.access_order)).collect();
+        let mut entries: Vec<_> = cache
+            .iter()
+            .map(|(k, v)| (k.clone(), v.access_order))
+            .collect();
         entries.sort_by_key(|(_, order)| *order);
 
         // Remove oldest entries

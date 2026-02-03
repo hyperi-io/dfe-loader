@@ -206,9 +206,7 @@ impl ConfigWatcher {
     fn validate_config(&self, config: &Config) -> Result<()> {
         // Basic validation - add more as needed
         if config.kafka.brokers.is_empty() {
-            return Err(crate::Error::Config(
-                "Kafka brokers cannot be empty".into(),
-            ));
+            return Err(crate::Error::Config("Kafka brokers cannot be empty".into()));
         }
 
         if config.clickhouse.hosts.is_empty() {
@@ -218,9 +216,7 @@ impl ConfigWatcher {
         }
 
         if config.buffer.flush_rows == 0 {
-            return Err(crate::Error::Config(
-                "Buffer flush_rows must be > 0".into(),
-            ));
+            return Err(crate::Error::Config("Buffer flush_rows must be > 0".into()));
         }
 
         Ok(())
@@ -268,10 +264,8 @@ buffer:
     #[test]
     fn test_watcher_nonexistent_path() {
         let shared = SharedConfig::default();
-        let result = ConfigWatcher::with_defaults(
-            PathBuf::from("/nonexistent/config.yaml"),
-            shared,
-        );
+        let result =
+            ConfigWatcher::with_defaults(PathBuf::from("/nonexistent/config.yaml"), shared);
         assert!(result.is_err());
     }
 

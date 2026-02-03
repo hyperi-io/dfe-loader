@@ -320,7 +320,10 @@ fn test_buffer_mixed_offset_tracking() {
     let topic: Arc<str> = Arc::from("events");
 
     for i in 0..5 {
-        let data = json!({"id": i, "table": "auth"}).as_object().unwrap().clone();
+        let data = json!({"id": i, "table": "auth"})
+            .as_object()
+            .unwrap()
+            .clone();
         let offset = KafkaOffset {
             topic: topic.clone(),
             partition: 0,
@@ -330,7 +333,10 @@ fn test_buffer_mixed_offset_tracking() {
     }
 
     for i in 0..5 {
-        let data = json!({"id": i, "table": "api"}).as_object().unwrap().clone();
+        let data = json!({"id": i, "table": "api"})
+            .as_object()
+            .unwrap()
+            .clone();
         let offset = KafkaOffset {
             topic: topic.clone(),
             partition: 1,

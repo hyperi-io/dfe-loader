@@ -129,12 +129,12 @@ impl TimestampValidator {
 
         // Try common formats
         let formats = [
-            "%Y-%m-%dT%H:%M:%S%.fZ",      // 2024-01-15T10:30:00.123Z
-            "%Y-%m-%dT%H:%M:%SZ",          // 2024-01-15T10:30:00Z
-            "%Y-%m-%d %H:%M:%S%.f",        // 2024-01-15 10:30:00.123
-            "%Y-%m-%d %H:%M:%S",           // 2024-01-15 10:30:00
-            "%Y-%m-%dT%H:%M:%S%.f%:z",     // 2024-01-15T10:30:00.123+00:00
-            "%Y-%m-%dT%H:%M:%S%:z",        // 2024-01-15T10:30:00+00:00
+            "%Y-%m-%dT%H:%M:%S%.fZ",   // 2024-01-15T10:30:00.123Z
+            "%Y-%m-%dT%H:%M:%SZ",      // 2024-01-15T10:30:00Z
+            "%Y-%m-%d %H:%M:%S%.f",    // 2024-01-15 10:30:00.123
+            "%Y-%m-%d %H:%M:%S",       // 2024-01-15 10:30:00
+            "%Y-%m-%dT%H:%M:%S%.f%:z", // 2024-01-15T10:30:00.123+00:00
+            "%Y-%m-%dT%H:%M:%S%:z",    // 2024-01-15T10:30:00+00:00
         ];
 
         for fmt in &formats {
@@ -195,8 +195,8 @@ impl TimestampValidator {
 impl Default for TimestampValidator {
     fn default() -> Self {
         Self {
-            max_future_seconds: 600,    // 10 minutes
-            max_past_seconds: 0,        // No limit
+            max_future_seconds: 600, // 10 minutes
+            max_past_seconds: 0,     // No limit
             correct_known_bad: true,
         }
     }

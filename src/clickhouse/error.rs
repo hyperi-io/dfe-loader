@@ -103,7 +103,10 @@ impl ClickHouseError {
     /// Returns true if this error is transient and should be retried with backoff.
     #[must_use]
     pub fn is_transient(&self) -> bool {
-        matches!(self.category(), ErrorCategory::Transient | ErrorCategory::Unknown)
+        matches!(
+            self.category(),
+            ErrorCategory::Transient | ErrorCategory::Unknown
+        )
     }
 
     /// Returns true if this error indicates bad data that should be salvaged/DLQ'd.
@@ -196,7 +199,8 @@ fn classify_from_message(msg: &str) -> ErrorCategory {
         || msg_lower.contains("invalid ipv")          // IPv4/IPv6
         || msg_lower.contains("cannot parse uuid")    // UUID
         || msg_lower.contains("unknown element")      // Enum
-        || msg_lower.contains("too long for type")    // String too long for FixedString
+        || msg_lower.contains("too long for type")
+    // String too long for FixedString
     {
         return ErrorCategory::Data;
     }
@@ -303,4 +307,3 @@ mod tests {
         assert!(err.is_data_error());
     }
 }
-

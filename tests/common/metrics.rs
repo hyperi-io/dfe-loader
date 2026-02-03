@@ -80,7 +80,8 @@ impl MetricsSnapshot {
 
                 if let Ok(value) = value_str.parse::<f64>() {
                     // Aggregate values for same metric name
-                    metrics.entry(name.to_string())
+                    metrics
+                        .entry(name.to_string())
                         .and_modify(|m: &mut MetricValue| m.value += value)
                         .or_insert(MetricValue {
                             value,
@@ -104,19 +105,16 @@ impl MetricsSnapshot {
         let json = serde_json::to_string_pretty(self)
             .map_err(|e| format!("Failed to serialize: {}", e))?;
 
-        fs::write(path, json)
-            .map_err(|e| format!("Failed to write file: {}", e))?;
+        fs::write(path, json).map_err(|e| format!("Failed to write file: {}", e))?;
 
         Ok(())
     }
 
     /// Load snapshot from JSON file
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self, String> {
-        let json = fs::read_to_string(path)
-            .map_err(|e| format!("Failed to read file: {}", e))?;
+        let json = fs::read_to_string(path).map_err(|e| format!("Failed to read file: {}", e))?;
 
-        serde_json::from_str(&json)
-            .map_err(|e| format!("Failed to deserialize: {}", e))
+        serde_json::from_str(&json).map_err(|e| format!("Failed to deserialize: {}", e))
     }
 
     /// Compare this snapshot with another (self is current, other is baseline)
@@ -167,10 +165,16 @@ impl MetricsSnapshot {
 
         // Sort by absolute percent change
         improvements.sort_by(|a, b| {
-            b.percent_change.abs().partial_cmp(&a.percent_change.abs()).unwrap()
+            b.percent_change
+                .abs()
+                .partial_cmp(&a.percent_change.abs())
+                .unwrap()
         });
         regressions.sort_by(|a, b| {
-            b.percent_change.abs().partial_cmp(&a.percent_change.abs()).unwrap()
+            b.percent_change
+                .abs()
+                .partial_cmp(&a.percent_change.abs())
+                .unwrap()
         });
 
         MetricsComparison {
@@ -187,11 +191,13 @@ impl MetricsComparison {
     /// Print comparison report to stdout
     pub fn print_report(&self) {
         println!("\n=== Metrics Comparison Report ===");
-        println!("Baseline: {} ({})",
+        println!(
+            "Baseline: {} ({})",
             self.baseline.test_name,
             self.baseline.git_commit.as_deref().unwrap_or("unknown")
         );
-        println!("Current:  {} ({})",
+        println!(
+            "Current:  {} ({})",
             self.current.test_name,
             self.current.git_commit.as_deref().unwrap_or("unknown")
         );
@@ -199,11 +205,9 @@ impl MetricsComparison {
         if !self.improvements.is_empty() {
             println!("\n✅ Improvements ({}):", self.improvements.len());
             for delta in &self.improvements {
-                println!("  {} : {:.2} → {:.2} ({:+.1}%)",
-                    delta.name,
-                    delta.baseline_value,
-                    delta.current_value,
-                    delta.percent_change
+                println!(
+                    "  {} : {:.2} → {:.2} ({:+.1}%)",
+                    delta.name, delta.baseline_value, delta.current_value, delta.percent_change
                 );
             }
         }
@@ -211,11 +215,9 @@ impl MetricsComparison {
         if !self.regressions.is_empty() {
             println!("\n❌ Regressions ({}):", self.regressions.len());
             for delta in &self.regressions {
-                println!("  {} : {:.2} → {:.2} ({:+.1}%)",
-                    delta.name,
-                    delta.baseline_value,
-                    delta.current_value,
-                    delta.percent_change
+                println!(
+                    "  {} : {:.2} → {:.2} ({:+.1}%)",
+                    delta.name, delta.baseline_value, delta.current_value, delta.percent_change
                 );
             }
         }
@@ -240,11 +242,13 @@ impl MetricsComparison {
         let mut md = String::new();
 
         md.push_str("# Metrics Comparison Report\n\n");
-        md.push_str(&format!("**Baseline:** {} ({})\n\n",
+        md.push_str(&format!(
+            "**Baseline:** {} ({})\n\n",
             self.baseline.test_name,
             self.baseline.git_commit.as_deref().unwrap_or("unknown")
         ));
-        md.push_str(&format!("**Current:** {} ({})\n\n",
+        md.push_str(&format!(
+            "**Current:** {} ({})\n\n",
             self.current.test_name,
             self.current.git_commit.as_deref().unwrap_or("unknown")
         ));
@@ -254,7 +258,8 @@ impl MetricsComparison {
             md.push_str("| Metric | Baseline | Current | Change | % |\n");
             md.push_str("|--------|----------|---------|--------|---|\n");
             for delta in &self.improvements {
-                md.push_str(&format!("| `{}` | {:.2} | {:.2} | {:+.2} | {:+.1}% |\n",
+                md.push_str(&format!(
+                    "| `{}` | {:.2} | {:.2} | {:+.2} | {:+.1}% |\n",
                     delta.name,
                     delta.baseline_value,
                     delta.current_value,
@@ -270,7 +275,8 @@ impl MetricsComparison {
             md.push_str("| Metric | Baseline | Current | Change | % |\n");
             md.push_str("|--------|----------|---------|--------|---|\n");
             for delta in &self.regressions {
-                md.push_str(&format!("| `{}` | {:.2} | {:.2} | {:+.2} | {:+.1}% |\n",
+                md.push_str(&format!(
+                    "| `{}` | {:.2} | {:.2} | {:+.2} | {:+.1}% |\n",
                     delta.name,
                     delta.baseline_value,
                     delta.current_value,
@@ -282,12 +288,14 @@ impl MetricsComparison {
         }
 
         md.push_str("## Summary\n\n");
-        md.push_str(&format!("- **Improvements:** {}\n", self.improvements.len()));
+        md.push_str(&format!(
+            "- **Improvements:** {}\n",
+            self.improvements.len()
+        ));
         md.push_str(&format!("- **Regressions:** {}\n", self.regressions.len()));
         md.push_str(&format!("- **Unchanged:** {}\n", self.unchanged.len()));
 
-        fs::write(path, md)
-            .map_err(|e| format!("Failed to write markdown: {}", e))
+        fs::write(path, md).map_err(|e| format!("Failed to write markdown: {}", e))
     }
 }
 
@@ -327,7 +335,8 @@ fn get_git_commit() -> Option<String> {
         .ok()
         .and_then(|output| {
             if output.status.success() {
-                String::from_utf8(output.stdout).ok()
+                String::from_utf8(output.stdout)
+                    .ok()
                     .map(|s| s.trim().to_string())
             } else {
                 None
@@ -413,17 +422,24 @@ mod tests {
         assert_eq!(comparison.regressions.len(), 0);
 
         // Check throughput improvement
-        let throughput_delta = comparison.improvements.iter()
+        let throughput_delta = comparison
+            .improvements
+            .iter()
             .find(|d| d.name == "loader_messages_processed_total")
             .unwrap();
         assert_eq!(throughput_delta.delta, 200.0);
         assert!((throughput_delta.percent_change - 20.0).abs() < 0.1);
 
         // Check latency improvement
-        let latency_delta = comparison.improvements.iter()
+        let latency_delta = comparison
+            .improvements
+            .iter()
             .find(|d| d.name == "loader_insert_latency_seconds")
             .unwrap();
-        assert!((latency_delta.delta + 0.1).abs() < 0.01, "Delta should be approximately -0.1");
+        assert!(
+            (latency_delta.delta + 0.1).abs() < 0.01,
+            "Delta should be approximately -0.1"
+        );
         assert!((latency_delta.percent_change + 20.0).abs() < 0.1);
     }
 }

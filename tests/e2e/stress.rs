@@ -13,8 +13,7 @@ use dfe_loader::buffer::{BufferManager, KafkaOffset};
 use dfe_loader::config::BufferConfig;
 
 use crate::common::{
-    check_clickhouse_reachable, create_test_client, drop_test_table, load_dotenv,
-    unique_table_name,
+    check_clickhouse_reachable, create_test_client, drop_test_table, load_dotenv, unique_table_name,
 };
 
 // ============================================================================
@@ -67,7 +66,9 @@ async fn test_stress_10k_single_batch() {
     ]));
 
     let ids: Vec<u64> = (0..row_count as u64).collect();
-    let events: Vec<String> = (0..row_count).map(|i| format!("event_{}", i % 100)).collect();
+    let events: Vec<String> = (0..row_count)
+        .map(|i| format!("event_{}", i % 100))
+        .collect();
     let values: Vec<f64> = (0..row_count).map(|i| i as f64 * 0.1).collect();
 
     let batch = RecordBatch::try_new(
@@ -374,10 +375,7 @@ fn test_stress_buffer_high_volume() {
 
     eprintln!(
         "✓ Buffer stress: {} messages → {} rows in {:?} ({:.0} msg/sec)",
-        message_count,
-        total_rows,
-        elapsed,
-        msgs_per_sec
+        message_count, total_rows, elapsed, msgs_per_sec
     );
 }
 
@@ -430,7 +428,10 @@ fn test_stress_buffer_multi_table() {
         batches.len(),
         elapsed
     );
-    eprintln!("  Total rows: {}, Tables: {}", total_rows, stats.table_count);
+    eprintln!(
+        "  Total rows: {}, Tables: {}",
+        total_rows, stats.table_count
+    );
 }
 
 /// Test offset tracking under load
@@ -548,7 +549,10 @@ fn test_stress_rapid_flush_cycles() {
     for cycle in 0..cycle_count {
         // Push 10 messages to trigger flush
         for i in 0..10 {
-            let data = json!({"cycle": cycle, "id": i}).as_object().unwrap().clone();
+            let data = json!({"cycle": cycle, "id": i})
+                .as_object()
+                .unwrap()
+                .clone();
             let offset = KafkaOffset {
                 topic: topic.clone(),
                 partition: 0,

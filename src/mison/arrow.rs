@@ -46,8 +46,8 @@
 use std::sync::Arc;
 
 use arrow::array::{
-    ArrayBuilder, ArrayRef, BooleanBuilder, Float64Builder, Int64Builder,
-    RecordBatch, StringBuilder,
+    ArrayBuilder, ArrayRef, BooleanBuilder, Float64Builder, Int64Builder, RecordBatch,
+    StringBuilder,
 };
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::error::ArrowError;
@@ -89,8 +89,16 @@ impl std::fmt::Display for BuildError {
         match self {
             BuildError::Arrow(e) => write!(f, "Arrow error: {}", e),
             BuildError::Extract(e) => write!(f, "Extract error: {:?}", e),
-            BuildError::TypeMismatch { field, expected, got } => {
-                write!(f, "Type mismatch for field '{}': expected {:?}, got {}", field, expected, got)
+            BuildError::TypeMismatch {
+                field,
+                expected,
+                got,
+            } => {
+                write!(
+                    f,
+                    "Type mismatch for field '{}': expected {:?}, got {}",
+                    field, expected, got
+                )
             }
             BuildError::SchemaMismatch(msg) => write!(f, "Schema mismatch: {}", msg),
         }
@@ -113,10 +121,14 @@ impl ColumnBuilder {
     fn new(data_type: &DataType) -> Self {
         match data_type {
             DataType::Boolean => ColumnBuilder::Bool(BooleanBuilder::new()),
-            DataType::Int8 | DataType::Int16 | DataType::Int32 | DataType::Int64 |
-            DataType::UInt8 | DataType::UInt16 | DataType::UInt32 | DataType::UInt64 => {
-                ColumnBuilder::Int64(Int64Builder::new())
-            }
+            DataType::Int8
+            | DataType::Int16
+            | DataType::Int32
+            | DataType::Int64
+            | DataType::UInt8
+            | DataType::UInt16
+            | DataType::UInt32
+            | DataType::UInt64 => ColumnBuilder::Int64(Int64Builder::new()),
             DataType::Float16 | DataType::Float32 | DataType::Float64 => {
                 ColumnBuilder::Float64(Float64Builder::new())
             }
@@ -303,7 +315,10 @@ impl MisonArrowBuilder {
     /// Append a row from extracted values
     ///
     /// Values must be in the same order as schema fields.
-    pub fn append_row(&mut self, values: &[Result<ExtractedValue<'_>, ExtractError>]) -> Result<(), BuildError> {
+    pub fn append_row(
+        &mut self,
+        values: &[Result<ExtractedValue<'_>, ExtractError>],
+    ) -> Result<(), BuildError> {
         if values.len() != self.builders.len() {
             return Err(BuildError::SchemaMismatch(format!(
                 "Expected {} values, got {}",
@@ -448,15 +463,20 @@ impl MisonBatchProcessor {
     ///
     /// OPTIMIZED: Uses extract_all_batch which iterates colons once for all fields.
     /// Best for many-field schemas (10+ fields).
-    pub fn process_batch_optimized(&mut self, messages: &[&[u8]]) -> Result<RecordBatch, BuildError> {
-        self.builder.append_batch_optimized(messages, &self.extractor)?;
+    pub fn process_batch_optimized(
+        &mut self,
+        messages: &[&[u8]],
+    ) -> Result<RecordBatch, BuildError> {
+        self.builder
+            .append_batch_optimized(messages, &self.extractor)?;
         self.builder.finish()
     }
 
     /// Process a single message (for routing/preview)
     pub fn process_single(&mut self, data: &[u8]) -> Result<RecordBatch, BuildError> {
         let index = StructuralIndex::build(data);
-        self.builder.append_from_index(&index, data, &mut self.extractor)?;
+        self.builder
+            .append_from_index(&index, data, &mut self.extractor)?;
         self.builder.finish()
     }
 
@@ -553,9 +573,7 @@ mod tests {
 
     #[test]
     fn test_type_coercion() {
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("value", DataType::Utf8, true),
-        ]));
+        let schema = Arc::new(Schema::new(vec![Field::new("value", DataType::Utf8, true)]));
         let mut builder = MisonArrowBuilder::new(schema);
 
         // Int coerced to string
@@ -568,15 +586,11 @@ mod tests {
 
     #[test]
     fn test_json_column() {
-        let columns = vec![
-            ("data".to_string(), "JSON".to_string()),
-        ];
+        let columns = vec![("data".to_string(), "JSON".to_string())];
 
         let mut processor = MisonBatchProcessor::new(&columns);
 
-        let messages: Vec<&[u8]> = vec![
-            br#"{"data":{"nested":"value"}}"#,
-        ];
+        let messages: Vec<&[u8]> = vec![br#"{"data":{"nested":"value"}}"#];
 
         let batch = processor.process_batch(&messages).unwrap();
         assert_eq!(batch.num_rows(), 1);

@@ -51,7 +51,8 @@ impl TableSchema {
     /// Create a TableSchema from column definitions
     pub fn from_columns(table_name: String, columns: Vec<(String, String)>) -> Result<Self> {
         let mut fields = Vec::with_capacity(columns.len());
-        let mut column_types = FxHashMap::with_capacity_and_hasher(columns.len(), Default::default());
+        let mut column_types =
+            FxHashMap::with_capacity_and_hasher(columns.len(), Default::default());
 
         for (name, ch_type) in columns {
             let arrow_type = ch_type_to_arrow(&ch_type)?;
@@ -201,8 +202,7 @@ impl TableBuffer {
     }
 
     fn is_ready(&self, flush_rows: usize, flush_age_secs: u64) -> bool {
-        self.builder.len() >= flush_rows
-            || self.created_at.elapsed().as_secs() >= flush_age_secs
+        self.builder.len() >= flush_rows || self.created_at.elapsed().as_secs() >= flush_age_secs
     }
 
     fn build(&mut self) -> Result<Option<(RecordBatch, Vec<KafkaOffset>)>> {
@@ -345,12 +345,7 @@ impl BufferManager {
     /// The table is determined by the caller (from routing).
     /// Uses get_mut for existing tables (common case) to avoid key allocation.
     #[inline]
-    pub fn push(
-        &mut self,
-        table: &str,
-        data: Map<String, Value>,
-        offset: Option<KafkaOffset>,
-    ) {
+    pub fn push(&mut self, table: &str, data: Map<String, Value>, offset: Option<KafkaOffset>) {
         // Fast path: table already exists (common case after first message)
         // Avoids allocating String for HashMap key lookup
         if let Some(buffer) = self.buffers.get_mut(table) {
@@ -366,9 +361,9 @@ impl BufferManager {
 
     /// Check if any buffer needs flushing
     pub fn should_flush(&self) -> bool {
-        self.buffers.values().any(|buf| {
-            buf.is_ready(self.flush_rows, self.flush_age_secs)
-        })
+        self.buffers
+            .values()
+            .any(|buf| buf.is_ready(self.flush_rows, self.flush_age_secs))
     }
 
     /// Get batches ready for flush
@@ -380,7 +375,9 @@ impl BufferManager {
         let flush_age_secs = self.flush_age_secs;
 
         // Count ready buffers for pre-allocation
-        let ready_count = self.buffers.values()
+        let ready_count = self
+            .buffers
+            .values()
             .filter(|buf| buf.is_ready(flush_rows, flush_age_secs))
             .count();
 
@@ -474,8 +471,8 @@ impl Default for BufferManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
     use crate::config::BufferConfig;
+    use serde_json::json;
 
     fn test_config() -> BufferConfig {
         BufferConfig {
@@ -577,12 +574,30 @@ mod tests {
 
     #[test]
     fn test_ch_type_to_arrow() {
-        assert!(matches!(ch_type_to_arrow("Int64").unwrap(), DataType::Int64));
-        assert!(matches!(ch_type_to_arrow("String").unwrap(), DataType::Binary));
-        assert!(matches!(ch_type_to_arrow("Nullable(Int64)").unwrap(), DataType::Int64));
-        assert!(matches!(ch_type_to_arrow("UUID").unwrap(), DataType::FixedSizeBinary(16)));
-        assert!(matches!(ch_type_to_arrow("IPv4").unwrap(), DataType::FixedSizeBinary(4)));
-        assert!(matches!(ch_type_to_arrow("Bool").unwrap(), DataType::Boolean));
+        assert!(matches!(
+            ch_type_to_arrow("Int64").unwrap(),
+            DataType::Int64
+        ));
+        assert!(matches!(
+            ch_type_to_arrow("String").unwrap(),
+            DataType::Binary
+        ));
+        assert!(matches!(
+            ch_type_to_arrow("Nullable(Int64)").unwrap(),
+            DataType::Int64
+        ));
+        assert!(matches!(
+            ch_type_to_arrow("UUID").unwrap(),
+            DataType::FixedSizeBinary(16)
+        ));
+        assert!(matches!(
+            ch_type_to_arrow("IPv4").unwrap(),
+            DataType::FixedSizeBinary(4)
+        ));
+        assert!(matches!(
+            ch_type_to_arrow("Bool").unwrap(),
+            DataType::Boolean
+        ));
     }
 
     #[test]

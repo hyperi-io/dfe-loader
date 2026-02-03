@@ -69,7 +69,11 @@ impl ServerState {
 
 type BoxBody = Full<Bytes>;
 
-fn full_response(status: StatusCode, content_type: &str, body: impl Into<Bytes>) -> Response<BoxBody> {
+fn full_response(
+    status: StatusCode,
+    content_type: &str,
+    body: impl Into<Bytes>,
+) -> Response<BoxBody> {
     Response::builder()
         .status(status)
         .header("Content-Type", content_type)

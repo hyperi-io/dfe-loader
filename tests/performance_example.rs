@@ -5,8 +5,8 @@
 //!
 //! Run with: cargo test --test performance_example -- --nocapture
 
-use std::sync::Arc;
 use prometheus::Registry;
+use std::sync::Arc;
 
 mod common;
 use common::metrics::MetricsSnapshot;
@@ -39,7 +39,8 @@ fn example_metrics_snapshot_workflow() {
 
     // Capture baseline snapshot
     let baseline = MetricsSnapshot::capture(&registry, "baseline_v1");
-    baseline.save("target/metrics_baseline.json")
+    baseline
+        .save("target/metrics_baseline.json")
         .expect("Failed to save baseline");
 
     eprintln!("✓ Baseline snapshot saved to target/metrics_baseline.json");
@@ -70,7 +71,8 @@ fn example_metrics_snapshot_workflow() {
 
     // Capture current snapshot
     let current = MetricsSnapshot::capture(&registry2, "optimized_v2");
-    current.save("target/metrics_current.json")
+    current
+        .save("target/metrics_current.json")
         .expect("Failed to save current");
 
     eprintln!("✓ Current snapshot saved to target/metrics_current.json");
@@ -82,13 +84,16 @@ fn example_metrics_snapshot_workflow() {
     comparison.print_report();
 
     // Save markdown report
-    comparison.save_markdown("target/metrics_comparison.md")
+    comparison
+        .save_markdown("target/metrics_comparison.md")
         .expect("Failed to save report");
 
     eprintln!("\n✓ Comparison report saved to target/metrics_comparison.md");
 
     // Assert no significant regressions (ignore histogram bucket counts which increase with more data)
-    let real_regressions: Vec<_> = comparison.regressions.iter()
+    let real_regressions: Vec<_> = comparison
+        .regressions
+        .iter()
         .filter(|r| !r.name.contains("_bucket") && !r.name.contains("_count"))
         .collect();
 

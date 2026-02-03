@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use rdkafka::consumer::{Consumer as RdConsumer, StreamConsumer, CommitMode};
+use rdkafka::consumer::{CommitMode, Consumer as RdConsumer, StreamConsumer};
 use rdkafka::message::{BorrowedMessage, Message};
 use rdkafka::{ClientConfig, Offset, TopicPartitionList};
 use tokio::sync::mpsc;
@@ -124,7 +124,8 @@ impl Consumer {
                     if let Some(ref region) = sasl.aws_region {
                         // Note: AWS MSK IAM auth requires custom token provider
                         // rdkafka doesn't natively support this - may need custom solution
-                        client_config.set("sasl.oauthbearer.config", format!("awsRegion={}", region));
+                        client_config
+                            .set("sasl.oauthbearer.config", format!("awsRegion={}", region));
                     }
                 }
 
@@ -270,7 +271,7 @@ impl Consumer {
         let mut max_offsets: HashMap<(Arc<str>, i32), i64> = HashMap::new();
 
         for off in offsets {
-            let key = (off.topic.clone(), off.partition);  // Arc::clone is cheap
+            let key = (off.topic.clone(), off.partition); // Arc::clone is cheap
             max_offsets
                 .entry(key)
                 .and_modify(|existing| {

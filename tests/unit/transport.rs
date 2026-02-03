@@ -6,7 +6,9 @@
 use serde_json::json;
 
 use dfe_loader::buffer::{BufferManager, KafkaOffset};
-use dfe_loader::config::{BufferConfig, FieldSanitizationConfig, MetadataConfig, RoutingConfig, TimestampDqConfig};
+use dfe_loader::config::{
+    BufferConfig, FieldSanitizationConfig, MetadataConfig, RoutingConfig, TimestampDqConfig,
+};
 use dfe_loader::kafka::{KafkaMessage, MemoryTransportAdapter};
 use dfe_loader::payload::{FormatDetector, FormatMode};
 use dfe_loader::routing::{RouteResult, Router};
@@ -44,8 +46,14 @@ async fn test_memory_adapter_inject_and_recv() {
 async fn test_memory_adapter_with_key() {
     let adapter = MemoryTransportAdapter::new("keyed-topic");
 
-    adapter.inject_with_key("key-1", b"payload-1".to_vec()).await.unwrap();
-    adapter.inject_with_key("key-2", b"payload-2".to_vec()).await.unwrap();
+    adapter
+        .inject_with_key("key-1", b"payload-1".to_vec())
+        .await
+        .unwrap();
+    adapter
+        .inject_with_key("key-2", b"payload-2".to_vec())
+        .await
+        .unwrap();
 
     let messages = adapter.recv(10).await.unwrap();
 
@@ -69,7 +77,10 @@ async fn test_memory_adapter_batch_recv() {
 
     // Inject 100 messages
     for i in 0..100 {
-        adapter.inject(format!("msg-{}", i).into_bytes()).await.unwrap();
+        adapter
+            .inject(format!("msg-{}", i).into_bytes())
+            .await
+            .unwrap();
     }
 
     // Receive in batches of 30
@@ -113,7 +124,10 @@ async fn test_json_message_processing() {
         "timestamp": "2025-01-01T00:00:00Z"
     });
 
-    adapter.inject(serde_json::to_vec(&event).unwrap()).await.unwrap();
+    adapter
+        .inject(serde_json::to_vec(&event).unwrap())
+        .await
+        .unwrap();
 
     // Receive and process
     let messages = adapter.recv(1).await.unwrap();
@@ -144,7 +158,10 @@ async fn test_routing_from_json() {
     ];
 
     for event in &events {
-        adapter.inject(serde_json::to_vec(event).unwrap()).await.unwrap();
+        adapter
+            .inject(serde_json::to_vec(event).unwrap())
+            .await
+            .unwrap();
     }
 
     // Configure router
@@ -161,10 +178,13 @@ async fn test_routing_from_json() {
     let messages = adapter.recv(10).await.unwrap();
     assert_eq!(messages.len(), 3);
 
-    let routes: Vec<_> = messages.iter().map(|msg| {
-        let value: serde_json::Value = sonic_rs::from_slice(&msg.payload).unwrap();
-        router.route_value(&value)
-    }).collect();
+    let routes: Vec<_> = messages
+        .iter()
+        .map(|msg| {
+            let value: serde_json::Value = sonic_rs::from_slice(&msg.payload).unwrap();
+            router.route_value(&value)
+        })
+        .collect();
 
     // Verify routing
     assert!(matches!(&routes[0], RouteResult::Table(t) if t == "org1.auth"));
@@ -187,12 +207,18 @@ async fn test_routing_with_nested_fields() {
         "payload": "test"
     });
 
-    adapter.inject(serde_json::to_vec(&event).unwrap()).await.unwrap();
+    adapter
+        .inject(serde_json::to_vec(&event).unwrap())
+        .await
+        .unwrap();
 
     // Configure router with nested field paths
     let routing_config = RoutingConfig {
         db_fields: vec!["org_id".to_string(), "tags.event.org_id".to_string()],
-        table_fields: vec!["event_category".to_string(), "tags.event.category".to_string()],
+        table_fields: vec![
+            "event_category".to_string(),
+            "tags.event.category".to_string(),
+        ],
         default_db: "common".to_string(),
         default_table: "events".to_string(),
         ..Default::default()
@@ -217,7 +243,10 @@ async fn test_routing_fallback_to_defaults() {
         "other_field": 123
     });
 
-    adapter.inject(serde_json::to_vec(&event).unwrap()).await.unwrap();
+    adapter
+        .inject(serde_json::to_vec(&event).unwrap())
+        .await
+        .unwrap();
 
     let routing_config = RoutingConfig {
         db_fields: vec!["org_id".to_string()],
@@ -257,7 +286,10 @@ async fn test_transform_flattens_nested() {
         "timestamp": "2025-01-01T00:00:00Z"
     });
 
-    adapter.inject(serde_json::to_vec(&event).unwrap()).await.unwrap();
+    adapter
+        .inject(serde_json::to_vec(&event).unwrap())
+        .await
+        .unwrap();
 
     let transformer = Transformer::new(
         &TimestampDqConfig::default(),
@@ -273,8 +305,14 @@ async fn test_transform_flattens_nested() {
     // Nested fields should be flattened with "." separator
     let data = result.data;
     assert_eq!(data.get("user.id").and_then(|v| v.as_i64()), Some(123));
-    assert_eq!(data.get("user.name").and_then(|v| v.as_str()), Some("Alice"));
-    assert_eq!(data.get("user.profile.email").and_then(|v| v.as_str()), Some("alice@example.com"));
+    assert_eq!(
+        data.get("user.name").and_then(|v| v.as_str()),
+        Some("Alice")
+    );
+    assert_eq!(
+        data.get("user.profile.email").and_then(|v| v.as_str()),
+        Some("alice@example.com")
+    );
 }
 
 #[tokio::test]
@@ -288,7 +326,10 @@ async fn test_transform_removes_routing_fields() {
         "timestamp": "2025-01-01T00:00:00Z"
     });
 
-    adapter.inject(serde_json::to_vec(&event).unwrap()).await.unwrap();
+    adapter
+        .inject(serde_json::to_vec(&event).unwrap())
+        .await
+        .unwrap();
 
     let routing_config = RoutingConfig {
         db_fields: vec!["org_id".to_string()],
@@ -314,7 +355,10 @@ async fn test_transform_removes_routing_fields() {
     assert!(data.get("event_category").is_none());
 
     // Other fields should remain
-    assert_eq!(data.get("keep_this").and_then(|v| v.as_str()), Some("value"));
+    assert_eq!(
+        data.get("keep_this").and_then(|v| v.as_str()),
+        Some("value")
+    );
 }
 
 // ============================================================================
@@ -333,7 +377,10 @@ async fn test_buffer_accumulates_messages() {
             "id": i,
             "timestamp": "2025-01-01T00:00:00Z"
         });
-        adapter.inject(serde_json::to_vec(&event).unwrap()).await.unwrap();
+        adapter
+            .inject(serde_json::to_vec(&event).unwrap())
+            .await
+            .unwrap();
     }
 
     let buffer_config = BufferConfig {
@@ -365,11 +412,7 @@ async fn test_buffer_accumulates_messages() {
 
         let result = transformer.transform(value).unwrap();
 
-        let offset = KafkaOffset::with_shared_topic(
-            msg.topic.clone(),
-            msg.partition,
-            msg.offset,
-        );
+        let offset = KafkaOffset::with_shared_topic(msg.topic.clone(), msg.partition, msg.offset);
 
         buffer_manager.push(&route, result.data, Some(offset));
     }
@@ -393,7 +436,10 @@ async fn test_buffer_flush_on_threshold() {
             "id": i,
             "timestamp": "2025-01-01T00:00:00Z"
         });
-        adapter.inject(serde_json::to_vec(&event).unwrap()).await.unwrap();
+        adapter
+            .inject(serde_json::to_vec(&event).unwrap())
+            .await
+            .unwrap();
     }
 
     let buffer_config = BufferConfig {
@@ -478,7 +524,10 @@ async fn test_full_message_flow_without_clickhouse() {
     ];
 
     for event in &events {
-        adapter.inject(serde_json::to_vec(event).unwrap()).await.unwrap();
+        adapter
+            .inject(serde_json::to_vec(event).unwrap())
+            .await
+            .unwrap();
     }
 
     // Setup pipeline components
@@ -532,7 +581,10 @@ async fn test_full_message_flow_without_clickhouse() {
     }
 
     // Verify routing
-    assert_eq!(routed_tables, vec!["acme.auth", "acme.network", "globex.file"]);
+    assert_eq!(
+        routed_tables,
+        vec!["acme.auth", "acme.network", "globex.file"]
+    );
 
     // Verify buffer state
     let stats = buffer_manager.stats();
@@ -566,7 +618,10 @@ async fn test_high_volume_message_processing() {
             "value": i as f64 * 1.5,
             "timestamp": "2025-01-01T00:00:00Z"
         });
-        adapter.inject(serde_json::to_vec(&event).unwrap()).await.unwrap();
+        adapter
+            .inject(serde_json::to_vec(&event).unwrap())
+            .await
+            .unwrap();
     }
 
     // Process in batches
@@ -604,7 +659,8 @@ async fn test_high_volume_message_processing() {
                 RouteResult::Dlq(_) => continue,
             };
             let result = transformer.transform(value).unwrap();
-            let offset = KafkaOffset::with_shared_topic(msg.topic.clone(), msg.partition, msg.offset);
+            let offset =
+                KafkaOffset::with_shared_topic(msg.topic.clone(), msg.partition, msg.offset);
             buffer_manager.push(&table, result.data, Some(offset));
             total_processed += 1;
         }

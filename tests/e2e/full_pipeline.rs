@@ -200,7 +200,10 @@ async fn test_full_pipeline_e2e() {
     let inserted = result.unwrap();
     assert_eq!(inserted, 3);
 
-    eprintln!("✓ Full E2E pipeline test completed: {} rows inserted", inserted);
+    eprintln!(
+        "✓ Full E2E pipeline test completed: {} rows inserted",
+        inserted
+    );
 
     drop_test_table(&client, &table_name).await;
 }
@@ -270,10 +273,22 @@ async fn test_pipeline_multi_table_routing() {
 
     // Messages for different tables
     let messages = vec![
-        (json!({"id": 1, "org_id": "default", "category": "auth", "event": "login", "value": 1.0}), format!("default.{}", table1)),
-        (json!({"id": 2, "org_id": "default", "category": "api", "event": "request", "value": 2.0}), format!("default.{}", table2)),
-        (json!({"id": 3, "org_id": "default", "category": "auth", "event": "logout", "value": 3.0}), format!("default.{}", table1)),
-        (json!({"id": 4, "org_id": "default", "category": "api", "event": "response", "value": 4.0}), format!("default.{}", table2)),
+        (
+            json!({"id": 1, "org_id": "default", "category": "auth", "event": "login", "value": 1.0}),
+            format!("default.{}", table1),
+        ),
+        (
+            json!({"id": 2, "org_id": "default", "category": "api", "event": "request", "value": 2.0}),
+            format!("default.{}", table2),
+        ),
+        (
+            json!({"id": 3, "org_id": "default", "category": "auth", "event": "logout", "value": 3.0}),
+            format!("default.{}", table1),
+        ),
+        (
+            json!({"id": 4, "org_id": "default", "category": "api", "event": "response", "value": 4.0}),
+            format!("default.{}", table2),
+        ),
     ];
 
     for (msg, expected_dest) in &messages {
@@ -293,7 +308,10 @@ async fn test_pipeline_multi_table_routing() {
     assert_eq!(stats.table_count, 2);
     assert_eq!(stats.pending_rows, 4);
 
-    eprintln!("✓ Multi-table routing: {} tables, {} rows", stats.table_count, stats.pending_rows);
+    eprintln!(
+        "✓ Multi-table routing: {} tables, {} rows",
+        stats.table_count, stats.pending_rows
+    );
 
     // Insert to both tables
     let schema = Arc::new(Schema::new(vec![
@@ -525,7 +543,7 @@ async fn test_pipeline_dlq_routing() {
     let routing_config = RoutingConfig {
         db_fields: vec!["org_id".to_string()],
         table_fields: vec!["category".to_string()],
-        default_db: "".to_string(),  // Empty = DLQ
+        default_db: "".to_string(), // Empty = DLQ
         default_table: "".to_string(),
         category_to_table: Default::default(),
         mapping_file: None,

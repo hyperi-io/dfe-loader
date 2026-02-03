@@ -79,17 +79,9 @@ pub struct Projector {
 impl Projector {
     /// Create a new projector for the given schema
     pub fn new(schema: &TableSchema) -> Self {
-        let column_set: FxHashSet<String> = schema
-            .columns
-            .iter()
-            .map(|c| c.name.clone())
-            .collect();
+        let column_set: FxHashSet<String> = schema.columns.iter().map(|c| c.name.clone()).collect();
 
-        let column_names: Vec<String> = schema
-            .columns
-            .iter()
-            .map(|c| c.name.clone())
-            .collect();
+        let column_names: Vec<String> = schema.columns.iter().map(|c| c.name.clone()).collect();
 
         Self {
             column_set,

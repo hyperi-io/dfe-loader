@@ -22,11 +22,11 @@ use super::reputation::ReputationResult;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RiskLevel {
     #[default]
-    Minimal,    // 0-19
-    Low,        // 20-39
-    Medium,     // 40-59
-    High,       // 60-79
-    Critical,   // 80-100
+    Minimal, // 0-19
+    Low,      // 20-39
+    Medium,   // 40-59
+    High,     // 60-79
+    Critical, // 80-100
 }
 
 impl RiskLevel {
@@ -79,7 +79,10 @@ pub struct RiskInput<'a> {
 
 impl<'a> RiskInput<'a> {
     /// Create from GeoIP and Reputation results
-    pub fn from_enrichment(geo: Option<&'a GeoIpResult>, rep: Option<&'a ReputationResult>) -> Self {
+    pub fn from_enrichment(
+        geo: Option<&'a GeoIpResult>,
+        rep: Option<&'a ReputationResult>,
+    ) -> Self {
         let mut input = RiskInput::default();
 
         if let Some(g) = geo {
@@ -138,19 +141,35 @@ impl RiskOutput {
                     out.insert(field.to_string(), Value::Number(self.geo_risk_score.into()));
                 }
                 "reputation_risk_score" => {
-                    out.insert(field.to_string(), Value::Number(self.reputation_risk_score.into()));
+                    out.insert(
+                        field.to_string(),
+                        Value::Number(self.reputation_risk_score.into()),
+                    );
                 }
                 "privacy_risk_score" => {
-                    out.insert(field.to_string(), Value::Number(self.privacy_risk_score.into()));
+                    out.insert(
+                        field.to_string(),
+                        Value::Number(self.privacy_risk_score.into()),
+                    );
                 }
                 "threat_risk_score" => {
-                    out.insert(field.to_string(), Value::Number(self.threat_risk_score.into()));
+                    out.insert(
+                        field.to_string(),
+                        Value::Number(self.threat_risk_score.into()),
+                    );
                 }
                 "risk_level" => {
-                    out.insert(field.to_string(), Value::String(self.risk_level.as_str().to_string()));
+                    out.insert(
+                        field.to_string(),
+                        Value::String(self.risk_level.as_str().to_string()),
+                    );
                 }
                 "risk_factors" => {
-                    let factors: Vec<Value> = self.risk_factors.iter().map(|s| Value::String(s.to_string())).collect();
+                    let factors: Vec<Value> = self
+                        .risk_factors
+                        .iter()
+                        .map(|s| Value::String(s.to_string()))
+                        .collect();
                     out.insert(field.to_string(), Value::Array(factors));
                 }
                 _ => {}
@@ -312,7 +331,8 @@ impl RiskScorer {
 
         // Calculate component scores
         output.geo_risk_score = self.calculate_geo_risk(input, &mut output.risk_factors);
-        output.reputation_risk_score = self.calculate_reputation_risk(input, &mut output.risk_factors);
+        output.reputation_risk_score =
+            self.calculate_reputation_risk(input, &mut output.risk_factors);
         output.privacy_risk_score = self.calculate_privacy_risk(input, &mut output.risk_factors);
         output.threat_risk_score = self.calculate_threat_risk(input, &mut output.risk_factors);
 
@@ -584,7 +604,10 @@ mod tests {
         let map = output.to_schema_map(&fields);
 
         assert_eq!(map.len(), 2);
-        assert_eq!(map.get("risk_score").unwrap(), &serde_json::Value::Number(75.into()));
+        assert_eq!(
+            map.get("risk_score").unwrap(),
+            &serde_json::Value::Number(75.into())
+        );
         assert_eq!(map.get("risk_level").unwrap(), "high");
     }
 }

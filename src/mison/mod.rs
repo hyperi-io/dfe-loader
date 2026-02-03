@@ -54,7 +54,7 @@ pub mod index;
 pub mod pattern;
 pub mod simd;
 
-pub use arrow::{MisonArrowBuilder, MisonBatchProcessor, BuildError};
+pub use arrow::{BuildError, MisonArrowBuilder, MisonBatchProcessor};
 pub use extract::{ExtractError, ExtractedValue, FieldExtractor, FieldSchema, SchemaExtractor};
 pub use index::{LeveledBitmaps, StructuralIndex};
 pub use pattern::{FieldPattern, PatternTree, TablePatternRegistry};

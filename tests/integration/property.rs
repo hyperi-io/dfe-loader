@@ -7,8 +7,8 @@ use serde_json::{json, Map, Value};
 use std::collections::HashMap;
 
 use dfe_loader::buffer::BufferManager;
-use dfe_loader::config::{BufferConfig, RoutingConfig, DlqConfig};
-use dfe_loader::routing::{Router, RouteResult};
+use dfe_loader::config::{BufferConfig, DlqConfig, RoutingConfig};
+use dfe_loader::routing::{RouteResult, Router};
 use dfe_loader::transform::Transformer;
 
 // ============================================================================

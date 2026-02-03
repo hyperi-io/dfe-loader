@@ -10,8 +10,8 @@ use std::time::Duration;
 use tempfile::TempDir;
 use tokio::time::timeout;
 
-use dfe_loader::config::{Config, SharedConfig};
 use dfe_loader::config::watcher::{ConfigWatcher, WatcherConfig};
+use dfe_loader::config::{Config, SharedConfig};
 
 // ============================================================================
 // SharedConfig Tests
@@ -145,10 +145,8 @@ fn test_watcher_creation() {
 #[test]
 fn test_watcher_nonexistent_path() {
     let shared = SharedConfig::default();
-    let result = ConfigWatcher::with_defaults(
-        PathBuf::from("/nonexistent/path/config.yaml"),
-        shared,
-    );
+    let result =
+        ConfigWatcher::with_defaults(PathBuf::from("/nonexistent/path/config.yaml"), shared);
 
     assert!(result.is_err(), "Watcher should fail for non-existent path");
     eprintln!("✓ ConfigWatcher rejects non-existent paths");
@@ -214,8 +212,14 @@ buffer:
 
     if result.is_ok() {
         let new_version = *rx.borrow();
-        assert!(new_version > initial_version, "Version should increment after config change");
-        eprintln!("✓ ConfigWatcher detected file change (version {} -> {})", initial_version, new_version);
+        assert!(
+            new_version > initial_version,
+            "Version should increment after config change"
+        );
+        eprintln!(
+            "✓ ConfigWatcher detected file change (version {} -> {})",
+            initial_version, new_version
+        );
     } else {
         // Polling might not have caught it in time - this is acceptable in tests
         eprintln!("⚠ ConfigWatcher did not detect change within timeout (polling-based detection)");
@@ -265,7 +269,10 @@ buffer:
 
     // Config should not have changed (validation failed)
     let current_brokers = shared.read().kafka.brokers.clone();
-    assert_eq!(current_brokers, initial_brokers, "Invalid config should not be applied");
+    assert_eq!(
+        current_brokers, initial_brokers,
+        "Invalid config should not be applied"
+    );
 
     eprintln!("✓ ConfigWatcher rejects invalid config");
 }
