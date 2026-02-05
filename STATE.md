@@ -704,86 +704,93 @@ Located at k8s.tyrell.com.au with:
 
 ---
 
-## Current Session (2026-01-21)
+## Current Session (2026-02-06)
 
 ### Accomplished This Session
 
-#### Registry Migration Complete
+#### 1. CI Fixes and Parallel Job Limiting
 
-Migrated dfe-loader from local path dependencies to Artifactory registry:
+- Fixed CI stuck in queued state (BuildJet runners unavailable)
+- Reverted to `ubuntu-latest` runners
+- Added configurable Rust feature sets to avoid `--all-features` conflicts
+- Implemented `jobs = 2` in `.cargo/config.toml` to prevent CPU starvation
+- Updated CI submodule to v1.52.0 with `get_cargo_jobs()` helper
 
-**Published to hypersec registry:**
+#### 2. FSL-1.1-ALv2 Licensing Migration (HyperI)
 
-| Crate | Version | Status |
-|-------|---------|--------|
-| `clickhouse-arrow-derive` | 0.4.2 | ✅ Published |
-| `clickhouse-arrow` | 0.4.2 | ✅ Published |
-| `hs-rustlib` | 1.2.2 | ✅ Published |
+Complete licensing overhaul from proprietary to FSL-1.1-ALv2:
 
-**Cargo.toml updated:**
+| File | Status |
+|------|--------|
+| `LICENSE` | ✅ Created (FSL-1.1-ALv2) |
+| `COMMERCIAL.md` | ✅ Created |
+| `CONTRIBUTING.md` | ✅ Created (DCO + Conventional Commits) |
+| `SECURITY.md` | ✅ Created |
+| `Cargo.toml` | ✅ Updated (license, authors) |
+| `CLAUDE.md` | ✅ Added licensing section |
+| 53 source files | ✅ SPDX headers added |
+| 33 test/bench files | ✅ SPDX headers added |
 
-```toml
-# Before (local paths)
-hs-rustlib = { path = "../hs-rustlib", features = ["transport-kafka"] }
-clickhouse-arrow = { path = "../clickhouse-arrow/clickhouse-arrow", features = ["http"] }
+**SPDX Header Format:**
 
-# After (registry)
-hs-rustlib = { version = ">=1.2.2", registry = "hypersec", features = ["transport-kafka"] }
-clickhouse-arrow = { version = ">=0.4.0", registry = "hypersec", features = ["http"] }
+```rust
+// SPDX-License-Identifier: FSL-1.1-ALv2
+// Copyright (c) 2026 HYPERI PTY LIMITED
 ```
 
-**clickhouse-arrow project updated:**
+#### 3. HyperI Rebranding Plan (Drafted, Blocked)
 
-- Added hypersec registry to `.cargo/config.toml`
-- Updated derive dependency to use registry: `clickhouse-arrow-derive = { version = ">=0.4.0", registry = "hypersec" }`
-- Committed: `bb45984` fix: use hypersec registry for derive dependency and add registry config
+Created comprehensive rebranding plan at `/home/derek/.claude/plans/steady-knitting-river.md`:
 
-### Fixes Applied
-
-- **FormatMode API change** - hs-rustlib 1.2.2 renamed `from_str()` to `parse()`. Fixed in `orchestrator.rs:123`
+- **Blocked on:** `hyperi-rustlib` being published to new registry
+- **Scope:** ~287 files, ~2,000+ occurrences
+- **Infrastructure not changed yet:** hypersec.jfrog.io, hypersec registry, hs-rustlib
 
 ### Git State
 
-**dfe-loader:**
-
 - **Branch:** main
-- **Upstream:** ahead by 4 commits (not pushed)
-- **Uncommitted:** 10 modified files (registry migration + API fix)
-  - `Cargo.toml`, `Cargo.lock` - Registry dependencies
-  - `src/pipeline/orchestrator.rs` - FormatMode::parse() fix
-  - Plus 7 other modified files from previous session
-
-**clickhouse-arrow:**
-
-- **Branch:** main
-- **Upstream:** 1 commit ahead (bb45984)
-- **Clean:** All changes committed
-
-### Test Results
-
-- **301 library tests** - all passing
-- Build successful with registry dependencies
+- **Upstream:** up to date with origin/main
+- **Uncommitted:** clean (docs/POSTGRESQL-CONFIG.md untracked)
+- **Latest commits:**
+  - `ae455e4` chore: update Cargo.lock and STATE.md
+  - `1e4e33a` chore: migrate to FSL-1.1-ALv2 licensing (HyperI)
+  - `dc6f4de` fix: limit parallel jobs to prevent CPU starvation
 
 ### Key Files Modified This Session
 
 | File | Description |
 |------|-------------|
-| `Cargo.toml` | Registry deps for hs-rustlib & clickhouse-arrow |
-| `Cargo.lock` | Updated with registry versions |
-| `src/pipeline/orchestrator.rs` | FormatMode::from_str → parse() |
+| `LICENSE` | FSL-1.1-ALv2 license text |
+| `COMMERCIAL.md` | Commercial licensing requirements |
+| `CONTRIBUTING.md` | DCO + Conventional Commits guide |
+| `SECURITY.md` | Vulnerability disclosure policy |
+| `Cargo.toml` | license = "FSL-1.1-ALv2", authors = HyperI |
+| `.cargo/config.toml` | jobs = 2 for local builds |
+| `src/**/*.rs` (53 files) | SPDX headers |
+| `tests/**/*.rs` (28 files) | SPDX headers |
+| `benches/*.rs` (5 files) | SPDX headers |
 
-### Next Steps
+### Decisions Made
 
-1. Commit dfe-loader changes (registry migration + API fix)
-2. Push dfe-loader (4 commits ahead)
-3. Push clickhouse-arrow (1 commit ahead)
+1. **FSL-1.1-ALv2 over proprietary** - Source-available with Apache 2.0 conversion after 2 years
+2. **Keep infrastructure references** - hypersec.jfrog.io stays until hyperi infra ready
+3. **Parallel jobs = 2** - Prevents CPU starvation on local builds
+4. **Casing: HyperI** - Capital H, capital I for brand; HYPERI for legal entity
+
+### Next Steps (When hyperi-rustlib Ready)
+
+1. Update JFrog domain: `hypersec.jfrog.io` → `hyperi.jfrog.io`
+2. Update registry name: `hypersec` → `hyperi`
+3. Rename crate: `hs-rustlib` → `hyperi-rustlib`
+4. Update GitHub org references: `hypersec-io` → `hyperi-io`
+5. Rename config file: `.hypersec-ci.yaml` → `.hyperi-ci.yaml`
 
 ### Session Context Summary
 
-Migrated dfe-loader to use clickhouse-arrow and hs-rustlib from hypersec Artifactory
-registry instead of local paths. Published clickhouse-arrow 0.4.2 and hs-rustlib 1.2.2
-to registry. Fixed API breaking change (FormatMode::from_str → parse). All 301 tests
-passing. Ready to commit and push.
+Fixed CI issues (BuildJet unavailable, CPU starvation from parallel jobs). Completed
+full licensing migration to FSL-1.1-ALv2 with SPDX headers on 86 files. Drafted
+HyperI rebranding plan but blocked on hyperi-rustlib availability. Infrastructure
+references (registry, JFrog) intentionally unchanged until new infra ready.
 
 ---
 
@@ -1056,7 +1063,7 @@ Arrow schemas. All 421 tests passing with production-ready verification patterns
 
 ---
 
-**Last Updated:** 2026-01-21
+**Last Updated:** 2026-02-06
 **ClickHouse:** 25.12 (native protocol)
-**Version:** 1.3.1
-**Status:** Registry Migration Complete - clickhouse-arrow 0.4.2, hs-rustlib 1.2.2
+**Version:** 1.4.0
+**Status:** FSL-1.1-ALv2 Licensed, HyperI Rebranding Pending
