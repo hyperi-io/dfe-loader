@@ -2,6 +2,8 @@
 //!
 //! Tests for various ClickHouse data types via Arrow inserts
 
+#![allow(clippy::approx_constant)]
+
 use std::sync::Arc;
 
 use arrow::array::{

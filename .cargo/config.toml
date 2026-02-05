@@ -40,6 +40,7 @@ rustflags = ["-C", "target-cpu=native"]
 
 [registries.hypersec]
 index = "sparse+https://hypersec.jfrog.io/artifactory/api/cargo/hypersec-cargo-virtual/index/"
+credential-provider = "cargo:token"
 
 # Uncomment to make hypersec the default for publishing
 # [registry]

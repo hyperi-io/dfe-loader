@@ -8,8 +8,8 @@
 #   3. ci/defaults.yaml (CI defaults)
 
 # Project language (auto-detected if not specified)
-# Values: python, typescript, golang, none
-language: none
+# Values: python, typescript, golang, rust, bash, none
+language: rust
 
 # Runner settings (override GH_RUNNER_* variables)
 # runners:
@@ -18,6 +18,13 @@ language: none
 # Quality checks
 quality:
   enabled: true
+  # Rust: test specific feature sets (avoids --all-features conflicts with mutually exclusive features)
+  rust:
+    features:
+      - "default"                    # Default features
+      - "default,jemalloc"           # With jemalloc allocator
+      - "default,mimalloc"           # With mimalloc allocator
+      - "default,http"               # With HTTP transport
 
 # Testing
 test:

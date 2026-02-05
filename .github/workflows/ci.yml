@@ -23,7 +23,7 @@ on:
 jobs:
   detect:
     name: Detect Config
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.GH_RUNNER_DEFAULT || 'ubuntu-latest' }}
     outputs:
       rust_features: ${{ steps.config.outputs.rust_features }}
       rust_test_tier: ${{ steps.config.outputs.rust_test_tier }}
@@ -48,7 +48,7 @@ jobs:
   quality:
     name: Quality
     needs: detect
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.GH_RUNNER_DEFAULT || 'ubuntu-latest' }}
     steps:
       - name: Generate token
         id: token
@@ -68,6 +68,7 @@ jobs:
           artifactory-url: ${{ vars.ARTIFACTORY_CARGO_URL }}
           artifactory-username: ${{ secrets.ARTIFACTORY_CI_USERNAME }}
           artifactory-password: ${{ secrets.ARTIFACTORY_CI_TOKEN }}
+          rust-features: ${{ needs.detect.outputs.rust_features }}
       - name: Commit auto-fixes
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
@@ -77,7 +78,7 @@ jobs:
   test:
     name: Test
     needs: [detect, quality]
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.GH_RUNNER_DEFAULT || 'ubuntu-latest' }}
     steps:
       - name: Generate token
         id: token
