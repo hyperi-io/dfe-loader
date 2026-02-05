@@ -37,11 +37,13 @@ tests/
 Located in `src/` using `#[cfg(test)]` modules. Test individual functions and modules in isolation.
 
 **Run:**
+
 ```bash
 cargo test --lib
 ```
 
 **Examples:**
+
 - Buffer management
 - JSON flattening
 - Routing logic
@@ -52,11 +54,13 @@ cargo test --lib
 Located in `tests/integration/`. Test components interacting with external systems (ClickHouse, Kafka).
 
 **Run:**
+
 ```bash
 cargo test --test integration_tests
 ```
 
 **Key Tests:**
+
 - [clickhouse.rs](tests/integration/clickhouse.rs) - Arrow protocol tests
 - [inserter.rs](tests/integration/inserter.rs) - Batch insert tests
 - [datatypes.rs](tests/integration/datatypes.rs) - Type handling tests
@@ -70,12 +74,14 @@ Use `proptest` to generate random inputs and test invariants.
 **Location:** [tests/integration/property.rs](tests/integration/property.rs)
 
 **Test Categories:**
+
 - **Routing:** Arbitrary org_ids, nested fields, extraction
 - **Transformation:** Underscore fields, nested flattening, type handling
 - **Buffer:** Accumulation, multiple tables
 - **Timestamp:** Edge cases, RFC3339 strings
 
 **Example:**
+
 ```rust
 proptest! {
     #[test]
@@ -101,6 +107,7 @@ Use metrics snapshots to validate that code changes improve performance.
 **Location:** [tests/performance_example.rs](tests/performance_example.rs)
 
 **Workflow:**
+
 ```rust
 // Capture baseline
 let baseline = MetricsSnapshot::capture(&registry, "baseline_v1");
@@ -134,6 +141,7 @@ See [PERFORMANCE_TESTING.md](tests/PERFORMANCE_TESTING.md) for details.
 **Why:** INSERT row count can succeed even if data is malformed. SELECT queries confirm data integrity.
 
 **Example:**
+
 ```rust
 // Insert data
 let result = client.insert(&table_name, batch).await;
@@ -150,10 +158,12 @@ assert_eq!(count, 500, "ACME should have 500 rows");
 ```
 
 **Helpers Available:**
+
 - `query_count(client, table, where_clause)` - Get row count with optional WHERE clause
 - `query_one(client, sql)` - Get first row as HashMap<String, String>
 
 **Note:** ClickHouse returns `String` columns as `Binary` via Arrow protocol. Use:
+
 ```rust
 use arrow::array::BinaryArray;
 if let Some(col) = batch.column(0).as_any().downcast_ref::<BinaryArray>() {
@@ -169,6 +179,7 @@ if let Some(col) = batch.column(0).as_any().downcast_ref::<BinaryArray>() {
 **Solution:** Always use explicit Arrow schemas for RecordBatches.
 
 **Example:**
+
 ```rust
 // ❌ BAD - JSON inference
 let batch = json_batch_to_arrow(&rows)?;
@@ -197,6 +208,7 @@ let batch = RecordBatch::try_new(
 **Use fixture builders for reusable test data:**
 
 **Event Data:**
+
 ```rust
 use crate::fixtures::EventBuilder;
 
@@ -217,6 +229,7 @@ let events = BatchEventBuilder::new()
 ```
 
 **Configuration:**
+
 ```rust
 use crate::fixtures::BufferConfigBuilder;
 
@@ -228,6 +241,7 @@ let config = BufferConfigBuilder::new()
 ```
 
 **Arrow Schemas:**
+
 ```rust
 use crate::fixtures::{rls_schema, auth_schema, api_schema};
 
@@ -240,6 +254,7 @@ let custom = ArrowSchemaBuilder::new()
 ```
 
 **DDL Statements:**
+
 ```rust
 use crate::fixtures::{event_table_ddl, DdlBuilder};
 
@@ -264,6 +279,7 @@ let custom_ddl = DdlBuilder::new("test", "my_table")
 **Status:** Infrastructure created but not yet integrated into tests (future work).
 
 **Example (future):**
+
 ```rust
 #[tokio::test]
 async fn test_with_isolated_clickhouse() {
@@ -280,32 +296,39 @@ async fn test_with_isolated_clickhouse() {
 ## Running Tests
 
 ### All Tests
+
 ```bash
 cargo test
 ```
 
 ### Unit Tests Only
+
 ```bash
 cargo test --lib
 ```
 
 ### Integration Tests Only
+
 ```bash
 cargo test --test integration_tests
 ```
 
 ### Property Tests Only
+
 ```bash
 cargo test --test integration_tests property::
 ```
 
 ### Performance Example
+
 ```bash
 cargo test --test performance_example -- --nocapture
 ```
 
 ### With External ClickHouse
+
 Integration tests require ClickHouse. Configure via `.env`:
+
 ```bash
 CLICKHOUSE_HOST=k8s.tyrell.com.au
 CLICKHOUSE_NATIVE_PORT=30900
@@ -317,6 +340,7 @@ CLICKHOUSE_PASSWORD=<password>
 Tests automatically skip if ClickHouse is unavailable.
 
 ### With Testcontainers (Future)
+
 ```bash
 cargo test --test integration_tests --features testcontainers
 ```
@@ -460,6 +484,7 @@ See: Query-Back Verification pattern above.
 **Solution:** Fix the implementation or add constraint to property test.
 
 **Example:**
+
 ```rust
 // If empty strings cause issues, constrain the generator:
 org_id in "[a-zA-Z0-9_-]{1,100}" // Minimum length 1
@@ -472,6 +497,7 @@ org_id in "[a-zA-Z0-9_-]{1,100}" // Minimum length 1
 **Cause:** Floating-point arithmetic precision.
 
 **Solution:** Use approximate comparison:
+
 ```rust
 // ❌ BAD
 assert_eq!(delta, -0.1);
@@ -489,6 +515,7 @@ assert!((delta + 0.1).abs() < 0.01);
 Test ClickHouse row policies with multiple users to verify data isolation.
 
 **Approach:**
+
 - Use testcontainers with preconfigured users/policies
 - Connect as different users
 - Verify each user only sees their own data
@@ -514,6 +541,7 @@ cargo fuzz run fuzz_json_parser
 ### 4. Chaos Testing
 
 Use testcontainers + toxiproxy to simulate failures:
+
 - Network delays
 - Connection drops
 - Resource exhaustion

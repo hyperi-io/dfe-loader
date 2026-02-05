@@ -70,6 +70,7 @@ Peers discover each other via multicast or configured endpoints.
 ```
 
 **Config:**
+
 ```toml
 [zenoh]
 mode = "peer"
@@ -98,12 +99,14 @@ Zenoh routers handle discovery and routing. Routers can be DaemonSet or dedicate
 ```
 
 **Router DaemonSet benefits:**
+
 - Clients only connect to local router (localhost or SHM)
 - Routers handle cross-node routing
 - Automatic failover if a router dies
 - Reduced connection count (N routers vs N² peers)
 
 **Config (client):**
+
 ```toml
 [zenoh]
 mode = "client"
@@ -111,6 +114,7 @@ connect = ["tcp/localhost:7447"]  # Local router
 ```
 
 **Config (router):**
+
 ```toml
 [zenoh]
 mode = "router"
@@ -390,12 +394,14 @@ type = "zenoh"
 ```
 
 **What stays the same:**
+
 - Message format (raw JSON/MsgPack)
 - Orchestrator logic
 - Buffer management
 - ClickHouse insertion
 
 **What changes:**
+
 - Latency characteristics
 - Durability guarantees
 - Deployment topology

@@ -251,6 +251,7 @@ SETTINGS index_granularity = 8192;
 ```
 
 **Benefits:**
+
 - **Index usage:** Primary key includes `_org_id` for fast filtering
 - **Partition pruning:** Queries only read relevant org's partitions
 - **Granule skipping:** ClickHouse skips granules (8192 rows) not matching org

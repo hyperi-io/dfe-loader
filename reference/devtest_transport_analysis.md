@@ -63,6 +63,7 @@ listen = ["tcp/127.0.0.1:7447"]
 | Complexity | Low (Rust-native, single binary) |
 
 **Pros:**
+
 - No broker required in peer mode
 - Same API for dev and production
 - Rust-native (Eclipse Foundation, well-maintained)
@@ -70,6 +71,7 @@ listen = ["tcp/127.0.0.1:7447"]
 - Mesh topology works without central coordinator
 
 **Cons:**
+
 - No persistence (acceptable for dev/test)
 - Adds ~2MB to binary size
 
@@ -98,12 +100,14 @@ let service = zero_copy::Service::new("events")
 | Complexity | Medium (SHM management) |
 
 **Pros:**
+
 - Fastest IPC available (~1µs)
 - True zero-copy (no serialization)
 - Rust-native (Eclipse Foundation)
 - C/C++ interop
 
 **Cons:**
+
 - Single-node only (no networking)
 - Requires shared memory setup
 - Fixed message types (no dynamic JSON)
@@ -127,11 +131,13 @@ let service = zero_copy::Service::new("events")
 | Complexity | Medium (broker deployment) |
 
 **Pros:**
+
 - At-least-once with JetStream
 - Well-maintained, CNCF project
 - Good Rust client (async-nats)
 
 **Cons:**
+
 - Requires broker (like Kafka)
 - Higher latency than Zenoh
 - No SHM optimization
@@ -154,11 +160,13 @@ let service = zero_copy::Service::new("events")
 | Complexity | Medium (socket patterns) |
 
 **Pros:**
+
 - Mature, well-understood patterns
 - Native Rust implementation (zmq.rs)
 - No broker for simple patterns
 
 **Cons:**
+
 - Lower-level API than Zenoh
 - Less modern (no native async)
 - No SHM optimization
