@@ -26,6 +26,7 @@ Transport ──────────┤
 ```
 
 **Alternative: Single loader with dual output**
+
 ```text
 Transport ──► dfe-loader ──┬──► ClickHouse (hot data)
                            └──► S3 (cold archive)

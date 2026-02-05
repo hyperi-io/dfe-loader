@@ -71,6 +71,7 @@ cp config.dev.yaml config.yaml
 ### Config File Locations
 
 The loader searches for config in this order:
+
 1. Path specified by `--config` or `LOADER_CONFIG` env var
 2. `config.yaml` in current directory
 3. `config.yml` in current directory
@@ -595,6 +596,7 @@ clickhouse-client --query "
 ### Common Issues
 
 **Config validation fails:**
+
 ```bash
 # Check config syntax
 ./target/release/dfe-loader --config config.yaml --validate
@@ -604,6 +606,7 @@ clickhouse-client --query "
 ```
 
 **Kafka connection issues:**
+
 ```bash
 # Test connectivity
 kcat -b localhost:9092 -L
@@ -618,6 +621,7 @@ kcat -b localhost:9092 \
 ```
 
 **ClickHouse connection issues:**
+
 ```bash
 # Test connectivity
 clickhouse-client --host localhost --port 9000 --query "SELECT 1"
@@ -627,6 +631,7 @@ clickhouse-client --host localhost --port 9440 --secure --query "SELECT 1"
 ```
 
 **High memory usage:**
+
 ```yaml
 # Reduce buffer sizes
 buffer:
@@ -638,6 +643,7 @@ memory:
 ```
 
 **Slow inserts:**
+
 ```yaml
 # Increase batch sizes
 buffer:

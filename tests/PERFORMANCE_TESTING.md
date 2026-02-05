@@ -95,6 +95,7 @@ The system automatically detects regressions:
 ### 1. Consistent Workloads
 
 Ensure baseline and current tests use identical workloads:
+
 - Same number of messages
 - Same message sizes
 - Same table distribution

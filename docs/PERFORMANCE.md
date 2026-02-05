@@ -77,6 +77,7 @@ codegen-units = 1      # Better optimization
 ```
 
 For maximum performance:
+
 ```toml
 lto = "fat"            # More aggressive, 2-3x longer compile
 ```
