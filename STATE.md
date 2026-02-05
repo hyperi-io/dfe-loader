@@ -1,9 +1,28 @@
-update # Project State
+# Project State
 
 **Project:** dfe-loader
 **Purpose:** High-performance Kafka to ClickHouse data loader (Rust port of Go clickhouse-loader)
 **Status:** Arrow-Only Pipeline Complete with SIMD Optimizations
 **Reference:** Feature parity (or better) with `/projects/clickhouse-loader` (Go version)
+
+---
+
+## Licensing
+
+| Component | Value |
+|-----------|-------|
+| License | FSL-1.1-ALv2 (Functional Source License) |
+| Licensor | HYPERI PTY LIMITED (ABN 31 622 581 748) |
+| SPDX ID | `FSL-1.1-ALv2` |
+| Apache 2.0 Conversion | 2 years after each release |
+
+**Source file headers:**
+```rust
+// SPDX-License-Identifier: FSL-1.1-ALv2
+// Copyright (c) 2026 HYPERI PTY LIMITED
+```
+
+See [LICENSE](LICENSE), [COMMERCIAL.md](COMMERCIAL.md), and [CONTRIBUTING.md](CONTRIBUTING.md) for details.
 
 ---
 
