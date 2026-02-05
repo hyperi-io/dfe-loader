@@ -23,7 +23,7 @@ on:
 jobs:
   detect:
     name: Detect Config
-    runs-on: ${{ vars.GH_RUNNER_DEFAULT || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     outputs:
       rust_features: ${{ steps.config.outputs.rust_features }}
       rust_test_tier: ${{ steps.config.outputs.rust_test_tier }}
@@ -48,7 +48,7 @@ jobs:
   quality:
     name: Quality
     needs: detect
-    runs-on: ${{ vars.GH_RUNNER_DEFAULT || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     steps:
       - name: Generate token
         id: token
@@ -78,7 +78,7 @@ jobs:
   test:
     name: Test
     needs: [detect, quality]
-    runs-on: ${{ vars.GH_RUNNER_DEFAULT || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     steps:
       - name: Generate token
         id: token
