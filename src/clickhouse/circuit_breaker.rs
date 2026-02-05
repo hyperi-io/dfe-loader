@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: FSL-1.1-ALv2
+// Copyright (c) 2026 HYPERI PTY LIMITED
+
 //! Circuit breaker for per-table failure detection
 //!
 //! Tracks failure rates per destination table and "opens" the circuit

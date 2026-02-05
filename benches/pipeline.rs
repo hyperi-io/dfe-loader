@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: FSL-1.1-ALv2
+// Copyright (c) 2026 HYPERI PTY LIMITED
+
 //! End-to-end pipeline benchmarks
 //!
 //! Measures throughput and latency for the full message processing pipeline:

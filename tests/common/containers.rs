@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: FSL-1.1-ALv2
+// Copyright (c) 2026 HYPERI PTY LIMITED
+
 //! Testcontainers infrastructure for isolated integration testing
 //!
 //! Provides Docker-based ClickHouse and Kafka containers for tests.

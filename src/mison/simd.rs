@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: FSL-1.1-ALv2
+// Copyright (c) 2026 HYPERI PTY LIMITED
+
 //! SIMD-accelerated structural character detection
 //!
 //! Uses AVX2 (256-bit) or SSE4.2 (128-bit) on x86_64, NEON (128-bit) on aarch64,

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: FSL-1.1-ALv2
+// Copyright (c) 2026 HYPERI PTY LIMITED
+
 //! Shared configuration with hot-reload support
 //!
 //! Provides thread-safe access to configuration with support for runtime updates.

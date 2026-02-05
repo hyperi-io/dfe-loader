@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: FSL-1.1-ALv2
+// Copyright (c) 2026 HYPERI PTY LIMITED
+
 // Project:   dfe-loader
 // File:      src/clickhouse/types.rs
 // Purpose:   ClickHouse type parsing (runtime, not compiled)

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: FSL-1.1-ALv2
+// Copyright (c) 2026 HYPERI PTY LIMITED
+
 // Project:   dfe-loader
 // File:      auto_init.rs
 // Purpose:   Auto-initialization of Kafka topics and ClickHouse schema

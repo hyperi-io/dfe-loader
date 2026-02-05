@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: FSL-1.1-ALv2
+// Copyright (c) 2026 HYPERI PTY LIMITED
+
 //! Type coercion to match ClickHouse schema
 //!
 //! Following the Go clickhouse-loader pattern:

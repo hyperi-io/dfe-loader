@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: FSL-1.1-ALv2
+// Copyright (c) 2026 HYPERI PTY LIMITED
+
 //! Property-based tests using proptest
 //!
 //! Tests routing, transformation, buffer, and timestamp logic with generated inputs

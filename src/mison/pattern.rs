@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: FSL-1.1-ALv2
+// Copyright (c) 2026 HYPERI PTY LIMITED
+
 //! Pattern Tree for Speculative Parsing
 //!
 //! Learns field orderings from observed JSON documents to enable speculative

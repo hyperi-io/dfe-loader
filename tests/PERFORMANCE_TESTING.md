@@ -239,4 +239,4 @@ git status
 ---
 
 **Last Updated:** 2026-01-12
-**Author:** HyperSec Platform Team
+**Author:** HyperI Platform Team

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: FSL-1.1-ALv2
+// Copyright (c) 2026 HYPERI PTY LIMITED
+
 //! MemoryTransport-based unit tests for pipeline components.
 //!
 //! These tests verify the transport adapter, message processing, and buffer
