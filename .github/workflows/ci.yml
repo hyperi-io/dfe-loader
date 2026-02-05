@@ -98,3 +98,4 @@ jobs:
           artifactory-url: ${{ vars.ARTIFACTORY_CARGO_URL }}
           artifactory-username: ${{ secrets.ARTIFACTORY_CI_USERNAME }}
           artifactory-password: ${{ secrets.ARTIFACTORY_CI_TOKEN }}
+          rust-features: ${{ needs.detect.outputs.rust_features }}
