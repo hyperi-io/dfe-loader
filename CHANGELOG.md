@@ -1,3 +1,23 @@
+# [1.4.0](https://github.com/hypersec-io/dfe-loader/compare/v1.3.1...v1.4.0) (2026-02-05)
+
+
+### Bug Fixes
+
+* add Rust CI workflows via attach.sh ([340aeaa](https://github.com/hypersec-io/dfe-loader/commit/340aeaaeb15a28a84a47774bf1f3f3c3c295723e))
+* apply cargo fmt and update ci submodule to v1.48.2 ([a951d49](https://github.com/hypersec-io/dfe-loader/commit/a951d49352a2f70a88ac2efc1528857393c34b9e))
+* CI configuration and clippy lint fixes ([12d9e7e](https://github.com/hypersec-io/dfe-loader/commit/12d9e7eb256d7afd905e362bc0f967a39e437e70))
+* hardcode ubuntu-latest runner to bypass queued state ([c69b42f](https://github.com/hypersec-io/dfe-loader/commit/c69b42fff1d393c46ecc93523fb1ce2fa1162158))
+* limit parallel jobs to prevent CPU starvation ([dc6f4de](https://github.com/hypersec-io/dfe-loader/commit/dc6f4de7b7d33c9448858cd103c167f27afd3999))
+* update ci submodule to v1.48.0 ([d3d3a9c](https://github.com/hypersec-io/dfe-loader/commit/d3d3a9c2e84ae9527c85ca19ceacdcd3e45831ec))
+* update test files to use clickhouse_arrow module path ([b593600](https://github.com/hypersec-io/dfe-loader/commit/b593600f1fcb169c978b98533138750435d4d12d))
+* use ubuntu-latest runners (BuildJet unavailable) ([529578a](https://github.com/hypersec-io/dfe-loader/commit/529578a33c6f6077a5b85895f0d21faa3fcda065))
+
+
+### Features
+
+* add auto-initialization for Kafka topics and ClickHouse schema ([d52ce40](https://github.com/hypersec-io/dfe-loader/commit/d52ce40725a34e7fc651601f56221cc7980694a2))
+* add table-level tags with [@tag](https://github.com/tag): key=value syntax ([e9c890d](https://github.com/hypersec-io/dfe-loader/commit/e9c890d78b099ebe1d6f1bd60ecef54a645df04f))
+
 ## [1.3.1](https://github.com/hypersec-io/dfe-loader-clickhouse/compare/v1.3.0...v1.3.1) (2026-01-13)
 
 
