@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: FSL-1.1-ALv2
+// Copyright (c) 2026 HYPERI PTY LIMITED
+
 //! Arrow-based chunked buffer for ClickHouse inserts
 //!
 //! Uses Arrow RecordBatch as the fundamental unit of data, with chunked

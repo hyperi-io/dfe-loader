@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: FSL-1.1-ALv2
+// Copyright (c) 2026 HYPERI PTY LIMITED
+
 //! Main transformer that applies all transformations
 //!
 //! Pipeline: Parse → Extract tags/logjson → Flatten → Timestamp → Metadata → Sanitize → Remove routing fields

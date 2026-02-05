@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: FSL-1.1-ALv2
+// Copyright (c) 2026 HYPERI PTY LIMITED
+
 //! Transport adapter for hs-rustlib transport abstraction.
 //!
 //! This module provides a thin adapter layer between the hs-rustlib Transport trait

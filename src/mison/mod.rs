@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: FSL-1.1-ALv2
+// Copyright (c) 2026 HYPERI PTY LIMITED
+
 //! Mison-style JSON processing
 //!
 //! High-performance JSON field extraction using structural indices and speculation.

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: FSL-1.1-ALv2
+// Copyright (c) 2026 HYPERI PTY LIMITED
+
 //! Main pipeline coordinator
 //!
 //! Orchestrates the Transport → Transform → Buffer → ClickHouse pipeline.

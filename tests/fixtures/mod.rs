@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: FSL-1.1-ALv2
+// Copyright (c) 2026 HYPERI PTY LIMITED
+
 //! Test fixture builders for creating test data
 //!
 //! Provides builder patterns for events, configs, Arrow schemas, and DDL

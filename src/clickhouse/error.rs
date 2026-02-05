@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: FSL-1.1-ALv2
+// Copyright (c) 2026 HYPERI PTY LIMITED
+
 // Project:   dfe-loader
 // File:      src/clickhouse/error.rs
 // Purpose:   ClickHouse error types with severity classification

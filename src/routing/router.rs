@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: FSL-1.1-ALv2
+// Copyright (c) 2026 HYPERI PTY LIMITED
+
 //! Routes messages to destination db.table based on event data
 //!
 //! Routing happens PRE-flattening using dot notation for nested field access.

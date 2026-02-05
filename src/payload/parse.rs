@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: FSL-1.1-ALv2
+// Copyright (c) 2026 HYPERI PTY LIMITED
+
 //! Payload parsing with auto-detection
 //!
 //! Parses JSON or MessagePack into a common Value type.

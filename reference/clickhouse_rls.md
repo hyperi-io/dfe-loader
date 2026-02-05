@@ -457,4 +457,4 @@ ORDER BY partition;
 ---
 
 **Last Updated:** 2026-01-12
-**Maintainer:** HyperSec Platform Team
+**Maintainer:** HyperI Platform Team

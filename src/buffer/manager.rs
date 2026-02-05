@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: FSL-1.1-ALv2
+// Copyright (c) 2026 HYPERI PTY LIMITED
+
 //! Per-table Arrow buffer manager with schema introspection
 //!
 //! Each destination table has its own ArrowBatchBuilder for schema uniformity.

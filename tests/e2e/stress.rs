@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: FSL-1.1-ALv2
+// Copyright (c) 2026 HYPERI PTY LIMITED
+
 //! High-Volume Stress Tests
 //!
 //! Tests for high-throughput scenarios and performance under load

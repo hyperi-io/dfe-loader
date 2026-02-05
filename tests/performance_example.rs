@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: FSL-1.1-ALv2
+// Copyright (c) 2026 HYPERI PTY LIMITED
+
 //! Example of using metrics snapshots for performance testing
 //!
 //! This demonstrates how to capture metrics before/after changes

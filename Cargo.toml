@@ -2,9 +2,10 @@
 name = "dfe-loader"
 version = "1.4.0"
 edition = "2021"
-authors = ["Hypersec"]
+authors = ["HyperI <dev@hyperi.com.au>"]
 description = "High-performance Kafka to ClickHouse data loader"
-license = "Proprietary"
+license = "FSL-1.1-ALv2"
+repository = "https://github.com/hypersec-io/dfe-loader"
 rust-version = "1.75"
 
 [lib]
