@@ -23,25 +23,25 @@ rustflags = ["-C", "target-cpu=native"]
 jobs = 2
 
 # =============================================================================
-# HyperSec Private Cargo Registry (Artifactory)
+# HyperI Private Cargo Registry (Artifactory)
 # =============================================================================
 #
-# The 'hypersec' registry hosts internal crates like hs-rustlib.
+# The 'hyperi' registry hosts internal crates like hyperi-rustlib.
 # Authentication is handled via ~/.cargo/credentials.toml
 #
 # To set up credentials:
-#   1. Get token: jf config export hypersec-token | base64 -d | jq -r '.accessToken'
+#   1. Get token: jf config export hyperi-token | base64 -d | jq -r '.accessToken'
 #   2. Add to ~/.cargo/credentials.toml:
-#      [registries.hypersec]
+#      [registries.hyperi]
 #      token = "Bearer <your-token>"
 #
 # Or use cargo-login (if available):
-#   cargo login --registry hypersec
+#   cargo login --registry hyperi
 
-[registries.hypersec]
+[registries.hyperi]
 index = "sparse+https://hypersec.jfrog.io/artifactory/api/cargo/hypersec-cargo-virtual/index/"
 credential-provider = "cargo:token"
 
-# Uncomment to make hypersec the default for publishing
+# Uncomment to make hyperi the default for publishing
 # [registry]
-# default = "hypersec"
+# default = "hyperi"

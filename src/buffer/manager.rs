@@ -197,8 +197,14 @@ impl TableBuffer {
         }
     }
 
-    fn push(&mut self, data: Map<String, Value>, table: &str, offset: Option<KafkaOffset>) {
-        self.builder.push(data, table);
+    fn push(
+        &mut self,
+        data: Map<String, Value>,
+        table: &str,
+        offset: Option<KafkaOffset>,
+        raw_payload: Option<&[u8]>,
+    ) {
+        self.builder.push(data, table, raw_payload);
         if let Some(off) = offset {
             self.offsets.push(off);
         }
@@ -346,19 +352,28 @@ impl BufferManager {
     /// Push a JSON object to the appropriate table buffer
     ///
     /// The table is determined by the caller (from routing).
+    /// `raw_payload` is the original Kafka message bytes for `_json` column
+    /// (passed directly to ArrowBatchBuilder sidecar, never enters the Map).
+    /// Pass `None` to suppress `_json` for this message (e.g., table has capture disabled).
     /// Uses get_mut for existing tables (common case) to avoid key allocation.
     #[inline]
-    pub fn push(&mut self, table: &str, data: Map<String, Value>, offset: Option<KafkaOffset>) {
+    pub fn push(
+        &mut self,
+        table: &str,
+        data: Map<String, Value>,
+        offset: Option<KafkaOffset>,
+        raw_payload: Option<&[u8]>,
+    ) {
         // Fast path: table already exists (common case after first message)
         // Avoids allocating String for HashMap key lookup
         if let Some(buffer) = self.buffers.get_mut(table) {
-            buffer.push(data, table, offset);
+            buffer.push(data, table, offset, raw_payload);
             return;
         }
 
         // Slow path: new table - allocate key and create buffer
         let mut buffer = TableBuffer::new(self.batch_size);
-        buffer.push(data, table, offset);
+        buffer.push(data, table, offset, raw_payload);
         self.buffers.insert(table.to_string(), buffer);
     }
 
@@ -492,8 +507,8 @@ mod tests {
         let data1 = json!({"id": 1, "name": "foo"}).as_object().unwrap().clone();
         let data2 = json!({"id": 2, "name": "bar"}).as_object().unwrap().clone();
 
-        manager.push("db.table_a", data1, None);
-        manager.push("db.table_b", data2, None);
+        manager.push("db.table_a", data1, None, None);
+        manager.push("db.table_b", data2, None, None);
 
         assert_eq!(manager.pending_rows(), 2);
         assert_eq!(manager.stats().table_count, 2);
@@ -506,7 +521,7 @@ mod tests {
         // Push enough rows to trigger flush (5 rows)
         for i in 0..6 {
             let data = json!({"id": i}).as_object().unwrap().clone();
-            manager.push("db.events", data, None);
+            manager.push("db.events", data, None, None);
         }
 
         assert!(manager.should_flush());
@@ -524,11 +539,11 @@ mod tests {
         // Push 3 rows to table_a, 2 rows to table_b
         for i in 0..3 {
             let data = json!({"id": i}).as_object().unwrap().clone();
-            manager.push("db.table_a", data, None);
+            manager.push("db.table_a", data, None, None);
         }
         for i in 0..2 {
             let data = json!({"id": i}).as_object().unwrap().clone();
-            manager.push("db.table_b", data, None);
+            manager.push("db.table_b", data, None, None);
         }
 
         // Neither should trigger flush (threshold is 5)
@@ -538,7 +553,7 @@ mod tests {
         // Add more to table_a to trigger
         for i in 3..6 {
             let data = json!({"id": i}).as_object().unwrap().clone();
-            manager.push("db.table_a", data, None);
+            manager.push("db.table_a", data, None, None);
         }
 
         assert!(manager.should_flush());
@@ -560,11 +575,11 @@ mod tests {
         // Push to multiple tables
         for i in 0..3 {
             let data = json!({"id": i}).as_object().unwrap().clone();
-            manager.push("db.table_a", data, None);
+            manager.push("db.table_a", data, None, None);
         }
         for i in 0..2 {
             let data = json!({"id": i}).as_object().unwrap().clone();
-            manager.push("db.table_b", data, None);
+            manager.push("db.table_b", data, None, None);
         }
 
         // Flush all (shutdown scenario)
@@ -632,13 +647,13 @@ mod tests {
         let data1 = json!({"id": 1}).as_object().unwrap().clone();
         let data2 = json!({"id": 2}).as_object().unwrap().clone();
 
-        manager.push("db.events", data1, Some(offset1));
-        manager.push("db.events", data2, Some(offset2));
+        manager.push("db.events", data1, Some(offset1), None);
+        manager.push("db.events", data2, Some(offset2), None);
 
         // Add more to trigger flush
         for i in 3..7 {
             let data = json!({"id": i}).as_object().unwrap().clone();
-            manager.push("db.events", data, None);
+            manager.push("db.events", data, None, None);
         }
 
         let batches = manager.get_ready_for_flush().unwrap();

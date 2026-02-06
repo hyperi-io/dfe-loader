@@ -113,7 +113,7 @@ cargo build --release --features mimalloc
 
 ## clickhouse-arrow Optimizations
 
-dfe-loader uses clickhouse-arrow via hs-rustlib. Key optimizations:
+dfe-loader uses clickhouse-arrow via hyperi-rustlib. Key optimizations:
 
 ### SIMD-Accelerated Serialization
 
@@ -125,12 +125,12 @@ These are applied automatically - no configuration needed.
 
 ### Enable Allocator in clickhouse-arrow
 
-When building hs-rustlib with clickhouse-arrow, the allocator features
-propagate. Ensure your hs-rustlib dependency enables the same allocator:
+When building hyperi-rustlib with clickhouse-arrow, the allocator features
+propagate. Ensure your hyperi-rustlib dependency enables the same allocator:
 
 ```toml
 [features]
-jemalloc = ["hs-rustlib/jemalloc"]
+jemalloc = ["hyperi-rustlib/jemalloc"]
 ```
 
 ## Runtime Tuning

@@ -79,8 +79,8 @@ None currently - all critical TODOs completed.
   - `timestamp` with minmax index for event time queries
   - `timestamp_load` as primary query filter (not `timestamp`)
 
-- [x] **Fixed hs-rustlib async_trait dependency** - Added to transport feature
-  - Commit `bbf1ea1` in hs-rustlib
+- [x] **Fixed hyperi-rustlib async_trait dependency** - Added to transport feature
+  - Commit `bbf1ea1` in hyperi-rustlib
   - All 283 unit + 124 integration tests passing
 
 ### 2026-01-13: Project Rename & WBS Tier 1
@@ -91,10 +91,10 @@ None currently - all critical TODOs completed.
   - All 280 library + 124 integration tests passing
 
 - [x] **WBS Tier 1 Assessment Complete**
-  - 1.1 Payload Detection → Migrated to hs-rustlib (366 lines)
+  - 1.1 Payload Detection → Migrated to hyperi-rustlib (366 lines)
   - 1.2-1.6 → Stay in dfe-loader (ClickHouse/app-specific)
 
-- [x] **hs-rustlib v0.2.0 Published to Artifactory**
+- [x] **hyperi-rustlib v0.2.0 Published to Artifactory**
   - Added stateful FormatDetector with FormatMode
   - dfe-loader using registry dependency (not local path)
 
@@ -114,9 +114,9 @@ None currently - all critical TODOs completed.
 - [x] DLQ Send integration (already implemented in orchestrator.rs:194-218)
 - [x] Field Projection - `Projector` struct with schema-based field filtering
 
-### 2025-12-29: Transport Abstraction (hs-rustlib)
+### 2025-12-29: Transport Abstraction (hyperi-rustlib)
 
-- [x] Transport module structure in hs-rustlib
+- [x] Transport module structure in hyperi-rustlib
 - [x] `Transport` trait with async send/recv/commit methods
 - [x] `CommitToken` trait for transport-specific tokens
 - [x] `Message<T>` struct (key, payload, token, timestamp, format)

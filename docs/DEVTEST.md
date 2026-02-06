@@ -666,7 +666,7 @@ RUST_LOG=dfe_loader::transform=debug ./target/release/dfe-loader --config config
 
 | Version | Date | Notes |
 |---------|------|-------|
-| 1.3.1 | 2026-01 | Registry migration (clickhouse-arrow 0.4.2, hs-rustlib 1.2.2) |
+| 1.3.1 | 2026-01 | Registry migration (clickhouse-arrow 0.4.2, hyperi-rustlib 1.2.2) |
 | 1.3.0 | 2026-01 | Auto-initialization, text search indexes |
 | 1.2.0 | 2025-12 | Enrichment modules (GeoIP, reputation, risk) |
 | 1.1.0 | 2025-12 | Arrow-only pipeline, SIMD optimizations |

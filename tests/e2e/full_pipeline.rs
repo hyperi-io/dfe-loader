@@ -164,7 +164,7 @@ async fn test_full_pipeline_e2e() {
             partition: 0,
             offset: idx as i64,
         };
-        buffer_manager.push(&destination, output.data, Some(offset));
+        buffer_manager.push(&destination, output.data, Some(offset), None);
     }
 
     // Verify buffer state
@@ -303,7 +303,7 @@ async fn test_pipeline_multi_table_routing() {
         };
         assert_eq!(&destination, expected_dest);
 
-        buffer_manager.push(&destination, msg.as_object().unwrap().clone(), None);
+        buffer_manager.push(&destination, msg.as_object().unwrap().clone(), None, None);
     }
 
     // Verify both tables have data
@@ -476,7 +476,7 @@ async fn test_pipeline_buffer_flush_thresholds() {
     // Add 4 rows - should not flush
     for i in 0..4 {
         let data = json!({"id": i}).as_object().unwrap().clone();
-        buffer_manager.push("test.events", data, None);
+        buffer_manager.push("test.events", data, None, None);
     }
 
     let batches = buffer_manager.get_ready_for_flush().unwrap();
@@ -485,7 +485,7 @@ async fn test_pipeline_buffer_flush_thresholds() {
 
     // Add 1 more - should trigger flush
     let data = json!({"id": 4}).as_object().unwrap().clone();
-    buffer_manager.push("test.events", data, None);
+    buffer_manager.push("test.events", data, None, None);
 
     let batches = buffer_manager.get_ready_for_flush().unwrap();
     assert_eq!(batches.len(), 1, "Should flush at 5 rows");

@@ -2,11 +2,11 @@
 
 ## Overview
 
-A pluggable transport layer in `hs-rustlib` that allows dfe-loader to receive
+A pluggable transport layer in `hyperi-rustlib` that allows dfe-loader to receive
 messages from multiple sources without code changes. The transport is **payload-agnostic** -
 it delivers raw bytes (JSON or MsgPack) without any envelope or framing.
 
-**Location:** `hs-rustlib/src/transport/`
+**Location:** `hyperi-rustlib/src/transport/`
 
 ---
 
@@ -164,7 +164,7 @@ spec:
 ## Trait Definition
 
 ```rust
-// hs-rustlib/src/transport/mod.rs
+// hyperi-rustlib/src/transport/mod.rs
 
 use std::sync::Arc;
 use async_trait::async_trait;
@@ -248,7 +248,7 @@ pub struct MemoryToken {
 ## Module Structure
 
 ```
-hs-rustlib/src/transport/
+hyperi-rustlib/src/transport/
 ├── mod.rs              # Trait definitions, re-exports
 ├── error.rs            # TransportError, SendResult
 ├── kafka/
@@ -269,7 +269,7 @@ hs-rustlib/src/transport/
 ## Feature Flags
 
 ```toml
-# hs-rustlib/Cargo.toml
+# hyperi-rustlib/Cargo.toml
 
 [features]
 transport = []                              # Core trait only

@@ -23,14 +23,14 @@ tokio-util = { version = ">=0.7", features = ["rt"] }
 
 # Shared library with transport abstraction
 # Published to Artifactory hypersec-cargo registry
-hs-rustlib = { version = ">=1.2.2", registry = "hypersec", features = ["transport-kafka"] }
+hs-rustlib = { version = ">=1.2.2", registry = "hyperi", features = ["transport-kafka"] }
 
 # Kafka (SASL/SCRAM required for auth) - also needed for DLQ producer
 rdkafka = { version = ">=0.38", features = ["cmake-build", "ssl", "sasl"] }
 
 # ClickHouse Arrow client (hypersec-io/clickhouse-arrow fork)
 # Native Arrow protocol for efficient columnar inserts
-clickhouse-arrow = { version = ">=0.4.0", registry = "hypersec", features = ["http"] }
+clickhouse-arrow = { version = ">=0.4.0", registry = "hyperi", features = ["http"] }
 futures-util = ">=0.3"  # For stream handling with clickhouse-arrow
 
 # Arrow for columnar data handling

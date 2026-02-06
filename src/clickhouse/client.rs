@@ -405,7 +405,46 @@ impl ArrowClickHouseClient {
         }
     }
 
-    /// Fetch table schema as `TableSchema` (includes parsed types).
+    /// Fetch a table's COMMENT string from `system.tables`.
+    ///
+    /// Returns empty string if no comment is set or fetch fails.
+    /// Used for DDL tag resolution (e.g., `@no_capture_json: true`).
+    pub async fn fetch_table_comment(&self, table: &str) -> Result<String> {
+        let (db, tbl) = parse_db_table(table, &self.database);
+        let sql = format!(
+            "SELECT comment FROM system.tables WHERE database = '{}' AND name = '{}'",
+            db, tbl
+        );
+        let batches = self.select(&sql).await?;
+
+        for batch in &batches {
+            if batch.num_rows() == 0 {
+                continue;
+            }
+            // ClickHouse returns String as Binary via native Arrow protocol
+            if let Some(col) = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<arrow::array::BinaryArray>()
+            {
+                if let Ok(s) = std::str::from_utf8(col.value(0)) {
+                    return Ok(s.to_string());
+                }
+            }
+            // HTTP transport returns StringArray
+            if let Some(col) = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<arrow::array::StringArray>()
+            {
+                return Ok(col.value(0).to_string());
+            }
+        }
+
+        Ok(String::new())
+    }
+
+    /// Fetch table schema as `TableSchema` (includes parsed types and comment).
     ///
     /// # Errors
     ///
@@ -434,11 +473,14 @@ impl ArrowClickHouseClient {
             })
             .collect();
 
+        // Fetch table comment for DDL tags (non-critical — default to empty on failure)
+        let comment = self.fetch_table_comment(table).await.unwrap_or_default();
+
         Ok(TableSchema {
             database: db,
             table: tbl,
             columns,
-            comment: String::new(),
+            comment,
         })
     }
 

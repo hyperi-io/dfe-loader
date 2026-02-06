@@ -24,8 +24,9 @@ use std::sync::Arc;
 
 use arrow::array::{
     ArrayRef, BinaryBuilder, BooleanBuilder, Float64Builder, Int64Builder, RecordBatch,
-    StringBuilder,
+    StringArray, StringBuilder,
 };
+use arrow::buffer::{Buffer, OffsetBuffer, ScalarBuffer};
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use arrow_json::{reader::infer_json_schema_from_iterator, ReaderBuilder};
 use serde_json::{Map, Value};
@@ -42,6 +43,16 @@ use crate::Result;
 ///
 /// Each ArrowBatchBuilder is used for a single destination table.
 /// The destination is stored once, not per-row, avoiding redundant allocations.
+///
+/// ## _json Sidecar (Zero-Copy Optimization)
+///
+/// The `_json` column is built from raw Kafka payload bytes directly into Arrow,
+/// bypassing the `Map<String, Value>` entirely. Raw bytes are accumulated in a
+/// contiguous buffer with offset tracking, then constructed into a `StringArray`
+/// via `Buffer::from_vec()` (zero-copy ownership transfer to Arrow).
+///
+/// This eliminates: String::from() allocation, Map insert/lookup overhead, and
+/// re-serialization from Value back to string during Arrow conversion.
 pub struct ArrowBatchBuilder {
     /// Accumulated JSON objects (destination is common for all rows)
     pending: Vec<Map<String, Value>>,
@@ -49,7 +60,20 @@ pub struct ArrowBatchBuilder {
     destination: Option<Arc<str>>,
     /// Target batch size before auto-flush
     batch_size: usize,
+
+    // _json sidecar: raw payload bytes accumulated for direct Arrow construction
+    /// Contiguous buffer of raw payload bytes for _json column
+    json_values_buf: Vec<u8>,
+    /// Byte offsets into json_values_buf (length = pending.len() + 1)
+    json_offsets: Vec<i32>,
+    /// Null bitmap: true = has payload, false = null (no payload)
+    json_nulls: Vec<bool>,
+    /// Name of the _json output field (from config)
+    json_field_name: String,
 }
+
+/// Average payload size estimate for pre-allocation (bytes)
+const ESTIMATED_PAYLOAD_SIZE: usize = 512;
 
 impl ArrowBatchBuilder {
     /// Create a new batch builder
@@ -58,20 +82,53 @@ impl ArrowBatchBuilder {
             pending: Vec::with_capacity(batch_size),
             destination: None,
             batch_size,
+            json_values_buf: Vec::with_capacity(batch_size * ESTIMATED_PAYLOAD_SIZE),
+            json_offsets: vec![0], // offsets always start at 0
+            json_nulls: Vec::with_capacity(batch_size),
+            json_field_name: "_json".to_string(),
         }
     }
 
-    /// Add a JSON object to the batch
+    /// Create a new batch builder with a custom _json field name
+    pub fn with_json_field(batch_size: usize, json_field_name: String) -> Self {
+        let mut builder = Self::new(batch_size);
+        builder.json_field_name = json_field_name;
+        builder
+    }
+
+    /// Add a JSON object to the batch with optional raw payload for _json
     ///
     /// The destination is stored once on first push, not per-row.
-    /// Subsequent pushes should use the same destination (per-table buffer design).
+    /// `raw_payload` is accumulated directly into the sidecar buffer —
+    /// it never enters the Map<String, Value>.
     #[inline]
-    pub fn push(&mut self, data: Map<String, Value>, destination: &str) {
+    pub fn push(
+        &mut self,
+        data: Map<String, Value>,
+        destination: &str,
+        raw_payload: Option<&[u8]>,
+    ) {
         // Store destination once on first push
         if self.destination.is_none() {
             self.destination = Some(Arc::from(destination));
         }
         self.pending.push(data);
+
+        // Accumulate raw payload into sidecar buffer
+        match raw_payload {
+            Some(bytes) if !bytes.is_empty() => {
+                self.json_values_buf.extend_from_slice(bytes);
+                self.json_offsets
+                    .push(self.json_values_buf.len() as i32);
+                self.json_nulls.push(true);
+            }
+            _ => {
+                // No payload — null entry (offset stays same as previous)
+                self.json_offsets
+                    .push(self.json_values_buf.len() as i32);
+                self.json_nulls.push(false);
+            }
+        }
     }
 
     /// Check if batch is ready for conversion (reached target size)
@@ -92,24 +149,71 @@ impl ArrowBatchBuilder {
         self.pending.is_empty()
     }
 
+    /// Build the _json column from sidecar buffer via zero-copy Buffer::from_vec
+    ///
+    /// Constructs a StringArray from the accumulated raw payload bytes.
+    /// Uses Buffer::from_vec() to transfer ownership without copying.
+    fn build_json_column(&mut self) -> (Arc<Field>, ArrayRef) {
+        let offsets = std::mem::replace(&mut self.json_offsets, vec![0]);
+        let values = std::mem::take(&mut self.json_values_buf);
+        let nulls = std::mem::take(&mut self.json_nulls);
+
+        let null_count = nulls.iter().filter(|&&n| !n).count();
+
+        let field = Arc::new(Field::new(&self.json_field_name, DataType::Utf8, true));
+
+        if offsets.len() <= 1 {
+            // Empty — no rows
+            let empty: StringArray = StringArray::new_null(0);
+            return (field, Arc::new(empty));
+        }
+
+        // Build null buffer
+        let null_buffer = if null_count > 0 {
+            Some(arrow::buffer::NullBuffer::from(nulls))
+        } else {
+            None
+        };
+
+        // Zero-copy: Buffer::from_vec takes ownership of the Vec without copying
+        let values_buffer = Buffer::from_vec(values);
+        let offsets_buffer =
+            OffsetBuffer::new(ScalarBuffer::from(offsets));
+
+        let array = StringArray::new(offsets_buffer, values_buffer, null_buffer);
+        (field, Arc::new(array))
+    }
+
     /// Build Arrow RecordBatch from accumulated messages
     ///
     /// Clears the pending buffer after conversion.
+    /// The _json column is built from the sidecar (zero-copy), not from the Map.
     pub fn build(&mut self) -> Result<Option<RecordBatch>> {
         if self.pending.is_empty() {
+            // Reset sidecar state
+            self.json_offsets = vec![0];
+            self.json_values_buf.clear();
+            self.json_nulls.clear();
             return Ok(None);
         }
 
-        let dest = self
-            .destination
-            .as_ref()
-            .map(|d| d.as_ref())
-            .unwrap_or("unknown");
+        // Clone destination before mutable borrow in build_json_column
+        let dest = self.destination.clone();
+        let dest_str = dest.as_ref().map(|d| d.as_ref()).unwrap_or("unknown");
 
-        // Pass pending directly - avoid intermediate Vec allocation
-        let batch = json_batch_to_arrow_direct(&self.pending, dest)?;
+        // Build _json column from sidecar before clearing pending
+        let json_column = self.build_json_column();
+
+        // Build remaining columns from pending Map data
+        let batch = json_batch_to_arrow_with_json(&self.pending, dest_str, json_column)?;
         self.pending.clear();
         // Keep destination for next batch (same table)
+        // Sidecar already cleared in build_json_column via std::mem::take
+
+        // Pre-allocate for next batch
+        self.json_values_buf
+            .reserve(self.batch_size * ESTIMATED_PAYLOAD_SIZE);
+        self.json_nulls.reserve(self.batch_size);
 
         Ok(Some(batch))
     }
@@ -208,12 +312,15 @@ pub fn json_batch_to_arrow(
 
 /// Convert multiple JSON objects to Arrow RecordBatch with shared destination
 ///
-/// Optimized version for per-table buffers where all rows share the same destination.
-/// Avoids intermediate Vec allocation by taking direct slice reference.
-#[inline]
-fn json_batch_to_arrow_direct(
+/// Convert JSON objects to Arrow RecordBatch with a pre-built _json sidecar column
+///
+/// Like `json_batch_to_arrow_direct` but accepts a pre-built `_json` column that
+/// was constructed from raw payload bytes (zero-copy via Buffer::from_vec).
+/// The _json field is NOT read from the Map data — it comes from the sidecar.
+fn json_batch_to_arrow_with_json(
     pending: &[Map<String, Value>],
     destination: &str,
+    json_column: (Arc<Field>, ArrayRef),
 ) -> Result<RecordBatch> {
     if pending.is_empty() {
         let schema = Arc::new(Schema::new(vec![Arc::new(Field::new(
@@ -224,27 +331,35 @@ fn json_batch_to_arrow_direct(
         return Ok(RecordBatch::new_empty(schema));
     }
 
-    // Determine schema from first row
-    let first_data = &pending[0];
-    let mut fields: Vec<Arc<Field>> = Vec::with_capacity(first_data.len() + 1);
+    let (json_field, json_array) = json_column;
+    let json_field_name = json_field.name().clone();
 
-    // _destination column
+    // Determine schema from first row + _destination + _json sidecar
+    let first_data = &pending[0];
+    // +2 for _destination and _json
+    let mut fields: Vec<Arc<Field>> = Vec::with_capacity(first_data.len() + 2);
     fields.push(Arc::new(Field::new("_destination", DataType::Utf8, false)));
 
-    // Data columns - infer type from first row and cache it
+    // Data columns from Map (excluding _json which comes from sidecar)
     let mut column_types: Vec<(&str, DataType)> = Vec::with_capacity(first_data.len());
     for (key, value) in first_data {
+        if key == &json_field_name {
+            continue; // Skip — _json comes from sidecar
+        }
         let data_type = infer_arrow_type(value);
         fields.push(Arc::new(Field::new(key, data_type.clone(), true)));
         column_types.push((key.as_str(), data_type));
     }
 
+    // Append _json field at the end
+    fields.push(json_field);
+
     let schema = Arc::new(Schema::new(fields));
 
     // Build columns
-    let mut columns: Vec<ArrayRef> = Vec::with_capacity(column_types.len() + 1);
+    let mut columns: Vec<ArrayRef> = Vec::with_capacity(column_types.len() + 2);
 
-    // Build _destination column - all rows share same destination
+    // Build _destination column
     let mut dest_builder =
         StringBuilder::with_capacity(pending.len(), pending.len() * destination.len());
     for _ in pending {
@@ -252,7 +367,7 @@ fn json_batch_to_arrow_direct(
     }
     columns.push(Arc::new(dest_builder.finish()));
 
-    // Build data columns using cached types - iterate directly without intermediate Vec
+    // Build data columns (excluding _json)
     for (key, data_type) in &column_types {
         let array = build_column_from_json_iter(
             pending.iter().map(|data| data.get(*key)),
@@ -261,6 +376,9 @@ fn json_batch_to_arrow_direct(
         )?;
         columns.push(array);
     }
+
+    // Append pre-built _json column from sidecar
+    columns.push(json_array);
 
     RecordBatch::try_new(schema, columns)
         .map_err(|e| crate::Error::Transform(format!("Failed to create RecordBatch: {}", e)))
@@ -678,6 +796,7 @@ fn build_column_from_json_iter<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arrow::array::Array;
     use serde_json::json;
 
     #[test]
@@ -721,19 +840,109 @@ mod tests {
     fn test_arrow_batch_builder() {
         let mut builder = ArrowBatchBuilder::new(3);
 
-        builder.push(json!({"id": 1}).as_object().unwrap().clone(), "t1".into());
-        builder.push(json!({"id": 2}).as_object().unwrap().clone(), "t2".into());
+        builder.push(
+            json!({"id": 1}).as_object().unwrap().clone(),
+            "t1",
+            Some(br#"{"id": 1}"#.as_slice()),
+        );
+        builder.push(
+            json!({"id": 2}).as_object().unwrap().clone(),
+            "t2",
+            Some(br#"{"id": 2}"#.as_slice()),
+        );
 
         assert!(!builder.is_ready());
         assert_eq!(builder.len(), 2);
 
-        builder.push(json!({"id": 3}).as_object().unwrap().clone(), "t1".into());
+        builder.push(
+            json!({"id": 3}).as_object().unwrap().clone(),
+            "t1",
+            Some(br#"{"id": 3}"#.as_slice()),
+        );
 
         assert!(builder.is_ready());
 
         let batch = builder.build().unwrap().unwrap();
         assert_eq!(batch.num_rows(), 3);
+        // 1 data column (id) + 1 _destination + 1 _json = 3
+        assert_eq!(batch.num_columns(), 3);
         assert!(builder.is_empty());
+    }
+
+    #[test]
+    fn test_arrow_batch_builder_json_sidecar() {
+        let mut builder = ArrowBatchBuilder::new(10);
+
+        let payload1 = br#"{"event": "login"}"#;
+        let payload2 = br#"{"event": "logout"}"#;
+
+        builder.push(
+            json!({"event": "login"}).as_object().unwrap().clone(),
+            "events",
+            Some(payload1.as_slice()),
+        );
+        builder.push(
+            json!({"event": "logout"}).as_object().unwrap().clone(),
+            "events",
+            None, // No _json for this row
+        );
+        builder.push(
+            json!({"event": "error"}).as_object().unwrap().clone(),
+            "events",
+            Some(payload2.as_slice()),
+        );
+
+        let batch = builder.build().unwrap().unwrap();
+        assert_eq!(batch.num_rows(), 3);
+
+        // Find _json column
+        let json_col_idx = batch.schema().index_of("_json").unwrap();
+        let json_col = batch
+            .column(json_col_idx)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+
+        // Row 0: has payload
+        assert!(!json_col.is_null(0));
+        assert_eq!(json_col.value(0), r#"{"event": "login"}"#);
+
+        // Row 1: null (no payload)
+        assert!(json_col.is_null(1));
+
+        // Row 2: has payload
+        assert!(!json_col.is_null(2));
+        assert_eq!(json_col.value(2), r#"{"event": "logout"}"#);
+    }
+
+    #[test]
+    fn test_arrow_batch_builder_no_json() {
+        // All rows have None payload — _json column should be all nulls
+        let mut builder = ArrowBatchBuilder::new(10);
+
+        builder.push(
+            json!({"id": 1}).as_object().unwrap().clone(),
+            "t1",
+            None,
+        );
+        builder.push(
+            json!({"id": 2}).as_object().unwrap().clone(),
+            "t1",
+            None,
+        );
+
+        let batch = builder.build().unwrap().unwrap();
+        assert_eq!(batch.num_rows(), 2);
+
+        let json_col_idx = batch.schema().index_of("_json").unwrap();
+        let json_col = batch
+            .column(json_col_idx)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+
+        assert!(json_col.is_null(0));
+        assert!(json_col.is_null(1));
     }
 
     #[test]

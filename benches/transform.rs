@@ -164,7 +164,7 @@ fn bench_arrow_batch_builder(c: &mut Criterion) {
                     let mut builder = ArrowBatchBuilder::new(size);
                     for i in 0..size {
                         let row = create_sample_row(i);
-                        builder.push(row, "test.table");
+                        builder.push(row, "test.table", None);
                     }
                     builder
                 })
@@ -183,7 +183,7 @@ fn bench_arrow_batch_builder(c: &mut Criterion) {
                         let mut builder = ArrowBatchBuilder::new(size);
                         for i in 0..size {
                             let row = create_sample_row(i);
-                            builder.push(row, "test.table");
+                            builder.push(row, "test.table", None);
                         }
                         builder
                     },

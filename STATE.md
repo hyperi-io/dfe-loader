@@ -39,16 +39,16 @@ export CARGO_BUILD_JOBS=2
 
 ## Dependency Management
 
-### hs-rustlib via Artifactory (MANDATORY)
+### hyperi-rustlib via Artifactory (MANDATORY)
 
-**hs-rustlib MUST be consumed via Artifactory, NOT local path.**
+**hyperi-rustlib MUST be consumed via Artifactory, NOT local path.**
 
 ```toml
 # ✅ CORRECT - Via Artifactory private registry
-hs-rustlib = { version = "x.y.z", registry = "hypersec", features = ["transport-kafka"] }
+hyperi-rustlib = { version = "x.y.z", registry = "hyperi", features = ["transport-kafka"] }
 
 # ❌ WRONG - Local path (development only, never commit)
-# hs-rustlib = { path = "../hs-rustlib", features = ["transport-kafka"] }
+# hyperi-rustlib = { path = "../hyperi-rustlib", features = ["transport-kafka"] }
 ```
 
 ### Artifactory Configuration
@@ -56,7 +56,7 @@ hs-rustlib = { version = "x.y.z", registry = "hypersec", features = ["transport-
 | Component | Value |
 |-----------|-------|
 | JFrog Domain | `hypersec.jfrog.io` |
-| Registry Name | `hypersec` |
+| Registry Name | `hyperi` |
 | Virtual Repo | `hypersec-cargo-virtual` |
 | Local Repo | `hypersec-cargo-local` |
 | Index URL | `sparse+https://hypersec.jfrog.io/artifactory/api/cargo/hypersec-cargo-virtual/index/` |
@@ -65,25 +65,25 @@ hs-rustlib = { version = "x.y.z", registry = "hypersec", features = ["transport-
 
 1. **Configure registry** in `.cargo/config.toml` (already done in this project):
    ```toml
-   [registries.hypersec]
+   [registries.hyperi]
    index = "sparse+https://hypersec.jfrog.io/artifactory/api/cargo/hypersec-cargo-virtual/index/"
    ```
 
 2. **Set credentials** in `~/.cargo/credentials.toml`:
    ```toml
-   [registries.hypersec]
+   [registries.hyperi]
    token = "Bearer <your-artifactory-token>"
    ```
 
-   Get token: `jf config export hypersec-token | base64 -d | jq -r '.accessToken'`
+   Get token: `jf config export hyperi-token | base64 -d | jq -r '.accessToken'`
 
 ### Version Update Workflow
 
-1. Make changes in `/projects/hs-rustlib`
-2. Commit and push to hs-rustlib repo
+1. Make changes in `/projects/hyperi-rustlib`
+2. Commit and push to hyperi-rustlib repo
 3. CI builds and publishes new version to Artifactory
-4. Update dfe-loader `Cargo.toml` with new version: `hs-rustlib = { version = "0.2.0", ... }`
-5. Run `cargo update -p hs-rustlib` to pull from Artifactory
+4. Update dfe-loader `Cargo.toml` with new version: `hyperi-rustlib = { version = "0.2.0", ... }`
+5. Run `cargo update -p hyperi-rustlib` to pull from Artifactory
 6. Test and commit
 
 ### Submodule Push Access
@@ -92,10 +92,10 @@ By default, CI/AI submodules are read-only (`no-push`). To enable push access:
 
 ```bash
 # Enable push for ci submodule (run once per clone)
-cd ci && git remote set-url --push origin https://github.com/hypersec-io/ci.git
+cd ci && git remote set-url --push origin https://github.com/hyperi-io/ci.git
 
 # Enable push for ai submodule
-cd ai && git remote set-url --push origin https://github.com/hypersec-io/ai.git
+cd ai && git remote set-url --push origin https://github.com/hyperi-io/ai.git
 ```
 
 **Projects with push access enabled:**
@@ -744,7 +744,7 @@ Created comprehensive rebranding plan at `/home/derek/.claude/plans/steady-knitt
 
 - **Blocked on:** `hyperi-rustlib` being published to new registry
 - **Scope:** ~287 files, ~2,000+ occurrences
-- **Infrastructure not changed yet:** hypersec.jfrog.io, hypersec registry, hs-rustlib
+- **Infrastructure not changed yet:** hypersec.jfrog.io, hyperi registry, hyperi-rustlib
 
 ### Git State
 
@@ -779,11 +779,11 @@ Created comprehensive rebranding plan at `/home/derek/.claude/plans/steady-knitt
 
 ### Next Steps (When hyperi-rustlib Ready)
 
-1. Update JFrog domain: `hypersec.jfrog.io` → `hyperi.jfrog.io`
+1. Update JFrog domain: `hypersec.jfrog.io` → `hypersec.jfrog.io`
 2. Update registry name: `hypersec` → `hyperi`
-3. Rename crate: `hs-rustlib` → `hyperi-rustlib`
-4. Update GitHub org references: `hypersec-io` → `hyperi-io`
-5. Rename config file: `.hypersec-ci.yaml` → `.hyperi-ci.yaml`
+3. Rename crate: `hyperi-rustlib` → `hyperi-rustlib`
+4. Update GitHub org references: `hyperi-io` → `hyperi-io`
+5. Rename config file: `.hyperi-ci.yaml` → `.hyperi-ci.yaml`
 
 ### Session Context Summary
 
@@ -854,9 +854,9 @@ Published all crates to HyperSec Artifactory private registry:
 
 | Crate | Version | Registry | Status |
 |-------|---------|----------|--------|
-| `clickhouse-arrow-derive` | 0.3.0 | hypersec | ✅ Published |
-| `clickhouse-arrow` | 0.3.0 | hypersec | ✅ Published |
-| `hs-rustlib` | 0.3.0 | hypersec | ✅ Published |
+| `clickhouse-arrow-derive` | 0.3.0 | hyperi | ✅ Published |
+| `clickhouse-arrow` | 0.3.0 | hyperi | ✅ Published |
+| `hyperi-rustlib` | 0.3.0 | hyperi | ✅ Published |
 
 #### Private CI for clickhouse-arrow Fork
 
@@ -865,25 +865,25 @@ Created workflow dispatch pattern for private CI on public fork:
 - Created [ci/.github/workflows/clickhouse-arrow.yml](ci/.github/workflows/clickhouse-arrow.yml)
 - Triggers: `repository_dispatch`, `workflow_dispatch`, `schedule` (daily 06:00 UTC)
 - Public fork stays clean for upstream PRs
-- Private CI runs from hypersec-io/ci repo
+- Private CI runs from hyperi-io/ci repo
 
-#### hs-rustlib Registry Dependency
+#### hyperi-rustlib Registry Dependency
 
-Updated hs-rustlib to consume clickhouse-arrow from registry instead of git:
+Updated hyperi-rustlib to consume clickhouse-arrow from registry instead of git:
 
 ```toml
 # Before (git dependency - can't publish)
-clickhouse-arrow = { git = "https://github.com/hypersec-io/clickhouse-arrow", ... }
+clickhouse-arrow = { git = "https://github.com/hyperi-io/clickhouse-arrow", ... }
 
 # After (registry dependency - publishable)
-clickhouse-arrow = { version = "0.3.0", registry = "hypersec", ... }
+clickhouse-arrow = { version = "0.3.0", registry = "hyperi", ... }
 ```
 
 ### Key Files Modified
 
 | File | Description |
 |------|-------------|
-| `/projects/hs-rustlib/Cargo.toml` | Registry dependency for clickhouse-arrow |
+| `/projects/hyperi-rustlib/Cargo.toml` | Registry dependency for clickhouse-arrow |
 | `/projects/dfe-loader/ci/.github/workflows/clickhouse-arrow.yml` | New CI workflow |
 | `/projects/clickhouse-arrow-publish/Cargo.toml` | Version 0.3.0, registry config |
 | `/projects/clickhouse-arrow-publish/clickhouse-arrow/Cargo.toml` | Derive via registry |
@@ -893,7 +893,7 @@ clickhouse-arrow = { version = "0.3.0", registry = "hypersec", ... }
 
 1. **Registry over git dependencies** - Required for cargo publish to work
 2. **Workflow dispatch pattern** - Private CI without polluting public fork
-3. **Version 0.3.0** - Aligned clickhouse-arrow, derive, and hs-rustlib versions
+3. **Version 0.3.0** - Aligned clickhouse-arrow, derive, and hyperi-rustlib versions
 
 ### Git State
 
@@ -903,16 +903,16 @@ clickhouse-arrow = { version = "0.3.0", registry = "hypersec", ... }
 
 ### Next Steps
 
-1. **Update dfe-loader** - Use `hs-rustlib = { version = "0.3.0", registry = "hypersec" }`
+1. **Update dfe-loader** - Use `hyperi-rustlib = { version = "0.3.0", registry = "hyperi" }`
 2. **Commit ci submodule** - Record new clickhouse-arrow workflow
 3. **Test integration** - Verify dfe-loader works with registry dependencies
 
 ### Session Context Summary
 
-Completed Artifactory publishing pipeline for clickhouse-arrow fork and hs-rustlib.
-All three crates (clickhouse-arrow-derive, clickhouse-arrow, hs-rustlib) now at
-v0.3.0 in hypersec registry. Created private CI workflow for the public fork.
-dfe-loader can now consume hs-rustlib with clickhouse feature from Artifactory.
+Completed Artifactory publishing pipeline for clickhouse-arrow fork and hyperi-rustlib.
+All three crates (clickhouse-arrow-derive, clickhouse-arrow, hyperi-rustlib) now at
+v0.3.0 in hyperi registry. Created private CI workflow for the public fork.
+dfe-loader can now consume hyperi-rustlib with clickhouse feature from Artifactory.
 
 ---
 
@@ -1049,7 +1049,7 @@ Arrow schemas. All 421 tests passing with production-ready verification patterns
 
 ### Session 2025-12-29 - Transport Abstraction
 
-- Implemented transport abstraction layer in hs-rustlib (Kafka/Zenoh/Memory)
+- Implemented transport abstraction layer in hyperi-rustlib (Kafka/Zenoh/Memory)
 - Integrated TransportAdapter into dfe-loader with zero-copy design
 - Created 15 unit tests using MemoryTransport (no infrastructure required)
 - 292 tests passing (277 lib + 15 unit)

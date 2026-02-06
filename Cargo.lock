@@ -1990,9 +1990,9 @@ dependencies = [
 
 [[package]]
 name = "hs-rustlib"
-version = "1.2.2"
+version = "1.3.8"
 source = "sparse+https://hypersec.jfrog.io/artifactory/api/cargo/hypersec-cargo-virtual/index/"
-checksum = "b91520e8b2bc853f54b8adcb74f8d1d95321fdc8e61ee092f4d13991197766b3"
+checksum = "2904636270f03fdf9d4e86c5136e5d1eec49b9d60b8a9a6515a3d8d8b7990c54"
 dependencies = [
  "async-trait",
  "chrono",

@@ -304,7 +304,7 @@ fn test_error_inconsistent_schema_in_batch() {
     ];
 
     for msg in messages {
-        buffer_manager.push("test.events", msg.as_object().unwrap().clone(), None);
+        buffer_manager.push("test.events", msg.as_object().unwrap().clone(), None, None);
     }
 
     // Flush and check handling

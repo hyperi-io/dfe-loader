@@ -46,7 +46,7 @@ ESH ──HTTP POST──► RECEIVER ──Transport──► LOADER ──► 
 
 ## Dependencies
 
-- `hs-rustlib` transport module (shared with dfe-loader)
+- `hyperi-rustlib` transport module (shared with dfe-loader)
 
 ---
 
