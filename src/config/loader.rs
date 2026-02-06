@@ -612,11 +612,29 @@ pub struct MetadataConfig {
     /// Drop tags entirely after routing extraction (saves storage)
     pub drop_tags: bool,
 
-    // logjson capture (Common Header v2)
+    // _json capture (Common Header v2)
     /// Store complete original Kafka message as JSON before transformation
-    pub capture_logjson: bool,
-    /// Output field name for logjson
-    pub logjson_output: String,
+    #[serde(alias = "capture_logjson")]
+    pub capture_json: bool,
+    /// Output field name for _json
+    #[serde(alias = "logjson_output")]
+    pub json_output: String,
+
+    // _raw field injection (Common Header v2)
+    // Implements @renamed: first(source_fields...) → raw_output
+    // Silent no-op if destination already present in data
+    /// Enable _raw field injection from source (zero-copy rename)
+    pub capture_raw: bool,
+    /// Source fields to try for rename (first match wins). Default: ["logoriginal"]
+    pub raw_source_fields: Vec<String>,
+    /// Output field name for raw log line
+    pub raw_output: String,
+
+    // Per-table capture overrides
+    /// Tables where _json capture is disabled (e.g., ["common.metrics"])
+    pub disable_json_tables: Vec<String>,
+    /// Tables where _raw capture is disabled (e.g., ["common.metrics"])
+    pub disable_raw_tables: Vec<String>,
 
     // Routing field removal (Common Header v2)
     /// Remove routing fields from output after extraction
@@ -640,14 +658,40 @@ impl Default for MetadataConfig {
             tags_output: "_tags".to_string(),
             drop_tags: false,
 
-            // logjson capture defaults
-            capture_logjson: true,
-            logjson_output: "_json".to_string(),
+            // _json capture defaults
+            capture_json: true,
+            json_output: "_json".to_string(),
+
+            // _raw capture defaults (@renamed: logoriginal → _raw)
+            capture_raw: true,
+            raw_source_fields: vec!["logoriginal".to_string()],
+            raw_output: "_raw".to_string(),
+
+            // Per-table overrides
+            disable_json_tables: vec![],
+            disable_raw_tables: vec![],
 
             // Routing field removal defaults
             remove_routing_fields: true,
         }
     }
+}
+
+// ============================================================================
+// Per-Table Capture Override Configuration
+// ============================================================================
+
+/// Per-table capture override configuration.
+///
+/// Resolved from two sources (DDL tags take precedence over config lists):
+/// 1. Config: `disable_json_tables` / `disable_raw_tables` lists
+/// 2. DDL: `@no_capture_json: true` / `@no_capture_raw: true` in table COMMENT
+#[derive(Debug, Clone, Default)]
+pub struct TableCaptureConfig {
+    /// Whether _json capture is disabled for this table
+    pub disable_json: bool,
+    /// Whether _raw capture is disabled for this table
+    pub disable_raw: bool,
 }
 
 // ============================================================================
@@ -959,6 +1003,55 @@ mod tests {
     fn test_config_validation_valid() {
         let config = Config::default();
         assert!(config.validate().is_ok());
+    }
+
+    // ========================================================================
+    // Metadata Config Tests
+    // ========================================================================
+
+    #[test]
+    fn test_metadata_config_defaults() {
+        let config = MetadataConfig::default();
+        assert!(config.capture_json);
+        assert_eq!(config.json_output, "_json");
+        assert!(config.capture_raw);
+        assert_eq!(config.raw_output, "_raw");
+        assert_eq!(config.raw_source_fields, vec!["logoriginal"]);
+        assert!(config.disable_json_tables.is_empty());
+        assert!(config.disable_raw_tables.is_empty());
+    }
+
+    #[test]
+    fn test_metadata_config_backward_compat_logjson() {
+        // Old config format with capture_logjson should still work via serde alias
+        let json_str = r#"{
+            "capture_logjson": false,
+            "logjson_output": "_logjson_custom"
+        }"#;
+        let config: MetadataConfig = serde_json::from_str(json_str).unwrap();
+        assert!(!config.capture_json);
+        assert_eq!(config.json_output, "_logjson_custom");
+    }
+
+    #[test]
+    fn test_metadata_config_new_field_names() {
+        let json_str = r#"{
+            "capture_json": false,
+            "json_output": "_custom_json",
+            "capture_raw": false,
+            "raw_output": "_custom_raw",
+            "raw_source_fields": ["original_log", "raw_message"],
+            "disable_json_tables": ["common.metrics"],
+            "disable_raw_tables": ["common.health"]
+        }"#;
+        let config: MetadataConfig = serde_json::from_str(json_str).unwrap();
+        assert!(!config.capture_json);
+        assert_eq!(config.json_output, "_custom_json");
+        assert!(!config.capture_raw);
+        assert_eq!(config.raw_output, "_custom_raw");
+        assert_eq!(config.raw_source_fields, vec!["original_log", "raw_message"]);
+        assert_eq!(config.disable_json_tables, vec!["common.metrics"]);
+        assert_eq!(config.disable_raw_tables, vec!["common.health"]);
     }
 
     // ========================================================================

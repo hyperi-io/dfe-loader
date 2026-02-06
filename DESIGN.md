@@ -587,16 +587,16 @@ fn should_flatten(field: &str, schema: &TableSchema) -> bool {
 
 ---
 
-## Transport Abstraction (hs-rustlib)
+## Transport Abstraction (hyperi-rustlib)
 
-The transport layer is implemented in `hs-rustlib` as a shared library for all HyperSec Rust projects.
+The transport layer is implemented in `hyperi-rustlib` as a shared library for all HyperSec Rust projects.
 This provides a consistent pattern for message transport with support for JSON/MsgPack payloads.
 
 ### Architecture
 
 ```mermaid
 graph TB
-    subgraph "hs-rustlib Transport Layer"
+    subgraph "hyperi-rustlib Transport Layer"
         T[Transport Trait]
 
         subgraph "Implementations"
@@ -705,7 +705,7 @@ impl PayloadFormat {
 ### Feature Flags
 
 ```toml
-# Cargo.toml (hs-rustlib)
+# Cargo.toml (hyperi-rustlib)
 [features]
 transport = ["tokio", "async-trait", "serde_json", "rmp-serde", "chrono"]
 transport-memory = ["transport"]
@@ -761,10 +761,10 @@ transport.inject(Some("test-topic"), payload).await?;
 
 ### Local Performance Deviations
 
-While `hs-rustlib` provides the baseline transport pattern, this project MAY deviate locally
+While `hyperi-rustlib` provides the baseline transport pattern, this project MAY deviate locally
 for performance-critical paths:
 
-- **sonic-rs for JSON**: SIMD-accelerated JSON parsing (vs serde_json in hs-rustlib)
+- **sonic-rs for JSON**: SIMD-accelerated JSON parsing (vs serde_json in hyperi-rustlib)
 - **Direct Arrow conversion**: Skip intermediate Value representation where possible
 - **Mison structural indexing**: Schema-guided field extraction without full parse
 

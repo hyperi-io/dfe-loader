@@ -88,7 +88,7 @@ s3://bucket/
 
 ## Dependencies
 
-- `hs-rustlib` transport module (shared with dfe-loader)
+- `hyperi-rustlib` transport module (shared with dfe-loader)
 - `arrow` + `parquet` crates for Parquet writing
 - `aws-sdk-s3` or `object_store` crate for S3 API
 

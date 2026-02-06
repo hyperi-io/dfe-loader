@@ -48,14 +48,16 @@ CREATE TABLE IF NOT EXISTS {db}.{table}
     -- LowCardinality for dictionary encoding (orgs are repeated)
     `_org_id` LowCardinality(String) CODEC(ZSTD(1)),
 
-    -- @captured: raw_payload (pre-transform)
-    -- @config: metadata.capture_logjson (default: false)
-    -- Original log line (full-text searchable when enabled)
+    -- @renamed: logoriginal
+    -- @config: metadata.capture_raw (default: true), metadata.raw_source_fields
+    -- Original log line (zero-copy rename from source field)
+    -- Silent no-op if _raw already present in data (upstream may populate directly)
+    -- Full-text searchable when enabled (see Text Search notes below)
     `_raw` Nullable(String) CODEC(ZSTD(3)),
 
     -- @captured: raw_payload as JSON (pre-transform)
-    -- @config: metadata.capture_logjson (default: true)
-    -- Complete message as JSON (structured queries)
+    -- @config: metadata.capture_json (default: true)
+    -- Complete Kafka message as JSON (structured queries)
     -- ClickHouse JSON type for columnar storage of dynamic fields
     `_json` Nullable(JSON) CODEC(ZSTD(3)),
 

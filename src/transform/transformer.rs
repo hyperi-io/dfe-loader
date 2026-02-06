@@ -3,7 +3,8 @@
 
 //! Main transformer that applies all transformations
 //!
-//! Pipeline: Parse → Extract tags/logjson → Flatten → Timestamp → Metadata → Sanitize → Remove routing fields
+//! Pipeline: Parse → Extract tags → Flatten → Timestamp → _raw rename → Metadata → Sanitize → Remove routing fields
+//! Note: _json is handled by ArrowBatchBuilder sidecar (zero-copy from raw bytes), not by the transformer.
 
 use chrono::Utc;
 use serde_json::{Map, Value};
@@ -32,7 +33,8 @@ pub struct TransformResult {
 ///
 /// Common Header v2 features:
 /// - Extract `_tags` from config-driven source fields before flattening
-/// - Capture `logjson` (raw payload) before transformation
+/// - Capture `_json` (raw payload) before transformation
+/// - Inject `_raw` from source field (zero-copy rename)
 /// - Remove routing fields after extraction
 ///
 /// Uses static strings for common field names to avoid allocation per message.
@@ -50,9 +52,15 @@ pub struct Transformer {
     tags_output: String,
     drop_tags: bool,
 
-    // Common Header v2: logjson capture
-    capture_logjson: bool,
-    logjson_output: String,
+    // Common Header v2: _json field name (used for sanitization preservation)
+    // Note: _json capture is controlled at the orchestrator/buffer level, not here.
+    // The ArrowBatchBuilder builds _json from raw bytes via sidecar (zero-copy).
+    json_output: String,
+
+    // Common Header v2: _raw injection (zero-copy rename from source field)
+    capture_raw: bool,
+    raw_source_fields: Vec<String>,
+    raw_output: String,
 
     // Common Header v2: Routing field removal
     remove_routing_fields: bool,
@@ -84,9 +92,13 @@ impl Transformer {
             tags_output: metadata_config.tags_output.clone(),
             drop_tags: metadata_config.drop_tags,
 
-            // Common Header v2: logjson capture
-            capture_logjson: metadata_config.capture_logjson,
-            logjson_output: metadata_config.logjson_output.clone(),
+            // Common Header v2: _json field name (capture controlled at orchestrator level)
+            json_output: metadata_config.json_output.clone(),
+
+            // Common Header v2: _raw injection
+            capture_raw: metadata_config.capture_raw,
+            raw_source_fields: metadata_config.raw_source_fields.clone(),
+            raw_output: metadata_config.raw_output.clone(),
 
             // Common Header v2: Routing field removal (empty until with_routing called)
             remove_routing_fields: metadata_config.remove_routing_fields,
@@ -111,20 +123,33 @@ impl Transformer {
         transformer
     }
 
-    /// Transform a parsed JSON value with raw payload for logjson capture
+    /// Get the _json output field name
+    #[must_use]
+    pub fn json_output(&self) -> &str {
+        &self.json_output
+    }
+
+    /// Get the _raw output field name
+    #[must_use]
+    pub fn raw_output(&self) -> &str {
+        &self.raw_output
+    }
+
+    /// Transform a parsed JSON value for Common Header v2 processing.
     ///
-    /// This is the primary entry point for Common Header v2 processing.
-    /// The raw_payload is stored as `logjson` before any transformation.
+    /// Applies: flatten → timestamp validation → `_raw` rename → `_tags` extraction →
+    /// `_org_id` injection → routing field removal → field sanitization.
+    ///
+    /// Note: `_json` is NOT injected here. It's built from raw Kafka bytes directly
+    /// in `ArrowBatchBuilder` sidecar (zero-copy via `Buffer::from_vec`).
     ///
     /// ## Parameters
     ///
     /// - `value`: Parsed JSON object to transform
-    /// - `raw_payload`: Original raw bytes for logjson capture
     /// - `org_id`: Optional org_id value for _org_id field (RLS)
     pub fn transform_with_raw(
         &self,
         value: Value,
-        raw_payload: &[u8],
         org_id: Option<&str>,
     ) -> Result<TransformResult> {
         // Cache current time once per message to avoid multiple syscalls
@@ -212,20 +237,19 @@ impl Transformer {
             data.insert(TIMESTAMP_RECEIVED_OUTPUT_FIELD.into(), ts);
         }
 
-        // Step 5: Add logjson (raw payload as JSON string for JSON column)
-        // OPTIMIZATION: Use from_utf8_unchecked via Cow to avoid allocation when possible
-        if self.capture_logjson && !raw_payload.is_empty() {
-            // Store raw payload as a JSON string value
-            // ClickHouse JSON column will parse this
-            if let Ok(json_str) = std::str::from_utf8(raw_payload) {
-                // OPTIMIZATION: Create Value::String directly from &str without intermediate String
-                // serde_json::Value::String takes ownership, so we need a String, but we can
-                // avoid the intermediate to_string() by using String::from() which is the same
-                // but more explicit. The real savings come from skipping empty payloads above.
-                data.insert(
-                    self.logjson_output.clone(),
-                    Value::String(String::from(json_str)),
-                );
+        // Step 5: _json is now built from raw bytes directly in ArrowBatchBuilder sidecar
+        // (zero-copy via Buffer::from_vec). No longer injected into the Map here.
+        // The orchestrator passes raw_payload to BufferManager.push() instead.
+
+        // Step 5b: @renamed: first(logoriginal/_raw/raw/raw_log/message) → _raw
+        // Zero-copy rename via data.remove() — ownership transfer, no clone.
+        // Silent no-op if destination already present (upstream may populate _raw directly).
+        if self.capture_raw && !data.contains_key(&self.raw_output) {
+            for field in &self.raw_source_fields {
+                if let Some(val) = data.remove(field.as_str()) {
+                    data.insert(self.raw_output.clone(), val);
+                    break;
+                }
             }
         }
 
@@ -257,8 +281,7 @@ impl Transformer {
     ///
     /// Legacy method - use transform_with_raw for Common Header v2 features.
     pub fn transform(&self, value: Value) -> Result<TransformResult> {
-        // For backward compatibility, call transform_with_raw with empty payload and no org_id
-        self.transform_with_raw(value, &[], None)
+        self.transform_with_raw(value, None)
     }
 
     /// Extract tags from the first matching field in tags_fields
@@ -353,15 +376,14 @@ impl Transformer {
         // Preserve system fields that start with underscore
         // These are common header fields that must not be sanitized
         if key == self.tags_output
-            || key == self.logjson_output
+            || key == self.json_output
+            || key == self.raw_output
             || key == self.org_id_output
             || key == TIMESTAMP_OUTPUT_FIELD         // _timestamp
             || key == TIMESTAMP_RECEIVED_OUTPUT_FIELD // _timestamp_received
             || key == TIMESTAMP_COLLECTOR_FIELD      // _timestamp_collector
             || key == "_timestamp_load"              // ClickHouse DEFAULT
             || key == "_uuid"                        // ClickHouse DEFAULT
-            || key == "_raw"
-        // Original log line
         {
             return key;
         }
@@ -420,7 +442,7 @@ impl Transformer {
         let value: Value = sonic_rs::from_slice(json)
             .map_err(|e| crate::Error::Json(format!("Parse error: {}", e)))?;
 
-        let result = self.transform_with_raw(value, json, None)?;
+        let result = self.transform_with_raw(value, None)?;
 
         serde_json::to_vec(&Value::Object(result.data))
             .map_err(|e| crate::Error::Json(format!("Serialize error: {}", e)))
@@ -448,8 +470,11 @@ impl Default for Transformer {
             tags_output: "_tags".to_string(),
             drop_tags: false,
 
-            capture_logjson: true,
-            logjson_output: "_json".to_string(),
+            json_output: "_json".to_string(),
+
+            capture_raw: true,
+            raw_source_fields: vec!["logoriginal".to_string()],
+            raw_output: "_raw".to_string(),
 
             remove_routing_fields: true,
             routing_db_fields: vec!["org_id".to_string()],
@@ -543,7 +568,7 @@ mod tests {
         let raw = br#"{"event": "login", "tags": {"source": "api", "level": "info"}}"#;
         let value: Value = serde_json::from_slice(raw).unwrap();
 
-        let result = transformer.transform_with_raw(value, raw, None).unwrap();
+        let result = transformer.transform_with_raw(value, None).unwrap();
 
         // _tags should contain the extracted tags object
         assert!(result.data.contains_key("_tags"));
@@ -552,15 +577,17 @@ mod tests {
     }
 
     #[test]
-    fn test_transformer_captures_logjson() {
+    fn test_transformer_no_json_in_map() {
+        // _json is built from raw bytes in ArrowBatchBuilder sidecar,
+        // NOT injected into the Map by the transformer.
         let transformer = Transformer::default();
         let raw = br#"{"event": "login", "user_id": 123}"#;
         let value: Value = serde_json::from_slice(raw).unwrap();
 
-        let result = transformer.transform_with_raw(value, raw, None).unwrap();
+        let result = transformer.transform_with_raw(value, None).unwrap();
 
-        // _json should contain the raw payload
-        assert!(result.data.contains_key("_json"));
+        // _json should NOT be in the Map (sidecar handles it)
+        assert!(!result.data.contains_key("_json"));
     }
 
     #[test]
@@ -569,7 +596,7 @@ mod tests {
         let raw = br#"{"org_id": "acme", "event_category": "auth", "data": "test"}"#;
         let value: Value = serde_json::from_slice(raw).unwrap();
 
-        let result = transformer.transform_with_raw(value, raw, None).unwrap();
+        let result = transformer.transform_with_raw(value, None).unwrap();
 
         // Routing fields should be removed
         assert!(!result.data.contains_key("org_id"));
@@ -584,7 +611,7 @@ mod tests {
         let raw = br#"{"event": "test", "tags": {"level": "info"}}"#;
         let value: Value = serde_json::from_slice(raw).unwrap();
 
-        let result = transformer.transform_with_raw(value, raw, None).unwrap();
+        let result = transformer.transform_with_raw(value, None).unwrap();
 
         // _tags should not be trimmed to "tags" by underscore sanitization
         assert!(result.data.contains_key("_tags"));
@@ -599,9 +626,123 @@ mod tests {
         let raw = br#"{"event": "login", "tags": {"source": "api"}}"#;
         let value: Value = serde_json::from_slice(raw).unwrap();
 
-        let result = transformer.transform_with_raw(value, raw, None).unwrap();
+        let result = transformer.transform_with_raw(value, None).unwrap();
 
         // _tags should not be present when drop_tags is true
         assert!(!result.data.contains_key("_tags"));
+    }
+
+    #[test]
+    fn test_transformer_captures_raw_from_logoriginal() {
+        let transformer = Transformer::default();
+        let raw = br#"{"event": "login", "logoriginal": "raw syslog line here"}"#;
+        let value: Value = serde_json::from_slice(raw).unwrap();
+
+        let result = transformer.transform_with_raw(value, None).unwrap();
+
+        // _raw should contain the value from logoriginal (zero-copy rename)
+        assert_eq!(result.data["_raw"], "raw syslog line here");
+        // Source field should be removed (rename, not copy)
+        assert!(!result.data.contains_key("logoriginal"));
+    }
+
+    #[test]
+    fn test_transformer_raw_first_match_wins() {
+        let mut transformer = Transformer::default();
+        // Override with multiple source fields to test first-match
+        transformer.raw_source_fields = vec![
+            "logoriginal".to_string(),
+            "message".to_string(),
+        ];
+        // Both logoriginal and message exist — logoriginal is first in raw_source_fields
+        let raw = br#"{"event": "test", "logoriginal": "first", "message": "second"}"#;
+        let value: Value = serde_json::from_slice(raw).unwrap();
+
+        let result = transformer.transform_with_raw(value, None).unwrap();
+
+        assert_eq!(result.data["_raw"], "first");
+        // logoriginal removed, message remains (only first match consumed)
+        assert!(!result.data.contains_key("logoriginal"));
+        assert!(result.data.contains_key("message"));
+    }
+
+    #[test]
+    fn test_transformer_raw_is_rename_not_copy() {
+        let transformer = Transformer::default();
+        // logoriginal is the default source field
+        let raw = br#"{"event": "test", "logoriginal": "the log line"}"#;
+        let value: Value = serde_json::from_slice(raw).unwrap();
+
+        let result = transformer.transform_with_raw(value, None).unwrap();
+
+        // logoriginal is in raw_source_fields — should be renamed to _raw
+        assert_eq!(result.data["_raw"], "the log line");
+        // Source field gone (ownership transferred)
+        assert!(!result.data.contains_key("logoriginal"));
+    }
+
+    #[test]
+    fn test_transformer_raw_silent_noop_if_present() {
+        let transformer = Transformer::default();
+        // Data already has _raw populated by upstream — rename should be skipped
+        let raw = br#"{"event": "test", "logoriginal": "source value", "_raw": "upstream value"}"#;
+        let value: Value = serde_json::from_slice(raw).unwrap();
+
+        let result = transformer.transform_with_raw(value, None).unwrap();
+
+        // _raw should keep the upstream value (silent no-op)
+        assert_eq!(result.data["_raw"], "upstream value");
+        // logoriginal should NOT be removed (rename was skipped)
+        assert!(result.data.contains_key("logoriginal"));
+    }
+
+    #[test]
+    fn test_transformer_raw_disabled() {
+        let mut transformer = Transformer::default();
+        transformer.capture_raw = false;
+
+        let raw = br#"{"event": "test", "logoriginal": "raw line"}"#;
+        let value: Value = serde_json::from_slice(raw).unwrap();
+
+        let result = transformer.transform_with_raw(value, None).unwrap();
+
+        // _raw should NOT be present when capture_raw is false
+        assert!(!result.data.contains_key("_raw"));
+        // Source field should remain untouched
+        assert!(result.data.contains_key("logoriginal"));
+    }
+
+    #[test]
+    fn test_transformer_raw_no_match() {
+        let transformer = Transformer::default();
+        // No raw_source_fields present in data
+        let raw = br#"{"event": "test", "custom_field": "value"}"#;
+        let value: Value = serde_json::from_slice(raw).unwrap();
+
+        let result = transformer.transform_with_raw(value, None).unwrap();
+
+        // _raw should not be present (no matching source field)
+        assert!(!result.data.contains_key("_raw"));
+    }
+
+    #[test]
+    fn test_transformer_does_not_inject_json() {
+        // _json is now built from raw bytes in ArrowBatchBuilder sidecar,
+        // not injected by the transformer. Verify it's absent from the Map.
+        let transformer = Transformer::default();
+        let raw = br#"{"event": "test"}"#;
+        let value: Value = serde_json::from_slice(raw).unwrap();
+
+        let result = transformer.transform_with_raw(value, None).unwrap();
+
+        // _json should NEVER be in the Map (handled by ArrowBatchBuilder sidecar)
+        assert!(!result.data.contains_key("_json"));
+    }
+
+    #[test]
+    fn test_transformer_output_accessors() {
+        let transformer = Transformer::default();
+        assert_eq!(transformer.json_output(), "_json");
+        assert_eq!(transformer.raw_output(), "_raw");
     }
 }

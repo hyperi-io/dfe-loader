@@ -685,11 +685,23 @@ Composite risk score from multiple enrichment sources.
 
 ### @renamed
 
-Field is renamed from source (no transformation, just name change).
+Field is renamed from source (no transformation, just name change). Uses `data.remove()` for zero-copy ownership transfer — the source field is removed and its value moves to the destination.
 
 ```
 @renamed: original_name
+@renamed: first(field1/field2/field3)
 ```
+
+| Syntax | Description |
+|--------|-------------|
+| `@renamed: field` | Rename source field to destination, NULL if missing |
+| `@renamed: first(a/b/c)` | First non-null from ordered list (/ separator), renamed to destination |
+
+**Semantics:**
+
+- **Zero-copy rename**: Source field is removed (`data.remove()`), value transferred to destination. No clone.
+- **Silent no-op if destination exists**: If the destination field is already present in the data, the rename is skipped entirely. This prevents overwriting upstream-populated fields.
+- **First-match wins**: With `first()`, fields are tried in order. The first present field is renamed; remaining candidates are left untouched.
 
 **Examples:**
 
@@ -699,6 +711,30 @@ Field is renamed from source (no transformation, just name change).
 
 -- @renamed: org
 `_org_id` String,
+
+-- @renamed: first(logoriginal/_raw/raw/raw_log/message)
+`_raw` Nullable(String) CODEC(ZSTD(3)),
+```
+
+**Implementation:**
+
+```rust
+// @renamed: field
+if !data.contains_key("_destination") {
+    if let Some(val) = data.remove("source_field") {
+        data.insert("_destination".to_string(), val);
+    }
+}
+
+// @renamed: first(a/b/c)
+if !data.contains_key("_destination") {
+    for field in &["a", "b", "c"] {
+        if let Some(val) = data.remove(*field) {
+            data.insert("_destination".to_string(), val);
+            break;
+        }
+    }
+}
 ```
 
 ## Operators
@@ -778,7 +814,7 @@ CREATE TABLE events (
 2. **@generated** fields are omitted - database provides value
 3. **@captured** fields are captured before any transformation
 4. **@computed** fields are calculated during transformation
-5. **@renamed** fields are simple name mappings
+5. **@renamed** fields are zero-copy renames (silent no-op if destination already present)
 
 ### Input vs Output Names
 
@@ -805,7 +841,8 @@ The data prep stage (transformer) implements these expressions:
 | `@generated: expr` | Field omitted from insert, DB DEFAULT used |
 | `@captured: payload` | Captured before flatten/transform |
 | `@computed: expr` | Custom logic per expression |
-| `@renamed: field` | Same as `@source:` with no transform |
+| `@renamed: field` | `data.remove("field")` → destination; no-op if destination exists |
+| `@renamed: first(a/b)` | Try each field via `remove()`, first match renamed; no-op if destination exists |
 
 ## CPU Cost Summary
 

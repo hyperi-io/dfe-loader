@@ -4,6 +4,6 @@ _timestamp,DateTime64(3),,false,Delta/ZSTD(1),@source: timestamp | now(),Event o
 _timestamp_received,DateTime64(3),,true,Delta/ZSTD(1),@source: timestamp_received,When receiver/loader received the event
 _uuid,UUID,generateUUIDv7(),false,,@generated: generateUUIDv7(),Unique event ID UUIDv7 (time-ordered)
 _org_id,String,,false,ZSTD(1),@source: org_id,Organisation ID for RLS (first in ORDER BY)
-_raw,String,,true,ZSTD(3),@captured: raw_payload,Original log line (text search when enabled)
+_raw,String,,true,ZSTD(3),@renamed: logoriginal,Original log line (zero-copy rename from source)
 _json,JSON,,true,ZSTD(3),@captured: raw_payload as JSON,Complete Kafka message as JSON
 _tags,JSON,,true,ZSTD(3),@source: first(tags/_tags/meta/metadata.tags),Metadata and collector/agent info
