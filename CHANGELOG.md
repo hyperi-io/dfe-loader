@@ -1,3 +1,11 @@
+# [1.5.0](https://github.com/hypersec-io/dfe-loader/compare/v1.4.0...v1.5.0) (2026-02-09)
+
+
+### Features
+
+* **bench:** add fair E2E bakeoff benchmark (Mison vs Decoder vs Current) ([db6d44f](https://github.com/hypersec-io/dfe-loader/commit/db6d44f1a4c186dbd1bc8b6091cbcfafb7379cbd))
+* zero-copy _json sidecar + configurable _raw/_json field control ([6e0d037](https://github.com/hypersec-io/dfe-loader/commit/6e0d0371b062c56ff29cb114a082f180663b2ac3))
+
 # [1.4.0](https://github.com/hypersec-io/dfe-loader/compare/v1.3.1...v1.4.0) (2026-02-05)
 
 
