@@ -1,3 +1,10 @@
+## [1.5.1](https://github.com/hypersec-io/dfe-loader/compare/v1.5.0...v1.5.1) (2026-02-09)
+
+
+### Bug Fixes
+
+* **ci:** update ci submodule with cargo registry name fix ([b8f7eec](https://github.com/hypersec-io/dfe-loader/commit/b8f7eecc9263c76c3c25c94db1c1a0df93d39212))
+
 # [1.5.0](https://github.com/hypersec-io/dfe-loader/compare/v1.4.0...v1.5.0) (2026-02-09)
 
 
