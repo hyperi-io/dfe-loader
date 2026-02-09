@@ -383,7 +383,8 @@ impl Transformer {
             || key == TIMESTAMP_RECEIVED_OUTPUT_FIELD // _timestamp_received
             || key == TIMESTAMP_COLLECTOR_FIELD      // _timestamp_collector
             || key == "_timestamp_load"              // ClickHouse DEFAULT
-            || key == "_uuid"                        // ClickHouse DEFAULT
+            || key == "_uuid"
+        // ClickHouse DEFAULT
         {
             return key;
         }
@@ -650,10 +651,7 @@ mod tests {
     fn test_transformer_raw_first_match_wins() {
         let mut transformer = Transformer::default();
         // Override with multiple source fields to test first-match
-        transformer.raw_source_fields = vec![
-            "logoriginal".to_string(),
-            "message".to_string(),
-        ];
+        transformer.raw_source_fields = vec!["logoriginal".to_string(), "message".to_string()];
         // Both logoriginal and message exist — logoriginal is first in raw_source_fields
         let raw = br#"{"event": "test", "logoriginal": "first", "message": "second"}"#;
         let value: Value = serde_json::from_slice(raw).unwrap();
