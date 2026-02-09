@@ -73,7 +73,7 @@ group rather than publicly.
 
 For commercial licensing enquiries:
 
-**Email**: sales@hyperi.com.au
+**Email**: sales@hyperi.io
 
 **Licensor**: HYPERI PTY LIMITED (ABN 31 622 581 748)
 
