@@ -118,14 +118,12 @@ impl ArrowBatchBuilder {
         match raw_payload {
             Some(bytes) if !bytes.is_empty() => {
                 self.json_values_buf.extend_from_slice(bytes);
-                self.json_offsets
-                    .push(self.json_values_buf.len() as i32);
+                self.json_offsets.push(self.json_values_buf.len() as i32);
                 self.json_nulls.push(true);
             }
             _ => {
                 // No payload — null entry (offset stays same as previous)
-                self.json_offsets
-                    .push(self.json_values_buf.len() as i32);
+                self.json_offsets.push(self.json_values_buf.len() as i32);
                 self.json_nulls.push(false);
             }
         }
@@ -177,8 +175,7 @@ impl ArrowBatchBuilder {
 
         // Zero-copy: Buffer::from_vec takes ownership of the Vec without copying
         let values_buffer = Buffer::from_vec(values);
-        let offsets_buffer =
-            OffsetBuffer::new(ScalarBuffer::from(offsets));
+        let offsets_buffer = OffsetBuffer::new(ScalarBuffer::from(offsets));
 
         let array = StringArray::new(offsets_buffer, values_buffer, null_buffer);
         (field, Arc::new(array))
@@ -920,16 +917,8 @@ mod tests {
         // All rows have None payload — _json column should be all nulls
         let mut builder = ArrowBatchBuilder::new(10);
 
-        builder.push(
-            json!({"id": 1}).as_object().unwrap().clone(),
-            "t1",
-            None,
-        );
-        builder.push(
-            json!({"id": 2}).as_object().unwrap().clone(),
-            "t1",
-            None,
-        );
+        builder.push(json!({"id": 1}).as_object().unwrap().clone(), "t1", None);
+        builder.push(json!({"id": 2}).as_object().unwrap().clone(), "t1", None);
 
         let batch = builder.build().unwrap().unwrap();
         assert_eq!(batch.num_rows(), 2);

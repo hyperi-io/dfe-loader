@@ -72,11 +72,7 @@ impl CaptureOverrides {
                 .iter()
                 .cloned()
                 .collect(),
-            disable_raw_tables: metadata_config
-                .disable_raw_tables
-                .iter()
-                .cloned()
-                .collect(),
+            disable_raw_tables: metadata_config.disable_raw_tables.iter().cloned().collect(),
             pending_tables: Vec::new(),
         }
     }
@@ -124,10 +120,18 @@ impl CaptureOverrides {
             });
 
         // DDL tags override config (only to disable)
-        if tags.get("no_capture_json").map(|v| v == "true").unwrap_or(false) {
+        if tags
+            .get("no_capture_json")
+            .map(|v| v == "true")
+            .unwrap_or(false)
+        {
             entry.disable_json = true;
         }
-        if tags.get("no_capture_raw").map(|v| v == "true").unwrap_or(false) {
+        if tags
+            .get("no_capture_raw")
+            .map(|v| v == "true")
+            .unwrap_or(false)
+        {
             entry.disable_raw = true;
         }
     }
@@ -465,8 +469,7 @@ impl Orchestrator {
 
         // Step 4: Transform (flatten, timestamp validation, _raw rename, routing field removal)
         // Note: _json is NOT injected here — it's built from raw bytes in ArrowBatchBuilder sidecar
-        let transform_result =
-            transformer.transform_with_raw(value, org_id_owned.as_deref())?;
+        let transform_result = transformer.transform_with_raw(value, org_id_owned.as_deref())?;
 
         // Step 4.5: Apply per-table capture overrides
         // Mark table for async DDL tag resolution if first time seen

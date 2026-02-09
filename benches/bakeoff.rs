@@ -229,8 +229,7 @@ fn mison_pipeline(
 
     for &payload in messages {
         let index = StructuralIndex::build(payload);
-        let db = FieldExtractor::extract_string(&index, payload, "org_id")
-            .unwrap_or(default_db);
+        let db = FieldExtractor::extract_string(&index, payload, "org_id").unwrap_or(default_db);
         let table = FieldExtractor::extract_string(&index, payload, "event_category")
             .unwrap_or(default_table);
 
@@ -261,8 +260,7 @@ fn mison_pipeline_optimized(
 
     for &payload in messages {
         let index = StructuralIndex::build(payload);
-        let db = FieldExtractor::extract_string(&index, payload, "org_id")
-            .unwrap_or(default_db);
+        let db = FieldExtractor::extract_string(&index, payload, "org_id").unwrap_or(default_db);
         let table = FieldExtractor::extract_string(&index, payload, "event_category")
             .unwrap_or(default_table);
 
@@ -493,9 +491,7 @@ fn bench_event_type(
             let cols = columns.clone();
             group.bench_function("mison", |b| {
                 let mut processor = MisonBatchProcessor::new(&cols);
-                b.iter(|| {
-                    mison_pipeline(black_box(&batch), &mut processor, "common", "common")
-                })
+                b.iter(|| mison_pipeline(black_box(&batch), &mut processor, "common", "common"))
             });
         }
 
@@ -505,12 +501,7 @@ fn bench_event_type(
             group.bench_function("mison_opt", |b| {
                 let mut processor = MisonBatchProcessor::new(&cols);
                 b.iter(|| {
-                    mison_pipeline_optimized(
-                        black_box(&batch),
-                        &mut processor,
-                        "common",
-                        "common",
-                    )
+                    mison_pipeline_optimized(black_box(&batch), &mut processor, "common", "common")
                 })
             });
         }
@@ -519,9 +510,7 @@ fn bench_event_type(
         {
             let schema = decoder_schema.clone();
             group.bench_function("decoder", |b| {
-                b.iter(|| {
-                    decoder_pipeline(black_box(&batch), schema.clone(), "common", "common")
-                })
+                b.iter(|| decoder_pipeline(black_box(&batch), schema.clone(), "common", "common"))
             });
         }
 
@@ -577,7 +566,11 @@ fn bench_single_message(c: &mut Criterion) {
     let events: Vec<(&str, fn() -> Vec<u8>, Vec<(String, String)>)> = vec![
         ("flat_10", flat_10_event, flat_10_columns()),
         ("flat_30", flat_30_event, flat_30_columns()),
-        ("nested_2level", nested_2level_event, nested_2level_columns()),
+        (
+            "nested_2level",
+            nested_2level_event,
+            nested_2level_columns(),
+        ),
     ];
 
     let router = Router::default();
@@ -603,9 +596,7 @@ fn bench_single_message(c: &mut Criterion) {
             let cols = columns.clone();
             group.bench_function("mison", |b| {
                 let mut processor = MisonBatchProcessor::new(&cols);
-                b.iter(|| {
-                    mison_pipeline(black_box(&batch), &mut processor, "common", "common")
-                })
+                b.iter(|| mison_pipeline(black_box(&batch), &mut processor, "common", "common"))
             });
         }
 
@@ -614,12 +605,7 @@ fn bench_single_message(c: &mut Criterion) {
             group.bench_function("mison_opt", |b| {
                 let mut processor = MisonBatchProcessor::new(&cols);
                 b.iter(|| {
-                    mison_pipeline_optimized(
-                        black_box(&batch),
-                        &mut processor,
-                        "common",
-                        "common",
-                    )
+                    mison_pipeline_optimized(black_box(&batch), &mut processor, "common", "common")
                 })
             });
         }
@@ -627,9 +613,7 @@ fn bench_single_message(c: &mut Criterion) {
         {
             let schema = decoder_schema.clone();
             group.bench_function("decoder", |b| {
-                b.iter(|| {
-                    decoder_pipeline(black_box(&batch), schema.clone(), "common", "common")
-                })
+                b.iter(|| decoder_pipeline(black_box(&batch), schema.clone(), "common", "common"))
             });
         }
 

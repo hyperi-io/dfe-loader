@@ -1049,7 +1049,10 @@ mod tests {
         assert_eq!(config.json_output, "_custom_json");
         assert!(!config.capture_raw);
         assert_eq!(config.raw_output, "_custom_raw");
-        assert_eq!(config.raw_source_fields, vec!["original_log", "raw_message"]);
+        assert_eq!(
+            config.raw_source_fields,
+            vec!["original_log", "raw_message"]
+        );
         assert_eq!(config.disable_json_tables, vec!["common.metrics"]);
         assert_eq!(config.disable_raw_tables, vec!["common.health"]);
     }
