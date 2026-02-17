@@ -1,3 +1,10 @@
+## [1.6.4](https://github.com/hyperi-io/dfe-loader/compare/v1.6.3...v1.6.4) (2026-02-17)
+
+
+### Bug Fixes
+
+* resolve CI publish failures ([63bcbe2](https://github.com/hyperi-io/dfe-loader/commit/63bcbe237b682bc7b19b29a9863fb3af4eff65dd))
+
 ## [1.6.3](https://github.com/hyperi-io/dfe-loader/compare/v1.6.2...v1.6.3) (2026-02-17)
 
 
