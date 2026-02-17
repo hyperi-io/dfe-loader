@@ -1,3 +1,10 @@
+## [1.6.1](https://github.com/hyperi-io/dfe-loader/compare/v1.6.0...v1.6.1) (2026-02-17)
+
+
+### Bug Fixes
+
+* resolve clippy warnings and allocator feature conflict ([251b72a](https://github.com/hyperi-io/dfe-loader/commit/251b72a8addfdbf7129bfab68ed70c86db04f64a))
+
 # [1.6.0](https://github.com/hyperi-io/dfe-loader/compare/v1.5.1...v1.6.0) (2026-02-17)
 
 
