@@ -1,3 +1,15 @@
+# [1.6.0](https://github.com/hyperi-io/dfe-loader/compare/v1.5.1...v1.6.0) (2026-02-17)
+
+
+### Bug Fixes
+
+* rebrand hypersec to hyperi across project ([df02a5b](https://github.com/hyperi-io/dfe-loader/commit/df02a5b041fd35ee6abdf83ea659c885849c9a3b))
+
+
+### Features
+
+* add field mapping with ECS/CIM/Beats presets ([c2873e5](https://github.com/hyperi-io/dfe-loader/commit/c2873e5fd936602d2f20610d5ef68b6127aa1bd2))
+
 ## [1.5.1](https://github.com/hyperi-io/dfe-loader/compare/v1.5.0...v1.5.1) (2026-02-09)
 
 
