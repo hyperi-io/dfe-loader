@@ -349,16 +349,6 @@ impl BatchFlattener {
         results
     }
 
-    /// Flatten a batch of values in parallel (for large batches).
-    #[cfg(feature = "parallel")]
-    pub fn flatten_batch_parallel(&self, values: Vec<Value>) -> Vec<Map<String, Value>> {
-        use rayon::prelude::*;
-        values
-            .into_par_iter()
-            .map(|v| self.flatten_fast(v))
-            .collect()
-    }
-
     /// Check if this flattener has a valid schema.
     pub fn is_uniform(&self) -> bool {
         self.uniform
