@@ -1,0 +1,206 @@
+# Elastic Common Schema (ECS) Field Mapping Preset
+#
+# Maps common raw field names from various log sources to ECS-compatible
+# destination field names. First match wins when multiple sources listed.
+#
+# Reference: https://www.elastic.co/docs/reference/ecs/ecs-field-reference
+# ECS Version: 8.x
+#
+# Format:
+#   destination_field:
+#     sources: [source1, source2, ...]  # first present wins
+#     action: rename|copy               # optional, defaults to config default_action
+
+mappings:
+  # ===========================================================================
+  # Network: Source
+  # ===========================================================================
+  source.ip:
+    sources: [src_ip, srcip, source_ip, sourceIPAddress, s_ip, SrcAddr, clientIP, client_ip]
+  source.port:
+    sources: [src_port, srcport, source_port, s_port, SrcPort, clientPort, client_port]
+  source.mac:
+    sources: [src_mac, source_mac, SrcMac]
+  source.bytes:
+    sources: [bytes_in, src_bytes, source_bytes, bytesIn, BytesReceived]
+  source.address:
+    sources: [src, source_address, SrcAddr]
+    action: copy
+  source.domain:
+    sources: [src_domain, source_domain, src_host]
+
+  # ===========================================================================
+  # Network: Destination
+  # ===========================================================================
+  destination.ip:
+    sources: [dst_ip, dstip, dest_ip, destinationIPAddress, d_ip, DstAddr, serverIP, server_ip]
+  destination.port:
+    sources: [dst_port, dstport, dest_port, d_port, DstPort, serverPort, server_port]
+  destination.mac:
+    sources: [dst_mac, dest_mac, DstMac]
+  destination.bytes:
+    sources: [bytes_out, dst_bytes, dest_bytes, bytesOut, BytesSent]
+  destination.address:
+    sources: [dest, dst, destination_address, DstAddr]
+    action: copy
+  destination.domain:
+    sources: [dst_domain, dest_domain, dst_host, dest_host]
+
+  # ===========================================================================
+  # Network: General
+  # ===========================================================================
+  network.transport:
+    sources: [protocol, transport, proto, ip_protocol]
+  network.direction:
+    sources: [direction, traffic_direction, flow_direction]
+  network.bytes:
+    sources: [total_bytes, bytes, network_bytes]
+  network.packets:
+    sources: [total_packets, packets, network_packets]
+  network.application:
+    sources: [app, application, app_name, service_name]
+
+  # ===========================================================================
+  # Event
+  # ===========================================================================
+  event.action:
+    sources: [action, event_action, EventAction, activity]
+  event.category:
+    sources: [category, event_category, EventCategory, event_type]
+  event.severity:
+    sources: [severity, priority, level, SeverityLevel, event_severity]
+  event.outcome:
+    sources: [outcome, result, status, event_outcome, EventOutcome]
+  event.duration:
+    sources: [duration, elapsed, response_time, elapsed_time]
+  event.id:
+    sources: [event_id, eventid, EventID, event_uid]
+  event.code:
+    sources: [event_code, EventCode, signature_id, rule_id]
+
+  # ===========================================================================
+  # User
+  # ===========================================================================
+  user.name:
+    sources: [user, username, user_name, userName, UserId, login, account_name]
+  user.id:
+    sources: [user_id, uid, userId, account_id, subject_user_id]
+  user.email:
+    sources: [user_email, email, mail, userEmail]
+  user.domain:
+    sources: [user_domain, domain, logon_domain, account_domain]
+
+  # ===========================================================================
+  # Host
+  # ===========================================================================
+  host.name:
+    sources: [hostname, host, computer_name, ComputerName, host_name, device_name]
+  host.ip:
+    sources: [host_ip, hostip, device_ip]
+    action: copy
+  host.hostname:
+    sources: [fqdn, host_fqdn]
+  host.os.name:
+    sources: [os, os_name, operating_system, os_type]
+
+  # ===========================================================================
+  # Process
+  # ===========================================================================
+  process.name:
+    sources: [process_name, proc_name, ProcessName, process, program]
+  process.pid:
+    sources: [process_id, pid, ProcessId, proc_id]
+  process.executable:
+    sources: [process_path, exe, executable, binary, process_exec]
+  process.command_line:
+    sources: [command_line, cmdline, cmd, CommandLine, process_command]
+
+  # ===========================================================================
+  # File
+  # ===========================================================================
+  file.name:
+    sources: [file_name, filename, FileName]
+  file.path:
+    sources: [file_path, filepath, FilePath, full_path]
+  file.hash.md5:
+    sources: [md5, file_md5, MD5, hash_md5]
+  file.hash.sha256:
+    sources: [sha256, file_sha256, SHA256, hash_sha256]
+  file.hash.sha1:
+    sources: [sha1, file_sha1, SHA1, hash_sha1]
+  file.size:
+    sources: [file_size, filesize, FileSize, size]
+
+  # ===========================================================================
+  # HTTP / URL
+  # ===========================================================================
+  url.full:
+    sources: [url, request_url, uri, URL, requestUrl, full_url]
+  url.domain:
+    sources: [url_domain, http_host, request_host]
+  url.path:
+    sources: [url_path, uri_path, request_path]
+  url.query:
+    sources: [url_query, query_string, uri_query]
+  http.request.method:
+    sources: [http_method, method, request_method, verb, HttpMethod]
+  http.response.status_code:
+    sources: [http_status, status_code, response_code, http_response_code, HttpStatusCode]
+  http.request.referrer:
+    sources: [referrer, referer, http_referrer]
+
+  # ===========================================================================
+  # User Agent
+  # ===========================================================================
+  user_agent.original:
+    sources: [user_agent, useragent, UserAgent, http_user_agent]
+
+  # ===========================================================================
+  # Agent / Observer
+  # ===========================================================================
+  agent.name:
+    sources: [agent_name, collector_name, sensor_name]
+  agent.version:
+    sources: [agent_version, collector_version]
+  observer.name:
+    sources: [dvc, device, observer_name, sensor, appliance]
+  observer.product:
+    sources: [vendor_product, product, device_product]
+  observer.vendor:
+    sources: [vendor, device_vendor]
+
+  # ===========================================================================
+  # Rule / Signature
+  # ===========================================================================
+  rule.name:
+    sources: [signature, rule_name, alert_name, sig_name]
+  rule.id:
+    sources: [rule_id, signature_id, sig_id, alert_id]
+
+  # ===========================================================================
+  # Log
+  # ===========================================================================
+  log.level:
+    sources: [log_level, loglevel, LogLevel, syslog_severity]
+  log.logger:
+    sources: [logger, log_source, logger_name]
+
+  # ===========================================================================
+  # DNS
+  # ===========================================================================
+  dns.question.name:
+    sources: [query, dns_query, QueryName, dns_name, question_name]
+  dns.question.type:
+    sources: [query_type, dns_type, QueryType, question_type]
+  dns.response_code:
+    sources: [rcode, dns_rcode, ResponseCode]
+
+  # ===========================================================================
+  # Related (pivot fields — always copy, never rename)
+  # ===========================================================================
+  related.ip:
+    sources: [src_ip, dst_ip, host_ip, client_ip, server_ip]
+    action: copy
+  related.user:
+    sources: [user, username, target_user, source_user]
+    action: copy

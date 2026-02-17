@@ -6,8 +6,8 @@
 // Purpose:   ClickHouse Arrow client wrapper with native and HTTP transport
 // Language:  Rust
 //
-// License:   LicenseRef-HyperSec-EULA
-// Copyright: (c) 2025 HyperSec
+// License:   FSL-1.1-ALv2
+// Copyright: (c) 2026 HYPERI PTY LIMITED
 
 //! ClickHouse Arrow client with support for native and HTTP transports.
 //!
@@ -442,6 +442,72 @@ impl ArrowClickHouseClient {
         }
 
         Ok(String::new())
+    }
+
+    /// Fetch column comments for a table from `system.columns`.
+    ///
+    /// Returns a map of column_name → comment for columns with non-empty comments.
+    /// Used for field mapping `@renamed` directive resolution.
+    pub async fn fetch_column_comments(
+        &self,
+        table: &str,
+    ) -> Result<rustc_hash::FxHashMap<String, String>> {
+        let (db, tbl) = parse_db_table(table, &self.database);
+        let sql = format!(
+            "SELECT name, comment FROM system.columns WHERE database = '{}' AND table = '{}' AND comment != ''",
+            db, tbl
+        );
+        let batches = self.select(&sql).await?;
+        let mut comments = rustc_hash::FxHashMap::default();
+
+        for batch in &batches {
+            if batch.num_rows() == 0 || batch.num_columns() < 2 {
+                continue;
+            }
+
+            let name_col = batch.column(0);
+            let comment_col = batch.column(1);
+
+            // ClickHouse returns String as Binary via native Arrow protocol
+            let names_binary = name_col
+                .as_any()
+                .downcast_ref::<arrow::array::BinaryArray>();
+            let names_string = name_col
+                .as_any()
+                .downcast_ref::<arrow::array::StringArray>();
+            let comments_binary = comment_col
+                .as_any()
+                .downcast_ref::<arrow::array::BinaryArray>();
+            let comments_string = comment_col
+                .as_any()
+                .downcast_ref::<arrow::array::StringArray>();
+
+            for i in 0..batch.num_rows() {
+                let name = if let Some(arr) = names_binary {
+                    std::str::from_utf8(arr.value(i)).ok().map(|s| s.to_string())
+                } else if let Some(arr) = names_string {
+                    Some(arr.value(i).to_string())
+                } else {
+                    None
+                };
+
+                let comment = if let Some(arr) = comments_binary {
+                    std::str::from_utf8(arr.value(i)).ok().map(|s| s.to_string())
+                } else if let Some(arr) = comments_string {
+                    Some(arr.value(i).to_string())
+                } else {
+                    None
+                };
+
+                if let (Some(n), Some(c)) = (name, comment) {
+                    if !c.is_empty() {
+                        comments.insert(n, c);
+                    }
+                }
+            }
+        }
+
+        Ok(comments)
     }
 
     /// Fetch table schema as `TableSchema` (includes parsed types and comment).

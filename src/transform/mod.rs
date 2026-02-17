@@ -5,8 +5,11 @@
 
 pub mod arrow;
 pub mod coerce;
+pub mod field_mapping;
 pub mod flatten;
+pub mod mapping_builder;
 pub mod project;
+pub mod remap_loader;
 pub mod timestamp;
 pub mod transformer;
 
@@ -22,4 +25,9 @@ pub use timestamp::{
     TimestampResult, TimestampValidator, MAX_DATETIME64_MS, MAX_DATETIME64_NANO_MS,
     MIN_DATETIME64_MS,
 };
+pub use field_mapping::{
+    parse_renamed_directive, FieldMappingRule, MappingAction, RuleOrigin, TableFieldMapping,
+};
+pub use mapping_builder::{FieldMappingCache, MappingBuilder};
+pub use remap_loader::BuiltinPreset;
 pub use transformer::{TransformResult, Transformer};

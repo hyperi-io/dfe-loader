@@ -36,6 +36,7 @@ pub struct Config {
     pub coercion: CoercionConfig,
     pub schema: SchemaConfig,
     pub auto_init: AutoInitConfig,
+    pub field_mapping: FieldMappingConfig,
 }
 
 impl Default for Config {
@@ -55,6 +56,7 @@ impl Default for Config {
             coercion: CoercionConfig::default(),
             schema: SchemaConfig::default(),
             auto_init: AutoInitConfig::default(),
+            field_mapping: FieldMappingConfig::default(),
         }
     }
 }
@@ -862,6 +864,60 @@ impl Default for AutoInitConfig {
             create_database: true,
             create_table: true,
             create_text_index: true,
+        }
+    }
+}
+
+// ============================================================================
+// Field Mapping Configuration
+// ============================================================================
+
+/// Field mapping configuration for normalising source field names.
+///
+/// Supports renaming or copying fields from source to destination names.
+/// Rules come from two sources with clear precedence:
+/// 1. ClickHouse column comments (`@renamed` directives) — highest priority
+/// 2. External remap files (CSV/YAML/JSON) and built-in presets — lower priority
+///
+/// CSV files are compatible with the elastic/ecs-mapper format:
+/// `source_field,destination_field,copy_action`
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FieldMappingConfig {
+    /// Master switch (default: false — no impact on existing pipelines)
+    pub enabled: bool,
+
+    /// Default action when not specified per-field: "rename" or "copy"
+    /// - rename: source field removed, value moved to destination (zero-copy)
+    /// - copy: source field retained, value cloned to destination
+    pub default_action: String,
+
+    /// Built-in mapping preset: "ecs", "cim", "beats", or "none"
+    pub builtin: String,
+
+    /// External remap file paths (CSV/YAML/JSON, loaded in order)
+    /// Later files override earlier ones for the same destination field.
+    pub files: Vec<String>,
+
+    /// Per-destination field action overrides
+    pub overrides: HashMap<String, FieldMappingOverride>,
+}
+
+/// Per-field override for mapping action
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FieldMappingOverride {
+    /// Action for this field: "rename" or "copy"
+    pub action: String,
+}
+
+impl Default for FieldMappingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            default_action: "rename".to_string(),
+            builtin: "none".to_string(),
+            files: vec![],
+            overrides: HashMap::new(),
         }
     }
 }

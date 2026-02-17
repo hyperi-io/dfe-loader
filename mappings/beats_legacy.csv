@@ -1,0 +1,10 @@
+source_field,destination_field,copy_action
+beat.name,agent.type,rename
+beat.version,agent.version,rename
+beat.hostname,agent.hostname,rename
+beat.id,agent.id,rename
+source,log.file.path,rename
+offset,log.offset,rename
+read_timestamp,event.created,rename
+input_type,input.type,rename
+type,event.module,rename
