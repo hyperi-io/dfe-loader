@@ -1,3 +1,10 @@
+## [1.6.2](https://github.com/hyperi-io/dfe-loader/compare/v1.6.1...v1.6.2) (2026-02-17)
+
+
+### Bug Fixes
+
+* remove env dependency from kafka config unit tests ([c360970](https://github.com/hyperi-io/dfe-loader/commit/c360970b9fee2d2115f92ae190ef71055d71b407))
+
 ## [1.6.1](https://github.com/hyperi-io/dfe-loader/compare/v1.6.0...v1.6.1) (2026-02-17)
 
 
