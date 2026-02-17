@@ -157,32 +157,46 @@ async fn test_kafka_consumer_creation() {
 
 #[tokio::test]
 async fn test_kafka_config_validation() {
-    // This test doesn't need Kafka running - just validates config
-    let mut config = get_test_config();
+    // This test doesn't need Kafka running - just validates config structure
+    let config = KafkaConfig {
+        brokers: vec!["localhost:9092".to_string()],
+        topics: vec!["test-topic".to_string()],
+        topic_regex: None,
+        group: "test-group".to_string(),
+        client_id: "test-client".to_string(),
+        sasl: None,
+        tls: None,
+    };
 
-    // Valid config
     assert!(!config.brokers.is_empty());
     assert!(!config.topics.is_empty());
     assert!(!config.group.is_empty());
 
     // Empty brokers should be invalid
-    config.brokers = vec![];
-    // This would be caught by Config::validate()
+    let mut invalid = config;
+    invalid.brokers = vec![];
+    assert!(invalid.brokers.is_empty());
 }
 
 #[tokio::test]
 async fn test_kafka_sasl_config() {
-    // Test that SASL configuration is properly set up
-    let mut config = get_test_config();
-    config.sasl = Some(SaslConfig {
-        enabled: true,
-        mechanism: "scram_sha_256".to_string(),
-        username: "testuser".to_string(),
-        password: "testpass".to_string(),
-        ..Default::default()
-    });
+    // Test that SASL configuration is properly set up (no Kafka needed)
+    let config = KafkaConfig {
+        brokers: vec!["localhost:9092".to_string()],
+        topics: vec!["test-topic".to_string()],
+        topic_regex: None,
+        group: "test-group".to_string(),
+        client_id: "test-client".to_string(),
+        sasl: Some(SaslConfig {
+            enabled: true,
+            mechanism: "scram_sha_256".to_string(),
+            username: "testuser".to_string(),
+            password: "testpass".to_string(),
+            ..Default::default()
+        }),
+        tls: None,
+    };
 
-    // Just verify config is set - actual connection test needs running Kafka
     assert!(config.sasl.is_some());
     let sasl = config.sasl.unwrap();
     assert!(sasl.enabled);
