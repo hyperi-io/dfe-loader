@@ -8,8 +8,8 @@
 
 pub mod parse;
 
-// Re-export from hs-rustlib with local type alias for backward compatibility
-pub use hs_rustlib::transport::{
+// Re-export from hyperi-rustlib with local type alias for backward compatibility
+pub use hyperi_rustlib::transport::{
     detect_format, DetectedFormat as PayloadFormat, FormatDetector, FormatMode,
 };
 pub use parse::parse_payload;

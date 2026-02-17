@@ -589,7 +589,7 @@ fn should_flatten(field: &str, schema: &TableSchema) -> bool {
 
 ## Transport Abstraction (hyperi-rustlib)
 
-The transport layer is implemented in `hyperi-rustlib` as a shared library for all HyperSec Rust projects.
+The transport layer is implemented in `hyperi-rustlib` as a shared library for all HyperI Rust projects.
 This provides a consistent pattern for message transport with support for JSON/MsgPack payloads.
 
 ### Architecture

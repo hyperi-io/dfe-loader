@@ -57,16 +57,16 @@ hyperi-rustlib = { version = "x.y.z", registry = "hyperi", features = ["transpor
 |-----------|-------|
 | JFrog Domain | `hypersec.jfrog.io` |
 | Registry Name | `hyperi` |
-| Virtual Repo | `hypersec-cargo-virtual` |
-| Local Repo | `hypersec-cargo-local` |
-| Index URL | `sparse+https://hypersec.jfrog.io/artifactory/api/cargo/hypersec-cargo-virtual/index/` |
+| Virtual Repo | `hyperi-cargo-virtual` |
+| Local Repo | `hyperi-cargo-local` |
+| Index URL | `sparse+https://hypersec.jfrog.io/artifactory/api/cargo/hyperi-cargo-virtual/index/` |
 
 ### Local Setup
 
 1. **Configure registry** in `.cargo/config.toml` (already done in this project):
    ```toml
    [registries.hyperi]
-   index = "sparse+https://hypersec.jfrog.io/artifactory/api/cargo/hypersec-cargo-virtual/index/"
+   index = "sparse+https://hypersec.jfrog.io/artifactory/api/cargo/hyperi-cargo-virtual/index/"
    ```
 
 2. **Set credentials** in `~/.cargo/credentials.toml`:
@@ -164,7 +164,7 @@ Two options (configurable via ENV/config cascade):
 - AggregateFunction, SimpleAggregateFunction (materialized views)
 
 **Removed:**
-- klickhouse - Moved to `/projects/klickhouse-hypersec` as read-only reference
+- klickhouse - Removed (deprecated)
 
 ---
 
@@ -465,7 +465,7 @@ struct TableBuffer {
 
 ### klickhouse Removal (2025-12-25)
 
-- [x] Moved klickhouse fork to `/projects/klickhouse-hypersec` (read-only reference)
+- [x] Moved klickhouse fork to separate repo (archived, read-only reference)
 - [x] Removed all klickhouse dependencies from Cargo.toml
 - [x] Rewrote `Inserter` to use Arrow-only (no JSON fallback)
 - [x] Moved `ColumnInfo` and `TableSchema` to `types.rs`
@@ -667,7 +667,7 @@ Located at k8s.tyrell.com.au with:
 
 ## Reference Projects
 
-- **klickhouse-hypersec**: `/projects/klickhouse-hypersec` - Fork with Variant/Dynamic/JSON/Nested types (read-only reference)
+- **klickhouse fork**: Archived — was used for Variant/Dynamic/JSON/Nested type research
 - **ClickHouse source**: `/projects/ClickHouse` - Server source for protocol research
 - **Go loader**: `/projects/clickhouse-loader` - Reference implementation
 
@@ -744,7 +744,7 @@ Created comprehensive rebranding plan at `/home/derek/.claude/plans/steady-knitt
 
 - **Blocked on:** `hyperi-rustlib` being published to new registry
 - **Scope:** ~287 files, ~2,000+ occurrences
-- **Infrastructure not changed yet:** hypersec.jfrog.io, hyperi registry, hyperi-rustlib
+- **JFrog domain stays:** `hypersec.jfrog.io` (account-level, not user-facing)
 
 ### Git State
 
@@ -773,17 +773,14 @@ Created comprehensive rebranding plan at `/home/derek/.claude/plans/steady-knitt
 ### Decisions Made
 
 1. **FSL-1.1-ALv2 over proprietary** - Source-available with Apache 2.0 conversion after 2 years
-2. **Keep infrastructure references** - hypersec.jfrog.io stays until hyperi infra ready
+2. **JFrog domain stays** - `hypersec.jfrog.io` is account-level, repo names updated to `hyperi-*`
 3. **Parallel jobs = 2** - Prevents CPU starvation on local builds
 4. **Casing: HyperI** - Capital H, capital I for brand; HYPERI for legal entity
 
-### Next Steps (When hyperi-rustlib Ready)
+### Remaining Rebranding
 
-1. Update JFrog domain: `hypersec.jfrog.io` → `hypersec.jfrog.io`
-2. Update registry name: `hypersec` → `hyperi`
-3. Rename crate: `hyperi-rustlib` → `hyperi-rustlib`
-4. Update GitHub org references: `hyperi-io` → `hyperi-io`
-5. Rename config file: `.hyperi-ci.yaml` → `.hyperi-ci.yaml`
+1. JFrog domain `hypersec.jfrog.io` stays (account-level, not user-facing)
+2. All repo names, registry name, crate names, GitHub org — updated to `hyperi`
 
 ### Session Context Summary
 
@@ -850,7 +847,7 @@ topic_replication_factor = 1
 
 #### Artifactory Registry Publishing Complete
 
-Published all crates to HyperSec Artifactory private registry:
+Published all crates to HyperI Artifactory private registry:
 
 | Crate | Version | Registry | Status |
 |-------|---------|----------|--------|
