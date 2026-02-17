@@ -5,10 +5,11 @@
 //!
 //! Measures CPU cost per operation for GeoIP, Reputation, and Risk scoring.
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, Criterion, Throughput};
 use dfe_loader::enrich::geoip::{GeoIpEnricher, GeoIpResult};
 use dfe_loader::enrich::reputation::{ReputationEnricher, ThreatSource, ThreatType};
 use dfe_loader::enrich::risk::{RiskInput, RiskPreset, RiskScorer};
+use std::hint::black_box;
 use std::net::IpAddr;
 
 // Sample IPs for benchmarking

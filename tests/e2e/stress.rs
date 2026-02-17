@@ -6,7 +6,7 @@
 //! Tests for high-throughput scenarios and performance under load
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use arrow::array::{ArrayRef, Float64Array, RecordBatch, StringArray, UInt64Array};
 use arrow::datatypes::{DataType, Field, Schema};
@@ -157,7 +157,7 @@ async fn test_stress_50k_single_batch() {
 
     assert!(result.is_ok(), "50k insert failed: {:?}", result.err());
     let inserted = result.unwrap();
-    assert_eq!(inserted, row_count as usize);
+    assert_eq!(inserted, row_count);
 
     let rows_per_sec = row_count as f64 / elapsed.as_secs_f64();
     eprintln!(
@@ -207,7 +207,7 @@ async fn test_stress_multiple_batches() {
 
     for batch_id in 0..batch_count {
         let ids: Vec<u64> = (0..rows_per_batch).collect();
-        let batch_ids: Vec<u64> = vec![batch_id as u64; rows_per_batch as usize];
+        let batch_ids: Vec<u64> = vec![batch_id; rows_per_batch as usize];
         let data: Vec<String> = (0..rows_per_batch)
             .map(|i| format!("data_{}_{}", batch_id, i))
             .collect();
@@ -284,7 +284,7 @@ async fn test_stress_concurrent_inserts() {
 
         let handle = tokio::spawn(async move {
             let ids: Vec<u64> = (0..rows_per_task).collect();
-            let thread_ids: Vec<u64> = vec![thread_id as u64; rows_per_task as usize];
+            let thread_ids: Vec<u64> = vec![thread_id; rows_per_task as usize];
             let values: Vec<f64> = (0..rows_per_task).map(|i| i as f64 * 0.5).collect();
 
             let batch = RecordBatch::try_new(
@@ -354,7 +354,7 @@ fn test_stress_buffer_high_volume() {
 
         let offset = KafkaOffset {
             topic: topic.clone(),
-            partition: (i % 10) as i32,
+            partition: (i % 10),
             offset: i as i64,
         };
 
@@ -456,7 +456,7 @@ fn test_stress_offset_tracking() {
         let data = json!({"id": i}).as_object().unwrap().clone();
         let offset = KafkaOffset {
             topic: topic.clone(),
-            partition: (i % partition_count) as i32,
+            partition: (i % partition_count),
             offset: (i / partition_count) as i64, // Offset per partition
         };
         buffer_manager.push("test.events", data, Some(offset), None);

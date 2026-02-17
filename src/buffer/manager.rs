@@ -436,8 +436,10 @@ impl BufferManager {
 
     /// Get buffer statistics
     pub fn stats(&self) -> ArrowBufferStats {
-        let mut stats = ArrowBufferStats::default();
-        stats.table_count = self.buffers.len();
+        let mut stats = ArrowBufferStats {
+            table_count: self.buffers.len(),
+            ..Default::default()
+        };
 
         for buffer in self.buffers.values() {
             stats.pending_rows += buffer.len();

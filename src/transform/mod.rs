@@ -18,16 +18,16 @@ pub use arrow::{
     json_to_arrow_batch, ArrowBatchBuilder, SimdBatchBuilder,
 };
 pub use coerce::Coercer;
+pub use field_mapping::{
+    parse_renamed_directive, FieldMappingRule, MappingAction, RuleOrigin, TableFieldMapping,
+};
 pub use flatten::{flatten, flatten_value, flatten_value_owned, BatchFlattenStats, BatchFlattener};
+pub use mapping_builder::{FieldMappingCache, MappingBuilder};
 pub use project::{project, ProjectedData, Projector};
+pub use remap_loader::BuiltinPreset;
 pub use timestamp::{
     clamp_timestamp_ms, clamp_timestamp_ms_nano, is_valid_datetime64_ms, validate_timestamp,
     TimestampResult, TimestampValidator, MAX_DATETIME64_MS, MAX_DATETIME64_NANO_MS,
     MIN_DATETIME64_MS,
 };
-pub use field_mapping::{
-    parse_renamed_directive, FieldMappingRule, MappingAction, RuleOrigin, TableFieldMapping,
-};
-pub use mapping_builder::{FieldMappingCache, MappingBuilder};
-pub use remap_loader::BuiltinPreset;
 pub use transformer::{TransformResult, Transformer};

@@ -277,7 +277,10 @@ mod tests {
         mapping.apply(&mut data);
 
         assert_eq!(data.get("source.ip").unwrap(), "10.0.0.1");
-        assert!(!data.contains_key("src_ip"), "source field should be removed");
+        assert!(
+            !data.contains_key("src_ip"),
+            "source field should be removed"
+        );
         assert_eq!(data.get("other").unwrap(), "value");
     }
 
@@ -294,7 +297,11 @@ mod tests {
         mapping.apply(&mut data);
 
         assert_eq!(data.get("related.ip").unwrap(), "10.0.0.1");
-        assert_eq!(data.get("src_ip").unwrap(), "10.0.0.1", "source should be retained");
+        assert_eq!(
+            data.get("src_ip").unwrap(),
+            "10.0.0.1",
+            "source should be retained"
+        );
     }
 
     #[test]

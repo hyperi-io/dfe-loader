@@ -24,7 +24,6 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use crate::buffer::{BufferManager, FlushBatch, KafkaOffset};
 use crate::clickhouse::{ArrowClickHouseClient, Inserter, InserterConfig};
 use crate::config::{Config, MetadataConfig, TableCaptureConfig};
-use crate::transform::{FieldMappingCache, MappingBuilder};
 use crate::kafka::{DlqMessage, DlqProducer, KafkaMessage, TransportAdapter};
 use crate::metrics::Metrics;
 use crate::payload::{FormatDetector, FormatMode, PayloadFormat};
@@ -32,6 +31,7 @@ use crate::pipeline::AutoInitializer;
 use crate::routing::{RouteResult, Router};
 use crate::schema::TableTags;
 use crate::transform::Transformer;
+use crate::transform::{FieldMappingCache, MappingBuilder};
 use crate::Result;
 
 /// Pipeline statistics
@@ -230,25 +230,26 @@ impl Orchestrator {
         let mut capture_overrides = CaptureOverrides::new(&self.config.metadata);
 
         // Per-table field mapping (rename/copy source fields to destination names)
-        let mut field_mapping_cache: Option<FieldMappingCache> = if self.config.field_mapping.enabled {
-            match MappingBuilder::from_config(&self.config.field_mapping) {
-                Ok(builder) => {
-                    info!(
-                        builtin = %self.config.field_mapping.builtin,
-                        files = self.config.field_mapping.files.len(),
-                        base_rules = builder.base_rule_count(),
-                        "Field mapping enabled"
-                    );
-                    Some(FieldMappingCache::new(builder))
+        let mut field_mapping_cache: Option<FieldMappingCache> =
+            if self.config.field_mapping.enabled {
+                match MappingBuilder::from_config(&self.config.field_mapping) {
+                    Ok(builder) => {
+                        info!(
+                            builtin = %self.config.field_mapping.builtin,
+                            files = self.config.field_mapping.files.len(),
+                            base_rules = builder.base_rule_count(),
+                            "Field mapping enabled"
+                        );
+                        Some(FieldMappingCache::new(builder))
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "Failed to initialize field mapping, continuing without");
+                        None
+                    }
                 }
-                Err(e) => {
-                    warn!(error = %e, "Failed to initialize field mapping, continuing without");
-                    None
-                }
-            }
-        } else {
-            None
-        };
+            } else {
+                None
+            };
 
         // Flush interval timer
         let mut flush_interval = interval(Duration::from_secs(self.config.buffer.flush_age_secs));
@@ -469,6 +470,7 @@ impl Orchestrator {
 
     /// Process a single message through the pipeline
     /// Returns the table name on success for metrics tracking
+    #[allow(clippy::too_many_arguments)]
     fn process_message(
         &self,
         msg: &KafkaMessage,

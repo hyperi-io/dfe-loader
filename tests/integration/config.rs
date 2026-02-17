@@ -59,7 +59,7 @@ fn test_shared_config_subscribe() {
     let shared = SharedConfig::new(config);
 
     // Subscribe to changes
-    let mut rx = shared.subscribe();
+    let rx = shared.subscribe();
 
     // Initial value should be 0
     assert_eq!(*rx.borrow(), 0);

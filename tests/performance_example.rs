@@ -9,7 +9,6 @@
 //! Run with: cargo test --test performance_example -- --nocapture
 
 use prometheus::Registry;
-use std::sync::Arc;
 
 mod common;
 use common::metrics::MetricsSnapshot;

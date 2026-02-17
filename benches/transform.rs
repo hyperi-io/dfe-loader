@@ -11,8 +11,9 @@
 //!
 //! Run with: cargo bench --bench transform
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use serde_json::{json, Map, Value};
+use std::hint::black_box;
 
 use dfe_loader::transform::{
     flatten_value_owned, ArrowBatchBuilder, BatchFlattener, TimestampValidator,

@@ -265,7 +265,7 @@ proptest! {
         month in 1..13_u32,
         day in 1..29_u32,  // Use 28 to avoid month-specific logic
     ) {
-        use chrono::{NaiveDate, Utc};
+        use chrono::NaiveDate;
 
         // Create a valid date
         let date = NaiveDate::from_ymd_opt(year, month, day);
@@ -322,11 +322,11 @@ proptest! {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
 
     #[test]
     fn test_proptest_runs() {
         // Dummy test to ensure proptest module compiles
-        assert!(true);
+        let compiles = true;
+        assert!(compiles);
     }
 }
