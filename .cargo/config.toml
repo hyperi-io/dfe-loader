@@ -39,7 +39,7 @@ jobs = 2
 #   cargo login --registry hyperi
 
 [registries.hyperi]
-index = "sparse+https://hypersec.jfrog.io/artifactory/api/cargo/hypersec-cargo-virtual/index/"
+index = "sparse+https://hypersec.jfrog.io/artifactory/api/cargo/hyperi-cargo-virtual/index/"
 credential-provider = "cargo:token"
 
 # Uncomment to make hyperi the default for publishing

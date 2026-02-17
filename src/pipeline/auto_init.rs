@@ -6,8 +6,8 @@
 // Purpose:   Auto-initialization of Kafka topics and ClickHouse schema
 // Language:  Rust
 //
-// License:   LicenseRef-HyperSec-EULA
-// Copyright: (c) 2026 HyperSec
+// License:   FSL-1.1-ALv2
+// Copyright: (c) 2026 HyperI
 
 //! Auto-initialization for pipeline infrastructure
 //!

@@ -1,20 +1,20 @@
 // SPDX-License-Identifier: FSL-1.1-ALv2
 // Copyright (c) 2026 HYPERI PTY LIMITED
 
-//! Transport adapter for hs-rustlib transport abstraction.
+//! Transport adapter for hyperi-rustlib transport abstraction.
 //!
-//! This module provides a thin adapter layer between the hs-rustlib Transport trait
+//! This module provides a thin adapter layer between the hyperi-rustlib Transport trait
 //! and the local KafkaMessage/KafkaOffset types. The adapter is designed for
 //! zero-overhead conversion in the hot path.
 //!
 //! ## Performance Strategy
 //!
-//! - Uses hs-rustlib `KafkaTransport` for receive/commit operations
+//! - Uses hyperi-rustlib `KafkaTransport` for receive/commit operations
 //! - Converts `Message<KafkaToken>` → local `KafkaMessage` with Arc<str> sharing
-//! - Local sonic-rs parsing is preserved (NOT using hs-rustlib payload utilities)
+//! - Local sonic-rs parsing is preserved (NOT using hyperi-rustlib payload utilities)
 //! - KafkaToken → KafkaOffset is a simple field copy (same structure)
 
-use hs_rustlib::transport::{
+use hyperi_rustlib::transport::{
     KafkaConfig as TransportKafkaConfig, KafkaToken, KafkaTransport, Transport, TransportError,
 };
 
@@ -24,7 +24,7 @@ use crate::Result;
 
 use super::KafkaMessage;
 
-/// Adapter that wraps hs-rustlib KafkaTransport for local use.
+/// Adapter that wraps hyperi-rustlib KafkaTransport for local use.
 ///
 /// Provides the same interface as the old Consumer but uses the transport abstraction
 /// underneath. This allows swapping to Zenoh or Memory transports for dev/test.
@@ -35,7 +35,7 @@ pub struct TransportAdapter {
 impl TransportAdapter {
     /// Create a new transport adapter from local KafkaConfig.
     ///
-    /// Converts local config to hs-rustlib TransportKafkaConfig.
+    /// Converts local config to hyperi-rustlib TransportKafkaConfig.
     pub async fn new(config: &KafkaConfig) -> Result<Self> {
         let transport_config = Self::convert_config(config);
         let transport = KafkaTransport::new(&transport_config)
@@ -45,7 +45,7 @@ impl TransportAdapter {
         Ok(Self { transport })
     }
 
-    /// Convert local KafkaConfig to hs-rustlib TransportKafkaConfig.
+    /// Convert local KafkaConfig to hyperi-rustlib TransportKafkaConfig.
     fn convert_config(config: &KafkaConfig) -> TransportKafkaConfig {
         let mut transport_config = TransportKafkaConfig {
             brokers: config.brokers.clone(),
@@ -170,7 +170,7 @@ pub use memory_adapter::MemoryTransportAdapter;
 
 #[cfg(feature = "transport-memory")]
 mod memory_adapter {
-    use hs_rustlib::transport::{MemoryConfig, MemoryTransport, Transport};
+    use hyperi_rustlib::transport::{MemoryConfig, MemoryTransport, Transport};
     use std::sync::Arc;
 
     use crate::buffer::KafkaOffset;
@@ -178,7 +178,7 @@ mod memory_adapter {
 
     use super::super::KafkaMessage;
 
-    /// Adapter that wraps hs-rustlib MemoryTransport for local testing.
+    /// Adapter that wraps hyperi-rustlib MemoryTransport for local testing.
     ///
     /// Same interface as TransportAdapter but uses in-memory channels.
     /// Perfect for unit tests - no Kafka required.

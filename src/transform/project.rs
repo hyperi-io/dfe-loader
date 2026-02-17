@@ -6,8 +6,8 @@
 // Purpose:   Project JSON fields to match ClickHouse schema
 // Language:  Rust
 //
-// License:   LicenseRef-HyperSec-EULA
-// Copyright: (c) 2026 HyperSec
+// License:   FSL-1.1-ALv2
+// Copyright: (c) 2026 HyperI
 
 //! Schema projection - filter JSON fields to match ClickHouse schema
 //!
