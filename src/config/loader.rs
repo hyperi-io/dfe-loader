@@ -21,6 +21,7 @@ use crate::Result;
 /// Main configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
+#[derive(Default)]
 pub struct Config {
     pub kafka: KafkaConfig,
     pub clickhouse: ClickHouseConfig,
@@ -37,28 +38,6 @@ pub struct Config {
     pub schema: SchemaConfig,
     pub auto_init: AutoInitConfig,
     pub field_mapping: FieldMappingConfig,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            kafka: KafkaConfig::default(),
-            clickhouse: ClickHouseConfig::default(),
-            payload: PayloadConfig::default(),
-            routing: RoutingConfig::default(),
-            buffer: BufferConfig::default(),
-            memory: MemoryConfig::default(),
-            metrics: MetricsConfig::default(),
-            logging: LoggingConfig::default(),
-            timestamp_dq: TimestampDqConfig::default(),
-            field_sanitization: FieldSanitizationConfig::default(),
-            metadata: MetadataConfig::default(),
-            coercion: CoercionConfig::default(),
-            schema: SchemaConfig::default(),
-            auto_init: AutoInitConfig::default(),
-            field_mapping: FieldMappingConfig::default(),
-        }
-    }
 }
 
 // ============================================================================
@@ -275,24 +254,13 @@ impl SaslConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
+#[derive(Default)]
 pub struct TlsConfig {
     pub enabled: bool,
     pub ca_cert_file: Option<String>,
     pub cert_file: Option<String>,
     pub key_file: Option<String>,
     pub skip_verify: bool,
-}
-
-impl Default for TlsConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            ca_cert_file: None,
-            cert_file: None,
-            key_file: None,
-            skip_verify: false,
-        }
-    }
 }
 
 // ============================================================================
@@ -331,7 +299,7 @@ impl From<&ClickHouseConfig> for crate::clickhouse::ClickHouseConfig {
             "http" => crate::clickhouse::Transport::Http,
             _ => crate::clickhouse::Transport::Native,
         };
-        let tls = cfg.tls.as_ref().map_or(false, |t| t.enabled);
+        let tls = cfg.tls.as_ref().is_some_and(|t| t.enabled);
 
         crate::clickhouse::ClickHouseConfig {
             hosts: cfg.hosts.clone(),

@@ -394,7 +394,7 @@ impl ReputationEnricher {
             threat_type,
             source,
         };
-        threats.entry(ip).or_insert_with(Vec::new).push(info);
+        threats.entry(ip).or_default().push(info);
     }
 
     /// Add a CIDR prefix to the blocklist

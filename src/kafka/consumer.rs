@@ -237,8 +237,8 @@ impl Consumer {
     /// Uses synchronous commit for reliability.
     ///
     /// # Arguments
-    /// * `offsets` - List of (topic, partition, offset) tuples to commit
-    ///               The offset should be the message offset + 1 (next to consume)
+    /// * `offsets` - List of (topic, partition, offset) tuples to commit.
+    ///   The offset should be the message offset + 1 (next to consume)
     pub fn commit_offsets(&self, offsets: &[(String, i32, i64)]) -> Result<()> {
         if offsets.is_empty() {
             return Ok(());

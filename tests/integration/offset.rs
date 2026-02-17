@@ -103,7 +103,7 @@ fn test_offset_grouping_by_partition() {
 #[test]
 fn test_offset_ordering() {
     // Offsets should be orderable for processing
-    let mut offsets = vec![
+    let mut offsets = [
         KafkaOffset {
             topic: Arc::from("topic"),
             partition: 0,

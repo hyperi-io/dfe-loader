@@ -20,21 +20,11 @@ use tracing::{debug, error, info};
 use super::Metrics;
 
 /// Health status for the application
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct HealthStatus {
     pub ready: bool,
     pub kafka_connected: bool,
     pub clickhouse_connected: bool,
-}
-
-impl Default for HealthStatus {
-    fn default() -> Self {
-        Self {
-            ready: false,
-            kafka_connected: false,
-            clickhouse_connected: false,
-        }
-    }
 }
 
 /// Shared state for the health server

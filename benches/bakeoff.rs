@@ -561,9 +561,11 @@ fn bench_nested(c: &mut Criterion) {
     );
 }
 
+type EventEntry = (&'static str, fn() -> Vec<u8>, Vec<(String, String)>);
+
 /// Single-message latency (p50/p99 sensitivity)
 fn bench_single_message(c: &mut Criterion) {
-    let events: Vec<(&str, fn() -> Vec<u8>, Vec<(String, String)>)> = vec![
+    let events: Vec<EventEntry> = vec![
         ("flat_10", flat_10_event, flat_10_columns()),
         ("flat_30", flat_30_event, flat_30_columns()),
         (
@@ -793,6 +795,7 @@ mod validation {
         assert_eq!(decoder.num_rows(), 3);
     }
 
+    #[allow(dead_code)]
     fn get_string_column<'a>(batch: &'a RecordBatch, name: &str) -> &'a StringArray {
         let idx = batch.schema().index_of(name).unwrap();
         batch

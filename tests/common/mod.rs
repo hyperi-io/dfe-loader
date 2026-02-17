@@ -2,6 +2,7 @@
 // Copyright (c) 2026 HYPERI PTY LIMITED
 
 //! Shared test utilities and fixtures
+#![allow(dead_code)]
 
 pub mod containers;
 pub mod metrics;
@@ -324,7 +325,7 @@ pub async fn create_test_client() -> Option<ArrowClickHouseClient> {
 /// Create a test table and return cleanup function
 pub async fn create_test_table(
     client: &ArrowClickHouseClient,
-    table_name: &str,
+    _table_name: &str,
     ddl: &str,
 ) -> Result<(), String> {
     client

@@ -49,7 +49,10 @@ impl BuiltinPreset {
 }
 
 /// Load rules from a built-in preset.
-pub fn load_builtin(preset: BuiltinPreset, default_action: MappingAction) -> crate::Result<Vec<FieldMappingRule>> {
+pub fn load_builtin(
+    preset: BuiltinPreset,
+    default_action: MappingAction,
+) -> crate::Result<Vec<FieldMappingRule>> {
     let origin_name = match preset {
         BuiltinPreset::Ecs => "builtin:ecs",
         BuiltinPreset::Cim => "builtin:cim",
@@ -57,15 +60,9 @@ pub fn load_builtin(preset: BuiltinPreset, default_action: MappingAction) -> cra
     };
 
     match preset {
-        BuiltinPreset::Ecs => {
-            load_yaml_str(BUILTIN_ECS, default_action, origin_name)
-        }
-        BuiltinPreset::Cim => {
-            load_csv_str(BUILTIN_CIM_TO_ECS, default_action, origin_name)
-        }
-        BuiltinPreset::Beats => {
-            load_csv_str(BUILTIN_BEATS_LEGACY, default_action, origin_name)
-        }
+        BuiltinPreset::Ecs => load_yaml_str(BUILTIN_ECS, default_action, origin_name),
+        BuiltinPreset::Cim => load_csv_str(BUILTIN_CIM_TO_ECS, default_action, origin_name),
+        BuiltinPreset::Beats => load_csv_str(BUILTIN_BEATS_LEGACY, default_action, origin_name),
     }
 }
 
@@ -78,9 +75,13 @@ pub fn load_builtin(preset: BuiltinPreset, default_action: MappingAction) -> cra
 /// - `.csv` → ecs-mapper CSV format
 /// - `.yaml` / `.yml` → YAML format
 /// - `.json` → JSON format
-pub fn load_file(path: &str, default_action: MappingAction) -> crate::Result<Vec<FieldMappingRule>> {
-    let content = std::fs::read_to_string(path)
-        .map_err(|e| crate::Error::Config(format!("Failed to read remap file '{}': {}", path, e)))?;
+pub fn load_file(
+    path: &str,
+    default_action: MappingAction,
+) -> crate::Result<Vec<FieldMappingRule>> {
+    let content = std::fs::read_to_string(path).map_err(|e| {
+        crate::Error::Config(format!("Failed to read remap file '{}': {}", path, e))
+    })?;
 
     let ext = Path::new(path)
         .extension()
@@ -115,7 +116,11 @@ struct CsvRow {
 ///
 /// Columns: `source_field`, `destination_field`, `copy_action` (optional).
 /// Multiple rows with the same destination create a multi-source rule (first() semantics).
-fn load_csv_str(content: &str, default_action: MappingAction, origin: &str) -> crate::Result<Vec<FieldMappingRule>> {
+fn load_csv_str(
+    content: &str,
+    default_action: MappingAction,
+    origin: &str,
+) -> crate::Result<Vec<FieldMappingRule>> {
     let mut reader = csv::ReaderBuilder::new()
         .has_headers(true)
         .flexible(true)
@@ -156,12 +161,14 @@ fn load_csv_str(content: &str, default_action: MappingAction, origin: &str) -> c
     let rules = dest_order
         .into_iter()
         .filter_map(|dest| {
-            dest_map.remove(&dest).map(|(sources, action)| FieldMappingRule {
-                source_fields: sources,
-                destination: dest,
-                action,
-                origin: RuleOrigin::ExternalFile(origin.to_string()),
-            })
+            dest_map
+                .remove(&dest)
+                .map(|(sources, action)| FieldMappingRule {
+                    source_fields: sources,
+                    destination: dest,
+                    action,
+                    origin: RuleOrigin::ExternalFile(origin.to_string()),
+                })
         })
         .collect();
 
@@ -187,7 +194,11 @@ struct YamlRemapEntry {
 }
 
 /// Load rules from YAML string.
-fn load_yaml_str(content: &str, default_action: MappingAction, origin: &str) -> crate::Result<Vec<FieldMappingRule>> {
+fn load_yaml_str(
+    content: &str,
+    default_action: MappingAction,
+    origin: &str,
+) -> crate::Result<Vec<FieldMappingRule>> {
     let file: YamlRemapFile = serde_yaml_ng::from_str(content)
         .map_err(|e| crate::Error::Config(format!("YAML parse error in '{}': {}", origin, e)))?;
 
@@ -197,7 +208,11 @@ fn load_yaml_str(content: &str, default_action: MappingAction, origin: &str) -> 
         .map(|(dest, entry)| FieldMappingRule {
             source_fields: entry.sources,
             destination: dest,
-            action: entry.action.as_deref().map(MappingAction::parse).unwrap_or(default_action),
+            action: entry
+                .action
+                .as_deref()
+                .map(MappingAction::parse)
+                .unwrap_or(default_action),
             origin: RuleOrigin::ExternalFile(origin.to_string()),
         })
         .collect();
@@ -210,7 +225,11 @@ fn load_yaml_str(content: &str, default_action: MappingAction, origin: &str) -> 
 // ============================================================================
 
 /// Load rules from JSON string (same structure as YAML).
-fn load_json_str(content: &str, default_action: MappingAction, origin: &str) -> crate::Result<Vec<FieldMappingRule>> {
+fn load_json_str(
+    content: &str,
+    default_action: MappingAction,
+    origin: &str,
+) -> crate::Result<Vec<FieldMappingRule>> {
     let file: YamlRemapFile = serde_json::from_str(content)
         .map_err(|e| crate::Error::Config(format!("JSON parse error in '{}': {}", origin, e)))?;
 
@@ -220,7 +239,11 @@ fn load_json_str(content: &str, default_action: MappingAction, origin: &str) -> 
         .map(|(dest, entry)| FieldMappingRule {
             source_fields: entry.sources,
             destination: dest,
-            action: entry.action.as_deref().map(MappingAction::parse).unwrap_or(default_action),
+            action: entry
+                .action
+                .as_deref()
+                .map(MappingAction::parse)
+                .unwrap_or(default_action),
             origin: RuleOrigin::ExternalFile(origin.to_string()),
         })
         .collect();
@@ -249,7 +272,10 @@ dest_ip,destination.ip,copy
         assert_eq!(source_rule.source_fields, vec!["src_ip", "srcip"]);
         assert_eq!(source_rule.action, MappingAction::Rename);
 
-        let dest_rule = rules.iter().find(|r| r.destination == "destination.ip").unwrap();
+        let dest_rule = rules
+            .iter()
+            .find(|r| r.destination == "destination.ip")
+            .unwrap();
         assert_eq!(dest_rule.source_fields, vec!["dest_ip"]);
         assert_eq!(dest_rule.action, MappingAction::Copy);
     }
@@ -291,7 +317,10 @@ mappings:
         assert_eq!(rules.len(), 2);
 
         let source_rule = rules.iter().find(|r| r.destination == "source.ip").unwrap();
-        assert_eq!(source_rule.source_fields, vec!["src_ip", "srcip", "source_ip"]);
+        assert_eq!(
+            source_rule.source_fields,
+            vec!["src_ip", "srcip", "source_ip"]
+        );
         assert_eq!(source_rule.action, MappingAction::Rename);
     }
 

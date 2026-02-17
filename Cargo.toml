@@ -183,5 +183,7 @@ mimalloc = ["dep:mimalloc"]  # Often faster, better security, consistent perform
 # Transport backends
 transport-memory = ["hyperi-rustlib/transport-memory"]  # Memory transport for unit tests
 transport-zenoh = ["hyperi-rustlib/transport-zenoh"]    # Zenoh transport for dev/test
+# Parallel processing (future: rayon-based batch operations)
+parallel = []
 # Testing
 testcontainers = []  # Enable testcontainers for CI/CD (Docker required)

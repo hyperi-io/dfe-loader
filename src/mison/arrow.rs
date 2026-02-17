@@ -222,6 +222,7 @@ impl ColumnBuilder {
         }
     }
 
+    #[allow(dead_code)]
     fn len(&self) -> usize {
         match self {
             ColumnBuilder::Bool(b) => b.len(),
@@ -277,6 +278,7 @@ impl MisonArrowBuilder {
     }
 
     /// Map ClickHouse type to Arrow DataType
+    #[allow(clippy::if_same_then_else)]
     fn clickhouse_type_to_arrow(type_str: &str) -> DataType {
         let type_lower = type_str.to_lowercase();
 

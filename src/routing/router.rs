@@ -828,11 +828,13 @@ mod tests {
     #[test]
     fn test_routed_orgs_allowlist() {
         // Allowlist: only specific orgs get own database
-        let mut config = RoutingConfig::default();
-        config.table_fields = vec!["event_category".to_string()];
-        config.db_fields = vec!["org_id".to_string()];
-        config.routed_orgs = vec!["acme".to_string(), "bigcorp".to_string()];
-        config.route_all_by_org = false;
+        let config = RoutingConfig {
+            table_fields: vec!["event_category".to_string()],
+            db_fields: vec!["org_id".to_string()],
+            routed_orgs: vec!["acme".to_string(), "bigcorp".to_string()],
+            route_all_by_org: false,
+            ..Default::default()
+        };
 
         let router = Router::new(&config);
 
@@ -860,10 +862,12 @@ mod tests {
     #[test]
     fn test_route_all_by_org() {
         // Route ALL orgs to own databases
-        let mut config = RoutingConfig::default();
-        config.table_fields = vec!["event_category".to_string()];
-        config.org_id_field = Some("org_id".to_string());
-        config.route_all_by_org = true;
+        let config = RoutingConfig {
+            table_fields: vec!["event_category".to_string()],
+            org_id_field: Some("org_id".to_string()),
+            route_all_by_org: true,
+            ..Default::default()
+        };
 
         let router = Router::new(&config);
 
@@ -892,8 +896,10 @@ mod tests {
         assert_eq!(router.extract_org_id_from_value(&value2), None);
 
         // Nested org_id
-        let mut config = RoutingConfig::default();
-        config.org_id_field = Some("tenant.id".to_string());
+        let config = RoutingConfig {
+            org_id_field: Some("tenant.id".to_string()),
+            ..Default::default()
+        };
         let router2 = Router::new(&config);
 
         let value3 = serde_json::json!({"tenant": {"id": "acme"}, "event_category": "auth"});

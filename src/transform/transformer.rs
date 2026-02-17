@@ -621,8 +621,10 @@ mod tests {
 
     #[test]
     fn test_transformer_drop_tags() {
-        let mut transformer = Transformer::default();
-        transformer.drop_tags = true;
+        let transformer = Transformer {
+            drop_tags: true,
+            ..Default::default()
+        };
 
         let raw = br#"{"event": "login", "tags": {"source": "api"}}"#;
         let value: Value = serde_json::from_slice(raw).unwrap();
@@ -649,9 +651,11 @@ mod tests {
 
     #[test]
     fn test_transformer_raw_first_match_wins() {
-        let mut transformer = Transformer::default();
         // Override with multiple source fields to test first-match
-        transformer.raw_source_fields = vec!["logoriginal".to_string(), "message".to_string()];
+        let transformer = Transformer {
+            raw_source_fields: vec!["logoriginal".to_string(), "message".to_string()],
+            ..Default::default()
+        };
         // Both logoriginal and message exist — logoriginal is first in raw_source_fields
         let raw = br#"{"event": "test", "logoriginal": "first", "message": "second"}"#;
         let value: Value = serde_json::from_slice(raw).unwrap();
@@ -696,8 +700,10 @@ mod tests {
 
     #[test]
     fn test_transformer_raw_disabled() {
-        let mut transformer = Transformer::default();
-        transformer.capture_raw = false;
+        let transformer = Transformer {
+            capture_raw: false,
+            ..Default::default()
+        };
 
         let raw = br#"{"event": "test", "logoriginal": "raw line"}"#;
         let value: Value = serde_json::from_slice(raw).unwrap();

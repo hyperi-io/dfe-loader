@@ -440,7 +440,7 @@ impl SchemaExtractor {
                 let value_start = self.skip_whitespace(data, colon_pos + 1);
                 let value_end = self
                     .find_value_end(data, index, value_start, end)
-                    .ok_or_else(|| ExtractError::UnexpectedEof)?;
+                    .ok_or(ExtractError::UnexpectedEof)?;
 
                 return Ok((value_start, value_end));
             }
@@ -501,6 +501,7 @@ impl SchemaExtractor {
     }
 
     /// Try speculative field access using pattern hint
+    #[allow(clippy::too_many_arguments)]
     fn try_speculative_access(
         &self,
         index: &StructuralIndex,
@@ -571,7 +572,7 @@ impl SchemaExtractor {
                 let value_start = self.skip_whitespace(data, colon_pos + 1);
                 let value_end = self
                     .find_value_end(data, index, value_start, end)
-                    .ok_or_else(|| ExtractError::UnexpectedEof)?;
+                    .ok_or(ExtractError::UnexpectedEof)?;
 
                 return Ok((value_start, value_end));
             }

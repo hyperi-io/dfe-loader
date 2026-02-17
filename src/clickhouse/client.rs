@@ -484,19 +484,19 @@ impl ArrowClickHouseClient {
 
             for i in 0..batch.num_rows() {
                 let name = if let Some(arr) = names_binary {
-                    std::str::from_utf8(arr.value(i)).ok().map(|s| s.to_string())
-                } else if let Some(arr) = names_string {
-                    Some(arr.value(i).to_string())
+                    std::str::from_utf8(arr.value(i))
+                        .ok()
+                        .map(|s| s.to_string())
                 } else {
-                    None
+                    names_string.map(|arr| arr.value(i).to_string())
                 };
 
                 let comment = if let Some(arr) = comments_binary {
-                    std::str::from_utf8(arr.value(i)).ok().map(|s| s.to_string())
-                } else if let Some(arr) = comments_string {
-                    Some(arr.value(i).to_string())
+                    std::str::from_utf8(arr.value(i))
+                        .ok()
+                        .map(|s| s.to_string())
                 } else {
-                    None
+                    comments_string.map(|arr| arr.value(i).to_string())
                 };
 
                 if let (Some(n), Some(c)) = (name, comment) {

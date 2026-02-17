@@ -3,8 +3,9 @@
 
 //! JSON parsing benchmarks
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{criterion_group, criterion_main, Criterion};
 use sonic_rs::JsonValueTrait;
+use std::hint::black_box;
 
 fn bench_sonic_rs_parse(c: &mut Criterion) {
     let json = r#"{"event_category":"auth","timestamp":"2025-12-24T00:00:00Z","user_id":"123"}"#;

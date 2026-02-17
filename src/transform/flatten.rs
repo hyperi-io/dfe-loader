@@ -196,7 +196,7 @@ struct KeyMapping {
 ///     let flattened = flattener.flatten_fast(value);
 /// }
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct BatchFlattener {
     /// Root-level key mappings
     mappings: Vec<KeyMapping>,
@@ -204,16 +204,6 @@ pub struct BatchFlattener {
     field_count: usize,
     /// Whether the schema is uniform (all fields are predictable)
     uniform: bool,
-}
-
-impl Default for BatchFlattener {
-    fn default() -> Self {
-        Self {
-            mappings: Vec::new(),
-            field_count: 0,
-            uniform: false,
-        }
-    }
 }
 
 impl BatchFlattener {

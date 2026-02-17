@@ -6,14 +6,12 @@
 //! Tests the complete Kafka → Transform → Buffer → ClickHouse flow
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use arrow::array::{ArrayRef, Float64Array, RecordBatch, StringArray, UInt64Array};
 use arrow::datatypes::{DataType, Field, Schema};
 use serde_json::json;
 
 use dfe_loader::buffer::{BufferManager, KafkaOffset};
-use dfe_loader::clickhouse::ArrowClickHouseClient;
 use dfe_loader::config::{
     BufferConfig, DlqConfig, FieldSanitizationConfig, MetadataConfig, RoutingConfig,
     TimestampDqConfig,
@@ -24,8 +22,7 @@ use dfe_loader::routing::{RouteResult, Router};
 use dfe_loader::transform::Transformer;
 
 use crate::common::{
-    check_clickhouse_reachable, create_test_client, drop_test_table, get_clickhouse_config,
-    load_dotenv, unique_table_name,
+    check_clickhouse_reachable, create_test_client, drop_test_table, load_dotenv, unique_table_name,
 };
 
 // ============================================================================
@@ -109,7 +106,7 @@ async fn test_full_pipeline_e2e() {
     });
 
     // Simulate processing messages (as if from Kafka)
-    let messages = vec![
+    let messages = [
         json!({
             "id": 1,
             "org_id": "default",
@@ -141,7 +138,7 @@ async fn test_full_pipeline_e2e() {
         let payload = serde_json::to_vec(msg).unwrap();
 
         // 1. Parse
-        let format = format_detector.check_and_detect(&payload).unwrap();
+        let _format = format_detector.check_and_detect(&payload).unwrap();
         let parsed: serde_json::Value = sonic_rs::from_slice(&payload).unwrap();
 
         // 2. Route (using parsed value)

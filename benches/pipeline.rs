@@ -11,8 +11,9 @@
 //!
 //! Run with: cargo bench --bench pipeline
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use serde_json::{Map, Value};
+use std::hint::black_box;
 
 use dfe_loader::payload::parse::{
     extract_field_json, extract_field_json_cow, extract_nested_field_json,
@@ -145,7 +146,7 @@ fn bench_transform(c: &mut Criterion) {
         group.bench_with_input(
             BenchmarkId::new("transform_with_raw", name),
             &(value.clone(), payload),
-            |b, (v, p)| b.iter(|| transformer.transform_with_raw(black_box(v.clone()), None)),
+            |b, (v, _p)| b.iter(|| transformer.transform_with_raw(black_box(v.clone()), None)),
         );
     }
 

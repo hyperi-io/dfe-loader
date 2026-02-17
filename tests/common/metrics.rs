@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: FSL-1.1-ALv2
 // Copyright (c) 2026 HYPERI PTY LIMITED
 
+#![allow(dead_code)]
+
 //! Test helpers for collecting and comparing Prometheus metrics
 //!
 //! Provides snapshot functionality to capture metrics before/after changes
@@ -270,7 +272,7 @@ impl MetricsComparison {
                     delta.percent_change
                 ));
             }
-            md.push_str("\n");
+            md.push('\n');
         }
 
         if !self.regressions.is_empty() {
@@ -287,7 +289,7 @@ impl MetricsComparison {
                     delta.percent_change
                 ));
             }
-            md.push_str("\n");
+            md.push('\n');
         }
 
         md.push_str("## Summary\n\n");
@@ -333,7 +335,7 @@ fn is_metric_improvement(metric_name: &str, delta: f64) -> bool {
 /// Get current git commit hash (if in git repo)
 fn get_git_commit() -> Option<String> {
     std::process::Command::new("git")
-        .args(&["rev-parse", "--short", "HEAD"])
+        .args(["rev-parse", "--short", "HEAD"])
         .output()
         .ok()
         .and_then(|output| {
@@ -350,7 +352,7 @@ fn get_git_commit() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use prometheus::{Counter, Gauge, Histogram, Opts, Registry};
+    use prometheus::{Counter, Opts, Registry};
 
     #[test]
     fn test_metrics_snapshot_capture() {

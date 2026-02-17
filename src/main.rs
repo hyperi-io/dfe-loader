@@ -10,11 +10,15 @@
 // Enable with: cargo build --release --features jemalloc
 //          or: cargo build --release --features mimalloc
 
-#[cfg(feature = "jemalloc")]
+// Compile-time guard: jemalloc and mimalloc are mutually exclusive
+#[cfg(all(feature = "jemalloc", feature = "mimalloc"))]
+compile_error!("Features 'jemalloc' and 'mimalloc' are mutually exclusive. Enable only one.");
+
+#[cfg(all(feature = "jemalloc", not(feature = "mimalloc")))]
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
-#[cfg(feature = "mimalloc")]
+#[cfg(all(feature = "mimalloc", not(feature = "jemalloc")))]
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 

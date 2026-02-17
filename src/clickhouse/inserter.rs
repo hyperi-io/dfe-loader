@@ -344,6 +344,7 @@ impl Inserter {
     }
 
     /// Recursively salvage a batch using binary split
+    #[allow(clippy::too_many_arguments)]
     fn salvage_batch<'a>(
         &'a self,
         table: &'a str,

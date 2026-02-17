@@ -322,7 +322,7 @@ mod tests {
 
         let hint = tree.get_hint(&path);
         // Should have a hint after enough observations with consistent index
-        assert!(hint.is_some() || tree.patterns.get("id").is_some());
+        assert!(hint.is_some() || tree.patterns.contains_key("id"));
     }
 
     #[test]

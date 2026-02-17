@@ -30,7 +30,7 @@ pub struct LeveledBitmaps {
 impl LeveledBitmaps {
     /// Create empty leveled bitmaps for a given data length
     pub fn new(data_len: usize, max_level: usize) -> Self {
-        let word_count = (data_len + WORD_SIZE - 1) / WORD_SIZE;
+        let word_count = data_len.div_ceil(WORD_SIZE);
         let max_level = max_level.min(MAX_DEPTH);
 
         Self {
@@ -87,7 +87,7 @@ impl StructuralIndex {
     /// Use this when you know the maximum depth of fields you need.
     /// Saves memory and computation for shallow queries.
     pub fn build_with_max_level(data: &[u8], max_level: usize) -> Self {
-        let word_count = (data.len() + WORD_SIZE - 1) / WORD_SIZE;
+        let word_count = data.len().div_ceil(WORD_SIZE);
         let max_level = max_level.min(MAX_DEPTH);
 
         // Step 1: Build character bitmaps for entire document
@@ -387,12 +387,17 @@ impl StructuralIndex {
         };
 
         let start_word = start / WORD_SIZE;
-        let end_word = (end + WORD_SIZE - 1) / WORD_SIZE;
+        let end_word = end.div_ceil(WORD_SIZE);
 
         let mut positions = Vec::new();
 
-        for word_idx in start_word..end_word.min(level_bitmap.len()) {
-            let mut word = level_bitmap[word_idx];
+        for (word_idx, &bitmap_word) in level_bitmap
+            .iter()
+            .enumerate()
+            .skip(start_word)
+            .take(end_word.min(level_bitmap.len()) - start_word)
+        {
+            let mut word = bitmap_word;
 
             while word != 0 {
                 let bit = extract_rightmost_one(word);

@@ -41,7 +41,7 @@ pub fn clamp_timestamp_ms_nano(ts_ms: i64) -> i64 {
 /// Check if a millisecond timestamp is within ClickHouse DateTime64 bounds.
 #[inline]
 pub fn is_valid_datetime64_ms(ts_ms: i64) -> bool {
-    ts_ms >= MIN_DATETIME64_MS && ts_ms <= MAX_DATETIME64_MS
+    (MIN_DATETIME64_MS..=MAX_DATETIME64_MS).contains(&ts_ms)
 }
 
 use crate::config::TimestampDqConfig;
