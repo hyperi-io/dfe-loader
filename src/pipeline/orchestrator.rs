@@ -24,6 +24,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use crate::buffer::{BufferManager, FlushBatch, KafkaOffset};
 use crate::clickhouse::{ArrowClickHouseClient, Inserter, InserterConfig};
 use crate::config::{Config, MetadataConfig, TableCaptureConfig};
+use crate::transform::{FieldMappingCache, MappingBuilder};
 use crate::kafka::{DlqMessage, DlqProducer, KafkaMessage, TransportAdapter};
 use crate::metrics::Metrics;
 use crate::payload::{FormatDetector, FormatMode, PayloadFormat};
@@ -228,6 +229,27 @@ impl Orchestrator {
         // Per-table capture overrides (_json/_raw disable via config + DDL tags)
         let mut capture_overrides = CaptureOverrides::new(&self.config.metadata);
 
+        // Per-table field mapping (rename/copy source fields to destination names)
+        let mut field_mapping_cache: Option<FieldMappingCache> = if self.config.field_mapping.enabled {
+            match MappingBuilder::from_config(&self.config.field_mapping) {
+                Ok(builder) => {
+                    info!(
+                        builtin = %self.config.field_mapping.builtin,
+                        files = self.config.field_mapping.files.len(),
+                        base_rules = builder.base_rule_count(),
+                        "Field mapping enabled"
+                    );
+                    Some(FieldMappingCache::new(builder))
+                }
+                Err(e) => {
+                    warn!(error = %e, "Failed to initialize field mapping, continuing without");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         // Flush interval timer
         let mut flush_interval = interval(Duration::from_secs(self.config.buffer.flush_age_secs));
 
@@ -286,6 +308,7 @@ impl Orchestrator {
                                     &transformer,
                                     &mut buffer_manager,
                                     &mut capture_overrides,
+                                    &mut field_mapping_cache,
                                 ) {
                                     Ok(table) => {
                                         self.stats.messages_processed += 1;
@@ -355,6 +378,30 @@ impl Orchestrator {
                                     Ok(_) => {} // No comment, config defaults apply
                                     Err(e) => {
                                         debug!(table = %table, error = %e, "Failed to fetch table comment for capture tags");
+                                    }
+                                }
+                            }
+
+                            // Resolve pending field mapping for newly seen tables
+                            if let Some(ref mut fm_cache) = field_mapping_cache {
+                                let fm_pending = fm_cache.take_pending();
+                                for table in fm_pending {
+                                    // Fetch schema and column comments for this table
+                                    let schema_result = arrow_client.fetch_table_schema(&table).await;
+                                    let comments_result = arrow_client.fetch_column_comments(&table).await;
+
+                                    match (schema_result, comments_result) {
+                                        (Ok(schema), Ok(comments)) => {
+                                            fm_cache.build_and_cache(&table, &schema, &comments);
+                                            debug!(table = %table, "Resolved field mapping");
+                                        }
+                                        (Ok(schema), Err(e)) => {
+                                            debug!(table = %table, error = %e, "Column comments unavailable, using base rules only");
+                                            fm_cache.build_and_cache_no_comments(&table, &schema);
+                                        }
+                                        (Err(e), _) => {
+                                            debug!(table = %table, error = %e, "Schema unavailable for field mapping");
+                                        }
                                     }
                                 }
                             }
@@ -430,6 +477,7 @@ impl Orchestrator {
         transformer: &Transformer,
         buffer_manager: &mut BufferManager,
         capture_overrides: &mut CaptureOverrides,
+        field_mapping_cache: &mut Option<FieldMappingCache>,
     ) -> Result<String> {
         // Step 1: Check/detect format
         let format = match format_detector.check_and_detect(&msg.payload) {
@@ -490,6 +538,14 @@ impl Orchestrator {
         // Remove _raw if disabled for this table (config list or DDL tags)
         if table_capture.disable_raw {
             data.remove(transformer.raw_output());
+        }
+
+        // Step 4.7: Apply per-table field mapping (rename/copy source fields)
+        if let Some(ref mut fm_cache) = field_mapping_cache {
+            fm_cache.mark_pending(&table);
+            if let Some(mapping) = fm_cache.get(&table) {
+                mapping.apply(&mut data);
+            }
         }
 
         // Step 5: Push to per-table buffer with raw payload sidecar for _json

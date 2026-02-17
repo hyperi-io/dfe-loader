@@ -28,9 +28,9 @@ pub mod watcher;
 
 pub use loader::{
     AutoInitConfig, BufferConfig, ClickHouseConfig, CoercionConfig, Config, DlqConfig,
-    FieldSanitizationConfig, KafkaConfig, LoggingConfig, MemoryConfig, MetadataConfig,
-    MetricsConfig, NullHandling, PayloadConfig, RoutingConfig, SaslConfig, SaslMechanism,
-    SchemaConfig, TableCaptureConfig, TimestampDqConfig, TlsConfig,
+    FieldMappingConfig, FieldMappingOverride, FieldSanitizationConfig, KafkaConfig, LoggingConfig,
+    MemoryConfig, MetadataConfig, MetricsConfig, NullHandling, PayloadConfig, RoutingConfig,
+    SaslConfig, SaslMechanism, SchemaConfig, TableCaptureConfig, TimestampDqConfig, TlsConfig,
 };
 pub use shared::SharedConfig;
 pub use watcher::{ConfigWatcher, WatcherConfig};
