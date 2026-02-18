@@ -147,17 +147,98 @@ anniversary of its release.
 - [ ] Tests pass (if applicable)
 - [ ] Documentation is updated (if applicable)
 
-## CI/CD Workflow
+## Building
 
-When your pull request is merged to `main`:
+### Local Build
 
-1. **semantic-release** analyses commit messages since the last release
-2. Determines the next version number based on commit types
-3. Generates/updates the CHANGELOG
-4. Creates a new GitHub release with release notes
-5. Publishes the package (if applicable)
+Run the local build orchestrator before pushing — it runs quality checks, tests,
+and builds in the same sequence as CI:
 
-This happens automatically - no manual intervention required.
+```bash
+ci/local-build.sh                    # Full: quality + tests + build
+ci/local-build.sh --skip-quality     # Tests + build only
+ci/local-build.sh --skip-tests       # Quality + build only
+ci/local-build.sh --skip-build       # Quality + tests only
+```
+
+Or build binaries directly:
+
+```bash
+# Native-only (quick)
+cargo build --release --features jemalloc
+
+# Cross-compile amd64 + arm64 (same as CI)
+RUST_BUILD_TARGETS='["x86_64-unknown-linux-gnu","aarch64-unknown-linux-gnu"]' \
+RUST_ALL_FEATURES=false RUST_FEATURES="jemalloc" \
+bash ci/scripts/languages/rust/build.sh
+```
+
+### Local Build Artifacts
+
+| Artifact | Location | Notes |
+|----------|----------|-------|
+| Native binary | `$CARGO_TARGET_DIR/release/dfe-loader` | Default `target/` or `~/.cargo-target/` |
+| Cross-compiled binaries | `dist/dfe-loader-{version}-linux-amd64` | Stripped, release-optimised |
+| | `dist/dfe-loader-{version}-linux-arm64` | Cross-compiled via `aarch64-linux-gnu-gcc` |
+| Checksums | `dist/checksums.sha256` | SHA-256 for all binaries |
+
+### Cross-Compilation Requirements
+
+The aarch64 cross-build requires these system packages (the CI build script
+installs them automatically via `sudo`):
+
+- `gcc-aarch64-linux-gnu` — C cross-compiler
+- `g++-aarch64-linux-gnu` — C++ cross-compiler (for rdkafka cmake build)
+- `libssl-dev:arm64` — OpenSSL headers/libs for arm64
+- `libsasl2-dev:arm64` — Cyrus SASL headers/libs for arm64
+
+On Ubuntu, arm64 packages require multiarch with `ports.ubuntu.com` sources.
+The build script configures this automatically. Note that `libsasl2-dev` is
+not `Multi-Arch: same`, so arm64 and amd64 variants cannot coexist — the
+build script handles this by building the native target first.
+
+## CI/CD Pipeline
+
+### Triggers
+
+| Workflow | Trigger | What It Does |
+|----------|---------|--------------|
+| `ci.yml` | Push to any branch, PRs | Quality checks + tests |
+| `publish.yml` | GitHub Release published, manual dispatch | Build + publish crate and binaries |
+
+### CI Publish Artifacts
+
+When a GitHub Release is published, CI produces and deploys:
+
+| Artifact | Destination | Path/URL |
+|----------|-------------|----------|
+| **Rust crate** | JFrog Artifactory (`hyperi` registry) | `hyperi-cargo-virtual/dfe-loader/{version}` |
+| **Linux amd64 binary** | JFrog Artifactory (generic repo) | `hyperi-binaries/dfe-loader/{version}/dfe-loader-{version}-linux-amd64` |
+| **Linux arm64 binary** | JFrog Artifactory (generic repo) | `hyperi-binaries/dfe-loader/{version}/dfe-loader-{version}-linux-arm64` |
+| **Linux amd64 binary** | GitHub Release assets | Attached to the release |
+| **Linux arm64 binary** | GitHub Release assets | Attached to the release |
+| **Checksums** | Both Artifactory + GitHub Release | `checksums.sha256` |
+| **LATEST_VERSION.txt** | JFrog Artifactory | `hyperi-binaries/dfe-loader/latest/LATEST_VERSION.txt` |
+
+### Artifactory Details
+
+| Setting | Value |
+|---------|-------|
+| JFrog domain | `hypersec.jfrog.io` |
+| Cargo registry name | `hyperi` |
+| Cargo index URL | `sparse+https://hypersec.jfrog.io/artifactory/api/cargo/hyperi-cargo-virtual/index/` |
+| Binary repo | `hyperi-binaries` |
+| Binary folder structure | `{project}/{version}/{binary-name}-{version}-{os}-{arch}` |
+
+### Version Flow
+
+1. Commit merged to `main` with `fix:` or `feat:` type
+2. **semantic-release** determines version bump from commit messages
+3. Updates `CHANGELOG.md`, creates git tag, publishes GitHub Release
+4. `publish.yml` triggers on the release event
+5. Builds crate + cross-compiled binaries
+6. Publishes crate to Artifactory Cargo registry
+7. Publishes binaries to Artifactory generic repo + GitHub Release assets
 
 ## Questions
 
