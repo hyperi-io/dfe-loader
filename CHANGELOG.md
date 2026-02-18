@@ -1,3 +1,10 @@
+## [1.6.5](https://github.com/hyperi-io/dfe-loader/compare/v1.6.4...v1.6.5) (2026-02-18)
+
+
+### Bug Fixes
+
+* add cross-compilation binary builds for amd64 and arm64 ([07d1754](https://github.com/hyperi-io/dfe-loader/commit/07d1754a4db973ddacf1f0ff125235528ac5d5d2))
+
 ## [1.6.4](https://github.com/hyperi-io/dfe-loader/compare/v1.6.3...v1.6.4) (2026-02-17)
 
 
