@@ -35,11 +35,16 @@ test:
 # Building
 build:
   enabled: true
+  type: app                # Build binaries (not just crate)
   strategies:
     - native
+  rust:
+    targets:
+      - x86_64-unknown-linux-gnu
+      - aarch64-unknown-linux-gnu
 
 # Publishing (on release)
 publish:
   enabled: true
-  # binaries: both         # Binary publish destination: artifactory, github, both
+  binaries: both           # Binary publish destination: artifactory, github, both
   # binaries_repo: hyperi-binaries  # JFrog Generic repo for binaries
