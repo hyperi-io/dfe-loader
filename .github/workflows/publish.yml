@@ -1,6 +1,6 @@
 # Project:      dfe-loader
 # File:         .github/workflows/publish.yml
-# Purpose:      Rust Publish pipeline - Build, Publish to Cargo registry
+# Purpose:      Rust Publish pipeline - Build, Publish crate and/or binaries
 # License:      FSL-1.1-ALv2
 # Copyright:    (c) 2026 HYPERI PTY LIMITED
 #
@@ -22,6 +22,9 @@ jobs:
     name: Detect Config
     runs-on: ${{ vars.GH_RUNNER_DEFAULT || 'ubuntu-latest' }}
     outputs:
+      build_type: ${{ steps.config.outputs.build_type }}
+      publish_binaries: ${{ steps.config.outputs.publish_binaries }}
+      binaries_repo: ${{ steps.config.outputs.binaries_repo }}
       rust_targets: ${{ steps.config.outputs.rust_targets }}
       rust_features: ${{ steps.config.outputs.rust_features }}
     steps:
@@ -67,6 +70,7 @@ jobs:
           artifactory-password: ${{ secrets.ARTIFACTORY_CI_TOKEN }}
           rust-targets: ${{ needs.detect.outputs.rust_targets }}
           rust-features: ${{ needs.detect.outputs.rust_features }}
+          build-type: ${{ needs.detect.outputs.build_type }}
 
   publish:
     name: Publish
@@ -93,5 +97,9 @@ jobs:
           artifactory-url: ${{ vars.ARTIFACTORY_CARGO_URL }}
           artifactory-username: ${{ secrets.ARTIFACTORY_CI_USERNAME }}
           artifactory-password: ${{ secrets.ARTIFACTORY_CI_TOKEN }}
+          build-type: ${{ needs.detect.outputs.build_type }}
+          publish-binaries: ${{ needs.detect.outputs.publish_binaries }}
+          binaries-repo: ${{ needs.detect.outputs.binaries_repo }}
+          github-token: ${{ steps.token.outputs.token }}
           linear-api-key: ${{ secrets.LINEAR_API_KEY }}
           linear-prefixes: ${{ vars.LINEAR_PREFIXES || 'DFE' }}
