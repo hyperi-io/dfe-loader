@@ -1,3 +1,10 @@
+## [1.6.11](https://github.com/hyperi-io/dfe-loader/compare/v1.6.10...v1.6.11) (2026-02-19)
+
+
+### Bug Fixes
+
+* update ci with two-level cross sysroot dependency resolution ([511a793](https://github.com/hyperi-io/dfe-loader/commit/511a793c11598bb33cd4cae242337dbbabd08d1f))
+
 ## [1.6.10](https://github.com/hyperi-io/dfe-loader/compare/v1.6.9...v1.6.10) (2026-02-19)
 
 
