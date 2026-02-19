@@ -1,3 +1,10 @@
+## [1.6.13](https://github.com/hyperi-io/dfe-loader/compare/v1.6.12...v1.6.13) (2026-02-19)
+
+
+### Bug Fixes
+
+* update ci with binary publish permission fix ([8397acc](https://github.com/hyperi-io/dfe-loader/commit/8397accf9b0b79b6180f83690df43b20559b6fb1))
+
 ## [1.6.12](https://github.com/hyperi-io/dfe-loader/compare/v1.6.11...v1.6.12) (2026-02-19)
 
 
