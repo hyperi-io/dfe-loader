@@ -1,6 +1,6 @@
 [package]
 name = "dfe-loader"
-version = "1.6.8"
+version = "1.6.9"
 edition = "2021"
 authors = ["HyperI <dev@hyperi.com.au>"]
 description = "High-performance Kafka to ClickHouse data loader"
