@@ -24,7 +24,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use crate::buffer::{BufferManager, FlushBatch, KafkaOffset};
 use crate::clickhouse::{ArrowClickHouseClient, Inserter, InserterConfig};
 use crate::config::{Config, MetadataConfig, TableCaptureConfig};
-use crate::kafka::{DlqMessage, DlqProducer, KafkaMessage, TransportAdapter};
+use crate::kafka::{DlqMessage, DlqProducer, KafkaMessage, TransportBackend};
 use crate::metrics::Metrics;
 use crate::payload::{FormatDetector, FormatMode, PayloadFormat};
 use crate::pipeline::AutoInitializer;
@@ -180,8 +180,8 @@ impl Orchestrator {
         let initializer = AutoInitializer::new(&self.config);
         initializer.run().await?;
 
-        // Initialize transport adapter (wraps hyperi-rustlib KafkaTransport)
-        let transport = TransportAdapter::new(&self.config.kafka).await?;
+        // Initialize transport backend (Kafka, Zenoh, etc. based on config)
+        let transport = TransportBackend::from_config(&self.config).await?;
         info!(transport = transport.name(), "Transport initialized");
 
         // Create Arrow client for native protocol inserts and schema queries
@@ -570,7 +570,7 @@ impl Orchestrator {
     async fn flush_batches_transport(
         &mut self,
         inserter: &Inserter,
-        transport: &TransportAdapter,
+        transport: &TransportBackend,
         batches: Vec<FlushBatch>,
     ) {
         use std::time::Instant;

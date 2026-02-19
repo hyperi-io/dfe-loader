@@ -1351,7 +1351,7 @@ dependencies = [
 
 [[package]]
 name = "dfe-loader"
-version = "1.6.5"
+version = "1.6.12"
 dependencies = [
  "anyhow",
  "arrow",

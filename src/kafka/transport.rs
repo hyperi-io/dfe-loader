@@ -1,18 +1,22 @@
 // SPDX-License-Identifier: FSL-1.1-ALv2
 // Copyright (c) 2026 HYPERI PTY LIMITED
 
-//! Transport adapter for hyperi-rustlib transport abstraction.
+//! Transport adapters for hyperi-rustlib transport abstraction.
 //!
-//! This module provides a thin adapter layer between the hyperi-rustlib Transport trait
-//! and the local KafkaMessage/KafkaOffset types. The adapter is designed for
-//! zero-overhead conversion in the hot path.
+//! This module provides thin adapter layers between the hyperi-rustlib Transport trait
+//! and the local KafkaMessage/KafkaOffset types. Each adapter converts transport-specific
+//! messages into the common pipeline types.
 //!
-//! ## Performance Strategy
+//! ## Supported Transports
 //!
-//! - Uses hyperi-rustlib `KafkaTransport` for receive/commit operations
-//! - Converts `Message<KafkaToken>` → local `KafkaMessage` with Arc<str> sharing
-//! - Local sonic-rs parsing is preserved (NOT using hyperi-rustlib payload utilities)
-//! - KafkaToken → KafkaOffset is a simple field copy (same structure)
+//! - **Kafka** (always compiled): Production transport with at-least-once delivery
+//! - **Zenoh** (feature `transport-zenoh`): Low-latency pub/sub for dev/test
+//! - **Memory** (feature `transport-memory`): In-process channels for unit tests
+//!
+//! ## TransportBackend
+//!
+//! The `TransportBackend` enum provides a unified interface over all compiled transports.
+//! The orchestrator uses this to be transport-agnostic.
 
 use hyperi_rustlib::transport::{
     KafkaConfig as TransportKafkaConfig, KafkaToken, KafkaTransport, Transport, TransportError,
@@ -279,6 +283,206 @@ mod memory_adapter {
         /// Get the underlying transport for advanced testing.
         pub fn inner(&self) -> &MemoryTransport {
             &self.transport
+        }
+    }
+}
+
+// ============================================================================
+// ZenohTransportAdapter - Low-latency pub/sub for dev/test
+// ============================================================================
+
+#[cfg(feature = "transport-zenoh")]
+pub use zenoh_adapter::ZenohTransportAdapter;
+
+#[cfg(feature = "transport-zenoh")]
+mod zenoh_adapter {
+    use hyperi_rustlib::transport::{
+        ZenohConfig as TransportZenohConfig, ZenohTransport, Transport,
+    };
+
+    use crate::buffer::KafkaOffset;
+    use crate::config::ZenohConfig;
+    use crate::Result;
+
+    use super::super::KafkaMessage;
+
+    /// Adapter that wraps hyperi-rustlib ZenohTransport for local use.
+    ///
+    /// Same interface as TransportAdapter but uses Zenoh pub/sub.
+    /// Zenoh has no persistence — commit is a no-op (logged for telemetry).
+    pub struct ZenohTransportAdapter {
+        transport: ZenohTransport,
+    }
+
+    impl ZenohTransportAdapter {
+        /// Create a new Zenoh transport adapter from local ZenohConfig.
+        pub async fn new(config: &ZenohConfig) -> Result<Self> {
+            let transport_config = Self::convert_config(config);
+            let transport = ZenohTransport::new(&transport_config)
+                .await
+                .map_err(|e| crate::Error::Transport(format!("Zenoh init error: {e}")))?;
+
+            Ok(Self { transport })
+        }
+
+        /// Convert local ZenohConfig to hyperi-rustlib TransportZenohConfig.
+        fn convert_config(config: &ZenohConfig) -> TransportZenohConfig {
+            let mut transport_config = match config.mode.as_str() {
+                "client" => TransportZenohConfig::client(
+                    config.connect.clone(),
+                    config.subscribe.clone(),
+                ),
+                "router" => TransportZenohConfig::router(
+                    config.listen.clone(),
+                    config.connect.clone(),
+                ),
+                _ => TransportZenohConfig::peer(config.subscribe.clone()),
+            };
+
+            transport_config.shm_enabled = config.shm_enabled;
+            transport_config.shm_size = config.shm_size;
+            transport_config.recv_buffer_size = config.recv_buffer_size;
+            transport_config.recv_timeout_ms = config.recv_timeout_ms;
+
+            transport_config
+        }
+
+        /// Receive up to `max` messages from the transport.
+        ///
+        /// Converts ZenohToken fields into KafkaMessage for pipeline compatibility.
+        /// key_expr → topic, seq → offset, partition = 0 (Zenoh has no partitions).
+        pub async fn recv(&self, max: usize) -> Result<Vec<KafkaMessage>> {
+            let messages = self
+                .transport
+                .recv(max)
+                .await
+                .map_err(|e| crate::Error::Transport(format!("Zenoh recv error: {e}")))?;
+
+            Ok(messages
+                .into_iter()
+                .map(|msg| KafkaMessage {
+                    payload: msg.payload,
+                    topic: msg.token.key_expr.clone(),
+                    partition: 0,
+                    offset: msg.token.seq as i64,
+                    key: msg.key.map(|k| k.as_bytes().to_vec()),
+                    timestamp_ms: msg.timestamp_ms,
+                })
+                .collect())
+        }
+
+        /// Commit is a no-op for Zenoh (no persistence, no consumer groups).
+        pub async fn commit(&self, _offsets: &[KafkaOffset]) -> Result<()> {
+            Ok(())
+        }
+
+        /// Close the transport.
+        pub async fn close(&self) -> Result<()> {
+            self.transport
+                .close()
+                .await
+                .map_err(|e| crate::Error::Transport(format!("Zenoh close error: {e}")))
+        }
+
+        /// Check if transport is healthy.
+        pub fn is_healthy(&self) -> bool {
+            self.transport.is_healthy()
+        }
+
+        /// Get transport name.
+        pub fn name(&self) -> &'static str {
+            self.transport.name()
+        }
+    }
+}
+
+// ============================================================================
+// TransportBackend - Unified dispatch over all compiled transports
+// ============================================================================
+
+/// Unified transport backend that dispatches to the configured transport.
+///
+/// The orchestrator uses this instead of a concrete adapter type, making the
+/// pipeline transport-agnostic at runtime.
+pub enum TransportBackend {
+    /// Kafka transport (production)
+    Kafka(TransportAdapter),
+
+    /// Zenoh transport (dev/test, low-latency)
+    #[cfg(feature = "transport-zenoh")]
+    Zenoh(ZenohTransportAdapter),
+}
+
+impl TransportBackend {
+    /// Create a transport backend from the application config.
+    ///
+    /// Selects transport type based on `config.transport` field.
+    /// Defaults to Kafka if not specified.
+    pub async fn from_config(config: &crate::config::Config) -> Result<Self> {
+        match config.transport.as_str() {
+            #[cfg(feature = "transport-zenoh")]
+            "zenoh" => {
+                let zenoh_config = config.zenoh.as_ref().ok_or_else(|| {
+                    crate::Error::Config("transport = \"zenoh\" but [zenoh] config is missing".into())
+                })?;
+                let adapter = ZenohTransportAdapter::new(zenoh_config).await?;
+                Ok(Self::Zenoh(adapter))
+            }
+            #[cfg(not(feature = "transport-zenoh"))]
+            "zenoh" => {
+                Err(crate::Error::Config(
+                    "transport = \"zenoh\" but dfe-loader was compiled without the transport-zenoh feature".into(),
+                ))
+            }
+            "kafka" | _ => {
+                let adapter = TransportAdapter::new(&config.kafka).await?;
+                Ok(Self::Kafka(adapter))
+            }
+        }
+    }
+
+    /// Receive up to `max` messages.
+    pub async fn recv(&self, max: usize) -> Result<Vec<super::KafkaMessage>> {
+        match self {
+            Self::Kafka(a) => a.recv(max).await,
+            #[cfg(feature = "transport-zenoh")]
+            Self::Zenoh(a) => a.recv(max).await,
+        }
+    }
+
+    /// Commit offsets (no-op for non-Kafka transports).
+    pub async fn commit(&self, offsets: &[crate::buffer::KafkaOffset]) -> Result<()> {
+        match self {
+            Self::Kafka(a) => a.commit(offsets).await,
+            #[cfg(feature = "transport-zenoh")]
+            Self::Zenoh(a) => a.commit(offsets).await,
+        }
+    }
+
+    /// Close the transport.
+    pub async fn close(&self) -> Result<()> {
+        match self {
+            Self::Kafka(a) => a.close().await,
+            #[cfg(feature = "transport-zenoh")]
+            Self::Zenoh(a) => a.close().await,
+        }
+    }
+
+    /// Check if transport is healthy.
+    pub fn is_healthy(&self) -> bool {
+        match self {
+            Self::Kafka(a) => a.is_healthy(),
+            #[cfg(feature = "transport-zenoh")]
+            Self::Zenoh(a) => a.is_healthy(),
+        }
+    }
+
+    /// Get transport name.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Kafka(a) => a.name(),
+            #[cfg(feature = "transport-zenoh")]
+            Self::Zenoh(a) => a.name(),
         }
     }
 }

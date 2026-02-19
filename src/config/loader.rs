@@ -23,7 +23,12 @@ use crate::Result;
 #[serde(default)]
 #[derive(Default)]
 pub struct Config {
+    /// Transport backend: "kafka" (default), "zenoh"
+    #[serde(default = "default_transport")]
+    pub transport: String,
     pub kafka: KafkaConfig,
+    /// Zenoh config (required when transport = "zenoh")
+    pub zenoh: Option<ZenohConfig>,
     pub clickhouse: ClickHouseConfig,
     pub payload: PayloadConfig,
     pub routing: RoutingConfig,
@@ -38,6 +43,10 @@ pub struct Config {
     pub schema: SchemaConfig,
     pub auto_init: AutoInitConfig,
     pub field_mapping: FieldMappingConfig,
+}
+
+fn default_transport() -> String {
+    "kafka".to_string()
 }
 
 // ============================================================================
@@ -780,6 +789,51 @@ impl Default for SchemaConfig {
 }
 
 // ============================================================================
+// Zenoh Configuration
+// ============================================================================
+
+/// Zenoh transport configuration.
+///
+/// Used when `transport = "zenoh"` in the main config. Zenoh provides
+/// low-latency pub/sub without a broker — suitable for dev/test and
+/// same-node inter-process communication via shared memory.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ZenohConfig {
+    /// Zenoh mode: "peer" (mesh), "client" (router-based), "router"
+    pub mode: String,
+    /// Endpoints to connect to (e.g., ["tcp/zenoh-router:7447"])
+    pub connect: Vec<String>,
+    /// Endpoints to listen on (router mode)
+    pub listen: Vec<String>,
+    /// Key expressions to subscribe to (e.g., ["events/**"])
+    pub subscribe: Vec<String>,
+    /// Enable shared memory for same-node zero-copy
+    pub shm_enabled: bool,
+    /// Shared memory buffer size in bytes
+    pub shm_size: usize,
+    /// Receive channel buffer size
+    pub recv_buffer_size: usize,
+    /// Receive timeout in milliseconds (0 = non-blocking)
+    pub recv_timeout_ms: u64,
+}
+
+impl Default for ZenohConfig {
+    fn default() -> Self {
+        Self {
+            mode: "peer".to_string(),
+            connect: vec![],
+            listen: vec![],
+            subscribe: vec!["events/**".to_string()],
+            shm_enabled: true,
+            shm_size: 67_108_864, // 64MB
+            recv_buffer_size: 1000,
+            recv_timeout_ms: 100,
+        }
+    }
+}
+
+// ============================================================================
 // Auto-Initialization Configuration
 // ============================================================================
 
@@ -946,16 +1000,35 @@ impl Config {
 
     /// Validate the configuration
     pub fn validate(&self) -> Result<()> {
-        // Kafka validation
-        if self.kafka.brokers.is_empty() {
-            return Err(crate::Error::Config(
-                "At least one Kafka broker must be configured".into(),
-            ));
-        }
-        if self.kafka.topics.is_empty() && self.kafka.topic_regex.is_none() {
-            return Err(crate::Error::Config(
-                "Either topics or topic_regex must be configured".into(),
-            ));
+        // Transport-specific validation
+        match self.transport.as_str() {
+            "zenoh" => {
+                // Zenoh requires [zenoh] config section
+                if self.zenoh.is_none() {
+                    return Err(crate::Error::Config(
+                        "transport = \"zenoh\" requires [zenoh] config section".into(),
+                    ));
+                }
+                let zenoh = self.zenoh.as_ref().unwrap();
+                if zenoh.subscribe.is_empty() {
+                    return Err(crate::Error::Config(
+                        "zenoh.subscribe must have at least one key expression".into(),
+                    ));
+                }
+            }
+            "kafka" | _ => {
+                // Kafka validation (default)
+                if self.kafka.brokers.is_empty() {
+                    return Err(crate::Error::Config(
+                        "At least one Kafka broker must be configured".into(),
+                    ));
+                }
+                if self.kafka.topics.is_empty() && self.kafka.topic_regex.is_none() {
+                    return Err(crate::Error::Config(
+                        "Either topics or topic_regex must be configured".into(),
+                    ));
+                }
+            }
         }
 
         // ClickHouse validation
