@@ -1,3 +1,10 @@
+# [1.7.0](https://github.com/hyperi-io/dfe-loader/compare/v1.6.13...v1.7.0) (2026-02-19)
+
+
+### Features
+
+* wire zenoh transport backend behind feature gate ([3a59fec](https://github.com/hyperi-io/dfe-loader/commit/3a59fec2a2f00f54432e0556cb4b553b2b3f4172))
+
 ## [1.6.13](https://github.com/hyperi-io/dfe-loader/compare/v1.6.12...v1.6.13) (2026-02-19)
 
 
