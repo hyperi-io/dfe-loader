@@ -8,6 +8,7 @@ mod config;
 mod datatypes;
 mod dlq;
 mod errors;
+mod field_mapping;
 mod inserter;
 mod kafka;
 mod offset;
