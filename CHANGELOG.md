@@ -1,3 +1,10 @@
+## [1.6.12](https://github.com/hyperi-io/dfe-loader/compare/v1.6.11...v1.6.12) (2026-02-19)
+
+
+### Bug Fixes
+
+* update ci with system libc6-dev:arm64 for cross-compilation ([027f396](https://github.com/hyperi-io/dfe-loader/commit/027f39616c1338524f83c78c30f5458563933417))
+
 ## [1.6.11](https://github.com/hyperi-io/dfe-loader/compare/v1.6.10...v1.6.11) (2026-02-19)
 
 
