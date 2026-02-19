@@ -1,3 +1,10 @@
+## [1.6.10](https://github.com/hyperi-io/dfe-loader/compare/v1.6.9...v1.6.10) (2026-02-19)
+
+
+### Bug Fixes
+
+* update ci with usrmerge sysroot handling ([cbf66e4](https://github.com/hyperi-io/dfe-loader/commit/cbf66e40bd5b77f2d7124b300664faf5f98fdf76))
+
 ## [1.6.9](https://github.com/hyperi-io/dfe-loader/compare/v1.6.8...v1.6.9) (2026-02-19)
 
 
