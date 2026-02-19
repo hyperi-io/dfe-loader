@@ -44,6 +44,9 @@ pub enum Error {
     #[error("Coercion error: {0}")]
     Coercion(String),
 
+    #[error("Transport error: {0}")]
+    Transport(String),
+
     #[error("Shutdown requested")]
     Shutdown,
 }

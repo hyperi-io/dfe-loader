@@ -21,7 +21,7 @@
 
 ---
 
-## Next: Performance Validation
+## Next: Performance Validation & CI Stabilisation
 
 - [ ] **Full Rust async optimisation review** - Hot path + operations branches
   - Review async/await patterns for unnecessary overhead
@@ -57,6 +57,27 @@ None currently - all critical TODOs completed.
 ---
 
 ## Completed
+
+### 2026-02-19: CI Cross-Compilation & Binary Publish Pipeline
+
+- [x] **Fixed pipe-delimited RUST_FEATURES parsing** in build.sh (extract first set for binary builds)
+- [x] **Fixed arch-specific OpenSSL headers** for aarch64 cross-compilation (`CFLAGS_aarch64_unknown_linux_gnu`)
+- [x] **Fixed GNU ld script absolute paths** via sed patching + usrmerge handling in sysroot
+- [x] **Fixed transitive dependency resolution** in sysroot (two-level deep for libc6:arm64)
+- [x] **Installed libc6-dev:arm64 system-wide** for dynamic linker availability (Multi-Arch: same)
+- [x] **Fixed binary publish permission loss** — `actions/upload-artifact@v4` strips Unix permissions; added `chmod +x` restore step
+- [x] **Reviewed macOS BSD compatibility changes** — `sed -i.bak`, `printf "%b"`, `grep -oE` all safe on Linux CI
+- [x] v1.6.13 published successfully with both amd64 (26M) and arm64 (22M) binaries to Artifactory
+
+### 2026-02-18: Field Mapping Integration Tests
+
+- [x] Integration tests for field mapping feature (33 tests in `tests/integration/field_mapping.rs`)
+  - Apply semantics (rename, copy, first-match, priority, skip existing, missing source, empty, value types)
+  - MappingBuilder schema filtering (column matching, empty schema, comment overrides, config override)
+  - Builtin preset smoke tests (ECS, CIM, Beats loading and apply)
+  - FieldMappingCache lifecycle (get, build, invalidate, dedup, drain)
+  - ClickHouse `@renamed` column comment parsing (with skip guard)
+  - End-to-end preset apply with schema filtering
 
 ### 2026-01-19: Auto-Initialization & Schema Optimization
 
@@ -192,4 +213,4 @@ None currently - all critical TODOs completed.
 
 ---
 
-**Last Updated:** 2026-01-21
+**Last Updated:** 2026-02-19

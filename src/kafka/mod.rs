@@ -9,7 +9,10 @@ pub mod transport;
 
 pub use consumer::{Consumer, KafkaMessage};
 pub use dlq::{DlqMessage, DlqProducer, DlqRoutingMode};
-pub use transport::TransportAdapter;
+pub use transport::{TransportAdapter, TransportBackend};
+
+#[cfg(feature = "transport-zenoh")]
+pub use transport::ZenohTransportAdapter;
 
 #[cfg(feature = "transport-memory")]
 pub use transport::MemoryTransportAdapter;

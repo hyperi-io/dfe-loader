@@ -704,363 +704,74 @@ Located at k8s.tyrell.com.au with:
 
 ---
 
-## Current Session (2026-02-06)
+## Key Architectural Insights
 
-### Accomplished This Session
+### ClickHouse Arrow Protocol Quirk
 
-#### 1. CI Fixes and Parallel Job Limiting
-
-- Fixed CI stuck in queued state (BuildJet runners unavailable)
-- Reverted to `ubuntu-latest` runners
-- Added configurable Rust feature sets to avoid `--all-features` conflicts
-- Implemented `jobs = 2` in `.cargo/config.toml` to prevent CPU starvation
-- Updated CI submodule to v1.52.0 with `get_cargo_jobs()` helper
-
-#### 2. FSL-1.1-ALv2 Licensing Migration (HyperI)
-
-Complete licensing overhaul from proprietary to FSL-1.1-ALv2:
-
-| File | Status |
-|------|--------|
-| `LICENSE` | ✅ Created (FSL-1.1-ALv2) |
-| `COMMERCIAL.md` | ✅ Created |
-| `CONTRIBUTING.md` | ✅ Created (DCO + Conventional Commits) |
-| `SECURITY.md` | ✅ Created |
-| `Cargo.toml` | ✅ Updated (license, authors) |
-| `CLAUDE.md` | ✅ Added licensing section |
-| 53 source files | ✅ SPDX headers added |
-| 33 test/bench files | ✅ SPDX headers added |
-
-**SPDX Header Format:**
+String columns are returned as Binary type via Arrow protocol:
 
 ```rust
-// SPDX-License-Identifier: FSL-1.1-ALv2
-// Copyright (c) 2026 HYPERI PTY LIMITED
+use arrow::array::BinaryArray;
+if let Some(col) = batch.column(0).as_any().downcast_ref::<BinaryArray>() {
+    let value = std::str::from_utf8(col.value(0))?;
+}
 ```
 
-#### 3. HyperI Rebranding Plan (Drafted, Blocked)
+### Explicit Arrow Schemas Required
 
-Created comprehensive rebranding plan at `/home/derek/.claude/plans/steady-knitting-river.md`:
+JSON schema inference fails for timestamps — always use explicit schemas:
 
-- **Blocked on:** `hyperi-rustlib` being published to new registry
-- **Scope:** ~287 files, ~2,000+ occurrences
-- **JFrog domain stays:** `hypersec.jfrog.io` (account-level, not user-facing)
+```rust
+// ❌ BAD - JSON inference creates String type
+let batch = json_batch_to_arrow(&rows)?;
 
-### Git State
-
-- **Branch:** main
-- **Upstream:** up to date with origin/main
-- **Uncommitted:** clean (docs/POSTGRESQL-CONFIG.md untracked)
-- **Latest commits:**
-  - `ae455e4` chore: update Cargo.lock and STATE.md
-  - `1e4e33a` chore: migrate to FSL-1.1-ALv2 licensing (HyperI)
-  - `dc6f4de` fix: limit parallel jobs to prevent CPU starvation
-
-### Key Files Modified This Session
-
-| File | Description |
-|------|-------------|
-| `LICENSE` | FSL-1.1-ALv2 license text |
-| `COMMERCIAL.md` | Commercial licensing requirements |
-| `CONTRIBUTING.md` | DCO + Conventional Commits guide |
-| `SECURITY.md` | Vulnerability disclosure policy |
-| `Cargo.toml` | license = "FSL-1.1-ALv2", authors = HyperI |
-| `.cargo/config.toml` | jobs = 2 for local builds |
-| `src/**/*.rs` (53 files) | SPDX headers |
-| `tests/**/*.rs` (28 files) | SPDX headers |
-| `benches/*.rs` (5 files) | SPDX headers |
-
-### Decisions Made
-
-1. **FSL-1.1-ALv2 over proprietary** - Source-available with Apache 2.0 conversion after 2 years
-2. **JFrog domain stays** - `hypersec.jfrog.io` is account-level, repo names updated to `hyperi-*`
-3. **Parallel jobs = 2** - Prevents CPU starvation on local builds
-4. **Casing: HyperI** - Capital H, capital I for brand; HYPERI for legal entity
-
-### Remaining Rebranding
-
-1. JFrog domain `hypersec.jfrog.io` stays (account-level, not user-facing)
-2. All repo names, registry name, crate names, GitHub org — updated to `hyperi`
-
-### Session Context Summary
-
-Fixed CI issues (BuildJet unavailable, CPU starvation from parallel jobs). Completed
-full licensing migration to FSL-1.1-ALv2 with SPDX headers on 86 files. Drafted
-HyperI rebranding plan but blocked on hyperi-rustlib availability. Infrastructure
-references (registry, JFrog) intentionally unchanged until new infra ready.
-
----
-
-## Previous Session (2026-01-19)
-
-### Accomplished That Session
-
-#### Auto-Initialization & Schema Optimization
-
-Implemented comprehensive auto-initialization for happy path setup:
-
-**New Files:**
-
-- `schemas/common_table.sql` - DDL template with `{db}`, `{table}`, `{engine}` placeholders
-- `schemas/common_header.csv` - Field definitions (column, type, default, nullable, codec, comment)
-- `src/schema/mod.rs` - Schema module with compile-time embedding and capability detection
-
-**Config (`src/config/loader.rs`):**
-
-```toml
-[auto_init]
-enabled = true           # Master switch (default: true)
-create_topics = true     # Kafka topic creation
-create_database = true   # ClickHouse database creation
-create_table = true      # ClickHouse table creation
-create_text_index = true # Text search index on logoriginal
-topic_partitions = 3
-topic_replication_factor = 1
+// ✅ GOOD - Explicit schema with TimestampMillisecondArray
+let schema = Arc::new(Schema::new(vec![
+    Field::new("timestamp", DataType::Timestamp(TimeUnit::Millisecond, None), false),
+]));
+let batch = RecordBatch::try_new(schema, columns)?;
 ```
 
-**Engine Auto-Detection (`src/pipeline/auto_init.rs`):**
+### Query Verification
 
-1. Queries `SELECT version()` for ClickHouse version
-2. Queries `system.table_engines` for SharedMergeTree availability
-3. Queries `system.clusters` for clustered deployment
-4. Selection: SharedMergeTree → ReplicatedMergeTree → MergeTree
-
-**Text Search Index:**
-
-- `full_text(0)` on ClickHouse 25.1+ (GA)
-- `ngrambf_v1(3, 256, 2, 0)` bloom filter fallback for older versions
-- Added via `ALTER TABLE ... ADD INDEX` after table creation
-
-**Key Design Decisions:**
-
-1. `_org_id` first in ORDER BY - every query uses org_id for RLS
-2. `timestamp_load` is primary query filter (not `timestamp`)
-3. `timestamp` gets minmax index for event time range queries
-4. Monthly + org partitions acceptable for <100 orgs
-5. Text search configurable (default ON) with version-based index selection
+INSERT row count can succeed even if data is malformed. Always query-back to verify.
 
 ---
 
-## Previous Session (2026-01-14)
+## CI Cross-Compilation
 
-### Accomplished That Session
+### aarch64 Sysroot Approach
 
-#### Artifactory Registry Publishing Complete
+The CI builds both `x86_64-unknown-linux-gnu` and `aarch64-unknown-linux-gnu` binaries.
+Cross-compilation uses a private sysroot approach in `build.sh`:
 
-Published all crates to HyperI Artifactory private registry:
+1. Auto-detect native `-dev` packages via `.pc` files
+2. Download cross-arch equivalents with two-level dependency resolution
+3. Apply usrmerge (merge `lib/` into `usr/lib/`)
+4. Patch GNU ld scripts to use sysroot-relative paths
+5. Install `libc6-dev:arm64` system-wide (Multi-Arch: same, needed for dynamic linker)
+6. Linker wrapper adds `-L` flags for sysroot library paths
+7. `CFLAGS_aarch64_unknown_linux_gnu` adds arch-specific include paths
 
-| Crate | Version | Registry | Status |
-|-------|---------|----------|--------|
-| `clickhouse-arrow-derive` | 0.3.0 | hyperi | ✅ Published |
-| `clickhouse-arrow` | 0.3.0 | hyperi | ✅ Published |
-| `hyperi-rustlib` | 0.3.0 | hyperi | ✅ Published |
+### GitHub Actions Artifact Permissions
 
-#### Private CI for clickhouse-arrow Fork
-
-Created workflow dispatch pattern for private CI on public fork:
-
-- Created [ci/.github/workflows/clickhouse-arrow.yml](ci/.github/workflows/clickhouse-arrow.yml)
-- Triggers: `repository_dispatch`, `workflow_dispatch`, `schedule` (daily 06:00 UTC)
-- Public fork stays clean for upstream PRs
-- Private CI runs from hyperi-io/ci repo
-
-#### hyperi-rustlib Registry Dependency
-
-Updated hyperi-rustlib to consume clickhouse-arrow from registry instead of git:
-
-```toml
-# Before (git dependency - can't publish)
-clickhouse-arrow = { git = "https://github.com/hyperi-io/clickhouse-arrow", ... }
-
-# After (registry dependency - publishable)
-clickhouse-arrow = { version = "0.3.0", registry = "hyperi", ... }
-```
-
-### Key Files Modified
-
-| File | Description |
-|------|-------------|
-| `/projects/hyperi-rustlib/Cargo.toml` | Registry dependency for clickhouse-arrow |
-| `/projects/dfe-loader/ci/.github/workflows/clickhouse-arrow.yml` | New CI workflow |
-| `/projects/clickhouse-arrow-publish/Cargo.toml` | Version 0.3.0, registry config |
-| `/projects/clickhouse-arrow-publish/clickhouse-arrow/Cargo.toml` | Derive via registry |
-| `/projects/clickhouse-arrow-publish/.cargo/config.toml` | Hypersec registry config |
-
-### Decisions Made
-
-1. **Registry over git dependencies** - Required for cargo publish to work
-2. **Workflow dispatch pattern** - Private CI without polluting public fork
-3. **Version 0.3.0** - Aligned clickhouse-arrow, derive, and hyperi-rustlib versions
-
-### Git State
-
-- **Branch:** main
-- **Upstream:** up to date with origin/main
-- **Uncommitted:** ci submodule updated (new workflow) - `ci | 2 +-`
-
-### Next Steps
-
-1. **Update dfe-loader** - Use `hyperi-rustlib = { version = "0.3.0", registry = "hyperi" }`
-2. **Commit ci submodule** - Record new clickhouse-arrow workflow
-3. **Test integration** - Verify dfe-loader works with registry dependencies
-
-### Session Context Summary
-
-Completed Artifactory publishing pipeline for clickhouse-arrow fork and hyperi-rustlib.
-All three crates (clickhouse-arrow-derive, clickhouse-arrow, hyperi-rustlib) now at
-v0.3.0 in hyperi registry. Created private CI workflow for the public fork.
-dfe-loader can now consume hyperi-rustlib with clickhouse feature from Artifactory.
+`actions/upload-artifact@v4` strips Unix file permissions. Binary publish scripts
+must `chmod +x` after downloading artifacts before `find -perm -u=x` searches.
 
 ---
 
-## Previous Session (2026-01-13)
+## Decisions Log
 
-**Tier 2 Test Infrastructure Enhancement - Complete** (commit 2521324)
-
-1. **Fixture Builder Library** (1,191 lines)
-   - `tests/fixtures/events.rs` - EventBuilder, BatchEventBuilder for test data generation
-   - `tests/fixtures/config.rs` - Builders for BufferConfig, ClickHouseConfig, RoutingConfig, TimestampConfig, MetadataConfig
-   - `tests/fixtures/arrow_schema.rs` - ArrowSchemaBuilder + pre-defined schemas (event, RLS, auth, API)
-   - `tests/fixtures/ddl.rs` - DdlBuilder + DDL template functions for ClickHouse tables
-   - Builder pattern eliminates test code duplication
-
-2. **Query-Back Verification Pattern**
-   - Updated `tests/integration/clickhouse.rs` - 3 levels of verification (count after each batch, category GROUP BY)
-   - Updated `tests/integration/inserter.rs` - Row count + data integrity with Binary array handling
-   - Updated `tests/integration/datatypes.rs` - Row count + org distribution + NULL field verification
-   - Added `query_count()` and `query_one()` helpers to `tests/common/mod.rs`
-   - **Critical insight**: ClickHouse returns String as Binary via Arrow protocol
-
-3. **Property-Based Tests** (11 new tests)
-   - Created `tests/integration/property.rs` using proptest
-   - Routing: arbitrary org_ids, nested fields, extraction (3 tests)
-   - Transformation: underscore fields, nested flattening, type handling (3 tests)
-   - Buffer: accumulation, multiple tables (2 tests)
-   - Timestamp: edge cases (1970-3000), RFC3339 strings (2 tests)
-   - Catches edge cases manual tests miss
-
-4. **Performance Metrics Infrastructure**
-   - Created `tests/common/metrics.rs` (430 lines) - MetricsSnapshot system
-   - Created `tests/performance_example.rs` - Working example with baseline/current comparison
-   - Created `tests/PERFORMANCE_TESTING.md` - Documentation
-   - Auto-detects improvements vs regressions (latency↓=good, throughput↑=good)
-   - Generates JSON snapshots + Markdown reports
-
-5. **Testcontainers Infrastructure**
-   - Created `tests/common/containers.rs` - Docker-based test isolation
-   - Added `testcontainers` feature flag to Cargo.toml
-   - Ready for CI/CD (not yet integrated into tests - future work)
-
-6. **Fixed RLS Test**
-   - Updated `tests/integration/rls.rs` - Explicit Arrow schema instead of JSON inference
-   - Added comprehensive query-back verification (total count, per-org counts, specific actions)
-   - Removed `#[ignore]` marker - now passing consistently
-   - **Root cause**: JSON schema inference creates String type instead of Timestamp type
-
-7. **Comprehensive Documentation**
-   - Created `tests/TESTING.md` (547 lines) covering:
-     - Test structure (unit/integration/property/performance)
-     - Testing patterns (query-back, explicit schemas, fixtures)
-     - Best practices and common issues
-     - Running tests and configuration
-     - Future enhancements (Tier 3)
-
-8. **Test Fixes**
-   - Fixed `tests/common/metrics.rs` - Floating-point comparison for latency delta
-   - Fixed `tests/performance_example.rs` - Exclude histogram bucket counts from regression detection
-
-### Key Files Created
-
-| File                               | Lines | Purpose                          |
-| ---------------------------------- | ----- | -------------------------------- |
-| `tests/fixtures/events.rs`         | 255   | Event data builders              |
-| `tests/fixtures/config.rs`         | 366   | Configuration builders           |
-| `tests/fixtures/arrow_schema.rs`   | 264   | Arrow schema builders            |
-| `tests/fixtures/ddl.rs`            | 306   | ClickHouse DDL builders          |
-| `tests/common/metrics.rs`          | 430   | Performance metrics snapshots    |
-| `tests/integration/property.rs`    | 330   | Property-based tests             |
-| `tests/TESTING.md`                 | 547   | Testing documentation            |
-| `tests/PERFORMANCE_TESTING.md`     | 147   | Performance testing guide        |
-
-### Critical Insights
-
-1. **ClickHouse Arrow Protocol Quirk**: String columns returned as Binary type
-
-   ```rust
-   use arrow::array::BinaryArray;
-   if let Some(col) = batch.column(0).as_any().downcast_ref::<BinaryArray>() {
-       let value = std::str::from_utf8(col.value(0))?;
-   }
-   ```
-
-2. **Explicit Schemas Required**: JSON schema inference fails for timestamps
-
-   ```rust
-   // ❌ BAD - JSON inference creates String type
-   let batch = json_batch_to_arrow(&rows)?;
-
-   // ✅ GOOD - Explicit schema with TimestampMillisecondArray
-   let schema = Arc::new(Schema::new(vec![
-       Field::new("timestamp", DataType::Timestamp(TimeUnit::Millisecond, None), false),
-   ]));
-   let batch = RecordBatch::try_new(schema, columns)?;
-   ```
-
-3. **Query Verification Catches Silent Failures**: INSERT row count can succeed even if data is malformed
-
-### Git State
-
-- **Branch:** main
-- **Upstream:** up to date with origin/main
-- **Uncommitted:** clean
-- **Commit:** 2521324 - "test: beef up test infrastructure like we mean it"
-
-### Test Results
-
-```text
-All 421 tests passing:
-- 294 unit tests
-- 124 integration tests (including 11 property tests)
-- 3 performance tests
-- 11 ignored/optional tests
-```
-
-### Next Steps (Tier 3 - Future)
-
-1. **Row Policy Enforcement Testing** - Multi-user, multi-role ClickHouse policy verification
-2. **Mutation Testing** - cargo-mutants to validate test quality
-3. **Fuzzing** - cargo-fuzz for parser/transformer edge cases
-4. **Chaos Testing** - testcontainers + toxiproxy for failure simulation
-
-### Session Context Summary
-
-Completed Tier 2 test infrastructure enhancement from the approved 3-tier plan.
-Built comprehensive fixture library, added query-back verification to all integration
-tests, created 11 property-based tests, implemented performance metrics snapshot
-system, and documented all patterns in TESTING.md. Fixed RLS test by using explicit
-Arrow schemas. All 421 tests passing with production-ready verification patterns.
+| Decision | Rationale |
+|----------|-----------|
+| FSL-1.1-ALv2 licensing | Source-available with Apache 2.0 conversion after 2 years |
+| JFrog domain stays `hypersec.jfrog.io` | Account-level, not user-facing; repo names updated to `hyperi-*` |
+| Parallel cargo jobs = 2 | Prevents CPU starvation on local builds and CI |
+| HyperI casing | Capital H, capital I for brand; HYPERI for legal entity |
+| Registry over git deps | Required for cargo publish to work |
+| clickhouse-arrow CI via workflow dispatch | Private CI without polluting public fork |
 
 ---
 
-## Previous Sessions
-
-### Session 2025-12-29 - Transport Abstraction
-
-- Implemented transport abstraction layer in hyperi-rustlib (Kafka/Zenoh/Memory)
-- Integrated TransportAdapter into dfe-loader with zero-copy design
-- Created 15 unit tests using MemoryTransport (no infrastructure required)
-- 292 tests passing (277 lib + 15 unit)
-
-### Session 2025-12-28 - Mison Structural Index
-
-- All 39 tests pass, benchmarks ready
-- Single-pass batch extraction O(colons + fields)
-- Runtime SIMD detection (AVX2/SSE4.2/NEON)
-- Awaiting benchmark validation on dedicated host
-
----
-
-**Last Updated:** 2026-02-06
 **ClickHouse:** 25.12 (native protocol)
-**Version:** 1.4.0
-**Status:** FSL-1.1-ALv2 Licensed, HyperI Rebranding Pending
+**Status:** FSL-1.1-ALv2 Licensed, CI publishing amd64 + arm64 binaries
