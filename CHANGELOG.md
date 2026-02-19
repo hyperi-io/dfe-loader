@@ -1,3 +1,10 @@
+## [1.6.8](https://github.com/hyperi-io/dfe-loader/compare/v1.6.7...v1.6.8) (2026-02-19)
+
+
+### Bug Fixes
+
+* update ci with cross-compilation sysroot include fix ([47132a3](https://github.com/hyperi-io/dfe-loader/commit/47132a369d8dbec46be04927595facabcdcade9f))
+
 ## [1.6.7](https://github.com/hyperi-io/dfe-loader/compare/v1.6.6...v1.6.7) (2026-02-19)
 
 
