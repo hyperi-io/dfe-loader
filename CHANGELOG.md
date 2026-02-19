@@ -1,3 +1,10 @@
+## [1.6.6](https://github.com/hyperi-io/dfe-loader/compare/v1.6.5...v1.6.6) (2026-02-19)
+
+
+### Bug Fixes
+
+* update ci submodule and add field mapping integration tests ([5cd5c67](https://github.com/hyperi-io/dfe-loader/commit/5cd5c6720a0e7dbfe12bee14d7aecb995d9dcdd3))
+
 ## [1.6.5](https://github.com/hyperi-io/dfe-loader/compare/v1.6.4...v1.6.5) (2026-02-18)
 
 
