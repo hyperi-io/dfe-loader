@@ -1,3 +1,10 @@
+## [1.6.7](https://github.com/hyperi-io/dfe-loader/compare/v1.6.6...v1.6.7) (2026-02-19)
+
+
+### Bug Fixes
+
+* update ci submodule with feature set parsing fix ([3600ddd](https://github.com/hyperi-io/dfe-loader/commit/3600ddde8234b83730479553fe60299bf5b2e459))
+
 ## [1.6.6](https://github.com/hyperi-io/dfe-loader/compare/v1.6.5...v1.6.6) (2026-02-19)
 
 
