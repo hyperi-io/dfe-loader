@@ -242,12 +242,20 @@ impl<'a> AutoInitializer<'a> {
         };
 
         // Check if SharedMergeTree is available
+        // Query returns `count() > 0` which is always one row with UInt8 value 0 or 1
         let shared_merge_tree = match client.select(DETECT_SHARED_MERGE_TREE_SQL).await {
             Ok(batches) if !batches.is_empty() => {
                 if let Some(batch) = batches.first() {
                     if batch.num_rows() > 0 {
-                        // Result is a boolean-like value
-                        true // If query succeeds, SharedMergeTree exists
+                        if let Some(col) = batch
+                            .column(0)
+                            .as_any()
+                            .downcast_ref::<arrow::array::UInt8Array>()
+                        {
+                            col.value(0) == 1
+                        } else {
+                            false
+                        }
                     } else {
                         false
                     }
@@ -259,9 +267,26 @@ impl<'a> AutoInitializer<'a> {
         };
 
         // Check if cluster is configured
+        // Query returns `count() > 0` which is always one row with UInt8 value 0 or 1
         let is_clustered = match client.select(DETECT_CLUSTER_SQL).await {
             Ok(batches) if !batches.is_empty() => {
-                batches.first().map(|b| b.num_rows() > 0).unwrap_or(false)
+                if let Some(batch) = batches.first() {
+                    if batch.num_rows() > 0 {
+                        if let Some(col) = batch
+                            .column(0)
+                            .as_any()
+                            .downcast_ref::<arrow::array::UInt8Array>()
+                        {
+                            col.value(0) == 1
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
             }
             _ => false,
         };
