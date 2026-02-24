@@ -1,3 +1,10 @@
+## [1.7.1](https://github.com/hyperi-io/dfe-loader/compare/v1.7.0...v1.7.1) (2026-02-24)
+
+
+### Bug Fixes
+
+* Engine identification always returning 1 row (0 or 1) causing always true statements ([e2e359b](https://github.com/hyperi-io/dfe-loader/commit/e2e359bb2213990a9ec8002749b174a041effd40))
+
 # [1.7.0](https://github.com/hyperi-io/dfe-loader/compare/v1.6.13...v1.7.0) (2026-02-19)
 
 
