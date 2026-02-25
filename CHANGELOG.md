@@ -1,3 +1,10 @@
+## [1.8.2](https://github.com/hyperi-io/dfe-loader/compare/v1.8.1...v1.8.2) (2026-02-25)
+
+
+### Bug Fixes
+
+* Point hyperi-rustlib back to artifactory ([9e895d8](https://github.com/hyperi-io/dfe-loader/commit/9e895d8032b3a29a1ac7c784e0c3b0f0495cfaf3))
+
 ## [1.8.1](https://github.com/hyperi-io/dfe-loader/compare/v1.8.0...v1.8.1) (2026-02-25)
 
 
