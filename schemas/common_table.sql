@@ -61,6 +61,12 @@ CREATE TABLE IF NOT EXISTS {db}.{table}
     -- ClickHouse JSON type for columnar storage of dynamic fields
     `_json` Nullable(JSON) CODEC(ZSTD(3)),
 
+    -- @source: first(_source) | topic_name (strip _land/_load suffix)
+    -- @config: metadata.source_fields (default: ["_source"])
+    -- Destination table / data source identifier
+    -- LowCardinality for dictionary encoding (sources are repeated)
+    `_source` LowCardinality(String) CODEC(ZSTD(1)),
+
     -- @source: first(tags/_tags/meta/metadata.tags)
     -- @config: metadata.tags_fields
     -- Metadata and collector/agent information

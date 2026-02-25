@@ -196,7 +196,7 @@ fn current_pipeline(messages: &[&[u8]], router: &Router, transformer: &Transform
         };
 
         // Step 3: Transform (flatten, timestamp, field sanitization)
-        let result = transformer.transform_with_raw(value, None).unwrap();
+        let result = transformer.transform_with_raw(value, None, None).unwrap();
 
         // Step 4: Push to builder with _json sidecar (raw bytes)
         builder.push(result.data, destination, Some(payload));

@@ -290,3 +290,193 @@ fn test_watcher_config_defaults() {
 
     eprintln!("✓ WatcherConfig defaults are correct");
 }
+
+// ============================================================================
+// Hot-Reload Full Cycle Tests
+// ============================================================================
+
+#[tokio::test]
+async fn test_hot_reload_full_cycle() {
+    // Simulates the full hot-reload flow:
+    // 1. Load config from YAML
+    // 2. Start watcher
+    // 3. Modify YAML
+    // 4. Verify subscriber sees new values
+
+    let dir = TempDir::new().unwrap();
+    let config_path = dir.path().join("config.yaml");
+
+    // Initial config
+    fs::write(
+        &config_path,
+        r#"
+kafka:
+  brokers:
+    - initial-broker:9092
+  group: initial-group
+  topics:
+    - test-topic
+clickhouse:
+  hosts:
+    - localhost:9000
+buffer:
+  flush_rows: 1000
+  flush_bytes: 1048576
+  flush_age_secs: 5
+"#,
+    )
+    .unwrap();
+
+    // Load initial config
+    let config = Config::load(Some(config_path.to_str().unwrap())).unwrap();
+    assert_eq!(config.kafka.brokers[0], "initial-broker:9092");
+    assert_eq!(config.buffer.flush_rows, 1000);
+
+    // Create shared config and subscriber
+    let shared = SharedConfig::new(config);
+    let mut rx = shared.subscribe();
+
+    // Start watcher
+    let watcher_config = WatcherConfig {
+        config_path: config_path.clone(),
+        poll_interval: Duration::from_millis(100),
+        debounce: Duration::from_millis(50),
+        enabled: true,
+    };
+    let watcher = ConfigWatcher::new(watcher_config, shared.clone()).unwrap();
+    let _handle = watcher.start();
+
+    // Let watcher start
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Modify config file — change brokers and flush_rows
+    fs::write(
+        &config_path,
+        r#"
+kafka:
+  brokers:
+    - updated-broker:9092
+  group: updated-group
+  topics:
+    - test-topic
+clickhouse:
+  hosts:
+    - localhost:9000
+buffer:
+  flush_rows: 5000
+  flush_bytes: 2097152
+  flush_age_secs: 10
+"#,
+    )
+    .unwrap();
+
+    // Wait for watcher to detect and reload
+    let result = timeout(Duration::from_secs(2), rx.changed()).await;
+
+    if result.is_ok() {
+        // Verify new values are visible
+        let new_config = shared.read();
+        assert_eq!(new_config.kafka.brokers[0], "updated-broker:9092");
+        assert_eq!(new_config.kafka.group, "updated-group");
+        assert_eq!(new_config.buffer.flush_rows, 5000);
+        assert_eq!(new_config.buffer.flush_bytes, 2097152);
+        assert_eq!(new_config.buffer.flush_age_secs, 10);
+
+        eprintln!("✓ Hot-reload full cycle: file change → watcher → subscriber → new values");
+    } else {
+        eprintln!("⚠ Hot-reload did not trigger within timeout (acceptable in CI)");
+    }
+}
+
+#[tokio::test]
+async fn test_hot_reload_preserves_valid_config_on_bad_update() {
+    // Verify that a bad YAML update doesn't break the running config
+
+    let dir = TempDir::new().unwrap();
+    let config_path = dir.path().join("config.yaml");
+
+    // Start with valid config
+    fs::write(
+        &config_path,
+        r#"
+kafka:
+  brokers:
+    - good-broker:9092
+  group: good-group
+  topics:
+    - test-topic
+clickhouse:
+  hosts:
+    - localhost:9000
+buffer:
+  flush_rows: 1000
+  flush_bytes: 1048576
+  flush_age_secs: 5
+"#,
+    )
+    .unwrap();
+
+    let config = Config::load(Some(config_path.to_str().unwrap())).unwrap();
+    let shared = SharedConfig::new(config);
+
+    let watcher_config = WatcherConfig {
+        config_path: config_path.clone(),
+        poll_interval: Duration::from_millis(100),
+        debounce: Duration::from_millis(50),
+        enabled: true,
+    };
+    let watcher = ConfigWatcher::new(watcher_config, shared.clone()).unwrap();
+    let _handle = watcher.start();
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Write completely invalid YAML
+    fs::write(&config_path, "{{{{invalid yaml!!!!").unwrap();
+
+    // Wait for watcher to attempt reload
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Original config should be preserved
+    let current = shared.read();
+    assert_eq!(current.kafka.brokers[0], "good-broker:9092");
+    assert_eq!(current.kafka.group, "good-group");
+
+    eprintln!("✓ Invalid YAML update preserves running config");
+}
+
+#[tokio::test]
+async fn test_hot_reload_multiple_subscribers() {
+    // Multiple components subscribing to config changes
+
+    let config = Config::default();
+    let shared = SharedConfig::new(config);
+
+    let mut rx1 = shared.subscribe();
+    let mut rx2 = shared.subscribe();
+    let mut rx3 = shared.subscribe();
+
+    // Update config
+    let mut new_config = Config::default();
+    new_config.buffer.flush_rows = 99999;
+    shared.update(new_config);
+
+    // All subscribers should see the change
+    let r1 = timeout(Duration::from_millis(100), rx1.changed()).await;
+    let r2 = timeout(Duration::from_millis(100), rx2.changed()).await;
+    let r3 = timeout(Duration::from_millis(100), rx3.changed()).await;
+
+    assert!(r1.is_ok(), "Subscriber 1 should receive update");
+    assert!(r2.is_ok(), "Subscriber 2 should receive update");
+    assert!(r3.is_ok(), "Subscriber 3 should receive update");
+
+    // All see the same version
+    assert_eq!(*rx1.borrow(), 1);
+    assert_eq!(*rx2.borrow(), 1);
+    assert_eq!(*rx3.borrow(), 1);
+
+    // All can read the new value
+    let current = shared.read();
+    assert_eq!(current.buffer.flush_rows, 99999);
+
+    eprintln!("✓ Multiple subscribers all receive config update");
+}

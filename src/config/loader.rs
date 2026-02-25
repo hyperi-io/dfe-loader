@@ -4,17 +4,19 @@
 //! Configuration structures and loading
 //!
 //! Configuration cascade (highest to lowest priority):
-//!   1. CLI args (--kafka-brokers, --clickhouse-hosts, etc.)
-//!   2. Environment variables (LOADER_KAFKA_BROKERS, etc.)
-//!   3. .env file
-//!   4. Config file specified by --config or LOADER_CONFIG
-//!   5. Hard-coded defaults
+//!   1. CLI args (--config, --log-level, etc.)
+//!   2. Explicit flat env overrides (DFE_LOADER_KAFKA_BROKERS, etc.)
+//!   3. Figment env vars with __ nesting (DFE_LOADER_KAFKA__BROKERS, etc.)
+//!   4. .env file (via dotenvy)
+//!   5. Config file specified by --config or DFE_LOADER_CONFIG
+//!   6. Hard-coded defaults
 
 use std::collections::HashMap;
 use std::path::Path;
 
-use config::{Config as ConfigBuilder, Environment, File, FileFormat};
+use hyperi_rustlib::config::env_compat::EnvVar;
 use serde::{Deserialize, Serialize};
+use tracing::debug;
 
 use crate::Result;
 
@@ -43,6 +45,7 @@ pub struct Config {
     pub schema: SchemaConfig,
     pub auto_init: AutoInitConfig,
     pub field_mapping: FieldMappingConfig,
+    pub hot_reload: HotReloadConfig,
 }
 
 fn default_transport() -> String {
@@ -359,14 +362,15 @@ pub struct RoutingConfig {
     pub db_fields: Vec<String>,
 
     /// Fields to check for table name (first match wins, dot notation for nested)
-    /// Example: ["event_category", "tags.event_category"]
+    /// Default: ["_source"] — aligned with _source field extraction
     pub table_fields: Vec<String>,
 
     /// Default database if no db_field matches (or db_fields is empty)
-    /// Default: "common" (shared multi-tenant schema)
+    /// Default: "dfe" (shared multi-tenant schema)
     pub default_db: String,
 
     /// Default table if no table_field matches
+    /// Default: "dfe"
     pub default_table: String,
 
     /// Field to extract for _org_id column (stored in data for RLS)
@@ -391,6 +395,14 @@ pub struct RoutingConfig {
     /// Legacy: mapping file path
     pub mapping_file: Option<String>,
 
+    /// Topic suffixes to strip when deriving _source from Kafka topic name
+    /// Example: topic "auth_land" with suffix "_land" → _source = "auth"
+    pub topic_suffixes: Vec<String>,
+
+    /// Pre-DFE 2.2 compatibility: prepend event_category/tags.event_category to
+    /// source_fields and table_fields for backwards compatibility with older data formats
+    pub compat_v2_source: bool,
+
     /// DLQ configuration
     pub dlq: DlqConfig,
 }
@@ -398,14 +410,11 @@ pub struct RoutingConfig {
 impl Default for RoutingConfig {
     fn default() -> Self {
         Self {
-            // NEW default: db_fields empty = shared schema (all to common.*)
+            // Default: db_fields empty = shared schema (all to dfe.*)
             db_fields: vec![],
-            table_fields: vec![
-                "event_category".to_string(),
-                "tags.event_category".to_string(),
-            ],
-            default_db: "common".to_string(),
-            default_table: "common".to_string(),
+            table_fields: vec!["_source".to_string()],
+            default_db: "dfe".to_string(),
+            default_table: "dfe".to_string(),
             // Extract org_id for _org_id column (RLS)
             org_id_field: Some("org_id".to_string()),
             // No per-org routing by default (shared schema)
@@ -413,6 +422,8 @@ impl Default for RoutingConfig {
             route_all_by_org: false,
             category_to_table: HashMap::new(),
             mapping_file: None,
+            topic_suffixes: vec!["_land".to_string(), "_load".to_string()],
+            compat_v2_source: false,
             dlq: DlqConfig::default(),
         }
     }
@@ -579,6 +590,11 @@ impl Default for FieldSanitizationConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MetadataConfig {
+    /// Master switch for common header field injection (default: true)
+    /// When false, no common header fields (_timestamp, _org_id, _raw, _json, _tags, _source)
+    /// are injected. Flattening and sanitization still apply.
+    pub enabled: bool,
+
     pub inject_timestamp_load: bool,
     pub extract_timestamp_collector: bool,
     pub collector_timestamp_path: String,
@@ -609,10 +625,18 @@ pub struct MetadataConfig {
     /// Output field name for raw log line
     pub raw_output: String,
 
+    // _source field (Common Header v2)
+    /// Enable _source field injection (destination table identifier)
+    pub capture_source: bool,
+    /// Fields to check for _source value in message data (first match wins)
+    pub source_fields: Vec<String>,
+    /// Output field name for _source
+    pub source_output: String,
+
     // Per-table capture overrides
-    /// Tables where _json capture is disabled (e.g., ["common.metrics"])
+    /// Tables where _json capture is disabled (e.g., ["dfe.metrics"])
     pub disable_json_tables: Vec<String>,
-    /// Tables where _raw capture is disabled (e.g., ["common.metrics"])
+    /// Tables where _raw capture is disabled (e.g., ["dfe.metrics"])
     pub disable_raw_tables: Vec<String>,
 
     // Routing field removal (Common Header v2)
@@ -623,6 +647,8 @@ pub struct MetadataConfig {
 impl Default for MetadataConfig {
     fn default() -> Self {
         Self {
+            enabled: true,
+
             inject_timestamp_load: true,
             extract_timestamp_collector: true,
             collector_timestamp_path: "tags.collector.timestamp".to_string(),
@@ -645,6 +671,11 @@ impl Default for MetadataConfig {
             capture_raw: true,
             raw_source_fields: vec!["logoriginal".to_string()],
             raw_output: "_raw".to_string(),
+
+            // _source capture defaults
+            capture_source: true,
+            source_fields: vec!["_source".to_string()],
+            source_output: "_source".to_string(),
 
             // Per-table overrides
             disable_json_tables: vec![],
@@ -890,6 +921,40 @@ impl Default for AutoInitConfig {
     }
 }
 
+/// Hot-reload configuration
+///
+/// Controls whether the config file is watched for changes at runtime.
+/// When enabled, the config cascade is re-evaluated on file change and
+/// safe-to-reload settings are applied without process restart.
+///
+/// **Safe to hot-reload:** buffer thresholds, routing, metadata, field
+/// sanitisation, timestamp DQ, coercion settings.
+///
+/// **Requires restart:** Kafka brokers/topics/auth, ClickHouse hosts/auth,
+/// payload format, transport type.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HotReloadConfig {
+    /// Enable config file watching (default: false)
+    pub enabled: bool,
+
+    /// Polling interval in seconds for checking file changes
+    pub poll_interval_secs: u64,
+
+    /// Debounce duration in milliseconds — minimum time between reloads
+    pub debounce_ms: u64,
+}
+
+impl Default for HotReloadConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            poll_interval_secs: 5,
+            debounce_ms: 500,
+        }
+    }
+}
+
 // ============================================================================
 // Field Mapping Configuration
 // ============================================================================
@@ -948,54 +1013,230 @@ impl Default for FieldMappingConfig {
 // Configuration Loading
 // ============================================================================
 
+/// Environment variable prefix for all dfe-loader settings
+const ENV_PREFIX: &str = "DFE_LOADER";
+
+/// Read a flat env var with the DFE_LOADER_ prefix
+fn env(name: &str) -> Option<String> {
+    EnvVar::new(&format!("{ENV_PREFIX}_{name}")).get()
+}
+
+/// Read a flat env var as a comma-separated list
+fn env_list(name: &str) -> Option<Vec<String>> {
+    EnvVar::new(&format!("{ENV_PREFIX}_{name}")).get_list()
+}
+
+/// Read a flat env var as a boolean
+fn env_bool(name: &str) -> Option<bool> {
+    EnvVar::new(&format!("{ENV_PREFIX}_{name}")).get_bool()
+}
+
+/// Read a flat env var parsed to a type
+fn env_parsed<T: std::str::FromStr>(name: &str) -> Option<T> {
+    EnvVar::new(&format!("{ENV_PREFIX}_{name}")).get_parsed()
+}
+
+/// Apply explicit flat environment variable overrides (DFE_LOADER_* prefix).
+///
+/// These are K8s-friendly single-underscore vars that override config file values.
+/// For nested/advanced config, use `__` (double underscore) nesting via figment:
+///   DFE_LOADER_KAFKA__SASL__OAUTH_TOKEN_ENDPOINT=https://...
+fn apply_env_overrides(config: &mut Config) {
+    // Kafka
+    if let Some(v) = env_list("KAFKA_BROKERS") {
+        config.kafka.brokers = v;
+        debug!("Override: kafka.brokers from env");
+    }
+    if let Some(v) = env("KAFKA_GROUP_ID") {
+        config.kafka.group = v;
+        debug!("Override: kafka.group from env");
+    }
+    if let Some(v) = env_list("KAFKA_TOPICS") {
+        config.kafka.topics = v;
+        debug!("Override: kafka.topics from env");
+    }
+    if let Some(v) = env("KAFKA_CLIENT_ID") {
+        config.kafka.client_id = v;
+        debug!("Override: kafka.client_id from env");
+    }
+    if let Some(v) = env("KAFKA_SASL_MECHANISM") {
+        let sasl = config.kafka.sasl.get_or_insert_with(SaslConfig::default);
+        sasl.enabled = true;
+        sasl.mechanism = v;
+        debug!("Override: kafka.sasl.mechanism from env");
+    }
+    if let Some(v) = env("KAFKA_SASL_USERNAME") {
+        let sasl = config.kafka.sasl.get_or_insert_with(SaslConfig::default);
+        sasl.enabled = true;
+        sasl.username = v;
+        debug!("Override: kafka.sasl.username from env");
+    }
+    if let Some(v) = env("KAFKA_SASL_PASSWORD") {
+        let sasl = config.kafka.sasl.get_or_insert_with(SaslConfig::default);
+        sasl.enabled = true;
+        sasl.password = v;
+        debug!("Override: kafka.sasl.password from env (redacted)");
+    }
+    if let Some(v) = env("KAFKA_SECURITY_PROTOCOL") {
+        // Map common protocol names to TLS/SASL config
+        let proto = v.to_uppercase();
+        if proto.contains("SSL") || proto.contains("TLS") {
+            let tls = config.kafka.tls.get_or_insert_with(TlsConfig::default);
+            tls.enabled = true;
+        }
+        debug!(protocol = %v, "Override: kafka security_protocol from env");
+    }
+
+    // ClickHouse
+    if let Some(v) = env_list("CLICKHOUSE_HOSTS") {
+        config.clickhouse.hosts = v;
+        debug!("Override: clickhouse.hosts from env");
+    }
+    if let Some(v) = env("CLICKHOUSE_DATABASE") {
+        config.clickhouse.database = v;
+        debug!("Override: clickhouse.database from env");
+    }
+    if let Some(v) = env("CLICKHOUSE_USERNAME") {
+        config.clickhouse.username = v;
+        debug!("Override: clickhouse.username from env");
+    }
+    if let Some(v) = env("CLICKHOUSE_PASSWORD") {
+        config.clickhouse.password = v;
+        debug!("Override: clickhouse.password from env (redacted)");
+    }
+
+    // Buffer
+    if let Some(v) = env_parsed::<usize>("BUFFER_FLUSH_ROWS") {
+        config.buffer.flush_rows = v;
+        debug!("Override: buffer.flush_rows from env");
+    }
+    if let Some(v) = env_parsed::<usize>("BUFFER_FLUSH_BYTES") {
+        config.buffer.flush_bytes = v;
+        debug!("Override: buffer.flush_bytes from env");
+    }
+    if let Some(v) = env_parsed::<u64>("BUFFER_FLUSH_AGE_SECS") {
+        config.buffer.flush_age_secs = v;
+        debug!("Override: buffer.flush_age_secs from env");
+    }
+
+    // Metrics
+    if let Some(v) = env("METRICS_ADDRESS") {
+        config.metrics.address = v;
+        debug!("Override: metrics.address from env");
+    }
+    if let Some(v) = env_bool("METRICS_ENABLED") {
+        config.metrics.enabled = v;
+        debug!("Override: metrics.enabled from env");
+    }
+
+    // Metadata (common header)
+    if let Some(v) = env_bool("METADATA_ENABLED") {
+        config.metadata.enabled = v;
+        debug!("Override: metadata.enabled from env");
+    }
+
+    // Logging
+    if let Some(v) = env("LOG_LEVEL") {
+        config.logging.level = v;
+        debug!("Override: logging.level from env");
+    }
+    if let Some(v) = env("LOG_FORMAT") {
+        config.logging.format = v;
+        debug!("Override: logging.format from env");
+    }
+
+    // Hot-reload
+    if let Some(v) = env_parsed::<u64>("CONFIG_RELOAD_SECS") {
+        config.hot_reload.poll_interval_secs = v;
+        config.hot_reload.enabled = true;
+        debug!("Override: hot_reload.poll_interval_secs from env");
+    }
+    if let Some(v) = env_bool("HOT_RELOAD_ENABLED") {
+        config.hot_reload.enabled = v;
+        debug!("Override: hot_reload.enabled from env");
+    }
+
+    // Routing
+    if let Some(v) = env("ROUTING_DEFAULT_DB") {
+        config.routing.default_db = v;
+        debug!("Override: routing.default_db from env");
+    }
+    if let Some(v) = env("ROUTING_DEFAULT_TABLE") {
+        config.routing.default_table = v;
+        debug!("Override: routing.default_table from env");
+    }
+
+    // Memory
+    if let Some(v) = env_parsed::<usize>("MEMORY_LIMIT_BYTES") {
+        config.memory.limit_bytes = v;
+        debug!("Override: memory.limit_bytes from env");
+    }
+}
+
+/// Apply figment env vars with __ (double underscore) nesting.
+///
+/// Supports arbitrary nesting: DFE_LOADER_KAFKA__SASL__USERNAME → kafka.sasl.username
+/// Lists require bracket syntax: DFE_LOADER_KAFKA__BROKERS=[a, b, c]
+fn apply_figment_env(config: &mut Config) -> Result<()> {
+    use figment::providers::{Env, Serialized};
+    use figment::Figment;
+
+    let figment = Figment::from(Serialized::defaults(&*config))
+        .merge(Env::prefixed(&format!("{ENV_PREFIX}_")).split("__"));
+
+    *config = figment
+        .extract()
+        .map_err(|e| crate::Error::Config(e.to_string()))?;
+    Ok(())
+}
+
 impl Config {
-    /// Load configuration with cascade:
-    /// 1. CLI args (applied separately after load)
-    /// 2. Environment variables (LOADER_*)
-    /// 3. .env file
-    /// 4. Config file
-    /// 5. Defaults
+    /// Load configuration with cascade (highest to lowest priority):
+    ///
+    /// 1. CLI args (applied separately by caller)
+    /// 2. Explicit flat env overrides (`DFE_LOADER_KAFKA_BROKERS`, etc.)
+    /// 3. Figment env vars with `__` nesting (`DFE_LOADER_KAFKA__SASL__USERNAME`, etc.)
+    /// 4. `.env` file (via dotenvy)
+    /// 5. Config file (YAML, specified by `--config` or auto-detected)
+    /// 6. Hard-coded defaults
     pub fn load(config_path: Option<&str>) -> Result<Self> {
-        // Load .env file if present (before building config)
+        // Load .env file if present (before any env var reading)
         let _ = dotenvy::dotenv();
 
-        let mut builder = ConfigBuilder::builder();
+        // 1. Start with hard-coded defaults
+        let mut config = Config::default();
 
-        // Start with defaults
-        builder = builder.add_source(config::Config::try_from(&Config::default())?);
-
-        // Add config file if specified
+        // 2. Load YAML config file (overrides defaults)
         if let Some(path) = config_path {
             if Path::new(path).exists() {
-                builder = builder.add_source(File::new(path, FileFormat::Yaml));
+                let content = std::fs::read_to_string(path)
+                    .map_err(|e| crate::Error::Config(format!("failed to read {path}: {e}")))?;
+                config = serde_yaml_ng::from_str(&content)
+                    .map_err(|e| crate::Error::Config(format!("failed to parse {path}: {e}")))?;
             }
         } else {
             // Try default config paths
             for path in &["config.yaml", "config.yml"] {
                 if Path::new(path).exists() {
-                    builder = builder.add_source(File::new(path, FileFormat::Yaml));
+                    let content = std::fs::read_to_string(path).map_err(|e| {
+                        crate::Error::Config(format!("failed to read {path}: {e}"))
+                    })?;
+                    config = serde_yaml_ng::from_str(&content).map_err(|e| {
+                        crate::Error::Config(format!("failed to parse {path}: {e}"))
+                    })?;
                     break;
                 }
             }
         }
 
-        // Add environment variables with LOADER_ prefix
-        // LOADER_KAFKA_BROKERS -> kafka.brokers
-        builder = builder.add_source(
-            Environment::with_prefix("LOADER")
-                .separator("_")
-                .list_separator(",")
-                .with_list_parse_key("kafka.brokers")
-                .with_list_parse_key("kafka.topics")
-                .with_list_parse_key("clickhouse.hosts")
-                .with_list_parse_key("clickhouse.tables")
-                .try_parsing(true),
-        );
+        // 3. Apply figment env vars (DFE_LOADER_SECTION__FIELD with __ nesting)
+        apply_figment_env(&mut config)?;
 
-        let config = builder.build()?;
-        let result: Config = config.try_deserialize()?;
+        // 4. Apply explicit flat env overrides (DFE_LOADER_KAFKA_BROKERS etc.)
+        // These are highest priority (after CLI args which caller handles)
+        apply_env_overrides(&mut config);
 
-        Ok(result)
+        Ok(config)
     }
 
     /// Validate the configuration
@@ -1431,5 +1672,142 @@ mod tests {
     fn test_null_handling_default() {
         let handling = NullHandling::default();
         assert_eq!(handling, NullHandling::Default);
+    }
+
+    // ========================================================================
+    // Config::load() tests
+    // ========================================================================
+    //
+    // All env-var-dependent tests are in a single function to avoid parallel
+    // contamination (env vars are process-global).
+
+    #[test]
+    fn test_load_with_env_and_yaml() {
+        // Sub-test 1: Flat env var overrides (sequential, no parallel contamination)
+        {
+            // Kafka brokers (comma-separated list)
+            std::env::set_var("DFE_LOADER_KAFKA_BROKERS", "broker1:9092,broker2:9092");
+            let config = Config::load(None).unwrap();
+            assert_eq!(
+                config.kafka.brokers,
+                vec!["broker1:9092".to_string(), "broker2:9092".to_string()]
+            );
+            std::env::remove_var("DFE_LOADER_KAFKA_BROKERS");
+        }
+
+        {
+            // Kafka group ID
+            std::env::set_var("DFE_LOADER_KAFKA_GROUP_ID", "test-group-env");
+            let config = Config::load(None).unwrap();
+            assert_eq!(config.kafka.group, "test-group-env");
+            std::env::remove_var("DFE_LOADER_KAFKA_GROUP_ID");
+        }
+
+        {
+            // ClickHouse hosts (comma-separated list)
+            std::env::set_var("DFE_LOADER_CLICKHOUSE_HOSTS", "ch1:9000,ch2:9000");
+            let config = Config::load(None).unwrap();
+            assert_eq!(
+                config.clickhouse.hosts,
+                vec!["ch1:9000".to_string(), "ch2:9000".to_string()]
+            );
+            std::env::remove_var("DFE_LOADER_CLICKHOUSE_HOSTS");
+        }
+
+        {
+            // Buffer flush rows (parsed integer)
+            std::env::set_var("DFE_LOADER_BUFFER_FLUSH_ROWS", "50000");
+            let config = Config::load(None).unwrap();
+            assert_eq!(config.buffer.flush_rows, 50000);
+            std::env::remove_var("DFE_LOADER_BUFFER_FLUSH_ROWS");
+        }
+
+        {
+            // Metadata enabled (boolean)
+            std::env::set_var("DFE_LOADER_METADATA_ENABLED", "false");
+            let config = Config::load(None).unwrap();
+            assert!(!config.metadata.enabled);
+            std::env::remove_var("DFE_LOADER_METADATA_ENABLED");
+        }
+
+        {
+            // Config reload secs (auto-enables hot_reload)
+            std::env::set_var("DFE_LOADER_CONFIG_RELOAD_SECS", "30");
+            let config = Config::load(None).unwrap();
+            assert!(config.hot_reload.enabled);
+            assert_eq!(config.hot_reload.poll_interval_secs, 30);
+            std::env::remove_var("DFE_LOADER_CONFIG_RELOAD_SECS");
+        }
+
+        {
+            // Log level
+            std::env::set_var("DFE_LOADER_LOG_LEVEL", "debug");
+            let config = Config::load(None).unwrap();
+            assert_eq!(config.logging.level, "debug");
+            std::env::remove_var("DFE_LOADER_LOG_LEVEL");
+        }
+
+        // Sub-test 2: YAML file loading
+        {
+            let dir = tempfile::TempDir::new().unwrap();
+            let config_path = dir.path().join("test_config.yaml");
+            std::fs::write(
+                &config_path,
+                r#"
+kafka:
+  brokers:
+    - yaml-broker:9092
+  group: yaml-group
+  topics:
+    - yaml-topic
+clickhouse:
+  hosts:
+    - yaml-ch:9000
+buffer:
+  flush_rows: 99999
+"#,
+            )
+            .unwrap();
+
+            let config = Config::load(Some(config_path.to_str().unwrap())).unwrap();
+            assert_eq!(config.kafka.brokers, vec!["yaml-broker:9092"]);
+            assert_eq!(config.kafka.group, "yaml-group");
+            assert_eq!(config.buffer.flush_rows, 99999);
+        }
+
+        // Sub-test 3: Env overrides YAML
+        {
+            let dir = tempfile::TempDir::new().unwrap();
+            let config_path = dir.path().join("test_config.yaml");
+            std::fs::write(
+                &config_path,
+                r#"
+kafka:
+  brokers:
+    - yaml-broker:9092
+  group: yaml-group
+  topics:
+    - yaml-topic
+clickhouse:
+  hosts:
+    - yaml-ch:9000
+"#,
+            )
+            .unwrap();
+
+            std::env::set_var("DFE_LOADER_KAFKA_BROKERS", "env-broker:9092");
+            let config = Config::load(Some(config_path.to_str().unwrap())).unwrap();
+            assert_eq!(config.kafka.brokers, vec!["env-broker:9092"]);
+            assert_eq!(config.kafka.group, "yaml-group");
+            std::env::remove_var("DFE_LOADER_KAFKA_BROKERS");
+        }
+
+        // Sub-test 4: Defaults when no config
+        {
+            let config = Config::load(None).unwrap();
+            assert_eq!(config.kafka.brokers, vec!["localhost:9092"]);
+            assert_eq!(config.routing.default_db, "dfe");
+            assert_eq!(config.routing.default_table, "dfe");
+        }
     }
 }

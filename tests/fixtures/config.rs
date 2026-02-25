@@ -213,6 +213,8 @@ impl RoutingConfigBuilder {
             route_all_by_org: self.route_all_by_org,
             category_to_table: self.category_to_table,
             mapping_file: None,
+            topic_suffixes: vec!["_land".to_string(), "_load".to_string()],
+            compat_v2_source: false,
             dlq: DlqConfig::default(),
         }
     }
