@@ -22,9 +22,7 @@ tokio = { version = ">=1.48", features = ["full"] }
 tokio-util = { version = ">=0.7", features = ["rt"] }
 
 # Shared library with transport abstraction
-# TODO: Switch back to registry after publishing config-reload feature
-# hyperi-rustlib = { version = ">=1.5.0", registry = "hyperi", features = ["transport-kafka", "config", "config-reload"] }
-hyperi-rustlib = { path = "../hyperi-rustlib", features = ["transport-kafka", "config", "config-reload"] }
+hyperi-rustlib = { version = ">=1.5.0", registry = "hyperi", features = ["transport-kafka", "config", "config-reload"] }
 
 # Kafka (SASL/SCRAM required for auth) - also needed for DLQ producer
 rdkafka = { version = ">=0.38", features = ["cmake-build", "ssl", "sasl"] }
