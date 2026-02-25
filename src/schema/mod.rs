@@ -381,8 +381,13 @@ pub const DETECT_VERSION_SQL: &str = "SELECT version()";
 pub const DETECT_SHARED_MERGE_TREE_SQL: &str =
     "SELECT count() > 0 FROM system.table_engines WHERE name = 'SharedMergeTree'";
 
-/// SQL to check if cluster is configured
-pub const DETECT_CLUSTER_SQL: &str = "SELECT count() > 0 FROM system.clusters WHERE cluster != ''";
+/// SQL to check if cluster is configured (multi-node, not single-node defaults)
+///
+/// ClickHouse always has entries in system.clusters even on single-node deployments.
+/// We check for clusters with more than one host (shard/replica) to detect actual
+/// multi-node setups that would benefit from ReplicatedMergeTree.
+pub const DETECT_CLUSTER_SQL: &str =
+    "SELECT count() > 0 FROM (SELECT cluster FROM system.clusters GROUP BY cluster HAVING count() > 1)";
 
 /// SQL to check if full_text index is available (non-experimental)
 pub const DETECT_FULL_TEXT_SQL: &str =
