@@ -19,13 +19,15 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use clap::Parser;
 use tokio::signal;
 use tracing::{error, info, warn};
 
-use dfe_loader::config::Config;
+use dfe_loader::config::{Config, ConfigWatcher, SharedConfig, WatcherConfig};
 use dfe_loader::metrics::{run_server, Metrics, ServerState};
 use dfe_loader::pipeline::Orchestrator;
 
@@ -113,9 +115,41 @@ async fn main() -> anyhow::Result<()> {
     let metrics = Metrics::new();
     let server_state = Arc::new(ServerState::new(metrics.clone()));
 
-    // Create orchestrator
-    let mut orchestrator = Orchestrator::with_metrics(config, metrics);
+    // Create shared config for hot-reload
+    let shared_config = SharedConfig::new(config.clone());
+
+    // Create orchestrator with hot-reload support
+    let mut orchestrator = Orchestrator::with_metrics(config.clone(), metrics)
+        .with_shared_config(shared_config.clone());
     let shutdown_token = orchestrator.shutdown_token();
+
+    // Start config watcher if hot-reload is enabled
+    if config.hot_reload.enabled {
+        if let Some(config_path) = args.config.as_deref() {
+            let watcher_config = WatcherConfig {
+                config_path: PathBuf::from(config_path),
+                poll_interval: Duration::from_secs(config.hot_reload.poll_interval_secs),
+                debounce: Duration::from_millis(config.hot_reload.debounce_ms),
+                enabled: true,
+            };
+
+            match ConfigWatcher::new(watcher_config, shared_config.clone()) {
+                Ok(watcher) => {
+                    let _handle = watcher.start();
+                    info!(
+                        path = config_path,
+                        poll_secs = config.hot_reload.poll_interval_secs,
+                        "Config hot-reload enabled"
+                    );
+                }
+                Err(e) => {
+                    warn!(error = %e, "Failed to start config watcher, hot-reload disabled");
+                }
+            }
+        } else {
+            warn!("Hot-reload enabled but no config file path provided (--config), skipping");
+        }
+    }
 
     // Start metrics server
     let metrics_addr: SocketAddr = args.metrics_addr.parse().unwrap_or_else(|_| {

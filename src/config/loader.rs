@@ -36,6 +36,7 @@ pub struct Config {
     pub coercion: CoercionConfig,
     pub schema: SchemaConfig,
     pub auto_init: AutoInitConfig,
+    pub hot_reload: HotReloadConfig,
 }
 
 impl Default for Config {
@@ -55,6 +56,7 @@ impl Default for Config {
             coercion: CoercionConfig::default(),
             schema: SchemaConfig::default(),
             auto_init: AutoInitConfig::default(),
+            hot_reload: HotReloadConfig::default(),
         }
     }
 }
@@ -890,6 +892,40 @@ impl Default for AutoInitConfig {
             create_database: true,
             create_table: true,
             create_text_index: true,
+        }
+    }
+}
+
+/// Hot-reload configuration
+///
+/// Controls whether the config file is watched for changes at runtime.
+/// When enabled, the config cascade is re-evaluated on file change and
+/// safe-to-reload settings are applied without process restart.
+///
+/// **Safe to hot-reload:** buffer thresholds, routing, metadata, field
+/// sanitisation, timestamp DQ, coercion settings.
+///
+/// **Requires restart:** Kafka brokers/topics/auth, ClickHouse hosts/auth,
+/// payload format, transport type.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HotReloadConfig {
+    /// Enable config file watching (default: false)
+    pub enabled: bool,
+
+    /// Polling interval in seconds for checking file changes
+    pub poll_interval_secs: u64,
+
+    /// Debounce duration in milliseconds — minimum time between reloads
+    pub debounce_ms: u64,
+}
+
+impl Default for HotReloadConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            poll_interval_secs: 5,
+            debounce_ms: 500,
         }
     }
 }

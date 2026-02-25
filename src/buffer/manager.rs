@@ -275,6 +275,15 @@ impl BufferManager {
         }
     }
 
+    /// Update buffer thresholds from new config (hot-reload safe)
+    ///
+    /// Updates flush thresholds without clearing existing buffers or schemas.
+    pub fn update_config(&mut self, config: &BufferConfig) {
+        self.batch_size = config.flush_rows.max(100);
+        self.flush_rows = config.flush_rows;
+        self.flush_age_secs = config.flush_age_secs;
+    }
+
     /// Set schema refresh interval
     pub fn with_schema_refresh(mut self, interval: Duration) -> Self {
         self.schema_refresh_interval = interval;
@@ -663,5 +672,31 @@ mod tests {
         assert_eq!(batches[0].offsets.len(), 2);
         assert_eq!(batches[0].offsets[0].offset, 100);
         assert_eq!(batches[0].offsets[1].offset, 101);
+    }
+
+    #[test]
+    fn test_buffer_manager_update_config() {
+        let config = test_config();
+        let mut manager = BufferManager::new(&config);
+
+        assert_eq!(manager.flush_rows, 5);
+
+        // Push some data
+        let data = json!({"id": 1}).as_object().unwrap().clone();
+        manager.push("db.events", data, None, None);
+        assert_eq!(manager.pending_rows(), 1);
+
+        // Update config — existing data is preserved
+        let new_config = BufferConfig {
+            flush_rows: 100,
+            flush_bytes: 2 * 1024 * 1024,
+            flush_age_secs: 30,
+        };
+        manager.update_config(&new_config);
+
+        assert_eq!(manager.flush_rows, 100);
+        assert_eq!(manager.flush_age_secs, 30);
+        // Data still there
+        assert_eq!(manager.pending_rows(), 1);
     }
 }
