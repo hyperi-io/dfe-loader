@@ -1,3 +1,10 @@
+## [1.8.1](https://github.com/hyperi-io/dfe-loader/compare/v1.8.0...v1.8.1) (2026-02-25)
+
+
+### Bug Fixes
+
+* Use of replicating merge tree when unavailable ([c2535bd](https://github.com/hyperi-io/dfe-loader/commit/c2535bdecc60878f3746c458ba8c374c718e8b3e))
+
 # [1.8.0](https://github.com/hyperi-io/dfe-loader/compare/v1.7.1...v1.8.0) (2026-02-25)
 
 
