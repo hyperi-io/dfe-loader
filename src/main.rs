@@ -35,15 +35,15 @@ use dfe_loader::pipeline::Orchestrator;
 #[command(version)]
 struct Args {
     /// Path to configuration file
-    #[arg(short, long, env = "LOADER_CONFIG")]
+    #[arg(short, long, env = "DFE_LOADER_CONFIG")]
     config: Option<String>,
 
     /// Log level (trace, debug, info, warn, error)
-    #[arg(long, env = "LOADER_LOG_LEVEL", default_value = "info")]
+    #[arg(long, env = "DFE_LOADER_LOG_LEVEL", default_value = "info")]
     log_level: String,
 
     /// Log format (json, text)
-    #[arg(long, env = "LOADER_LOG_FORMAT", default_value = "json")]
+    #[arg(long, env = "DFE_LOADER_LOG_FORMAT", default_value = "json")]
     log_format: String,
 
     /// Validate config and exit
@@ -55,7 +55,7 @@ struct Args {
     print_config: bool,
 
     /// Metrics server bind address
-    #[arg(long, env = "LOADER_METRICS_ADDR", default_value = "0.0.0.0:9090")]
+    #[arg(long, env = "DFE_LOADER_METRICS_ADDR", default_value = "0.0.0.0:9090")]
     metrics_addr: String,
 }
 

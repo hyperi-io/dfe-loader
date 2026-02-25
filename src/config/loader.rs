@@ -5,9 +5,9 @@
 //!
 //! Configuration cascade (highest to lowest priority):
 //!   1. CLI args (--kafka-brokers, --clickhouse-hosts, etc.)
-//!   2. Environment variables (LOADER_KAFKA_BROKERS, etc.)
+//!   2. Environment variables (DFE_LOADER_KAFKA_BROKERS, etc.)
 //!   3. .env file
-//!   4. Config file specified by --config or LOADER_CONFIG
+//!   4. Config file specified by --config or DFE_LOADER_CONFIG
 //!   5. Hard-coded defaults
 
 use std::collections::HashMap;
@@ -380,14 +380,15 @@ pub struct RoutingConfig {
     pub db_fields: Vec<String>,
 
     /// Fields to check for table name (first match wins, dot notation for nested)
-    /// Example: ["event_category", "tags.event_category"]
+    /// Default: ["_source"] — aligned with _source field extraction
     pub table_fields: Vec<String>,
 
     /// Default database if no db_field matches (or db_fields is empty)
-    /// Default: "common" (shared multi-tenant schema)
+    /// Default: "dfe" (shared multi-tenant schema)
     pub default_db: String,
 
     /// Default table if no table_field matches
+    /// Default: "dfe"
     pub default_table: String,
 
     /// Field to extract for _org_id column (stored in data for RLS)
@@ -412,6 +413,14 @@ pub struct RoutingConfig {
     /// Legacy: mapping file path
     pub mapping_file: Option<String>,
 
+    /// Topic suffixes to strip when deriving _source from Kafka topic name
+    /// Example: topic "auth_land" with suffix "_land" → _source = "auth"
+    pub topic_suffixes: Vec<String>,
+
+    /// Pre-DFE 2.2 compatibility: prepend event_category/tags.event_category to
+    /// source_fields and table_fields for backwards compatibility with older data formats
+    pub compat_v2_source: bool,
+
     /// DLQ configuration
     pub dlq: DlqConfig,
 }
@@ -419,14 +428,11 @@ pub struct RoutingConfig {
 impl Default for RoutingConfig {
     fn default() -> Self {
         Self {
-            // NEW default: db_fields empty = shared schema (all to common.*)
+            // Default: db_fields empty = shared schema (all to dfe.*)
             db_fields: vec![],
-            table_fields: vec![
-                "event_category".to_string(),
-                "tags.event_category".to_string(),
-            ],
-            default_db: "common".to_string(),
-            default_table: "common".to_string(),
+            table_fields: vec!["_source".to_string()],
+            default_db: "dfe".to_string(),
+            default_table: "dfe".to_string(),
             // Extract org_id for _org_id column (RLS)
             org_id_field: Some("org_id".to_string()),
             // No per-org routing by default (shared schema)
@@ -434,6 +440,8 @@ impl Default for RoutingConfig {
             route_all_by_org: false,
             category_to_table: HashMap::new(),
             mapping_file: None,
+            topic_suffixes: vec!["_land".to_string(), "_load".to_string()],
+            compat_v2_source: false,
             dlq: DlqConfig::default(),
         }
     }
@@ -600,6 +608,11 @@ impl Default for FieldSanitizationConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MetadataConfig {
+    /// Master switch for common header field injection (default: true)
+    /// When false, no common header fields (_timestamp, _org_id, _raw, _json, _tags, _source)
+    /// are injected. Flattening and sanitization still apply.
+    pub enabled: bool,
+
     pub inject_timestamp_load: bool,
     pub extract_timestamp_collector: bool,
     pub collector_timestamp_path: String,
@@ -630,10 +643,18 @@ pub struct MetadataConfig {
     /// Output field name for raw log line
     pub raw_output: String,
 
+    // _source field (Common Header v2)
+    /// Enable _source field injection (destination table identifier)
+    pub capture_source: bool,
+    /// Fields to check for _source value in message data (first match wins)
+    pub source_fields: Vec<String>,
+    /// Output field name for _source
+    pub source_output: String,
+
     // Per-table capture overrides
-    /// Tables where _json capture is disabled (e.g., ["common.metrics"])
+    /// Tables where _json capture is disabled (e.g., ["dfe.metrics"])
     pub disable_json_tables: Vec<String>,
-    /// Tables where _raw capture is disabled (e.g., ["common.metrics"])
+    /// Tables where _raw capture is disabled (e.g., ["dfe.metrics"])
     pub disable_raw_tables: Vec<String>,
 
     // Routing field removal (Common Header v2)
@@ -644,6 +665,8 @@ pub struct MetadataConfig {
 impl Default for MetadataConfig {
     fn default() -> Self {
         Self {
+            enabled: true,
+
             inject_timestamp_load: true,
             extract_timestamp_collector: true,
             collector_timestamp_path: "tags.collector.timestamp".to_string(),
@@ -666,6 +689,11 @@ impl Default for MetadataConfig {
             capture_raw: true,
             raw_source_fields: vec!["logoriginal".to_string()],
             raw_output: "_raw".to_string(),
+
+            // _source capture defaults
+            capture_source: true,
+            source_fields: vec!["_source".to_string()],
+            source_output: "_source".to_string(),
 
             // Per-table overrides
             disable_json_tables: vec![],
@@ -873,7 +901,7 @@ impl Default for AutoInitConfig {
 impl Config {
     /// Load configuration with cascade:
     /// 1. CLI args (applied separately after load)
-    /// 2. Environment variables (LOADER_*)
+    /// 2. Environment variables (DFE_LOADER_*)
     /// 3. .env file
     /// 4. Config file
     /// 5. Defaults
@@ -901,10 +929,11 @@ impl Config {
             }
         }
 
-        // Add environment variables with LOADER_ prefix
-        // LOADER_KAFKA_BROKERS -> kafka.brokers
+        // Add environment variables with DFE_LOADER_ prefix
+        // DFE_LOADER_KAFKA_BROKERS -> kafka.brokers
+        // DFE_LOADER_METADATA_ENABLED -> metadata.enabled (common header toggle)
         builder = builder.add_source(
-            Environment::with_prefix("LOADER")
+            Environment::with_prefix("DFE_LOADER")
                 .separator("_")
                 .list_separator(",")
                 .with_list_parse_key("kafka.brokers")

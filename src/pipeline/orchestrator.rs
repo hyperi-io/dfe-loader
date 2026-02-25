@@ -461,15 +461,38 @@ impl Orchestrator {
             }
         };
 
+        let common_header = self.config.metadata.enabled;
+
         // Step 3.5: Extract org_id for _org_id field (Common Header v2 - RLS)
         // Clone the str to avoid borrowing value (which we need to move into transform)
-        let org_id_owned = router
-            .extract_org_id_from_value(&value)
-            .map(|s| s.to_string());
+        let org_id_owned = if common_header {
+            router
+                .extract_org_id_from_value(&value)
+                .map(|s| s.to_string())
+        } else {
+            None
+        };
+
+        // Step 3.6: Extract _source value (Common Header v2)
+        // Priority: 1) message data field, 2) Kafka topic (strip suffix), 3) default
+        let source_owned = if common_header && self.config.metadata.capture_source {
+            Some(
+                router
+                    .extract_source_from_value(&value)
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| router.derive_source_from_topic(&msg.topic)),
+            )
+        } else {
+            None
+        };
 
         // Step 4: Transform (flatten, timestamp validation, _raw rename, routing field removal)
         // Note: _json is NOT injected here — it's built from raw bytes in ArrowBatchBuilder sidecar
-        let transform_result = transformer.transform_with_raw(value, org_id_owned.as_deref())?;
+        let transform_result = transformer.transform_with_raw(
+            value,
+            org_id_owned.as_deref(),
+            source_owned.as_deref(),
+        )?;
 
         // Step 4.5: Apply per-table capture overrides
         // Mark table for async DDL tag resolution if first time seen
@@ -478,17 +501,17 @@ impl Orchestrator {
 
         // Determine raw_payload for _json sidecar:
         // Pass Some(bytes) to enable _json, None to suppress.
-        // Checks: global capture_json config AND per-table override.
+        // Checks: global capture_json config, common header enabled, AND per-table override.
         let table_capture = capture_overrides.get_or_default(&table);
         let raw_payload: Option<&[u8]> =
-            if self.config.metadata.capture_json && !table_capture.disable_json {
+            if common_header && self.config.metadata.capture_json && !table_capture.disable_json {
                 Some(&msg.payload)
             } else {
                 None
             };
 
         // Remove _raw if disabled for this table (config list or DDL tags)
-        if table_capture.disable_raw {
+        if common_header && table_capture.disable_raw {
             data.remove(transformer.raw_output());
         }
 

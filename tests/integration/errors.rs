@@ -100,6 +100,8 @@ fn test_error_missing_routing_fields() {
         route_all_by_org: false,
         category_to_table: Default::default(),
         mapping_file: None,
+        topic_suffixes: vec!["_land".to_string(), "_load".to_string()],
+        compat_v2_source: false,
         dlq: DlqConfig::default(),
     };
 
@@ -136,6 +138,8 @@ fn test_error_null_routing_fields() {
         route_all_by_org: false,
         category_to_table: Default::default(),
         mapping_file: None,
+        topic_suffixes: vec!["_land".to_string(), "_load".to_string()],
+        compat_v2_source: false,
         dlq: DlqConfig::default(),
     };
 
@@ -173,6 +177,8 @@ fn test_error_non_string_routing_fields() {
         route_all_by_org: false,
         category_to_table: Default::default(),
         mapping_file: None,
+        topic_suffixes: vec!["_land".to_string(), "_load".to_string()],
+        compat_v2_source: false,
         dlq: DlqConfig::default(),
     };
 

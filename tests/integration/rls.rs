@@ -32,6 +32,8 @@ async fn test_org_id_field_population() {
         route_all_by_org: false,
         category_to_table: HashMap::new(),
         mapping_file: None,
+        topic_suffixes: vec!["_land".to_string(), "_load".to_string()],
+        compat_v2_source: false,
         dlq: DlqConfig::default(),
     };
 
@@ -61,7 +63,7 @@ async fn test_org_id_field_population() {
 
     // Transform with org_id
     let result = transformer
-        .transform_with_raw(value, org_id_owned.as_deref())
+        .transform_with_raw(value, org_id_owned.as_deref(), None)
         .unwrap();
 
     // Verify _org_id field is present
@@ -88,6 +90,8 @@ async fn test_org_id_custom_field_name() {
         route_all_by_org: false,
         category_to_table: HashMap::new(),
         mapping_file: None,
+        topic_suffixes: vec!["_land".to_string(), "_load".to_string()],
+        compat_v2_source: false,
         dlq: DlqConfig::default(),
     };
 
@@ -109,7 +113,7 @@ async fn test_org_id_custom_field_name() {
     assert_eq!(org_id_owned.as_deref(), Some("bigcorp"));
 
     let result = transformer
-        .transform_with_raw(value, org_id_owned.as_deref())
+        .transform_with_raw(value, org_id_owned.as_deref(), None)
         .unwrap();
 
     // _org_id should be populated from tenant_id
@@ -134,6 +138,8 @@ async fn test_shared_schema_multiple_orgs() {
             .into_iter()
             .collect(),
         mapping_file: None,
+        topic_suffixes: vec!["_land".to_string(), "_load".to_string()],
+        compat_v2_source: false,
         dlq: DlqConfig::default(),
     };
 
@@ -165,7 +171,7 @@ async fn test_shared_schema_multiple_orgs() {
                 .extract_org_id_from_value(&value)
                 .map(|s| s.to_string());
             let result = transformer
-                .transform_with_raw(value, org_id_owned.as_deref())
+                .transform_with_raw(value, org_id_owned.as_deref(), None)
                 .unwrap();
 
             // Each should have its own org_id

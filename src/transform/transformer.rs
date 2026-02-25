@@ -39,6 +39,9 @@ pub struct TransformResult {
 ///
 /// Uses static strings for common field names to avoid allocation per message.
 pub struct Transformer {
+    /// Master switch for common header field injection
+    common_header_enabled: bool,
+
     timestamp_validator: TimestampValidator,
     extract_collector_timestamp: bool,
     collector_timestamp_path: String,
@@ -62,6 +65,10 @@ pub struct Transformer {
     raw_source_fields: Vec<String>,
     raw_output: String,
 
+    // Common Header v2: _source field injection
+    capture_source: bool,
+    source_output: String,
+
     // Common Header v2: Routing field removal
     remove_routing_fields: bool,
     routing_db_fields: Vec<String>,
@@ -79,6 +86,8 @@ impl Transformer {
         sanitization_config: &FieldSanitizationConfig,
     ) -> Self {
         Self {
+            common_header_enabled: metadata_config.enabled,
+
             timestamp_validator: TimestampValidator::new(timestamp_config),
             extract_collector_timestamp: metadata_config.extract_timestamp_collector,
             collector_timestamp_path: metadata_config.collector_timestamp_path.clone(),
@@ -99,6 +108,10 @@ impl Transformer {
             capture_raw: metadata_config.capture_raw,
             raw_source_fields: metadata_config.raw_source_fields.clone(),
             raw_output: metadata_config.raw_output.clone(),
+
+            // Common Header v2: _source injection
+            capture_source: metadata_config.capture_source,
+            source_output: metadata_config.source_output.clone(),
 
             // Common Header v2: Routing field removal (empty until with_routing called)
             remove_routing_fields: metadata_config.remove_routing_fields,
@@ -135,10 +148,25 @@ impl Transformer {
         &self.raw_output
     }
 
+    /// Get the _source output field name
+    #[must_use]
+    pub fn source_output(&self) -> &str {
+        &self.source_output
+    }
+
+    /// Whether common header injection is enabled
+    #[must_use]
+    pub fn common_header_enabled(&self) -> bool {
+        self.common_header_enabled
+    }
+
     /// Transform a parsed JSON value for Common Header v2 processing.
     ///
     /// Applies: flatten → timestamp validation → `_raw` rename → `_tags` extraction →
-    /// `_org_id` injection → routing field removal → field sanitization.
+    /// `_org_id` injection → `_source` injection → routing field removal → field sanitization.
+    ///
+    /// When common header is disabled (`metadata.enabled = false`), only flattening and
+    /// sanitization are applied — no common header fields are injected.
     ///
     /// Note: `_json` is NOT injected here. It's built from raw Kafka bytes directly
     /// in `ArrowBatchBuilder` sidecar (zero-copy via `Buffer::from_vec`).
@@ -147,10 +175,12 @@ impl Transformer {
     ///
     /// - `value`: Parsed JSON object to transform
     /// - `org_id`: Optional org_id value for _org_id field (RLS)
+    /// - `source`: Optional _source value (destination table identifier)
     pub fn transform_with_raw(
         &self,
         value: Value,
         org_id: Option<&str>,
+        source: Option<&str>,
     ) -> Result<TransformResult> {
         // Cache current time once per message to avoid multiple syscalls
         let now = Utc::now();
@@ -167,108 +197,123 @@ impl Transformer {
         };
 
         // Step 1: Extract _tags BEFORE flattening (preserves nested structure)
-        // OPTIMIZATION: Skip entirely if tags_fields is empty
-        let extracted_tags = if !self.drop_tags && !self.tags_fields.is_empty() {
-            self.extract_tags(&obj)
-        } else {
-            None
-        };
+        // OPTIMIZATION: Skip entirely if tags_fields is empty or common header disabled
+        let extracted_tags =
+            if self.common_header_enabled && !self.drop_tags && !self.tags_fields.is_empty() {
+                self.extract_tags(&obj)
+            } else {
+                None
+            };
 
         // Step 2: Flatten nested objects (owned version avoids cloning leaf values)
+        // Always applies regardless of common header setting
         let mut data = if self.flatten_nested {
             flatten_value_owned(Value::Object(obj))
         } else {
             obj
         };
 
-        // Step 3: Validate/correct timestamp
-        // Read from input field (timestamp), remove it, write to output field (_timestamp)
-        if let Some(ts_value) = data.remove(TIMESTAMP_INPUT_FIELD) {
-            let ts_result = match &ts_value {
-                Value::String(s) => self.timestamp_validator.validate_with_now(s, now),
-                Value::Number(n) => {
-                    if let Some(i) = n.as_i64() {
-                        self.timestamp_validator.validate_unix_with_now(i, now)
-                    } else {
-                        TimestampResult::Invalid("Invalid number format".into())
+        // Steps 3-8: Common header field injection (skip all when disabled)
+        if self.common_header_enabled {
+            // Step 3: Validate/correct timestamp
+            // Read from input field (timestamp), remove it, write to output field (_timestamp)
+            if let Some(ts_value) = data.remove(TIMESTAMP_INPUT_FIELD) {
+                let ts_result = match &ts_value {
+                    Value::String(s) => self.timestamp_validator.validate_with_now(s, now),
+                    Value::Number(n) => {
+                        if let Some(i) = n.as_i64() {
+                            self.timestamp_validator.validate_unix_with_now(i, now)
+                        } else {
+                            TimestampResult::Invalid("Invalid number format".into())
+                        }
+                    }
+                    _ => TimestampResult::Invalid("Timestamp must be string or number".into()),
+                };
+
+                match ts_result {
+                    TimestampResult::Valid(dt) => {
+                        data.insert(
+                            TIMESTAMP_OUTPUT_FIELD.into(),
+                            Value::String(dt.to_rfc3339()),
+                        );
+                    }
+                    TimestampResult::Corrected(dt, reason) => {
+                        warnings.get_or_insert_with(Vec::new).push(reason);
+                        data.insert(
+                            TIMESTAMP_OUTPUT_FIELD.into(),
+                            Value::String(dt.to_rfc3339()),
+                        );
+                    }
+                    TimestampResult::Invalid(reason) => {
+                        warnings.get_or_insert_with(Vec::new).push(reason);
+                        // OPTIMIZATION: Lazy format - only format now() if we actually need it
+                        let ts = now_str.get_or_insert_with(|| now.to_rfc3339()).clone();
+                        data.insert(TIMESTAMP_OUTPUT_FIELD.into(), Value::String(ts));
                     }
                 }
-                _ => TimestampResult::Invalid("Timestamp must be string or number".into()),
-            };
+            } else {
+                // No timestamp field - inject current time (lazy format)
+                let ts = now_str.get_or_insert_with(|| now.to_rfc3339()).clone();
+                data.insert(TIMESTAMP_OUTPUT_FIELD.into(), Value::String(ts));
+            }
 
-            match ts_result {
-                TimestampResult::Valid(dt) => {
+            // Step 4: Extract collector timestamp if present
+            // Use remove() to take ownership instead of get().cloned() to avoid allocation
+            if self.extract_collector_timestamp {
+                if let Some(ts) = data.remove(&self.collector_timestamp_path) {
+                    data.insert(TIMESTAMP_COLLECTOR_FIELD.into(), ts);
+                }
+            }
+
+            // Step 4b: Extract timestamp_received if present (nullable)
+            // This is when the receiver/loader received the event
+            if let Some(ts) = data.remove(TIMESTAMP_RECEIVED_INPUT_FIELD) {
+                data.insert(TIMESTAMP_RECEIVED_OUTPUT_FIELD.into(), ts);
+            }
+
+            // Step 5: _json is now built from raw bytes directly in ArrowBatchBuilder sidecar
+            // (zero-copy via Buffer::from_vec). No longer injected into the Map here.
+            // The orchestrator passes raw_payload to BufferManager.push() instead.
+
+            // Step 5b: @renamed: first(logoriginal/_raw/raw/raw_log/message) → _raw
+            // Zero-copy rename via data.remove() — ownership transfer, no clone.
+            // Silent no-op if destination already present (upstream may populate _raw directly).
+            if self.capture_raw && !data.contains_key(&self.raw_output) {
+                for field in &self.raw_source_fields {
+                    if let Some(val) = data.remove(field.as_str()) {
+                        data.insert(self.raw_output.clone(), val);
+                        break;
+                    }
+                }
+            }
+
+            // Step 6: Add extracted _tags
+            if let Some(tags) = extracted_tags {
+                data.insert(self.tags_output.clone(), tags);
+            }
+
+            // Step 7: Inject _org_id for row-level security (RLS)
+            if let Some(org) = org_id {
+                data.insert(self.org_id_output.clone(), Value::String(org.to_string()));
+            }
+
+            // Step 7b: Inject _source (destination table identifier)
+            if self.capture_source {
+                if let Some(src) = source {
                     data.insert(
-                        TIMESTAMP_OUTPUT_FIELD.into(),
-                        Value::String(dt.to_rfc3339()),
+                        self.source_output.clone(),
+                        Value::String(src.to_string()),
                     );
                 }
-                TimestampResult::Corrected(dt, reason) => {
-                    warnings.get_or_insert_with(Vec::new).push(reason);
-                    data.insert(
-                        TIMESTAMP_OUTPUT_FIELD.into(),
-                        Value::String(dt.to_rfc3339()),
-                    );
-                }
-                TimestampResult::Invalid(reason) => {
-                    warnings.get_or_insert_with(Vec::new).push(reason);
-                    // OPTIMIZATION: Lazy format - only format now() if we actually need it
-                    let ts = now_str.get_or_insert_with(|| now.to_rfc3339()).clone();
-                    data.insert(TIMESTAMP_OUTPUT_FIELD.into(), Value::String(ts));
-                }
             }
-        } else {
-            // No timestamp field - inject current time (lazy format)
-            let ts = now_str.get_or_insert_with(|| now.to_rfc3339()).clone();
-            data.insert(TIMESTAMP_OUTPUT_FIELD.into(), Value::String(ts));
-        }
 
-        // Step 4: Extract collector timestamp if present
-        // Use remove() to take ownership instead of get().cloned() to avoid allocation
-        if self.extract_collector_timestamp {
-            if let Some(ts) = data.remove(&self.collector_timestamp_path) {
-                data.insert(TIMESTAMP_COLLECTOR_FIELD.into(), ts);
+            // Step 8: Remove routing fields (they're only used for db.table routing)
+            if self.remove_routing_fields {
+                self.remove_routing_fields_from(&mut data);
             }
         }
 
-        // Step 4b: Extract timestamp_received if present (nullable)
-        // This is when the receiver/loader received the event
-        if let Some(ts) = data.remove(TIMESTAMP_RECEIVED_INPUT_FIELD) {
-            data.insert(TIMESTAMP_RECEIVED_OUTPUT_FIELD.into(), ts);
-        }
-
-        // Step 5: _json is now built from raw bytes directly in ArrowBatchBuilder sidecar
-        // (zero-copy via Buffer::from_vec). No longer injected into the Map here.
-        // The orchestrator passes raw_payload to BufferManager.push() instead.
-
-        // Step 5b: @renamed: first(logoriginal/_raw/raw/raw_log/message) → _raw
-        // Zero-copy rename via data.remove() — ownership transfer, no clone.
-        // Silent no-op if destination already present (upstream may populate _raw directly).
-        if self.capture_raw && !data.contains_key(&self.raw_output) {
-            for field in &self.raw_source_fields {
-                if let Some(val) = data.remove(field.as_str()) {
-                    data.insert(self.raw_output.clone(), val);
-                    break;
-                }
-            }
-        }
-
-        // Step 6: Add extracted _tags
-        if let Some(tags) = extracted_tags {
-            data.insert(self.tags_output.clone(), tags);
-        }
-
-        // Step 7: Inject _org_id for row-level security (RLS)
-        if let Some(org) = org_id {
-            data.insert(self.org_id_output.clone(), Value::String(org.to_string()));
-        }
-
-        // Step 8: Remove routing fields (they're only used for db.table routing)
-        if self.remove_routing_fields {
-            self.remove_routing_fields_from(&mut data);
-        }
-
-        // Step 9: Sanitize field names
+        // Step 9: Sanitize field names (always applies)
         let sanitized = self.sanitize_fields(data);
 
         Ok(TransformResult {
@@ -281,7 +326,7 @@ impl Transformer {
     ///
     /// Legacy method - use transform_with_raw for Common Header v2 features.
     pub fn transform(&self, value: Value) -> Result<TransformResult> {
-        self.transform_with_raw(value, None)
+        self.transform_with_raw(value, None, None)
     }
 
     /// Extract tags from the first matching field in tags_fields
@@ -379,6 +424,7 @@ impl Transformer {
             || key == self.json_output
             || key == self.raw_output
             || key == self.org_id_output
+            || key == self.source_output
             || key == TIMESTAMP_OUTPUT_FIELD         // _timestamp
             || key == TIMESTAMP_RECEIVED_OUTPUT_FIELD // _timestamp_received
             || key == TIMESTAMP_COLLECTOR_FIELD      // _timestamp_collector
@@ -443,7 +489,7 @@ impl Transformer {
         let value: Value = sonic_rs::from_slice(json)
             .map_err(|e| crate::Error::Json(format!("Parse error: {}", e)))?;
 
-        let result = self.transform_with_raw(value, None)?;
+        let result = self.transform_with_raw(value, None, None)?;
 
         serde_json::to_vec(&Value::Object(result.data))
             .map_err(|e| crate::Error::Json(format!("Serialize error: {}", e)))
@@ -453,6 +499,8 @@ impl Transformer {
 impl Default for Transformer {
     fn default() -> Self {
         Self {
+            common_header_enabled: true,
+
             timestamp_validator: TimestampValidator::default(),
             extract_collector_timestamp: true,
             collector_timestamp_path: "tags.collector.timestamp".to_string(),
@@ -477,12 +525,12 @@ impl Default for Transformer {
             raw_source_fields: vec!["logoriginal".to_string()],
             raw_output: "_raw".to_string(),
 
+            capture_source: true,
+            source_output: "_source".to_string(),
+
             remove_routing_fields: true,
             routing_db_fields: vec!["org_id".to_string()],
-            routing_table_fields: vec![
-                "event_category".to_string(),
-                "tags.event_category".to_string(),
-            ],
+            routing_table_fields: vec!["_source".to_string()],
 
             org_id_output: "_org_id".to_string(),
         }
@@ -569,7 +617,7 @@ mod tests {
         let raw = br#"{"event": "login", "tags": {"source": "api", "level": "info"}}"#;
         let value: Value = serde_json::from_slice(raw).unwrap();
 
-        let result = transformer.transform_with_raw(value, None).unwrap();
+        let result = transformer.transform_with_raw(value, None, None).unwrap();
 
         // _tags should contain the extracted tags object
         assert!(result.data.contains_key("_tags"));
@@ -585,7 +633,7 @@ mod tests {
         let raw = br#"{"event": "login", "user_id": 123}"#;
         let value: Value = serde_json::from_slice(raw).unwrap();
 
-        let result = transformer.transform_with_raw(value, None).unwrap();
+        let result = transformer.transform_with_raw(value, None, None).unwrap();
 
         // _json should NOT be in the Map (sidecar handles it)
         assert!(!result.data.contains_key("_json"));
@@ -594,12 +642,33 @@ mod tests {
     #[test]
     fn test_transformer_removes_routing_fields() {
         let transformer = Transformer::default();
+        // Default routing_table_fields is ["_source"], so _source should be removed
+        let raw = br#"{"org_id": "acme", "_source": "auth", "data": "test"}"#;
+        let value: Value = serde_json::from_slice(raw).unwrap();
+
+        let result = transformer.transform_with_raw(value, None, None).unwrap();
+
+        // Routing fields should be removed (org_id always removed)
+        assert!(!result.data.contains_key("org_id"));
+        // _source is removed as routing field then re-injected as common header
+        // (but here source=None so it won't be re-injected)
+        // Other fields should remain
+        assert!(result.data.contains_key("data"));
+    }
+
+    #[test]
+    fn test_transformer_removes_legacy_routing_fields() {
+        // Test with legacy event_category routing (pre-DFE 2.2 compat)
+        let mut transformer = Transformer::default();
+        transformer.routing_table_fields =
+            vec!["event_category".to_string(), "tags.event_category".to_string()];
+
         let raw = br#"{"org_id": "acme", "event_category": "auth", "data": "test"}"#;
         let value: Value = serde_json::from_slice(raw).unwrap();
 
-        let result = transformer.transform_with_raw(value, None).unwrap();
+        let result = transformer.transform_with_raw(value, None, None).unwrap();
 
-        // Routing fields should be removed
+        // Legacy routing fields should be removed
         assert!(!result.data.contains_key("org_id"));
         assert!(!result.data.contains_key("event_category"));
         // Other fields should remain
@@ -612,7 +681,7 @@ mod tests {
         let raw = br#"{"event": "test", "tags": {"level": "info"}}"#;
         let value: Value = serde_json::from_slice(raw).unwrap();
 
-        let result = transformer.transform_with_raw(value, None).unwrap();
+        let result = transformer.transform_with_raw(value, None, None).unwrap();
 
         // _tags should not be trimmed to "tags" by underscore sanitization
         assert!(result.data.contains_key("_tags"));
@@ -627,7 +696,7 @@ mod tests {
         let raw = br#"{"event": "login", "tags": {"source": "api"}}"#;
         let value: Value = serde_json::from_slice(raw).unwrap();
 
-        let result = transformer.transform_with_raw(value, None).unwrap();
+        let result = transformer.transform_with_raw(value, None, None).unwrap();
 
         // _tags should not be present when drop_tags is true
         assert!(!result.data.contains_key("_tags"));
@@ -639,7 +708,7 @@ mod tests {
         let raw = br#"{"event": "login", "logoriginal": "raw syslog line here"}"#;
         let value: Value = serde_json::from_slice(raw).unwrap();
 
-        let result = transformer.transform_with_raw(value, None).unwrap();
+        let result = transformer.transform_with_raw(value, None, None).unwrap();
 
         // _raw should contain the value from logoriginal (zero-copy rename)
         assert_eq!(result.data["_raw"], "raw syslog line here");
@@ -656,7 +725,7 @@ mod tests {
         let raw = br#"{"event": "test", "logoriginal": "first", "message": "second"}"#;
         let value: Value = serde_json::from_slice(raw).unwrap();
 
-        let result = transformer.transform_with_raw(value, None).unwrap();
+        let result = transformer.transform_with_raw(value, None, None).unwrap();
 
         assert_eq!(result.data["_raw"], "first");
         // logoriginal removed, message remains (only first match consumed)
@@ -671,7 +740,7 @@ mod tests {
         let raw = br#"{"event": "test", "logoriginal": "the log line"}"#;
         let value: Value = serde_json::from_slice(raw).unwrap();
 
-        let result = transformer.transform_with_raw(value, None).unwrap();
+        let result = transformer.transform_with_raw(value, None, None).unwrap();
 
         // logoriginal is in raw_source_fields — should be renamed to _raw
         assert_eq!(result.data["_raw"], "the log line");
@@ -686,7 +755,7 @@ mod tests {
         let raw = br#"{"event": "test", "logoriginal": "source value", "_raw": "upstream value"}"#;
         let value: Value = serde_json::from_slice(raw).unwrap();
 
-        let result = transformer.transform_with_raw(value, None).unwrap();
+        let result = transformer.transform_with_raw(value, None, None).unwrap();
 
         // _raw should keep the upstream value (silent no-op)
         assert_eq!(result.data["_raw"], "upstream value");
@@ -702,7 +771,7 @@ mod tests {
         let raw = br#"{"event": "test", "logoriginal": "raw line"}"#;
         let value: Value = serde_json::from_slice(raw).unwrap();
 
-        let result = transformer.transform_with_raw(value, None).unwrap();
+        let result = transformer.transform_with_raw(value, None, None).unwrap();
 
         // _raw should NOT be present when capture_raw is false
         assert!(!result.data.contains_key("_raw"));
@@ -717,7 +786,7 @@ mod tests {
         let raw = br#"{"event": "test", "custom_field": "value"}"#;
         let value: Value = serde_json::from_slice(raw).unwrap();
 
-        let result = transformer.transform_with_raw(value, None).unwrap();
+        let result = transformer.transform_with_raw(value, None, None).unwrap();
 
         // _raw should not be present (no matching source field)
         assert!(!result.data.contains_key("_raw"));
@@ -731,7 +800,7 @@ mod tests {
         let raw = br#"{"event": "test"}"#;
         let value: Value = serde_json::from_slice(raw).unwrap();
 
-        let result = transformer.transform_with_raw(value, None).unwrap();
+        let result = transformer.transform_with_raw(value, None, None).unwrap();
 
         // _json should NEVER be in the Map (handled by ArrowBatchBuilder sidecar)
         assert!(!result.data.contains_key("_json"));

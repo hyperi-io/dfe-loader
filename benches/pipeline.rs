@@ -145,7 +145,7 @@ fn bench_transform(c: &mut Criterion) {
         group.bench_with_input(
             BenchmarkId::new("transform_with_raw", name),
             &(value.clone(), payload),
-            |b, (v, p)| b.iter(|| transformer.transform_with_raw(black_box(v.clone()), None)),
+            |b, (v, p)| b.iter(|| transformer.transform_with_raw(black_box(v.clone()), None, None)),
         );
     }
 
@@ -177,7 +177,7 @@ fn bench_end_to_end(c: &mut Criterion) {
                     let _route = router.route_value(&value);
 
                     // Step 3: Transform
-                    transformer.transform_with_raw(value, None)
+                    transformer.transform_with_raw(value, None, None)
                 })
             },
         );
@@ -201,7 +201,7 @@ fn bench_batch_processing(c: &mut Criterion) {
             for payload in &batch {
                 let value: Value = sonic_rs::from_slice(black_box(*payload)).unwrap();
                 let _route = router.route_value(&value);
-                if let Ok(result) = transformer.transform_with_raw(value, None) {
+                if let Ok(result) = transformer.transform_with_raw(value, None, None) {
                     results.push(result.data);
                 }
             }

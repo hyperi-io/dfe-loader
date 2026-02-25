@@ -54,6 +54,8 @@ proptest! {
             route_all_by_org: false,
             category_to_table: HashMap::new(),
             mapping_file: None,
+            topic_suffixes: vec!["_land".to_string(), "_load".to_string()],
+            compat_v2_source: false,
             dlq: DlqConfig::default(),
         };
 

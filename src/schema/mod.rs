@@ -135,7 +135,7 @@ impl std::fmt::Display for TableEngine {
 /// let tags = TableTags::core()
 ///     .with("custom_field", "custom_value");
 ///
-/// assert_eq!(tags.to_comment(), "@schema_source: core | @schema_version: 2 | @custom_field: custom_value");
+/// assert_eq!(tags.to_comment(), "@custom_field: custom_value | @schema_source: core | @schema_version: 2");
 /// ```
 #[derive(Debug, Clone, Default)]
 pub struct TableTags {

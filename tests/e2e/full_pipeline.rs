@@ -90,6 +90,8 @@ async fn test_full_pipeline_e2e() {
         org_id_field: Some("org_id".to_string()),
         routed_orgs: vec![],
         route_all_by_org: true,
+        topic_suffixes: vec!["_land".to_string(), "_load".to_string()],
+        compat_v2_source: false,
         dlq: DlqConfig::default(),
     };
 
@@ -263,6 +265,8 @@ async fn test_pipeline_multi_table_routing() {
         org_id_field: Some("org_id".to_string()),
         routed_orgs: vec![],
         route_all_by_org: true,
+        topic_suffixes: vec!["_land".to_string(), "_load".to_string()],
+        compat_v2_source: false,
         dlq: DlqConfig::default(),
     };
 
@@ -394,6 +398,8 @@ async fn test_pipeline_with_flattening() {
         org_id_field: Some("org_id".to_string()),
         routed_orgs: vec![],
         route_all_by_org: true,
+        topic_suffixes: vec!["_land".to_string(), "_load".to_string()],
+        compat_v2_source: false,
         dlq: DlqConfig::default(),
     };
 
@@ -553,6 +559,8 @@ async fn test_pipeline_dlq_routing() {
         org_id_field: Some("org_id".to_string()),
         routed_orgs: vec![],
         route_all_by_org: true,
+        topic_suffixes: vec!["_land".to_string(), "_load".to_string()],
+        compat_v2_source: false,
         dlq: DlqConfig::default(),
     };
 
