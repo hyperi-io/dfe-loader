@@ -23,7 +23,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::buffer::{BufferManager, FlushBatch, KafkaOffset};
 use crate::clickhouse::{ArrowClickHouseClient, Inserter, InserterConfig};
-use crate::config::{Config, MetadataConfig, TableCaptureConfig};
+use crate::config::{Config, MetadataConfig, SharedConfig, TableCaptureConfig};
 use crate::kafka::{DlqMessage, DlqProducer, KafkaMessage, TransportBackend};
 use crate::metrics::Metrics;
 use crate::payload::{FormatDetector, FormatMode, PayloadFormat};
@@ -141,6 +141,7 @@ impl CaptureOverrides {
 /// Orchestrates the Kafka → ClickHouse pipeline
 pub struct Orchestrator {
     config: Config,
+    shared_config: Option<SharedConfig>,
     shutdown: CancellationToken,
     stats: PipelineStats,
     metrics: Option<Metrics>,
@@ -151,6 +152,7 @@ impl Orchestrator {
     pub fn new(config: Config) -> Self {
         Self {
             config,
+            shared_config: None,
             shutdown: CancellationToken::new(),
             stats: PipelineStats::default(),
             metrics: None,
@@ -161,10 +163,17 @@ impl Orchestrator {
     pub fn with_metrics(config: Config, metrics: Metrics) -> Self {
         Self {
             config,
+            shared_config: None,
             shutdown: CancellationToken::new(),
             stats: PipelineStats::default(),
             metrics: Some(metrics),
         }
+    }
+
+    /// Set shared config for hot-reload support
+    pub fn with_shared_config(mut self, shared: SharedConfig) -> Self {
+        self.shared_config = Some(shared);
+        self
     }
 
     /// Get the shutdown token for external shutdown requests
@@ -210,9 +219,9 @@ impl Orchestrator {
             None
         };
 
-        let router = Router::new(&self.config.routing);
+        let mut router = Router::new(&self.config.routing);
         // Use with_routing to enable routing field removal
-        let transformer = Transformer::with_routing(
+        let mut transformer = Transformer::with_routing(
             &self.config.timestamp_dq,
             &self.config.metadata,
             &self.config.field_sanitization,
@@ -254,6 +263,9 @@ impl Orchestrator {
         // Flush interval timer
         let mut flush_interval = interval(Duration::from_secs(self.config.buffer.flush_age_secs));
 
+        // Hot-reload: subscribe to config changes if SharedConfig is available
+        let mut config_rx = self.shared_config.as_ref().map(|sc| sc.subscribe());
+
         // Batch size for transport.recv() - process multiple messages per iteration
         const RECV_BATCH_SIZE: usize = 100;
 
@@ -263,6 +275,7 @@ impl Orchestrator {
             flush_bytes = self.config.buffer.flush_bytes,
             flush_secs = self.config.buffer.flush_age_secs,
             recv_batch_size = RECV_BATCH_SIZE,
+            hot_reload = self.shared_config.is_some(),
             "Pipeline running"
         );
 
@@ -273,6 +286,48 @@ impl Orchestrator {
                 _ = self.shutdown.cancelled() => {
                     info!("Shutdown requested, flushing remaining buffers");
                     break;
+                }
+
+                // Hot-reload: rebuild mutable components on config change
+                Ok(()) = async {
+                    match config_rx.as_mut() {
+                        Some(rx) => rx.changed().await.map_err(|_| ()),
+                        None => std::future::pending::<std::result::Result<(), ()>>().await,
+                    }
+                } => {
+                    if let Some(ref shared) = self.shared_config {
+                        let new_config = shared.read().clone();
+                        let version = shared.version();
+
+                        info!(version = version, "Config reloaded, applying safe changes");
+
+                        // Rebuild router and transformer (safe to hot-reload)
+                        router = Router::new(&new_config.routing);
+                        transformer = Transformer::with_routing(
+                            &new_config.timestamp_dq,
+                            &new_config.metadata,
+                            &new_config.field_sanitization,
+                            &new_config.routing,
+                        );
+
+                        // Update buffer thresholds
+                        buffer_manager.update_config(&new_config.buffer);
+
+                        // Rebuild capture overrides
+                        capture_overrides = CaptureOverrides::new(&new_config.metadata);
+
+                        // Update flush interval if changed
+                        if new_config.buffer.flush_age_secs != self.config.buffer.flush_age_secs {
+                            flush_interval = interval(Duration::from_secs(
+                                new_config.buffer.flush_age_secs,
+                            ));
+                        }
+
+                        // Store new config (for process_message to reference)
+                        self.config = new_config;
+
+                        info!(version = version, "Config hot-reload complete");
+                    }
                 }
 
                 _ = flush_interval.tick() => {
@@ -511,15 +566,38 @@ impl Orchestrator {
             }
         };
 
+        let common_header = self.config.metadata.enabled;
+
         // Step 3.5: Extract org_id for _org_id field (Common Header v2 - RLS)
         // Clone the str to avoid borrowing value (which we need to move into transform)
-        let org_id_owned = router
-            .extract_org_id_from_value(&value)
-            .map(|s| s.to_string());
+        let org_id_owned = if common_header {
+            router
+                .extract_org_id_from_value(&value)
+                .map(|s| s.to_string())
+        } else {
+            None
+        };
+
+        // Step 3.6: Extract _source value (Common Header v2)
+        // Priority: 1) message data field, 2) Kafka topic (strip suffix), 3) default
+        let source_owned = if common_header && self.config.metadata.capture_source {
+            Some(
+                router
+                    .extract_source_from_value(&value)
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| router.derive_source_from_topic(&msg.topic)),
+            )
+        } else {
+            None
+        };
 
         // Step 4: Transform (flatten, timestamp validation, _raw rename, routing field removal)
         // Note: _json is NOT injected here — it's built from raw bytes in ArrowBatchBuilder sidecar
-        let transform_result = transformer.transform_with_raw(value, org_id_owned.as_deref())?;
+        let transform_result = transformer.transform_with_raw(
+            value,
+            org_id_owned.as_deref(),
+            source_owned.as_deref(),
+        )?;
 
         // Step 4.5: Apply per-table capture overrides
         // Mark table for async DDL tag resolution if first time seen
@@ -528,17 +606,17 @@ impl Orchestrator {
 
         // Determine raw_payload for _json sidecar:
         // Pass Some(bytes) to enable _json, None to suppress.
-        // Checks: global capture_json config AND per-table override.
+        // Checks: global capture_json config, common header enabled, AND per-table override.
         let table_capture = capture_overrides.get_or_default(&table);
         let raw_payload: Option<&[u8]> =
-            if self.config.metadata.capture_json && !table_capture.disable_json {
+            if common_header && self.config.metadata.capture_json && !table_capture.disable_json {
                 Some(&msg.payload)
             } else {
                 None
             };
 
         // Remove _raw if disabled for this table (config list or DDL tags)
-        if table_capture.disable_raw {
+        if common_header && table_capture.disable_raw {
             data.remove(transformer.raw_output());
         }
 
@@ -776,5 +854,32 @@ mod tests {
         let config = overrides.get_or_default("common.events");
         assert!(!config.disable_json);
         assert!(!config.disable_raw);
+    }
+
+    #[test]
+    fn test_orchestrator_with_shared_config() {
+        let config = Config::default();
+        let shared = SharedConfig::new(config.clone());
+
+        let orchestrator = Orchestrator::new(config).with_shared_config(shared.clone());
+        assert!(orchestrator.shared_config.is_some());
+        assert_eq!(shared.version(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_orchestrator_shared_config_update() {
+        let config = Config::default();
+        let shared = SharedConfig::new(config.clone());
+        let mut rx = shared.subscribe();
+
+        // Simulate config update
+        let mut new_config = Config::default();
+        new_config.buffer.flush_rows = 99999;
+        shared.update(new_config);
+
+        rx.changed().await.unwrap();
+        let updated = shared.read();
+        assert_eq!(updated.buffer.flush_rows, 99999);
+        assert_eq!(shared.version(), 1);
     }
 }

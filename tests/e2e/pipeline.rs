@@ -65,6 +65,8 @@ async fn test_routing_and_buffer() {
         .into_iter()
         .collect(),
         mapping_file: None,
+        topic_suffixes: vec!["_land".to_string(), "_load".to_string()],
+        compat_v2_source: false,
         dlq: DlqConfig::default(),
     };
 

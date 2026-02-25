@@ -19,7 +19,7 @@ use std::borrow::Cow;
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde_json::Value;
 
-use crate::config::RoutingConfig;
+use crate::config::{MetadataConfig, RoutingConfig};
 use crate::payload::parse::{
     extract_field_json, extract_field_json_cow, extract_nested_field_json,
     extract_nested_field_json_cow,
@@ -71,11 +71,24 @@ pub struct Router {
     category_to_table: FxHashMap<String, String>,
     /// Whether DLQ is enabled
     dlq_enabled: bool,
+    /// Fields to check for _source value (first match wins)
+    source_fields: Vec<String>,
+    /// Topic suffixes to strip when deriving _source from Kafka topic
+    topic_suffixes: Vec<String>,
 }
 
 impl Router {
-    /// Create a new router from config
+    /// Create a new router from routing and metadata config
     pub fn new(config: &RoutingConfig) -> Self {
+        Self::with_metadata(config, &MetadataConfig::default())
+    }
+
+    /// Create a new router from routing and metadata config
+    ///
+    /// Metadata config provides source_fields for _source extraction.
+    /// When compat_v2_source is enabled, event_category/tags.event_category
+    /// are prepended to both source_fields and table_fields.
+    pub fn with_metadata(config: &RoutingConfig, metadata: &MetadataConfig) -> Self {
         // Convert HashMap to FxHashMap for faster lookups
         let category_to_table: FxHashMap<String, String> = config
             .category_to_table
@@ -86,9 +99,28 @@ impl Router {
         // Convert routed_orgs Vec to FxHashSet for O(1) lookups
         let routed_orgs: FxHashSet<String> = config.routed_orgs.iter().cloned().collect();
 
+        // Build source_fields from metadata config
+        let mut source_fields = metadata.source_fields.clone();
+        let mut table_fields = config.table_fields.clone();
+
+        // Pre-DFE 2.2 compat: prepend legacy fields
+        if config.compat_v2_source {
+            let legacy = vec![
+                "event_category".to_string(),
+                "tags.event_category".to_string(),
+            ];
+            let mut combined_source = legacy.clone();
+            combined_source.extend(source_fields);
+            source_fields = combined_source;
+
+            let mut combined_table = legacy;
+            combined_table.extend(table_fields);
+            table_fields = combined_table;
+        }
+
         Self {
             db_fields: config.db_fields.clone(),
-            table_fields: config.table_fields.clone(),
+            table_fields,
             default_db: config.default_db.clone(),
             default_table: config.default_table.clone(),
             org_id_field: config.org_id_field.clone(),
@@ -96,6 +128,8 @@ impl Router {
             route_all_by_org: config.route_all_by_org,
             category_to_table,
             dlq_enabled: config.dlq.enabled,
+            source_fields,
+            topic_suffixes: config.topic_suffixes.clone(),
         }
     }
 
@@ -435,6 +469,30 @@ impl Router {
         RouteResult::Table(build_db_table_string(&self.default_db, table))
     }
 
+    /// Extract _source value from parsed JSON Value
+    ///
+    /// Checks source_fields in order (first match wins).
+    /// Returns None if no field matches — caller should fall back to topic derivation.
+    #[inline]
+    pub fn extract_source_from_value<'a>(&self, value: &'a Value) -> Option<&'a str> {
+        self.extract_first_match_from_value(value, &self.source_fields)
+    }
+
+    /// Derive _source from Kafka topic name by stripping configured suffixes
+    ///
+    /// Strips the first matching suffix from topic_suffixes.
+    /// Example: topic "auth_land" with suffix "_land" → "auth"
+    /// If no suffix matches, returns the full topic name.
+    #[inline]
+    pub fn derive_source_from_topic(&self, topic: &str) -> String {
+        for suffix in &self.topic_suffixes {
+            if let Some(stripped) = topic.strip_suffix(suffix.as_str()) {
+                return stripped.to_string();
+            }
+        }
+        topic.to_string()
+    }
+
     /// Extract org_id for _org_id field (from parsed Value)
     ///
     /// Used by transformer to populate _org_id column for row-level security.
@@ -476,14 +534,11 @@ fn build_db_table_string(db: &str, table: &str) -> String {
 impl Default for Router {
     fn default() -> Self {
         Self {
-            // NEW default: db_fields empty = shared schema (all to common.*)
+            // Default: db_fields empty = shared schema (all to dfe.*)
             db_fields: vec![],
-            table_fields: vec![
-                "event_category".to_string(),
-                "tags.event_category".to_string(),
-            ],
-            default_db: "common".to_string(),
-            default_table: "common".to_string(),
+            table_fields: vec!["_source".to_string()],
+            default_db: "dfe".to_string(),
+            default_table: "dfe".to_string(),
             // Extract org_id for _org_id column (RLS)
             org_id_field: Some("org_id".to_string()),
             // No per-org routing by default (shared schema)
@@ -491,6 +546,8 @@ impl Default for Router {
             route_all_by_org: false,
             category_to_table: FxHashMap::default(),
             dlq_enabled: true,
+            source_fields: vec!["_source".to_string()],
+            topic_suffixes: vec!["_land".to_string(), "_load".to_string()],
         }
     }
 }
@@ -511,13 +568,15 @@ mod tests {
                 "event_category".to_string(),
                 "tags.event_category".to_string(),
             ],
-            default_db: "common".to_string(),
-            default_table: "common".to_string(),
+            default_db: "dfe".to_string(),
+            default_table: "dfe".to_string(),
             org_id_field: Some("org_id".to_string()),
             routed_orgs: vec![], // Old behaviour: all orgs get own DB (use route_all_by_org)
             route_all_by_org: true, // Simulate old default behaviour for these tests
             category_to_table,
             mapping_file: None,
+            topic_suffixes: vec!["_land".to_string(), "_load".to_string()],
+            compat_v2_source: false,
             dlq: crate::config::DlqConfig {
                 enabled: true,
                 topic_suffix: ".dlq".to_string(),
@@ -569,7 +628,7 @@ mod tests {
 
         assert_eq!(
             router.route(payload),
-            RouteResult::Table("common.network".to_string())
+            RouteResult::Table("dfe.network".to_string())
         );
     }
 
@@ -581,7 +640,7 @@ mod tests {
 
         assert_eq!(
             router.route(payload),
-            RouteResult::Table("acme.common".to_string())
+            RouteResult::Table("acme.dfe".to_string())
         );
     }
 
@@ -593,45 +652,46 @@ mod tests {
 
         assert_eq!(
             router.route(payload),
-            RouteResult::Table("common.common".to_string())
+            RouteResult::Table("dfe.dfe".to_string())
         );
     }
 
     #[test]
     fn test_extract_db() {
-        // NEW default: shared schema (db_fields empty)
+        // Default: shared schema (db_fields empty)
         let router = Router::default();
 
-        let p1 = br#"{"org_id": "acme", "event_category": "auth"}"#;
-        assert_eq!(router.extract_db(p1), "common".to_string()); // NEW: goes to common
+        let p1 = br#"{"org_id": "acme", "_source": "auth"}"#;
+        assert_eq!(router.extract_db(p1), "dfe".to_string()); // Shared schema: goes to dfe
 
-        let p2 = br#"{"event_category": "auth"}"#;
-        assert_eq!(router.extract_db(p2), "common".to_string());
+        let p2 = br#"{"_source": "auth"}"#;
+        assert_eq!(router.extract_db(p2), "dfe".to_string());
 
         // OLD behaviour: route_all_by_org = true
         let mut config = test_config();
         config.route_all_by_org = true;
         let router_old = Router::new(&config);
 
-        assert_eq!(router_old.extract_db(p1), "acme".to_string());
-        assert_eq!(router_old.extract_db(p2), "common".to_string()); // No org_id
+        let p3 = br#"{"org_id": "acme", "event_category": "auth"}"#;
+        assert_eq!(router_old.extract_db(p3), "acme".to_string());
+        assert_eq!(router_old.extract_db(p2), "dfe".to_string()); // No org_id
     }
 
     #[test]
     fn test_extract_table() {
         let router = Router::default();
 
-        // Direct field
-        let p1 = br#"{"event_category": "auth"}"#;
+        // _source field (default table_fields)
+        let p1 = br#"{"_source": "auth"}"#;
         assert_eq!(router.extract_table(p1), "auth".to_string());
 
-        // Nested field (fallback)
-        let p2 = br#"{"tags": {"event_category": "api"}}"#;
-        assert_eq!(router.extract_table(p2), "api".to_string());
+        // No match → default table
+        let p2 = br#"{"user_id": 123}"#;
+        assert_eq!(router.extract_table(p2), "dfe".to_string());
 
-        // No match
-        let p3 = br#"{"user_id": 123}"#;
-        assert_eq!(router.extract_table(p3), "common".to_string());
+        // event_category not matched by default (need compat mode)
+        let p3 = br#"{"event_category": "api"}"#;
+        assert_eq!(router.extract_table(p3), "dfe".to_string());
     }
 
     #[test]
@@ -657,11 +717,11 @@ mod tests {
             RouteResult::Table("acme.events_auth".to_string())
         );
 
-        // Not in allowlist → common
+        // Not in allowlist → dfe (default)
         let p3 = br#"{"org_id": "other", "event_category": "auth"}"#;
         assert_eq!(
             router.route(p3),
-            RouteResult::Table("common.events_auth".to_string())
+            RouteResult::Table("dfe.events_auth".to_string())
         );
     }
 
@@ -688,13 +748,13 @@ mod tests {
         // Mapped category
         assert_eq!(
             router.route_category("auth"),
-            RouteResult::Table("common.events_auth".to_string())
+            RouteResult::Table("dfe.events_auth".to_string())
         );
 
         // Unmapped category uses category as table
         assert_eq!(
             router.route_category("network"),
-            RouteResult::Table("common.network".to_string())
+            RouteResult::Table("dfe.network".to_string())
         );
     }
 
@@ -750,7 +810,7 @@ mod tests {
 
         assert_eq!(
             router.route_value(&value),
-            RouteResult::Table("common.common".to_string())
+            RouteResult::Table("dfe.dfe".to_string())
         );
     }
 
@@ -794,7 +854,7 @@ mod tests {
         let router = Router::default();
 
         // org_id with escape sequence
-        let payload = br#"{"org_id": "acme\ncorp", "event_category": "auth"}"#;
+        let payload = br#"{"org_id": "acme\ncorp", "_source": "auth"}"#;
         let result = router.route_cow(payload);
 
         // Should still route correctly (value is "acme\ncorp" with actual newline)
@@ -803,25 +863,25 @@ mod tests {
 
     #[test]
     fn test_shared_schema_default() {
-        // Default behaviour: all to common database
+        // Default behaviour: all to dfe database
         let router = Router::default();
 
-        let p1 = br#"{"org_id": "acme", "event_category": "auth"}"#;
-        let p2 = br#"{"org_id": "bigcorp", "event_category": "api"}"#;
-        let p3 = br#"{"event_category": "network"}"#;
+        let p1 = br#"{"org_id": "acme", "_source": "auth"}"#;
+        let p2 = br#"{"org_id": "bigcorp", "_source": "api"}"#;
+        let p3 = br#"{"_source": "network"}"#;
 
-        // All go to common.*
+        // All go to dfe.* (shared schema)
         assert_eq!(
             router.route(p1),
-            RouteResult::Table("common.auth".to_string())
+            RouteResult::Table("dfe.auth".to_string())
         );
         assert_eq!(
             router.route(p2),
-            RouteResult::Table("common.api".to_string())
+            RouteResult::Table("dfe.api".to_string())
         );
         assert_eq!(
             router.route(p3),
-            RouteResult::Table("common.network".to_string())
+            RouteResult::Table("dfe.network".to_string())
         );
     }
 
@@ -852,10 +912,10 @@ mod tests {
             RouteResult::Table("bigcorp.api".to_string())
         );
 
-        // other goes to common
+        // other goes to dfe (default)
         assert_eq!(
             router.route(p3),
-            RouteResult::Table("common.network".to_string())
+            RouteResult::Table("dfe.network".to_string())
         );
     }
 
@@ -910,10 +970,97 @@ mod tests {
     fn test_extract_org_id_bytes() {
         let router = Router::default();
 
-        let p1 = br#"{"org_id": "acme", "event_category": "auth"}"#;
+        let p1 = br#"{"org_id": "acme", "_source": "auth"}"#;
         assert_eq!(router.extract_org_id(p1), Some("acme".to_string()));
 
-        let p2 = br#"{"event_category": "auth"}"#;
+        let p2 = br#"{"_source": "auth"}"#;
         assert_eq!(router.extract_org_id(p2), None);
+    }
+
+    #[test]
+    fn test_derive_source_from_topic() {
+        let router = Router::default();
+
+        // Strip _land suffix
+        assert_eq!(router.derive_source_from_topic("auth_land"), "auth");
+
+        // Strip _load suffix
+        assert_eq!(router.derive_source_from_topic("network_load"), "network");
+
+        // No suffix to strip
+        assert_eq!(router.derive_source_from_topic("events"), "events");
+
+        // First matching suffix wins
+        assert_eq!(router.derive_source_from_topic("dfe_land"), "dfe");
+
+        // Suffix only at end, not middle
+        assert_eq!(
+            router.derive_source_from_topic("land_events"),
+            "land_events"
+        );
+    }
+
+    #[test]
+    fn test_extract_source_from_value() {
+        let router = Router::default();
+
+        // _source field present
+        let v1 = serde_json::json!({"_source": "auth", "data": "test"});
+        assert_eq!(router.extract_source_from_value(&v1), Some("auth"));
+
+        // _source field absent
+        let v2 = serde_json::json!({"event_category": "auth", "data": "test"});
+        assert_eq!(router.extract_source_from_value(&v2), None);
+    }
+
+    #[test]
+    fn test_compat_v2_source() {
+        // Pre-DFE 2.2 compat: event_category/tags.event_category prepended
+        let mut routing_config = RoutingConfig::default();
+        routing_config.compat_v2_source = true;
+
+        let mut metadata_config = MetadataConfig::default();
+        metadata_config.source_fields = vec!["_source".to_string()];
+
+        let router = Router::with_metadata(&routing_config, &metadata_config);
+
+        // event_category matched (prepended by compat mode)
+        let v1 = serde_json::json!({"event_category": "auth"});
+        assert_eq!(router.extract_source_from_value(&v1), Some("auth"));
+
+        // tags.event_category matched (prepended by compat mode)
+        let v2 = serde_json::json!({"tags": {"event_category": "api"}});
+        assert_eq!(router.extract_source_from_value(&v2), Some("api"));
+
+        // _source still works (it's in the list after compat fields)
+        let v3 = serde_json::json!({"_source": "network"});
+        assert_eq!(router.extract_source_from_value(&v3), Some("network"));
+
+        // event_category takes priority over _source (prepended first)
+        let v4 = serde_json::json!({"event_category": "auth", "_source": "network"});
+        assert_eq!(router.extract_source_from_value(&v4), Some("auth"));
+    }
+
+    #[test]
+    fn test_compat_v2_source_routing() {
+        // Compat mode also prepends to table_fields for routing
+        let mut routing_config = RoutingConfig::default();
+        routing_config.compat_v2_source = true;
+
+        let router = Router::with_metadata(&routing_config, &MetadataConfig::default());
+
+        // event_category routes to table (via compat prepend)
+        let p1 = br#"{"event_category": "auth"}"#;
+        assert_eq!(
+            router.route(p1),
+            RouteResult::Table("dfe.auth".to_string())
+        );
+
+        // _source also works for routing
+        let p2 = br#"{"_source": "network"}"#;
+        assert_eq!(
+            router.route(p2),
+            RouteResult::Table("dfe.network".to_string())
+        );
     }
 }

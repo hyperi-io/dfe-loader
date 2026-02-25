@@ -550,28 +550,23 @@ Location: `crates/clickhouse-arrow/`
 
 ---
 
-## Current Sprint: Performance Optimisation
+## Current Sprint: Zero-Copy Pipeline
 
-**Benchmark Priority (measure in this order):**
+**Goal:** Eliminate `serde_json::Value` DOM from the hot path. Target: 40-60% CPU reduction.
 
-1. **CPU consumption** - cycles per message
-2. **Latency** - time for event throughput processing (p50/p95/p99)
-3. **Memory consumption** - peak and steady-state
+**Approach:** Benchmark first, then commit. Two candidate approaches (Mison vs arrow-json Decoder)
+both produce Arrow RecordBatch without DOM. See `docs/REVIEW3.md` Section 8 and `TODO.md` Phase 0.
 
-### In Progress
+**Key decisions (this sprint):**
+- Arrow as intermediate format is settled (see `docs/WHY-ARROW.md`)
+- Mison structural index (3,428 lines in `src/mison/`) is a real contender, not dead code
+- Existing Mison benchmarks are misleading (compare different things); fair E2E benchmarks needed
+- Architecture decision deferred until benchmarks run on dedicated host
 
-- [x] **Production Load Testing** - Benchmark infrastructure
-  - `benches/pipeline.rs` - E2E throughput benchmarks
-  - `benches/transform.rs` - Transform operation benchmarks
-
-- [ ] **Zero-Copy Routing** - Eliminate String allocations
-- [ ] **Buffer Pool** - Object pool for buffer reuse
-- [ ] **Config Hot-Reload** - File watcher for config changes
-
-### Deferred
-
-- [ ] **Vectorised JSON Flattening** - Current implementation already optimised
-- [ ] **simd-json integration** - sonic-rs benchmarks show it's already faster
+**Review documents:**
+- `docs/REVIEW3.md` -- Full architectural review with copy audit, research, optimization tiers
+- `docs/WHY-ARROW.md` -- Arrow vs non-Arrow bulk insert analysis (settled decision)
+- `TODO.md` -- WBS with Phase 0 (benchmarks) → Phase 4 (production validation)
 
 ---
 

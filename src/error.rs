@@ -21,9 +21,6 @@ pub enum Error {
     Json(String),
 
     #[error("Configuration error: {0}")]
-    ConfigLoad(#[from] config::ConfigError),
-
-    #[error("Configuration validation error: {0}")]
     Config(String),
 
     #[error("IO error: {0}")]

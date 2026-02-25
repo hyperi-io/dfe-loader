@@ -5,8 +5,10 @@
 //!
 //! ## Hot-Reload Support
 //!
-//! The config module supports hot-reloading via polling, which works
-//! reliably on all filesystem types including S3, NFS, and FUSE mounts.
+//! The config module supports hot-reloading via file polling and SIGHUP,
+//! using the generic `SharedConfig<T>` and `ConfigReloader<T>` from
+//! `hyperi-rustlib`. File polling works reliably on all filesystem types
+//! including S3, NFS, and FUSE mounts.
 //!
 //! ```ignore
 //! use dfe_loader::config::{Config, SharedConfig, ConfigWatcher, WatcherConfig};
@@ -14,7 +16,7 @@
 //! let config = Config::load(Some("config.yaml"))?;
 //! let shared = SharedConfig::new(config);
 //!
-//! // Start watching for changes
+//! // Start watching for changes (file polling + SIGHUP)
 //! let watcher = ConfigWatcher::new(WatcherConfig::default(), shared.clone())?;
 //! let _handle = watcher.start();
 //!
@@ -28,10 +30,10 @@ pub mod watcher;
 
 pub use loader::{
     AutoInitConfig, BufferConfig, ClickHouseConfig, CoercionConfig, Config, DlqConfig,
-    FieldMappingConfig, FieldMappingOverride, FieldSanitizationConfig, KafkaConfig, LoggingConfig,
-    MemoryConfig, MetadataConfig, MetricsConfig, NullHandling, PayloadConfig, RoutingConfig,
-    SaslConfig, SaslMechanism, SchemaConfig, TableCaptureConfig, TimestampDqConfig, TlsConfig,
-    ZenohConfig,
+    FieldMappingConfig, FieldMappingOverride, FieldSanitizationConfig, HotReloadConfig,
+    KafkaConfig, LoggingConfig, MemoryConfig, MetadataConfig, MetricsConfig, NullHandling,
+    PayloadConfig, RoutingConfig, SaslConfig, SaslMechanism, SchemaConfig, TableCaptureConfig,
+    TimestampDqConfig, TlsConfig, ZenohConfig,
 };
 pub use shared::SharedConfig;
 pub use watcher::{ConfigWatcher, WatcherConfig};

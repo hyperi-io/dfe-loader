@@ -3,7 +3,7 @@
 #
 # Configuration cascade (highest to lowest priority):
 #   1. CLI args (--config, --host, etc.)
-#   2. Environment variables (LOADER_KAFKA_BROKERS, etc.)
+#   2. Environment variables (DFE_LOADER_KAFKA_BROKERS, etc.)
 #   3. .env file
 #   4. settings.{env}.yaml
 #   5. settings.yaml
@@ -80,15 +80,15 @@ routing:
 
   # Fields to check for table name (first match wins)
   # Supports dot notation for nested fields
+  # Default: ["_source"] — aligned with _source field extraction
   table_fields:
-    - event_category
-    - tags.event_category
+    - _source
 
   # Default database if no db_field matches
-  default_db: common
+  default_db: dfe
 
   # Default table if no table_field matches
-  default_table: common
+  default_table: dfe
 
   # Optional: map extracted table values to different names
   category_to_table:
@@ -99,6 +99,16 @@ routing:
 
   # External mapping file (CSV, YAML, or JSON)
   # mapping_file: /etc/loader/category-mappings.yaml
+
+  # Topic suffixes stripped when deriving _source from Kafka topic name
+  # Example: topic "auth_land" with suffix "_land" → _source = "auth"
+  topic_suffixes:
+    - _land
+    - _load
+
+  # Pre-DFE 2.2 compatibility: prepend event_category/tags.event_category
+  # to source_fields and table_fields for backwards compatibility
+  compat_v2_source: false
 
   # Dead Letter Queue settings
   dlq:
@@ -144,11 +154,22 @@ field_sanitization:
   trim_underscores: true
   collision_strategy: last_wins
 
-# Metadata field injection
+# Metadata field injection (Common Header v2)
 metadata:
+  # Master switch for common header injection (default: true)
+  # When false, no common header fields (_timestamp, _org_id, _raw, _json, _tags, _source) are injected
+  enabled: true
+
   inject_timestamp_load: true
   extract_timestamp_collector: true
   collector_timestamp_path: "tags.collector.timestamp"
+
+  # _source field (destination table identifier)
+  # Derived from: 1) message data field, 2) Kafka topic (strip suffix), 3) default
+  capture_source: true
+  source_fields:
+    - _source
+  source_output: "_source"
 
 # Type coercion settings
 coercion:
@@ -177,3 +198,11 @@ field_mapping:
 schema:
   cache_ttl_secs: 300   # 5 minutes
   refresh_on_error: true
+
+# Hot-reload: watch config file for changes at runtime
+# Safe to reload: buffer, routing, metadata, field_sanitization, timestamp_dq, coercion
+# Requires restart: kafka, clickhouse, payload format
+hot_reload:
+  enabled: false          # Enable config file watching
+  poll_interval_secs: 5   # How often to check for file changes
+  debounce_ms: 500        # Minimum time between reloads
