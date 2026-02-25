@@ -1,3 +1,10 @@
+# [1.8.0](https://github.com/hyperi-io/dfe-loader/compare/v1.7.1...v1.8.0) (2026-02-25)
+
+
+### Features
+
+* source field, common header, figment config cascade, config-reload abstractions ([638f181](https://github.com/hyperi-io/dfe-loader/commit/638f18199e26ea65fbc3f60094ebe564cadf6541))
+
 ## [1.7.1](https://github.com/hyperi-io/dfe-loader/compare/v1.7.0...v1.7.1) (2026-02-24)
 
 
