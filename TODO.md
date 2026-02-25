@@ -10,37 +10,33 @@
 
 ---
 
-## Current: Mison Benchmark Validation
+## Current: Config Reload & Registry Publishing
 
-- [ ] **Run Mison Benchmarks** - Awaiting dedicated host (CPU currently busy)
-  - `cargo bench --bench mison`
-  - Compare: `mison_15_fields` vs `mison_15_fields_batch_opt`
-  - Compare: `mison_30_fields` vs `mison_30_fields_batch_opt`
-  - Compare: `mison_15_fields_batch_100` vs `mison_15_fields_batch_100_opt`
-  - Expected: Single-pass batch extraction should outperform per-field for 10+ fields
+- [ ] **Publish hyperi-rustlib with config-reload feature** to Artifactory
+  - Switch dfe-loader back from path dep to registry dep
+  - Switch dfe-archiver and dfe-receiver back from path dep to registry dep
+
+- [ ] **CI pipeline validation** - Verify build + publish after merge
+  - Confirm arrow <58.0 pin works with clickhouse-arrow 0.4.2
+  - Confirm figment config cascade loads correctly in CI
 
 ---
 
 ## Next: Performance Validation & CI Stabilisation
 
+- [ ] **Run Mison Benchmarks** - Awaiting dedicated host (CPU currently busy)
+
 - [ ] **Full Rust async optimisation review** - Hot path + operations branches
-  - Review async/await patterns for unnecessary overhead
-  - Check for blocking operations in async contexts
-  - Audit tokio spawn vs direct await decisions
 
 - [ ] **Benchmark transport integration** - Verify no performance regression
-  - Compare before/after throughput with Kafka
-  - Test with MemoryTransport for baseline
 
 - [ ] **Production load testing** - Real-world validation
-  - Test against k8s.tyrell.com.au environment
-  - Monitor memory usage under sustained load
 
 ---
 
 ## Code TODOs (from source)
 
-None currently - all critical TODOs completed.
+- `Cargo.toml:25` - Switch hyperi-rustlib back to registry dep after config-reload published
 
 ---
 
@@ -57,6 +53,19 @@ None currently - all critical TODOs completed.
 ---
 
 ## Completed
+
+### 2026-02-25: Config Cascade & Config-Reload Migration
+
+- [x] **Figment config cascade** - Replaced `config` crate with figment (CLI > ENV > .env > config file > defaults)
+- [x] **DFE_LOADER_ env prefix** - All config via `DFE_LOADER__KAFKA__BROKERS` nesting + flat overrides
+- [x] **SharedConfig<T> type alias** - Replaced local SharedConfig with hyperi-rustlib generic
+- [x] **ConfigReloader<T> wrapper** - Replaced local ConfigWatcher with hyperi-rustlib ConfigReloader
+- [x] **Config hot-reload wired** - SIGHUP + file polling + periodic timer in pipeline
+- [x] **_source field + common header** - Optional _source injection, configurable common header fields
+- [x] **Arrow version pin** - `<58.0` for clickhouse-arrow 0.4.2 compatibility
+- [x] **dfe-archiver migrated** - SharedConfig type alias + ConfigReloader wiring
+- [x] **dfe-receiver migrated** - SharedConfig type alias + ConfigReloader + subscriber rebuild pattern
+- [x] All 389 unit tests passing after merge to main
 
 ### 2026-02-19: CI Cross-Compilation & Binary Publish Pipeline
 
