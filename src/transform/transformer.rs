@@ -6,7 +6,7 @@
 //! Pipeline: Parse → Extract tags → Flatten → Timestamp → _raw rename → Metadata → Sanitize → Remove routing fields
 //! Note: _json is handled by ArrowBatchBuilder sidecar (zero-copy from raw bytes), not by the transformer.
 
-use chrono::Utc;
+use chrono::{DateTime, SecondsFormat, Utc};
 use serde_json::{Map, Value};
 
 use crate::config::{FieldSanitizationConfig, MetadataConfig, RoutingConfig, TimestampDqConfig};
@@ -22,6 +22,13 @@ static TIMESTAMP_RECEIVED_INPUT_FIELD: &str = "timestamp_received";
 static TIMESTAMP_OUTPUT_FIELD: &str = "_timestamp";
 static TIMESTAMP_RECEIVED_OUTPUT_FIELD: &str = "_timestamp_received";
 static TIMESTAMP_COLLECTOR_FIELD: &str = "_timestamp_collector";
+
+/// Format a DateTime as RFC3339 with millisecond precision and Z suffix.
+/// ClickHouse DateTime64(3) can only parse up to 3 decimal places.
+#[inline]
+fn fmt_ts(dt: &DateTime<Utc>) -> String {
+    dt.to_rfc3339_opts(SecondsFormat::Millis, true)
+}
 
 /// Transform result with metadata
 pub struct TransformResult {
@@ -234,26 +241,26 @@ impl Transformer {
                     TimestampResult::Valid(dt) => {
                         data.insert(
                             TIMESTAMP_OUTPUT_FIELD.into(),
-                            Value::String(dt.to_rfc3339()),
+                            Value::String(fmt_ts(&dt)),
                         );
                     }
                     TimestampResult::Corrected(dt, reason) => {
                         warnings.get_or_insert_with(Vec::new).push(reason);
                         data.insert(
                             TIMESTAMP_OUTPUT_FIELD.into(),
-                            Value::String(dt.to_rfc3339()),
+                            Value::String(fmt_ts(&dt)),
                         );
                     }
                     TimestampResult::Invalid(reason) => {
                         warnings.get_or_insert_with(Vec::new).push(reason);
                         // OPTIMIZATION: Lazy format - only format now() if we actually need it
-                        let ts = now_str.get_or_insert_with(|| now.to_rfc3339()).clone();
+                        let ts = now_str.get_or_insert_with(|| fmt_ts(&now)).clone();
                         data.insert(TIMESTAMP_OUTPUT_FIELD.into(), Value::String(ts));
                     }
                 }
             } else {
                 // No timestamp field - inject current time (lazy format)
-                let ts = now_str.get_or_insert_with(|| now.to_rfc3339()).clone();
+                let ts = now_str.get_or_insert_with(|| fmt_ts(&now)).clone();
                 data.insert(TIMESTAMP_OUTPUT_FIELD.into(), Value::String(ts));
             }
 
