@@ -1,3 +1,10 @@
+## [1.8.3](https://github.com/hyperi-io/dfe-loader/compare/v1.8.2...v1.8.3) (2026-02-26)
+
+
+### Bug Fixes
+
+* Add comments as COMMENT to columns and allow formating of timestamps with tz ([5ca6bad](https://github.com/hyperi-io/dfe-loader/commit/5ca6badf43c5beccb80773b2aafc5af39cde0bae))
+
 ## [1.8.2](https://github.com/hyperi-io/dfe-loader/compare/v1.8.1...v1.8.2) (2026-02-25)
 
 
