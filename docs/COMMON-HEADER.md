@@ -1,6 +1,6 @@
 # Common Header Schema v2
 
-The standardized schema for all event tables in the DFE (Data Flow Engine) pipeline.
+The standardized schema for all event tables in the DFE (Data Fusion Engine) pipeline.
 
 ## Overview
 
