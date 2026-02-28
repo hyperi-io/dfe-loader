@@ -146,7 +146,9 @@ fn bench_transform(c: &mut Criterion) {
         group.bench_with_input(
             BenchmarkId::new("transform_with_raw", name),
             &(value.clone(), payload),
-            |b, (v, _p)| b.iter(|| transformer.transform_with_raw(black_box(v.clone()), None, None)),
+            |b, (v, _p)| {
+                b.iter(|| transformer.transform_with_raw(black_box(v.clone()), None, None))
+            },
         );
     }
 

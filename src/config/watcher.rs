@@ -100,14 +100,12 @@ impl ConfigWatcher {
             reloader_config,
             shared_config,
             move || {
-                Config::load(Some(&config_path_str)).map_err(|e| {
-                    Box::new(e) as Box<dyn std::error::Error + Send + Sync>
-                })
+                Config::load(Some(&config_path_str))
+                    .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
             },
             |cfg| {
-                validate_config(cfg).map_err(|e| {
-                    Box::new(e) as Box<dyn std::error::Error + Send + Sync>
-                })
+                validate_config(cfg)
+                    .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
             },
         );
 

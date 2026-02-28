@@ -297,7 +297,7 @@ pub use zenoh_adapter::ZenohTransportAdapter;
 #[cfg(feature = "transport-zenoh")]
 mod zenoh_adapter {
     use hyperi_rustlib::transport::{
-        ZenohConfig as TransportZenohConfig, ZenohTransport, Transport,
+        Transport, ZenohConfig as TransportZenohConfig, ZenohTransport,
     };
 
     use crate::buffer::KafkaOffset;
@@ -328,14 +328,12 @@ mod zenoh_adapter {
         /// Convert local ZenohConfig to hyperi-rustlib TransportZenohConfig.
         fn convert_config(config: &ZenohConfig) -> TransportZenohConfig {
             let mut transport_config = match config.mode.as_str() {
-                "client" => TransportZenohConfig::client(
-                    config.connect.clone(),
-                    config.subscribe.clone(),
-                ),
-                "router" => TransportZenohConfig::router(
-                    config.listen.clone(),
-                    config.connect.clone(),
-                ),
+                "client" => {
+                    TransportZenohConfig::client(config.connect.clone(), config.subscribe.clone())
+                }
+                "router" => {
+                    TransportZenohConfig::router(config.listen.clone(), config.connect.clone())
+                }
                 _ => TransportZenohConfig::peer(config.subscribe.clone()),
             };
 
