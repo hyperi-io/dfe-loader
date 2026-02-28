@@ -1,3 +1,10 @@
+# [1.9.0](https://github.com/hyperi-io/dfe-loader/compare/v1.8.3...v1.9.0) (2026-02-28)
+
+
+### Features
+
+* helm chart, dockerfile, version check, config cascade improvements ([c757338](https://github.com/hyperi-io/dfe-loader/commit/c7573384379e0a69569ef2439e0ffd48fd6fea1e))
+
 ## [1.8.3](https://github.com/hyperi-io/dfe-loader/compare/v1.8.2...v1.8.3) (2026-02-26)
 
 
