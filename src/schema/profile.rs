@@ -494,7 +494,8 @@ impl ProfileDiff {
                         data_type.clone()
                     };
 
-                    let mut stmt = format!("ALTER TABLE {db}.{table} ADD COLUMN `{name}` {col_type}");
+                    let mut stmt =
+                        format!("ALTER TABLE {db}.{table} ADD COLUMN `{name}` {col_type}");
 
                     if let Some(ref def) = default {
                         stmt.push_str(&format!(" DEFAULT {def}"));
@@ -761,8 +762,8 @@ impl ProfileRegistry {
         }
 
         let mut loaded = 0;
-        let entries = std::fs::read_dir(dir)
-            .map_err(|e| ProfileError::Io(dir.display().to_string(), e))?;
+        let entries =
+            std::fs::read_dir(dir).map_err(|e| ProfileError::Io(dir.display().to_string(), e))?;
 
         for entry in entries.flatten() {
             let path = entry.path();
@@ -891,7 +892,10 @@ mod tests {
             profile.ddl.partition_by,
             "toYYYYMM(_timestamp_load), _org_id"
         );
-        assert_eq!(profile.ddl.settings.get("index_granularity").unwrap(), "8192");
+        assert_eq!(
+            profile.ddl.settings.get("index_granularity").unwrap(),
+            "8192"
+        );
         assert_eq!(profile.ddl.indexes.len(), 1);
         assert_eq!(profile.ddl.indexes[0].name, "idx_timestamp");
         assert_eq!(profile.ddl.indexes[0].column, "_timestamp");
@@ -974,10 +978,7 @@ mod tests {
         };
         match field.behaviour() {
             SourceBehaviour::Source { fields, fallback } => {
-                assert_eq!(
-                    fields,
-                    vec!["tags", "_tags", "meta", "metadata.tags"]
-                );
+                assert_eq!(fields, vec!["tags", "_tags", "meta", "metadata.tags"]);
                 assert!(fallback.is_none());
             }
             other => panic!("Expected Source, got {other:?}"),
@@ -1488,7 +1489,10 @@ mod tests {
     #[test]
     fn test_types_compatible_whitespace() {
         assert!(types_compatible("Nullable(JSON)", "Nullable( JSON)"));
-        assert!(types_compatible("LowCardinality(String)", "LowCardinality( String )"));
+        assert!(types_compatible(
+            "LowCardinality(String)",
+            "LowCardinality( String )"
+        ));
     }
 
     #[test]

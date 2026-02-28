@@ -294,17 +294,11 @@ impl Transformer {
 
                 match ts_result {
                     TimestampResult::Valid(dt) => {
-                        data.insert(
-                            TIMESTAMP_OUTPUT_FIELD.into(),
-                            Value::String(fmt_ts(&dt)),
-                        );
+                        data.insert(TIMESTAMP_OUTPUT_FIELD.into(), Value::String(fmt_ts(&dt)));
                     }
                     TimestampResult::Corrected(dt, reason) => {
                         warnings.get_or_insert_with(Vec::new).push(reason);
-                        data.insert(
-                            TIMESTAMP_OUTPUT_FIELD.into(),
-                            Value::String(fmt_ts(&dt)),
-                        );
+                        data.insert(TIMESTAMP_OUTPUT_FIELD.into(), Value::String(fmt_ts(&dt)));
                     }
                     TimestampResult::Invalid(reason) => {
                         warnings.get_or_insert_with(Vec::new).push(reason);
@@ -362,10 +356,7 @@ impl Transformer {
             // Step 7b: Inject _source (destination table identifier)
             if self.capture_source {
                 if let Some(src) = source {
-                    data.insert(
-                        self.source_output.clone(),
-                        Value::String(src.to_string()),
-                    );
+                    data.insert(self.source_output.clone(), Value::String(src.to_string()));
                 }
             }
 
@@ -722,8 +713,10 @@ mod tests {
     fn test_transformer_removes_legacy_routing_fields() {
         // Test with legacy event_category routing (pre-DFE 2.2 compat)
         let mut transformer = Transformer::default();
-        transformer.routing_table_fields =
-            vec!["event_category".to_string(), "tags.event_category".to_string()];
+        transformer.routing_table_fields = vec![
+            "event_category".to_string(),
+            "tags.event_category".to_string(),
+        ];
 
         let raw = br#"{"org_id": "acme", "event_category": "auth", "data": "test"}"#;
         let value: Value = serde_json::from_slice(raw).unwrap();

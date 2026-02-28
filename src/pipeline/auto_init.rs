@@ -42,8 +42,8 @@ use crate::clickhouse::ArrowClickHouseClient;
 use crate::config::{Config, KafkaConfig};
 use crate::schema::profile::ProfileRegistry;
 use crate::schema::{
-    add_text_index_ddl, render_ddl_with_engine, ClusterCapabilities, TableTags,
-    DETECT_CLUSTER_SQL, DETECT_SHARED_MERGE_TREE_SQL, DETECT_VERSION_SQL,
+    add_text_index_ddl, render_ddl_with_engine, ClusterCapabilities, TableTags, DETECT_CLUSTER_SQL,
+    DETECT_SHARED_MERGE_TREE_SQL, DETECT_VERSION_SQL,
 };
 use crate::Result;
 
@@ -420,8 +420,7 @@ impl<'a> AutoInitializer<'a> {
                     Err(e) => {
                         // Index already exists is not an error
                         let err_str = e.to_string();
-                        if err_str.contains("already exists")
-                            || err_str.contains("ALREADY_EXISTS")
+                        if err_str.contains("already exists") || err_str.contains("ALREADY_EXISTS")
                         {
                             debug!(
                                 table = %table_str,

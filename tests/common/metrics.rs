@@ -112,8 +112,7 @@ impl MetricsSnapshot {
 
         // Ensure parent directory exists
         if let Some(parent) = path.as_ref().parent() {
-            fs::create_dir_all(parent)
-                .map_err(|e| format!("Failed to create directory: {}", e))?;
+            fs::create_dir_all(parent).map_err(|e| format!("Failed to create directory: {}", e))?;
         }
 
         fs::write(path, json).map_err(|e| format!("Failed to write file: {}", e))?;
@@ -308,8 +307,7 @@ impl MetricsComparison {
 
         // Ensure parent directory exists
         if let Some(parent) = path.as_ref().parent() {
-            fs::create_dir_all(parent)
-                .map_err(|e| format!("Failed to create directory: {}", e))?;
+            fs::create_dir_all(parent).map_err(|e| format!("Failed to create directory: {}", e))?;
         }
 
         fs::write(path, md).map_err(|e| format!("Failed to write markdown: {}", e))

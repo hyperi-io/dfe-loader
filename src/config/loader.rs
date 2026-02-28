@@ -1298,9 +1298,8 @@ impl Config {
             // Try default config paths
             for path in &["config.yaml", "config.yml"] {
                 if Path::new(path).exists() {
-                    let content = std::fs::read_to_string(path).map_err(|e| {
-                        crate::Error::Config(format!("failed to read {path}: {e}"))
-                    })?;
+                    let content = std::fs::read_to_string(path)
+                        .map_err(|e| crate::Error::Config(format!("failed to read {path}: {e}")))?;
                     config = serde_yaml_ng::from_str(&content).map_err(|e| {
                         crate::Error::Config(format!("failed to parse {path}: {e}"))
                     })?;

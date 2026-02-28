@@ -871,14 +871,8 @@ mod tests {
         let p3 = br#"{"_source": "network"}"#;
 
         // All go to dfe.* (shared schema)
-        assert_eq!(
-            router.route(p1),
-            RouteResult::Table("dfe.auth".to_string())
-        );
-        assert_eq!(
-            router.route(p2),
-            RouteResult::Table("dfe.api".to_string())
-        );
+        assert_eq!(router.route(p1), RouteResult::Table("dfe.auth".to_string()));
+        assert_eq!(router.route(p2), RouteResult::Table("dfe.api".to_string()));
         assert_eq!(
             router.route(p3),
             RouteResult::Table("dfe.network".to_string())
@@ -1051,10 +1045,7 @@ mod tests {
 
         // event_category routes to table (via compat prepend)
         let p1 = br#"{"event_category": "auth"}"#;
-        assert_eq!(
-            router.route(p1),
-            RouteResult::Table("dfe.auth".to_string())
-        );
+        assert_eq!(router.route(p1), RouteResult::Table("dfe.auth".to_string()));
 
         // _source also works for routing
         let p2 = br#"{"_source": "network"}"#;
