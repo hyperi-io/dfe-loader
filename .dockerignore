@@ -1,0 +1,13 @@
+target/
+.git/
+ai/
+ci/
+tests/
+benches/
+docs/
+*.md
+.env*
+.cargo/
+.tmp/
+schemas/
+reference/

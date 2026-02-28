@@ -46,6 +46,8 @@ pub struct Config {
     pub auto_init: AutoInitConfig,
     pub field_mapping: FieldMappingConfig,
     pub hot_reload: HotReloadConfig,
+    pub profiles: ProfilesConfig,
+    pub keda: KedaConfig,
 }
 
 fn default_transport() -> String {
@@ -414,7 +416,7 @@ impl Default for RoutingConfig {
             db_fields: vec![],
             table_fields: vec!["_source".to_string()],
             default_db: "dfe".to_string(),
-            default_table: "dfe".to_string(),
+            default_table: "default".to_string(),
             // Extract org_id for _org_id column (RLS)
             org_id_field: Some("org_id".to_string()),
             // No per-org routing by default (shared schema)
@@ -683,6 +685,84 @@ impl Default for MetadataConfig {
 
             // Routing field removal defaults
             remove_routing_fields: true,
+        }
+    }
+}
+
+// ============================================================================
+// Profile Configuration
+// ============================================================================
+
+/// Common header profile configuration
+///
+/// Controls which profile is used for each table's schema and field injection.
+/// Profiles define the field set and DDL structure (ORDER BY, PARTITION BY, etc.).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ProfilesConfig {
+    /// Default profile for tables without explicit assignment
+    /// Default: "timeseries" (built-in time-series event profile)
+    pub default: String,
+    /// Per-table profile assignments
+    /// Example: { "dfe.metrics": "minimal" }
+    pub table_profiles: HashMap<String, String>,
+    /// Directory containing user-defined profile YAML files
+    /// Empty string = no custom profiles directory
+    pub custom_dir: String,
+}
+
+impl Default for ProfilesConfig {
+    fn default() -> Self {
+        Self {
+            default: "timeseries".to_string(),
+            table_profiles: HashMap::new(),
+            custom_dir: String::new(),
+        }
+    }
+}
+
+// ============================================================================
+// KEDA Autoscaling Configuration
+// ============================================================================
+
+/// KEDA autoscaling thresholds (deployment-level config).
+///
+/// These values are the SSoT for the Helm chart's KEDA ScaledObject.
+/// The contract sync test validates that chart/values.yaml matches these
+/// defaults. Override at runtime via env vars:
+///   DFE_LOADER__KEDA__KAFKA_LAG_THRESHOLD=5000
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct KedaConfig {
+    pub enabled: bool,
+    pub min_replicas: u32,
+    pub max_replicas: u32,
+    /// Seconds between KEDA polling the scaler
+    pub polling_interval: u32,
+    /// Seconds before scale-down after load drops
+    pub cooldown_period: u32,
+    /// Scale when consumer group lag exceeds this per partition
+    pub kafka_lag_threshold: u64,
+    /// Wake from zero replicas when lag exceeds this
+    pub activation_lag_threshold: u64,
+    /// Enable CPU-based scaling trigger
+    pub cpu_enabled: bool,
+    /// CPU utilisation percentage threshold
+    pub cpu_threshold: u32,
+}
+
+impl Default for KedaConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            min_replicas: 1,
+            max_replicas: 10,
+            polling_interval: 15,
+            cooldown_period: 300,
+            kafka_lag_threshold: 1000,
+            activation_lag_threshold: 0,
+            cpu_enabled: true,
+            cpu_threshold: 80,
         }
     }
 }
@@ -1807,7 +1887,7 @@ clickhouse:
             let config = Config::load(None).unwrap();
             assert_eq!(config.kafka.brokers, vec!["localhost:9092"]);
             assert_eq!(config.routing.default_db, "dfe");
-            assert_eq!(config.routing.default_table, "dfe");
+            assert_eq!(config.routing.default_table, "default");
         }
     }
 }

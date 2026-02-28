@@ -62,6 +62,8 @@
 //! let ddl = render_ddl_with_tags("common", "events", TableEngine::SharedMergeTree, &tags);
 //! ```
 
+pub mod profile;
+
 use std::collections::BTreeMap;
 
 /// Common table DDL template (ClickHouse)
@@ -158,6 +160,30 @@ impl TableTags {
         Self::new()
             .with("schema_source", "core")
             .with("schema_version", "2")
+    }
+
+    /// Create tags for core schemas with a profile name and version
+    ///
+    /// Sets:
+    /// - `@schema_source: core`
+    /// - `@schema_version: 2`
+    /// - `@profile: <name>`
+    /// - `@profile_version: <version>`
+    pub fn core_with_profile(profile_name: &str) -> Self {
+        Self::core().with("profile", profile_name)
+    }
+
+    /// Create tags for core schemas with profile name and explicit version
+    ///
+    /// Sets:
+    /// - `@schema_source: core`
+    /// - `@schema_version: 2`
+    /// - `@profile: <name>`
+    /// - `@profile_version: <version>`
+    pub fn core_with_profile_version(profile_name: &str, profile_version: u32) -> Self {
+        Self::core()
+            .with("profile", profile_name)
+            .with("profile_version", &profile_version.to_string())
     }
 
     /// Create tags for user-created schemas

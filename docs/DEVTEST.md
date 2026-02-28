@@ -337,8 +337,8 @@ The loader auto-creates tables using the common schema. See [schemas/common_tabl
 | `_timestamp_received` | DateTime64(3) | `@source: timestamp_received` | Receive time (nullable) |
 | `_uuid` | UUID | Generated | UUIDv7 (ClickHouse DEFAULT) |
 | `_org_id` | LowCardinality(String) | `@source: org_id` | Organization ID (RLS) |
-| `_raw` | String | `@captured: raw_payload` | Original log line (nullable) |
-| `_json` | JSON | `@captured: raw_payload as JSON` | Full message as JSON |
+| `_raw` | String | `@captured: raw_payload` | Original raw data as received (per-table configurable, nullable) |
+| `_json` | JSON | `@captured: raw_payload as JSON` | Complete message as native JSON (structured path-based queries) |
 | `_tags` | JSON | `@source: first(tags/_tags/meta)` | Metadata/tags |
 
 ### Manual Table Creation

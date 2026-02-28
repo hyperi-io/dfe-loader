@@ -1,0 +1,104 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "dfe-loader.fullname" . }}
+  labels:
+    {{- include "dfe-loader.labels" . | nindent 4 }}
+spec:
+  {{- if not (or .Values.keda.enabled .Values.autoscaling.enabled) }}
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "dfe-loader.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "dfe-loader.labels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "dfe-loader.serviceAccountName" . }}
+      containers:
+        - name: {{ .Chart.Name }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - "--config"
+            - "/etc/dfe/loader.yaml"
+          ports:
+            - name: metrics
+              containerPort: {{ .Values.service.port }}
+              protocol: TCP
+          env:
+            # Kafka credentials via Secret (figment env cascade overrides file config)
+            - name: DFE_LOADER__KAFKA__USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "dfe-loader.kafkaSecretName" . }}
+                  key: {{ .Values.kafka.secretKeys.username }}
+            - name: DFE_LOADER__KAFKA__PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "dfe-loader.kafkaSecretName" . }}
+                  key: {{ .Values.kafka.secretKeys.password }}
+            # ClickHouse password via Secret
+            - name: DFE_LOADER__CLICKHOUSE__PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "dfe-loader.clickhouseSecretName" . }}
+                  key: {{ .Values.clickhouse.secretKeys.password }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: metrics
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 2
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+            failureThreshold: 30
+            periodSeconds: 5
+          volumeMounts:
+            - name: config
+              mountPath: /etc/dfe
+              readOnly: true
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "dfe-loader.fullname" . }}-config
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

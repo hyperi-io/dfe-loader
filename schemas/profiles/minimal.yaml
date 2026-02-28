@@ -1,0 +1,65 @@
+# Common Header Profile: minimal
+#
+# Minimal common header for high-volume structured data.
+# No _raw (no text search), no _tags, no _source.
+# Use when data is already structured and you only need
+# timestamped, org-scoped JSON storage.
+#
+# NOTE: This profile defines the COMMON HEADER only — the system fields
+# that the loader injects. Non-default tables will have additional
+# data-specific columns beyond these fields.
+
+name: minimal
+version: 1
+description: "Minimal schema - timestamped org-scoped JSON storage"
+
+fields:
+  - name: _timestamp_load
+    type: "DateTime64(3)"
+    default: "now64(3)"
+    nullable: false
+    codec: "Delta, ZSTD(1)"
+    source: "@generated: now64(3)"
+    comment: "Load time - primary query filter"
+
+  - name: _timestamp
+    type: "DateTime64(3)"
+    nullable: false
+    codec: "Delta, ZSTD(1)"
+    source: "@source: timestamp | now()"
+    comment: "Event occurrence time"
+
+  - name: _uuid
+    type: "UUID"
+    default: "generateUUIDv7()"
+    nullable: false
+    source: "@generated: generateUUIDv7()"
+    comment: "Unique event ID UUIDv7 (time-ordered)"
+
+  - name: _org_id
+    type: "LowCardinality(String)"
+    nullable: false
+    codec: "ZSTD(1)"
+    source: "@source: org_id"
+    comment: "Organisation ID for RLS"
+
+  - name: _json
+    type: "JSON"
+    nullable: true
+    codec: "ZSTD(3)"
+    source: "@captured: raw_payload as JSON"
+    comment: "Complete message as native JSON"
+
+ddl:
+  order_by:
+    - _org_id
+    - _timestamp_load
+    - _uuid
+  partition_by: "toYYYYMM(_timestamp_load), _org_id"
+  settings:
+    index_granularity: "8192"
+  indexes:
+    - name: idx_timestamp
+      column: _timestamp
+      type: minmax
+      granularity: 1

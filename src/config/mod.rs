@@ -32,8 +32,8 @@ pub use loader::{
     AutoInitConfig, BufferConfig, ClickHouseConfig, CoercionConfig, Config, DlqConfig,
     FieldMappingConfig, FieldMappingOverride, FieldSanitizationConfig, HotReloadConfig,
     KafkaConfig, LoggingConfig, MemoryConfig, MetadataConfig, MetricsConfig, NullHandling,
-    PayloadConfig, RoutingConfig, SaslConfig, SaslMechanism, SchemaConfig, TableCaptureConfig,
-    TimestampDqConfig, TlsConfig, ZenohConfig,
+    PayloadConfig, ProfilesConfig, RoutingConfig, SaslConfig, SaslMechanism, SchemaConfig,
+    TableCaptureConfig, TimestampDqConfig, TlsConfig, ZenohConfig,
 };
 pub use shared::SharedConfig;
 pub use watcher::{ConfigWatcher, WatcherConfig};

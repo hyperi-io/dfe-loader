@@ -110,6 +110,12 @@ impl MetricsSnapshot {
         let json = serde_json::to_string_pretty(self)
             .map_err(|e| format!("Failed to serialize: {}", e))?;
 
+        // Ensure parent directory exists
+        if let Some(parent) = path.as_ref().parent() {
+            fs::create_dir_all(parent)
+                .map_err(|e| format!("Failed to create directory: {}", e))?;
+        }
+
         fs::write(path, json).map_err(|e| format!("Failed to write file: {}", e))?;
 
         Ok(())
@@ -299,6 +305,12 @@ impl MetricsComparison {
         ));
         md.push_str(&format!("- **Regressions:** {}\n", self.regressions.len()));
         md.push_str(&format!("- **Unchanged:** {}\n", self.unchanged.len()));
+
+        // Ensure parent directory exists
+        if let Some(parent) = path.as_ref().parent() {
+            fs::create_dir_all(parent)
+                .map_err(|e| format!("Failed to create directory: {}", e))?;
+        }
 
         fs::write(path, md).map_err(|e| format!("Failed to write markdown: {}", e))
     }

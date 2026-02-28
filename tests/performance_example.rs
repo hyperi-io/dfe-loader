@@ -42,10 +42,10 @@ fn example_metrics_snapshot_workflow() {
     // Capture baseline snapshot
     let baseline = MetricsSnapshot::capture(&registry, "baseline_v1");
     baseline
-        .save("target/metrics_baseline.json")
+        .save(".tmp/metrics_baseline.json")
         .expect("Failed to save baseline");
 
-    eprintln!("✓ Baseline snapshot saved to target/metrics_baseline.json");
+    eprintln!("✓ Baseline snapshot saved to .tmp/metrics_baseline.json");
 
     // === Simulate improved workload (after optimization) ===
 
@@ -74,10 +74,10 @@ fn example_metrics_snapshot_workflow() {
     // Capture current snapshot
     let current = MetricsSnapshot::capture(&registry2, "optimized_v2");
     current
-        .save("target/metrics_current.json")
+        .save(".tmp/metrics_current.json")
         .expect("Failed to save current");
 
-    eprintln!("✓ Current snapshot saved to target/metrics_current.json");
+    eprintln!("✓ Current snapshot saved to .tmp/metrics_current.json");
 
     // === Compare snapshots ===
     let comparison = current.compare(&baseline);
@@ -87,10 +87,10 @@ fn example_metrics_snapshot_workflow() {
 
     // Save markdown report
     comparison
-        .save_markdown("target/metrics_comparison.md")
+        .save_markdown(".tmp/metrics_comparison.md")
         .expect("Failed to save report");
 
-    eprintln!("\n✓ Comparison report saved to target/metrics_comparison.md");
+    eprintln!("\n✓ Comparison report saved to .tmp/metrics_comparison.md");
 
     // Assert no significant regressions (ignore histogram bucket counts which increase with more data)
     let real_regressions: Vec<_> = comparison
@@ -111,10 +111,10 @@ fn example_metrics_snapshot_workflow() {
 #[ignore] // Run manually with: cargo test test_load_and_compare_snapshots -- --ignored --nocapture
 fn test_load_and_compare_snapshots() {
     // Load previously saved snapshots
-    let baseline = MetricsSnapshot::load("target/metrics_baseline.json")
+    let baseline = MetricsSnapshot::load(".tmp/metrics_baseline.json")
         .expect("Failed to load baseline - run example_metrics_snapshot_workflow first");
 
-    let current = MetricsSnapshot::load("target/metrics_current.json")
+    let current = MetricsSnapshot::load(".tmp/metrics_current.json")
         .expect("Failed to load current - run example_metrics_snapshot_workflow first");
 
     // Compare

@@ -9,6 +9,7 @@ mod datatypes;
 mod dlq;
 mod errors;
 mod field_mapping;
+mod helm_contract;
 mod inserter;
 mod kafka;
 mod offset;

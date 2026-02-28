@@ -10,6 +10,7 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use serde_json::{Map, Value};
 
 use crate::config::{FieldSanitizationConfig, MetadataConfig, RoutingConfig, TimestampDqConfig};
+use crate::schema::profile::{Profile, SourceBehaviour};
 use crate::transform::flatten::flatten_value_owned;
 use crate::transform::timestamp::{TimestampResult, TimestampValidator};
 use crate::Result;
@@ -140,6 +141,60 @@ impl Transformer {
         let mut transformer = Self::new(timestamp_config, metadata_config, sanitization_config);
         transformer.routing_db_fields = routing_config.db_fields.clone();
         transformer.routing_table_fields = routing_config.table_fields.clone();
+        transformer
+    }
+
+    /// Create transformer driven by a profile's field definitions
+    ///
+    /// The profile determines which common header fields are active and how
+    /// they're sourced. `MetadataConfig` overrides can further disable fields.
+    ///
+    /// Profile source expressions drive configuration:
+    /// - `@source: first(a/b/c)` → sets tags_fields or source extraction
+    /// - `@renamed: field` → sets raw_source_fields for _raw rename
+    /// - `@generated` → skipped (ClickHouse DEFAULT)
+    /// - `@captured` → skipped (handled by ArrowBatchBuilder sidecar)
+    pub fn from_profile(
+        profile: &Profile,
+        timestamp_config: &TimestampDqConfig,
+        metadata_config: &MetadataConfig,
+        sanitization_config: &FieldSanitizationConfig,
+        routing_config: &RoutingConfig,
+    ) -> Self {
+        let mut transformer = Self::new(timestamp_config, metadata_config, sanitization_config);
+        transformer.routing_db_fields = routing_config.db_fields.clone();
+        transformer.routing_table_fields = routing_config.table_fields.clone();
+
+        // _raw: profile determines source field for rename
+        if let Some(raw_field) = profile.field("_raw") {
+            if let SourceBehaviour::Renamed(source) = raw_field.behaviour() {
+                transformer.raw_source_fields = vec![source];
+            }
+        } else {
+            // Profile doesn't define _raw — disable injection
+            transformer.capture_raw = false;
+        }
+
+        // _tags: profile determines source fields for extraction
+        if let Some(tags_field) = profile.field("_tags") {
+            if let SourceBehaviour::Source { fields, .. } = tags_field.behaviour() {
+                transformer.tags_fields = fields;
+            }
+        } else {
+            // Profile doesn't define _tags — disable extraction
+            transformer.tags_fields = vec![];
+        }
+
+        // _source: disable if profile doesn't define it
+        if !profile.has_field("_source") {
+            transformer.capture_source = false;
+        }
+
+        // _timestamp: disable common header if profile doesn't define it
+        if !profile.has_field("_timestamp") {
+            transformer.common_header_enabled = false;
+        }
+
         transformer
     }
 
@@ -824,5 +879,105 @@ mod tests {
         let transformer = Transformer::default();
         assert_eq!(transformer.json_output(), "_json");
         assert_eq!(transformer.raw_output(), "_raw");
+    }
+
+    #[test]
+    fn test_from_profile_timeseries() {
+        use crate::schema::profile::Profile;
+
+        let yaml = include_str!("../../schemas/profiles/timeseries.yaml");
+        let profile = Profile::from_yaml(yaml).unwrap();
+
+        let ts_config = TimestampDqConfig::default();
+        let meta_config = MetadataConfig::default();
+        let san_config = FieldSanitizationConfig::default();
+        let routing_config = crate::config::RoutingConfig::default();
+
+        let transformer = Transformer::from_profile(
+            &profile,
+            &ts_config,
+            &meta_config,
+            &san_config,
+            &routing_config,
+        );
+
+        // Timeseries profile has all fields — transformer should be fully enabled
+        assert!(transformer.common_header_enabled());
+
+        // _raw source should be "logoriginal" (from @renamed: logoriginal)
+        let raw = br#"{"event": "test", "logoriginal": "raw line"}"#;
+        let value: Value = serde_json::from_slice(raw).unwrap();
+        let result = transformer.transform_with_raw(value, None, None).unwrap();
+        assert_eq!(result.data["_raw"], "raw line");
+    }
+
+    #[test]
+    fn test_from_profile_without_raw() {
+        use crate::schema::profile::{DdlStructure, Profile, ProfileField};
+        use std::collections::BTreeMap;
+
+        // Build a minimal profile without _raw
+        let profile = Profile {
+            name: "minimal".into(),
+            version: 1,
+            description: "Minimal profile without _raw".into(),
+            fields: vec![
+                ProfileField {
+                    name: "_timestamp".into(),
+                    data_type: "DateTime64(3)".into(),
+                    default: None,
+                    nullable: false,
+                    codec: None,
+                    source: "@source: timestamp | now()".into(),
+                    comment: String::new(),
+                },
+                ProfileField {
+                    name: "_org_id".into(),
+                    data_type: "String".into(),
+                    default: None,
+                    nullable: false,
+                    codec: None,
+                    source: "@source: org_id".into(),
+                    comment: String::new(),
+                },
+            ],
+            ddl: DdlStructure {
+                order_by: vec!["_org_id".into()],
+                partition_by: "toYYYYMM(_timestamp)".into(),
+                settings: BTreeMap::new(),
+                indexes: vec![],
+                text_index: None,
+            },
+        };
+
+        let ts_config = TimestampDqConfig::default();
+        let meta_config = MetadataConfig::default();
+        let san_config = FieldSanitizationConfig::default();
+        let routing_config = crate::config::RoutingConfig::default();
+
+        let transformer = Transformer::from_profile(
+            &profile,
+            &ts_config,
+            &meta_config,
+            &san_config,
+            &routing_config,
+        );
+
+        // Profile has _timestamp so common header is enabled
+        assert!(transformer.common_header_enabled());
+
+        // _raw should NOT be injected (not in profile)
+        let raw = br#"{"event": "test", "logoriginal": "raw line"}"#;
+        let value: Value = serde_json::from_slice(raw).unwrap();
+        let result = transformer.transform_with_raw(value, None, None).unwrap();
+        assert!(!result.data.contains_key("_raw"));
+        // logoriginal should remain (not consumed)
+        assert!(result.data.contains_key("logoriginal"));
+
+        // _tags should NOT be injected (not in profile)
+        assert!(!result.data.contains_key("_tags"));
+
+        // _source should NOT be injected (not in profile)
+        assert!(!result.data.contains_key("_source"));
     }
 }

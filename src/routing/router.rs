@@ -538,7 +538,7 @@ impl Default for Router {
             db_fields: vec![],
             table_fields: vec!["_source".to_string()],
             default_db: "dfe".to_string(),
-            default_table: "dfe".to_string(),
+            default_table: "default".to_string(),
             // Extract org_id for _org_id column (RLS)
             org_id_field: Some("org_id".to_string()),
             // No per-org routing by default (shared schema)
@@ -569,7 +569,7 @@ mod tests {
                 "tags.event_category".to_string(),
             ],
             default_db: "dfe".to_string(),
-            default_table: "dfe".to_string(),
+            default_table: "default".to_string(),
             org_id_field: Some("org_id".to_string()),
             routed_orgs: vec![], // Old behaviour: all orgs get own DB (use route_all_by_org)
             route_all_by_org: true, // Simulate old default behaviour for these tests
@@ -640,7 +640,7 @@ mod tests {
 
         assert_eq!(
             router.route(payload),
-            RouteResult::Table("acme.dfe".to_string())
+            RouteResult::Table("acme.default".to_string())
         );
     }
 
@@ -652,7 +652,7 @@ mod tests {
 
         assert_eq!(
             router.route(payload),
-            RouteResult::Table("dfe.dfe".to_string())
+            RouteResult::Table("dfe.default".to_string())
         );
     }
 
@@ -687,11 +687,11 @@ mod tests {
 
         // No match → default table
         let p2 = br#"{"user_id": 123}"#;
-        assert_eq!(router.extract_table(p2), "dfe".to_string());
+        assert_eq!(router.extract_table(p2), "default".to_string());
 
         // event_category not matched by default (need compat mode)
         let p3 = br#"{"event_category": "api"}"#;
-        assert_eq!(router.extract_table(p3), "dfe".to_string());
+        assert_eq!(router.extract_table(p3), "default".to_string());
     }
 
     #[test]
@@ -810,7 +810,7 @@ mod tests {
 
         assert_eq!(
             router.route_value(&value),
-            RouteResult::Table("dfe.dfe".to_string())
+            RouteResult::Table("dfe.default".to_string())
         );
     }
 

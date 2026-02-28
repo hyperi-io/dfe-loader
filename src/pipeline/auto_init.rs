@@ -40,9 +40,10 @@ use tracing::{debug, info, warn};
 
 use crate::clickhouse::ArrowClickHouseClient;
 use crate::config::{Config, KafkaConfig};
+use crate::schema::profile::ProfileRegistry;
 use crate::schema::{
-    add_text_index_ddl, render_ddl_with_engine, ClusterCapabilities, DETECT_CLUSTER_SQL,
-    DETECT_SHARED_MERGE_TREE_SQL, DETECT_VERSION_SQL,
+    add_text_index_ddl, render_ddl_with_engine, ClusterCapabilities, TableTags,
+    DETECT_CLUSTER_SQL, DETECT_SHARED_MERGE_TREE_SQL, DETECT_VERSION_SQL,
 };
 use crate::Result;
 
@@ -340,27 +341,46 @@ impl<'a> AutoInitializer<'a> {
             }
         }
 
-        // Create table using embedded DDL template with auto-detected engine
-        if auto_init.create_table {
-            let create_table_sql = render_ddl_with_engine(db, table, engine);
+        // Resolve profile for the default table
+        let registry = ProfileRegistry::new();
+        let profile_name = &self.config.profiles.default;
+        let table_str = format!("{}.{}", db, table);
 
-            info!(
-                table = %format!("{}.{}", db, table),
-                engine = %engine,
-                "Attempting to create ClickHouse table"
-            );
+        // Create table using profile DDL (or fallback to static template)
+        if auto_init.create_table {
+            let create_table_sql = if let Some(profile) = registry.get(profile_name) {
+                let tags = TableTags::core_with_profile_version(&profile.name, profile.version);
+                info!(
+                    table = %table_str,
+                    engine = %engine,
+                    profile = %profile,
+                    "Attempting to create ClickHouse table (profile DDL)"
+                );
+                profile.render_ddl(db, table, engine, &tags)
+            } else {
+                warn!(
+                    profile = %profile_name,
+                    "Profile not found, falling back to static DDL template"
+                );
+                info!(
+                    table = %table_str,
+                    engine = %engine,
+                    "Attempting to create ClickHouse table (static DDL)"
+                );
+                render_ddl_with_engine(db, table, engine)
+            };
 
             match client.query(&create_table_sql).await {
                 Ok(()) => {
                     info!(
-                        table = %format!("{}.{}", db, table),
+                        table = %table_str,
                         engine = %engine,
                         "ClickHouse table created (or already exists)"
                     );
                 }
                 Err(e) => {
                     warn!(
-                        table = %format!("{}.{}", db, table),
+                        table = %table_str,
                         error = %e,
                         "Failed to create ClickHouse table"
                     );
@@ -368,44 +388,52 @@ impl<'a> AutoInitializer<'a> {
             }
         }
 
-        // Add text search index on _raw
+        // Add text search index (profile-aware or fallback)
         if auto_init.create_text_index {
-            let index_type = if capabilities.full_text_index {
-                "full_text"
+            let add_index_sql = if let Some(profile) = registry.get(profile_name) {
+                profile.text_index_ddl(db, table, &capabilities)
             } else {
-                "ngrambf_v1"
+                Some(add_text_index_ddl(db, table, "_raw", &capabilities))
             };
 
-            let add_index_sql = add_text_index_ddl(db, table, "_raw", &capabilities);
+            if let Some(add_index_sql) = add_index_sql {
+                let index_type = if capabilities.full_text_index {
+                    "full_text"
+                } else {
+                    "ngrambf_v1"
+                };
 
-            info!(
-                table = %format!("{}.{}", db, table),
-                index_type = %index_type,
-                "Attempting to add text search index"
-            );
+                info!(
+                    table = %table_str,
+                    index_type = %index_type,
+                    "Attempting to add text search index"
+                );
 
-            match client.query(&add_index_sql).await {
-                Ok(()) => {
-                    info!(
-                        table = %format!("{}.{}", db, table),
-                        index_type = %index_type,
-                        "Text search index added (or already exists)"
-                    );
-                }
-                Err(e) => {
-                    // Index already exists is not an error
-                    let err_str = e.to_string();
-                    if err_str.contains("already exists") || err_str.contains("ALREADY_EXISTS") {
-                        debug!(
-                            table = %format!("{}.{}", db, table),
-                            "Text search index already exists"
+                match client.query(&add_index_sql).await {
+                    Ok(()) => {
+                        info!(
+                            table = %table_str,
+                            index_type = %index_type,
+                            "Text search index added (or already exists)"
                         );
-                    } else {
-                        warn!(
-                            table = %format!("{}.{}", db, table),
-                            error = %e,
-                            "Failed to add text search index"
-                        );
+                    }
+                    Err(e) => {
+                        // Index already exists is not an error
+                        let err_str = e.to_string();
+                        if err_str.contains("already exists")
+                            || err_str.contains("ALREADY_EXISTS")
+                        {
+                            debug!(
+                                table = %table_str,
+                                "Text search index already exists"
+                            );
+                        } else {
+                            warn!(
+                                table = %table_str,
+                                error = %e,
+                                "Failed to add text search index"
+                            );
+                        }
                     }
                 }
             }

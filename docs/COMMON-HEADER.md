@@ -1,6 +1,6 @@
 # Common Header Schema v2
 
-The standardized schema for all event tables in the DFE (Data Fusion Engine) pipeline.
+The standardised common header for all event tables in the DFE (Data Fusion Engine) pipeline.
 
 ## Overview
 
@@ -12,7 +12,46 @@ Every event table shares a common header that provides:
 4. **Auditability** - Original payload preservation
 5. **Extensibility** - Dynamic metadata via JSON fields
 
-## Schema Definition
+## Common Header vs Complete Table Schema
+
+The common header is the **base** of every table's schema — not the complete
+schema itself. The loader injects these system fields into every event.
+
+- **Default table** (`dfe.default`): Schema IS just the common header. This is the
+  catch-all for unrouted events and the only table auto-created by the loader.
+- **Non-default tables** (e.g., `dfe.auth`, `dfe.metrics`): Schema = common header
+  + data-specific columns. These tables are created externally (by DBAs or IaC)
+  with their own columns alongside the common header.
+
+```text
+┌──────────────────────────────────┐
+│   default table (dfe.default)    │  ← schema = common header ONLY
+│  ┌────────────────────────────┐  │
+│  │      common header         │  │
+│  │  (_timestamp, _org_id, …)  │  │
+│  └────────────────────────────┘  │
+└──────────────────────────────────┘
+
+┌──────────────────────────────────┐
+│  non-default table (dfe.auth)    │  ← schema = common header + data columns
+│  ┌────────────────────────────┐  │
+│  │      common header         │  │
+│  │  (_timestamp, _org_id, …)  │  │
+│  ├────────────────────────────┤  │
+│  │    data columns            │  │
+│  │  (user_id, action, ip, …)  │  │
+│  └────────────────────────────┘  │
+└──────────────────────────────────┘
+```
+
+The profile system (see `schemas/profiles/*.yaml`) controls which common header
+fields are injected. The profile does NOT define data-specific columns — those
+come from the source data or are defined in the table's own DDL.
+
+## Common Header DDL (Default Table)
+
+The following DDL shows the common header as used for the default table. Non-default
+tables would include these columns alongside their own data-specific columns.
 
 ```sql
 CREATE TABLE IF NOT EXISTS {db}.{table}
@@ -25,6 +64,9 @@ CREATE TABLE IF NOT EXISTS {db}.{table}
     -- Identity
     `_uuid` UUID DEFAULT generateUUIDv7(),
     `_org_id` LowCardinality(String) CODEC(ZSTD(1)),
+
+    -- Source identifier
+    `_source` LowCardinality(String) CODEC(ZSTD(1)),
 
     -- Payload preservation
     `_raw` Nullable(String) CODEC(ZSTD(3)),
@@ -220,13 +262,17 @@ TO analytics_users;
 | Codec | `ZSTD(3)` |
 | Source | `@captured: raw_payload` |
 
-**Purpose:** Original unparsed log line for full-text search.
+**Purpose:** Original raw data as received — the data as it would appear in a tailed log
+file or a database row, BEFORE any RFC/format parsing.
+
+**NOT the same as `_json`:** `_raw` is the original wire format (e.g., raw syslog RFC
+3164/5424 line), while `_json` is the parsed/structured result.
 
 **Rationale:**
 
-- Captured BEFORE any transformation
-- Enables "grep-like" searches across all fields
-- Nullable - can be disabled to save storage
+- Captured BEFORE any transformation or parsing
+- Enables "grep-like" full-text searches across the original payload
+- Nullable — can be disabled globally or per-table to save storage
 - Higher ZSTD level (3) for better compression of text
 
 **Text search index (optional):**
@@ -245,8 +291,16 @@ ALTER TABLE {db}.{table} ADD INDEX idx_raw _raw
 
 ```toml
 [metadata]
-capture_raw = true   # Enable/disable _raw capture
+include_raw = true   # Global default: include _raw in all tables
+
+# Per-table overrides (table name → include_raw)
+[metadata.raw_overrides]
+"events" = false     # Drop _raw for the catch-all events table
+"syslog" = true      # Keep _raw for syslog (original format is valuable)
 ```
+
+Per-table overrides take precedence over the global default. When `_raw` is excluded,
+the loader omits the field from the Arrow batch (ClickHouse column stays NULL).
 
 ### `_json`
 
@@ -258,26 +312,30 @@ capture_raw = true   # Enable/disable _raw capture
 | Codec | `ZSTD(3)` |
 | Source | `@captured: raw_payload as JSON` |
 
-**Purpose:** Complete Kafka message as structured JSON.
+**Purpose:** Complete Kafka message as native ClickHouse JSON type for structured
+path-based queries.
+
+**NOT the same as `_raw`:** `_json` is the parsed/structured result stored as native
+columnar JSON. `_raw` is the original wire format before parsing.
 
 **Rationale:**
 
 - Captured BEFORE any transformation (preserves original structure)
-- ClickHouse JSON type for columnar storage of dynamic fields
+- ClickHouse JSON type — each JSON path stored as a native subcolumn
 - Enables ad-hoc queries on any field without schema changes
-- Nullable - can be disabled to save storage
+- Nullable — can be disabled to save storage
 
 **ClickHouse JSON type benefits:**
 
 - Columnar storage within JSON (not stored as string blob)
 - Type inference per JSON path
-- Efficient queries: `SELECT _json.user.id FROM events`
+- Efficient queries: `SELECT _json.user.id, _json.action FROM events`
 - Supports nested objects and arrays
+- ClickHouse stores each path as a dense subcolumn with compression
 
 **Requirements:**
 
-- ClickHouse 24.1+ for experimental JSON
-- ClickHouse 25.x+ for stable JSON type
+- ClickHouse 25.3+ for GA JSON type (tested with 25.12)
 
 **Configuration:**
 
@@ -673,11 +731,15 @@ topic_replication_factor = 1
 
 | File | Purpose |
 |------|---------|
-| `schemas/common_table.sql` | DDL template |
-| `schemas/common_header.csv` | Field definitions |
-| `src/schema/mod.rs` | Schema parsing and rendering |
-| `src/transform/transformer.rs` | Field extraction logic |
-| `src/pipeline/auto_init.rs` | Auto-initialization |
+| `schemas/profiles/timeseries.yaml` | Default profile — full common header |
+| `schemas/profiles/minimal.yaml` | Minimal profile — no _raw, _tags, _source |
+| `schemas/profiles/passthrough.yaml` | Passthrough profile — no field injection |
+| `src/schema/profile.rs` | Profile types, registry, DDL generation, migration |
+| `src/schema/mod.rs` | Schema parsing, table tags, capability detection |
+| `src/transform/transformer.rs` | Profile-driven field injection |
+| `src/pipeline/auto_init.rs` | Auto-creates default table from profile DDL |
+| `schemas/common_table.sql` | Legacy DDL template (fallback) |
+| `schemas/common_header.csv` | Legacy field definitions (fallback) |
 | `tests/fixtures/ddl.rs` | Test DDL builders |
 
 ## Migration from v1
@@ -725,6 +787,51 @@ FROM common.events;
 -- Swap tables
 RENAME TABLE common.events TO common.events_v1,
              common.events_v2 TO common.events;
+```
+
+## Profiles
+
+The common header is controlled by **profiles** — named, versioned YAML
+definitions that specify which system fields to inject and how to populate them.
+
+| Profile | Fields | Use Case |
+|---------|--------|----------|
+| `timeseries` (default) | 9 | Full common header for event ingestion |
+| `minimal` | 5 | High-volume structured data (no _raw, _tags, _source) |
+| `passthrough` | 4 | Transparent bridge (no _timestamp injection) |
+
+Profiles define:
+- **Field set**: which common header columns to inject
+- **Field behaviour**: source expression for each field (how it's populated)
+- **DDL structure**: ORDER BY, PARTITION BY, indexes (for default table creation)
+
+Profiles do NOT define data-specific columns. Those come from the source data
+or are defined in the table's own DDL.
+
+### Profile Versioning
+
+Tables created by auto-init are tagged with their profile name and version
+in the table comment:
+
+```sql
+COMMENT '@schema_source: core | @schema_version: 2 | @profile: timeseries | @profile_version: 1'
+```
+
+The migration tooling (`ProfileDiff`) can compare a profile's current version
+against an existing table's tagged version and generate safe `ALTER TABLE ADD
+COLUMN` statements for any missing common header fields.
+
+### Custom Profiles
+
+User-defined profiles can be loaded from YAML files:
+
+```yaml
+# config
+profiles:
+  default: timeseries
+  custom_dir: /etc/dfe-loader/profiles
+  table_profiles:
+    dfe.metrics: minimal
 ```
 
 ## Version History

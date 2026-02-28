@@ -29,6 +29,7 @@ use crate::metrics::Metrics;
 use crate::payload::{FormatDetector, FormatMode, PayloadFormat};
 use crate::pipeline::AutoInitializer;
 use crate::routing::{RouteResult, Router};
+use crate::schema::profile::ProfileRegistry;
 use crate::schema::TableTags;
 use crate::transform::Transformer;
 use crate::transform::{FieldMappingCache, MappingBuilder};
@@ -189,6 +190,27 @@ impl Orchestrator {
         let initializer = AutoInitializer::new(&self.config);
         initializer.run().await?;
 
+        // Build profile registry (built-in + custom profiles)
+        let mut profile_registry = ProfileRegistry::new();
+        if !self.config.profiles.custom_dir.is_empty() {
+            let custom_dir = std::path::Path::new(&self.config.profiles.custom_dir);
+            match profile_registry.load_custom_dir(custom_dir) {
+                Ok(count) => {
+                    if count > 0 {
+                        info!(count = count, dir = %custom_dir.display(), "Loaded custom profiles");
+                    }
+                }
+                Err(e) => {
+                    warn!(error = %e, "Failed to load custom profiles directory");
+                }
+            }
+        }
+        info!(
+            default_profile = %self.config.profiles.default,
+            profiles = ?profile_registry.names(),
+            "Profile registry initialized"
+        );
+
         // Initialize transport backend (Kafka, Zenoh, etc. based on config)
         let transport = TransportBackend::from_config(&self.config).await?;
         info!(transport = transport.name(), "Transport initialized");
@@ -220,13 +242,24 @@ impl Orchestrator {
         };
 
         let mut router = Router::new(&self.config.routing);
-        // Use with_routing to enable routing field removal
-        let mut transformer = Transformer::with_routing(
-            &self.config.timestamp_dq,
-            &self.config.metadata,
-            &self.config.field_sanitization,
-            &self.config.routing,
-        );
+        // Build transformer from profile (profile drives field injection)
+        let default_profile = profile_registry.get(&self.config.profiles.default);
+        let mut transformer = if let Some(profile) = default_profile {
+            Transformer::from_profile(
+                profile,
+                &self.config.timestamp_dq,
+                &self.config.metadata,
+                &self.config.field_sanitization,
+                &self.config.routing,
+            )
+        } else {
+            Transformer::with_routing(
+                &self.config.timestamp_dq,
+                &self.config.metadata,
+                &self.config.field_sanitization,
+                &self.config.routing,
+            )
+        };
 
         // Determine format mode from config
         let format_mode =
@@ -303,12 +336,23 @@ impl Orchestrator {
 
                         // Rebuild router and transformer (safe to hot-reload)
                         router = Router::new(&new_config.routing);
-                        transformer = Transformer::with_routing(
-                            &new_config.timestamp_dq,
-                            &new_config.metadata,
-                            &new_config.field_sanitization,
-                            &new_config.routing,
-                        );
+                        let reload_profile = profile_registry.get(&new_config.profiles.default);
+                        transformer = if let Some(profile) = reload_profile {
+                            Transformer::from_profile(
+                                profile,
+                                &new_config.timestamp_dq,
+                                &new_config.metadata,
+                                &new_config.field_sanitization,
+                                &new_config.routing,
+                            )
+                        } else {
+                            Transformer::with_routing(
+                                &new_config.timestamp_dq,
+                                &new_config.metadata,
+                                &new_config.field_sanitization,
+                                &new_config.routing,
+                            )
+                        };
 
                         // Update buffer thresholds
                         buffer_manager.update_config(&new_config.buffer);
