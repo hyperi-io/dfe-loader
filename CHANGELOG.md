@@ -1,3 +1,10 @@
+## [1.9.3](https://github.com/hyperi-io/dfe-loader/compare/v1.9.2...v1.9.3) (2026-02-28)
+
+
+### Bug Fixes
+
+* prevent auto-commit race with semantic-release ([95645b0](https://github.com/hyperi-io/dfe-loader/commit/95645b007dd7dc63fd1c2c231bd88461d09f6d74))
+
 ## [1.9.2](https://github.com/hyperi-io/dfe-loader/compare/v1.9.1...v1.9.2) (2026-02-28)
 
 
