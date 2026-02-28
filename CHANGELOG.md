@@ -1,3 +1,11 @@
+## [1.9.1](https://github.com/hyperi-io/dfe-loader/compare/v1.9.0...v1.9.1) (2026-02-28)
+
+
+### Bug Fixes
+
+* switch hyperi-rustlib back to artifactory registry ([8929ce6](https://github.com/hyperi-io/dfe-loader/commit/8929ce6bc5e503c27232971df34b4f667cee0d92))
+* use GH_RUNNER_DEFAULT variable for runner selection ([829306d](https://github.com/hyperi-io/dfe-loader/commit/829306dddedd873c6c370825f69920cddd383c24))
+
 # [1.9.0](https://github.com/hyperi-io/dfe-loader/compare/v1.8.3...v1.9.0) (2026-02-28)
 
 
