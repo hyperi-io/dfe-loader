@@ -1,6 +1,7 @@
 # Project State
 
 **Project:** dfe-loader
+**DFE:** Data Fusion Engine
 **Purpose:** High-performance Kafka to ClickHouse data loader (Rust port of Go clickhouse-loader)
 **Status:** Arrow-Only Pipeline Complete with SIMD Optimizations
 **Reference:** Feature parity (or better) with `/projects/clickhouse-loader` (Go version)
@@ -271,7 +272,7 @@ The destination tables have a minimal required schema. All other fields are dyna
 | `_timestamp_received` | DateTime64(3) | - | YES | When receiver/loader received the event |
 | `_uuid` | UUID | `generateUUIDv7()` | **NO** | Unique event ID. UUIDv7 (time-ordered) |
 | `_org_id` | String | - | **NO** | Organisation ID for multi-tenancy and RLS |
-| `_raw` | String | - | YES | Original unparsed log line |
+| `_raw` | String | - | YES | Original raw data (e.g., tailed log line, DB row). Configurable per-table. |
 | `_json` | JSON | - | YES | Complete Kafka message as JSON type |
 | `_tags` | JSON | - | YES | Meta info + collector/agent info as JSON |
 
@@ -300,6 +301,27 @@ tags_output = "_tags"
 # Drop tags entirely after routing extraction (saves storage)
 drop_tags = false
 ```
+
+### Config: Per-Table _raw Handling
+
+```toml
+[metadata]
+# Global default: include _raw in all tables
+include_raw = true
+
+# Per-table overrides (table name → include_raw)
+# Tables listed here with false will NOT receive _raw
+[metadata.raw_overrides]
+"events" = false      # Drop _raw for the catch-all events table
+"dns" = false          # DNS events don't need original wire format
+"syslog" = true        # Keep _raw for syslog (original RFC 3164/5424 line is valuable)
+```
+
+**Behaviour:**
+- `include_raw = true` (default): all tables get `_raw` unless overridden
+- `include_raw = false`: no tables get `_raw` unless overridden to `true`
+- Per-table overrides take precedence over the global default
+- When `_raw` is excluded, the loader omits the field from the Arrow batch (ClickHouse column stays NULL)
 
 ### Implementation Requirements
 
@@ -333,12 +355,17 @@ drop_tags = false
    - See `reference/clickhouse_rls.md` for row policy setup
 
 6. **`_json`** (was `logjson`)
-   - Store complete original Kafka message as JSON
+   - Store complete Kafka message as native JSON type
    - Capture before any transformation
+   - Provides structured path-based access (`_json.user.name`, `_json.action`)
+   - ClickHouse stores each JSON path as a native subcolumn for efficient queries
 
 7. **`_raw`** (was `logoriginal`)
-   - Original unparsed log line for text search
-   - Full-text indexed when enabled
+   - Original raw data as received — the data as it would appear in a tailed log file or a DB row
+   - NOT the same as `_json` — `_raw` is the original wire format, `_json` is the parsed/structured result
+   - Full-text indexed when enabled (text index on this column for free-text search)
+   - **Configurable per-table**: can be dropped to save storage where original format is not needed
+   - Default: included. Set `drop_raw = true` globally or per-table override
 
 8. **`_tags`** (was `tags`)
    - Config-driven source field list (first match wins)
@@ -379,8 +406,8 @@ Routing happens **PRE-flattening** using dot notation for nested field access.
 // Config (from ENV/config cascade)
 db_fields: []                                       // Empty = shared schema (common db)
 table_fields: ["event_category", "tags.event.category"]  // First matching = table
-default_db: "common"                                // Used when db_fields is empty
-default_table: "events"                             // Fallback if no table field found
+default_db: "dfe"                                   // Used when db_fields is empty
+default_table: "default"                            // Fallback if no table field found
 org_id_field: Some("org_id")                        // Extract for _org_id field (RLS)
 routed_orgs: []                                     // Empty = all orgs use default_db
 route_all_by_org: false                             // false = shared schema
@@ -768,5 +795,7 @@ must `chmod +x` after downloading artifacts before `find -perm -u=x` searches.
 
 ---
 
+**Last Updated:** 2026-02-28
 **ClickHouse:** 25.12 (native protocol)
+**Version:** 1.8.0
 **Status:** FSL-1.1-ALv2 Licensed, CI publishing amd64 + arm64 binaries

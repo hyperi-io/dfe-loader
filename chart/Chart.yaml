@@ -1,0 +1,16 @@
+apiVersion: v2
+name: dfe-loader
+description: High-performance Kafka to ClickHouse data loader
+type: application
+version: 0.1.0
+appVersion: "1.8.0"
+
+keywords:
+  - kafka
+  - clickhouse
+  - data-loader
+  - etl
+
+maintainers:
+  - name: HyperI
+    url: https://github.com/hyperi-io

@@ -48,3 +48,13 @@ publish:
   enabled: true
   binaries: both           # Binary publish destination: artifactory, github, both
   # binaries_repo: hyperi-binaries  # JFrog Generic repo for binaries
+  container:
+    enabled: true
+    registry: ghcr
+    dockerfile: Dockerfile
+    platforms:
+      - linux/amd64
+      - linux/arm64
+  helm:
+    enabled: true
+    registry: ghcr

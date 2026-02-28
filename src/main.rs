@@ -105,6 +105,14 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    // Startup version check (fire-and-forget, never blocks)
+    hyperi_rustlib::VersionCheck::new(hyperi_rustlib::VersionCheckConfig {
+        product: "dfe-loader".into(),
+        current_version: env!("CARGO_PKG_VERSION").into(),
+        ..Default::default()
+    })
+    .check_on_startup();
+
     info!(
         kafka_brokers = ?config.kafka.brokers,
         clickhouse_hosts = ?config.clickhouse.hosts,

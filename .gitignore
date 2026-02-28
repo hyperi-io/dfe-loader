@@ -15,6 +15,7 @@ build/
 out/
 test-results/
 coverage/
+.tmp/
 
 
 # Added by cargo

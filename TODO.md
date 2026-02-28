@@ -22,6 +22,49 @@
 
 ---
 
+## Next: Defaults & Per-Table _raw Config
+
+- [x] **Change `default_table` from `"dfe"` to `"default"`** — destination becomes `dfe.default`
+  - Updated `RoutingConfig::default()` in `src/config/loader.rs` and `src/routing/router.rs`
+  - Updated config test assertions and route result assertions
+  - Auto-init creates `dfe.default` on startup
+
+- [ ] **Per-table `_raw` drop** — configurable `include_raw` with per-table overrides
+  1. [ ] Add `include_raw: bool` and `raw_overrides: HashMap<String, bool>` to `MetadataConfig`
+  2. [ ] Transformer checks table name against overrides before injecting `_raw`
+  3. [ ] Default: `include_raw = true`, `default` table override to `false`
+  4. [ ] Unit tests for global default, per-table override, and precedence logic
+  5. [ ] Integration test: verify `_raw` NULL when dropped, present when included
+
+---
+
+## Next: GHCR Container Image Publishing
+
+- [ ] **Container image publishing** (see `docs/CONTAINER-PUBLISHING.md`)
+  1. [ ] Create `Dockerfile` in repo root (wraps pre-built binary, Option B)
+  2. [ ] Add `publish.container` section to `.hyperi-ci.yaml`
+  3. [ ] Update ci submodule to v1.59.0+
+  4. [ ] Update publish workflow for container inputs
+  5. [ ] Test: trigger release, verify `ghcr.io/hyperi-io/dfe-loader`
+
+---
+
+## Next: Startup Version Check (rustlib)
+
+- [ ] **Add `version-check` feature to hyperi-rustlib**
+  - Calls `POST /api/v1/check` on hyperi-telemetry (Cloudflare Worker) on startup
+  - Sends: product, current_version, instance_id, os, arch, deployment
+  - Logs result: info if update available, debug if current, warn if check failed
+  - Graceful failure — never blocks or crashes on network error
+  - Feature flag: `version-check` (requires `reqwest`, `tokio`, `serde_json`)
+  - NOT named telemetry — exposed as version check only
+
+- [ ] **Wire version check into dfe-loader startup**
+  - Call `version_check::check_on_startup()` in main.rs
+  - Pass product="dfe-loader", version from Cargo.toml
+
+---
+
 ## Next: Performance Validation & CI Stabilisation
 
 - [ ] **Run Mison Benchmarks** - Awaiting dedicated host (CPU currently busy)
@@ -222,4 +265,4 @@
 
 ---
 
-**Last Updated:** 2026-02-19
+**Last Updated:** 2026-02-28
