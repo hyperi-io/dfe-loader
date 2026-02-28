@@ -1,3 +1,10 @@
+## [1.9.2](https://github.com/hyperi-io/dfe-loader/compare/v1.9.1...v1.9.2) (2026-02-28)
+
+
+### Bug Fixes
+
+* cargo fmt and rustfmt formatting ([f1a4b74](https://github.com/hyperi-io/dfe-loader/commit/f1a4b749fe8d0cf97cca8c85c28ac487edb62a19))
+
 ## [1.9.1](https://github.com/hyperi-io/dfe-loader/compare/v1.9.0...v1.9.1) (2026-02-28)
 
 
