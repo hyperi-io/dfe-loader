@@ -1,7 +1,7 @@
 # Design Document: dfe-loader
 
-**Version:** 2.1 (Arrow Architecture + Transport Abstraction)
-**Date:** 2025-12-29
+**Version:** 2.2 (Arrow Architecture + gRPC Transport)
+**Date:** 2026-03-02
 
 ---
 
@@ -11,16 +11,18 @@ High-performance data loader from message transports to ClickHouse using Apache 
 
 ```text
 Transport ──► Parse ──► Route ──► Transform ──► Buffer ──► ClickHouse Native
-(Kafka/Zenoh/Memory)  (SIMD)   (db.table)  (vectorized)  (per-table)   (Arrow protocol)
+(Kafka/gRPC/Memory)   (SIMD)   (db.table)  (vectorized)  (per-table)   (Arrow protocol)
 ```
 
 ### Transport Selection
 
 | Transport | Use Case | Persistence | Latency |
 |-----------|----------|-------------|---------|
-| **Kafka** | Production (default) | At-least-once with offset tracking | ~1-5ms |
-| **Zenoh** | Dev/test, edge, real-time | In-flight only (no persistence) | ~30µs with SHM |
+| **Kafka** | Production (durable) | At-least-once with offset tracking | ~1-5ms |
+| **gRPC** | Dev/test, prod mesh (low-latency) | Sender-side WAL (receiver buffer) | ~200µs |
 | **Memory** | Unit tests | None | ~1µs |
+
+See [GRPC-MESH.md](./GRPC-MESH.md) for the complete gRPC transport design.
 
 ---
 
@@ -601,7 +603,7 @@ graph TB
 
         subgraph "Implementations"
             K[KafkaTransport<br/>rdkafka]
-            Z[ZenohTransport<br/>zenoh 1.x]
+            G[GrpcTransport<br/>tonic]
             M[MemoryTransport<br/>tokio::mpsc]
         end
 
@@ -612,11 +614,11 @@ graph TB
         end
 
         T --> K
-        T --> Z
+        T --> G
         T --> M
 
         K --> P
-        Z --> P
+        G --> P
         M --> P
 
         P --> J
@@ -631,7 +633,7 @@ graph TB
     end
 
     K --> O
-    Z --> O
+    G --> O
     M --> O
     O --> R
     R --> B
@@ -651,7 +653,7 @@ pub trait Transport: Send + Sync {
     /// Receive up to `max` messages.
     async fn recv(&self, max: usize) -> TransportResult<Vec<Message<Self::Token>>>;
 
-    /// Commit processed messages (Kafka: offset commit, Zenoh: no-op).
+    /// Commit processed messages (Kafka: offset commit, gRPC: response ACK).
     async fn commit(&self, tokens: &[Self::Token]) -> TransportResult<()>;
 
     /// Close the transport gracefully.
@@ -710,13 +712,13 @@ impl PayloadFormat {
 transport = ["tokio", "async-trait", "serde_json", "rmp-serde", "chrono"]
 transport-memory = ["transport"]
 transport-kafka = ["transport", "rdkafka"]
-transport-zenoh = ["transport", "zenoh"]
-transport-all = ["transport-memory", "transport-kafka", "transport-zenoh"]
+transport-grpc = ["transport", "tonic", "prost"]
+transport-all = ["transport-memory", "transport-kafka", "transport-grpc"]
 ```
 
 ### Transport Configurations
 
-#### Kafka (Production Default)
+#### Kafka (Production — Durable)
 
 ```rust
 let config = KafkaConfig {
@@ -730,17 +732,20 @@ let config = KafkaConfig {
 let transport = KafkaTransport::new(&config).await?;
 ```
 
-#### Zenoh (Dev/Test)
+#### gRPC (Dev/Test + Production Mesh)
 
 ```rust
-let config = ZenohConfig::peer(vec!["events/**".to_string()]);
-// or with routers:
-let config = ZenohConfig::client(
-    vec!["tcp/zenoh-router:7447".to_string()],
-    vec!["events/**".to_string()],
-);
-let transport = ZenohTransport::new(&config).await?;
+let config = GrpcConfig {
+    listen_addr: "0.0.0.0:50051".to_string(),
+    target_addrs: vec!["loader:50051".to_string()],
+    max_message_size: 16 * 1024 * 1024,  // 16MB
+    ..Default::default()
+};
+let transport = GrpcTransport::new(&config).await?;
 ```
+
+See [GRPC-MESH.md](./GRPC-MESH.md) for the complete gRPC transport design,
+including v1/v2 proto evolution, tonic-health integration, and mesh topology.
 
 #### Memory (Unit Tests)
 
@@ -756,8 +761,10 @@ transport.inject(Some("test-topic"), payload).await?;
 
 1. **Arc<str> for topics**: Topics are cached and Arc-shared to avoid repeated allocations
 2. **Batch receiving**: `recv(max)` returns up to `max` messages in one call
-3. **Non-blocking sends**: Memory/Zenoh use try_send to avoid blocking on full buffers
+3. **Non-blocking sends**: Memory transport uses try_send to avoid blocking on full buffers
 4. **Payload format detection**: Single byte check, no parsing overhead
+5. **gRPC native ACK**: Response IS the acknowledgement — no custom protocol needed
+6. **gRPC backpressure**: HTTP/2 flow control built into the wire protocol
 
 ### Local Performance Deviations
 
@@ -773,4 +780,4 @@ and payload format conventions.
 
 ---
 
-**Last Updated:** 2025-12-29
+**Last Updated:** 2026-03-02

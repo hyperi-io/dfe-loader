@@ -2,7 +2,7 @@
 
 **Purpose:** Complete enumeration of ClickHouse data types for implementing full type support in our client library.
 
-**Last Updated:** 2025-12-24
+**Last Updated:** 2026-03-02
 
 **Sources:**
 - [ClickHouse Data Types Documentation](https://clickhouse.com/docs/en/sql-reference/data-types)
@@ -275,51 +275,9 @@ SELECT data.user, data.score FROM events;
 | **SimpleAggregateFunction** | ✅ DFE Fork |
 | **JSON** | ⚠️ Via Dynamic |
 
-### klickhouse (Rust - upstream, parked)
-
-| Type | Supported |
-|------|-----------|
-| Int8-Int256, UInt8-UInt256 | ✅ |
-| Float32, Float64 | ✅ |
-| Decimal32/64/128/256 | ✅ |
-| String, FixedString | ✅ |
-| Date, DateTime, DateTime64 | ✅ |
-| UUID | ✅ |
-| IPv4, IPv6 | ✅ |
-| Array, Tuple, Map | ✅ |
-| Nullable, LowCardinality | ✅ |
-| Enum8, Enum16 | ✅ |
-| Point, Ring, Polygon, MultiPolygon | ✅ |
-| **JSON** | ❌ Missing |
-| **Variant** | ❌ Missing |
-| **Dynamic** | ❌ Missing |
-| **Nested** | ❌ Missing |
-| **AggregateFunction** | ❌ Missing |
-| **SimpleAggregateFunction** | ❌ Missing |
-| **BFloat16** | ❌ Missing |
-| **Date32** | ❌ Missing |
-| **Time/Time64** | ❌ Missing |
-
-### clickhouse-cpp (C++ - official)
-
-| Type | Supported |
-|------|-----------|
-| Int8-Int128, UInt8-UInt64 | ✅ |
-| Float32, Float64 | ✅ |
-| Decimal32/64/128 | ✅ |
-| String, FixedString | ✅ |
-| Date, DateTime, DateTime64 | ✅ |
-| UUID | ✅ |
-| IPv4, IPv6 | ✅ |
-| Array, Tuple, Map | ✅ |
-| Nullable, LowCardinality | ✅ |
-| Enum8, Enum16 | ✅ |
-| Point, Ring, Polygon, MultiPolygon | ✅ |
-| **JSON** | ❌ [Open Issue #422](https://github.com/ClickHouse/clickhouse-cpp/issues) |
-| **Variant** | ❌ Not yet |
-| **Dynamic** | ❌ Not yet |
-| Int256, UInt256 | ❌ Missing |
-| Decimal256 | ❌ Missing |
+**Note:** klickhouse and clickhouse-cpp were evaluated during the initial library
+selection (2025-12). klickhouse was removed — we use clickhouse-arrow (DFE fork)
+exclusively. See [DESIGN.md](./DESIGN.md) for the architecture.
 
 ---
 
@@ -355,32 +313,24 @@ Timezone stored in column metadata, not per-value. All values in column share ti
 
 ---
 
-## Implementation Priority for dfe-loader
+## Implementation Status for dfe-loader
 
-### Phase 1: Critical Missing Types
-1. **JSON** - Production GA, key for event data
-2. **Variant** - Building block for JSON
-3. **Dynamic** - Building block for JSON
+All priority types are implemented in the clickhouse-arrow DFE fork:
 
-### Phase 2: Useful Missing Types
-4. **Nested** - Common in analytics schemas
-5. **Date32** - Extended date range
-6. **AggregateFunction** - Materialized views
-
-### Phase 3: Edge Cases
-7. **SimpleAggregateFunction**
-8. **BFloat16** - ML workloads
-9. **Time/Time64** - Rare usage
+1. **JSON** — via Dynamic type mapping
+2. **Variant** — full discriminated union support
+3. **Dynamic** — runtime-typed storage
+4. **Nested** — parallel array serialisation
+5. **AggregateFunction** — materialized view support
+6. **SimpleAggregateFunction** — simplified aggregate state
+7. **BFloat16** — ML workload support
+8. **Time/Time64** — time-of-day types
 
 ---
 
-## Decision: Fork vs FFI Bindings vs Rewrite
+## Decision: Library Choice (Resolved)
 
-See TODO.md for current decision status.
+**Chosen:** clickhouse-arrow (DFE fork) — native Arrow inserts via ClickHouse HTTP protocol.
 
-**Options:**
-1. **Fork klickhouse** - Add missing types to pure Rust implementation
-2. **FFI to clickhouse-cpp** - Wrap C++ library, inherit their type support
-3. **New implementation** - Minimal client focused on our use case
-
-**Key Consideration:** clickhouse-cpp also lacks JSON/Variant/Dynamic support (open issue), so FFI doesn't immediately solve our problem.
+All missing types (Variant, Dynamic, Nested, BFloat16, Time/Time64, AggregateFunction,
+SimpleAggregateFunction) were implemented in the DFE fork. See `crates/clickhouse-arrow/`.
