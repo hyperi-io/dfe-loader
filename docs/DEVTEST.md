@@ -35,7 +35,7 @@ docker run -d --name clickhouse \
   -p 9000:9000 -p 8123:8123 \
   -e CLICKHOUSE_USER=default \
   -e CLICKHOUSE_PASSWORD= \
-  clickhouse/clickhouse-server:25.1
+  clickhouse/clickhouse-server:25.12
 
 # Start Kafka (Redpanda - lighter weight)
 docker run -d --name redpanda \
@@ -72,29 +72,30 @@ cp config.dev.yaml config.yaml
 
 The loader searches for config in this order:
 
-1. Path specified by `--config` or `LOADER_CONFIG` env var
+1. Path specified by `--config` or `DFE_LOADER_CONFIG` env var
 2. `config.yaml` in current directory
 3. `config.yml` in current directory
 
 ### Environment Variables
 
-All config values can be overridden via environment variables with `LOADER_` prefix:
+All config values can be overridden via environment variables with `DFE_LOADER` prefix.
+Nested config uses `__` (double underscore) as separator:
 
 ```bash
 # Kafka
-export LOADER_KAFKA_BROKERS=localhost:9092
-export LOADER_KAFKA_GROUP=my-consumer-group
-export LOADER_KAFKA_TOPICS=events,logs
+export DFE_LOADER__KAFKA__BROKERS=localhost:9092
+export DFE_LOADER__KAFKA__GROUP_ID=my-consumer-group
+export DFE_LOADER__KAFKA__TOPICS=events,logs
 
 # ClickHouse
-export LOADER_CLICKHOUSE_HOSTS=localhost:9000
-export LOADER_CLICKHOUSE_DATABASE=default
-export LOADER_CLICKHOUSE_USERNAME=default
-export LOADER_CLICKHOUSE_PASSWORD=secret
+export DFE_LOADER__CLICKHOUSE__URL=http://localhost:8123
+export DFE_LOADER__CLICKHOUSE__DATABASE=default
+export DFE_LOADER__CLICKHOUSE__USERNAME=default
+export DFE_LOADER__CLICKHOUSE__PASSWORD=secret
 
-# Logging
-export LOADER_LOG_LEVEL=debug
-export LOADER_LOG_FORMAT=text
+# Logging (CLI-level env vars)
+export DFE_LOADER_LOG_LEVEL=debug
+export DFE_LOADER_LOG_FORMAT=text
 ```
 
 ### Config File Reference
@@ -148,8 +149,8 @@ routing:
   table_fields:
     - event_category
     - tags.event_category
-  default_db: common
-  default_table: events
+  default_db: dfe
+  default_table: default
 
   # Category to table mapping
   category_to_table:
@@ -298,7 +299,7 @@ kcat -b k8s.tyrell.com.au:30092 \
 dfe-loader [OPTIONS]
 
 Options:
-  -c, --config <CONFIG>              Path to configuration file [env: LOADER_CONFIG=]
+  -c, --config <CONFIG>              Path to configuration file [env: DFE_LOADER_CONFIG=]
       --log-level <LOG_LEVEL>        Log level (trace, debug, info, warn, error) [default: info]
       --log-format <LOG_FORMAT>      Log format (json, text) [default: json]
       --validate                     Validate config and exit
@@ -355,6 +356,7 @@ CREATE TABLE IF NOT EXISTS benchmark.events
     `_timestamp_received` Nullable(DateTime64(3)) CODEC(Delta, ZSTD(1)),
     `_uuid` UUID DEFAULT generateUUIDv7(),
     `_org_id` LowCardinality(String) CODEC(ZSTD(1)),
+    `_source` LowCardinality(String) CODEC(ZSTD(1)),
     `_raw` Nullable(String) CODEC(ZSTD(3)),
     `_json` Nullable(JSON) CODEC(ZSTD(3)),
     `_tags` Nullable(JSON) CODEC(ZSTD(3)),
@@ -365,7 +367,7 @@ ORDER BY (_org_id, _timestamp_load, _uuid)
 PARTITION BY (toYYYYMM(_timestamp_load), _org_id)
 SETTINGS index_granularity = 8192;
 
--- Add full-text search index (ClickHouse 25.1+)
+-- Add full-text search index (ClickHouse 25.1+, tested with 25.12)
 ALTER TABLE benchmark.events ADD INDEX idx_raw _raw TYPE full_text(0) GRANULARITY 1;
 ```
 
@@ -388,8 +390,8 @@ routing:
     - tags.event.category
 
   # Defaults if no match
-  default_db: common
-  default_table: events
+  default_db: dfe
+  default_table: default
 
   # Optional: map values to table names
   category_to_table:
@@ -420,7 +422,7 @@ By default, all messages go to `{default_db}.{table}` regardless of org_id:
 ```yaml
 routing:
   db_fields: []            # Empty = shared schema
-  default_db: common       # All data goes here
+  default_db: dfe          # All data goes here
   table_fields:
     - event_category
 ```
@@ -520,15 +522,15 @@ Prometheus metrics are exposed at the configured address (default: `:9090`).
 
 | Metric | Type | Description |
 |--------|------|-------------|
-| `dfe_messages_received_total` | Counter | Total messages consumed from Kafka |
-| `dfe_messages_processed_total` | Counter | Messages successfully processed |
-| `dfe_messages_failed_total` | Counter | Messages sent to DLQ |
-| `dfe_rows_inserted_total` | Counter | Rows inserted into ClickHouse |
-| `dfe_batches_flushed_total` | Counter | Batch flushes to ClickHouse |
-| `dfe_buffer_bytes` | Gauge | Current buffer memory usage |
-| `dfe_kafka_lag` | Gauge | Consumer lag per partition |
-| `dfe_insert_latency_seconds` | Histogram | ClickHouse insert latency |
-| `dfe_offsets_committed_total` | Counter | Kafka offsets committed |
+| `loader_messages_received_total` | Counter | Total messages consumed from Kafka |
+| `loader_messages_processed_total` | Counter | Messages successfully processed |
+| `loader_messages_dlq_total` | Counter | Messages sent to DLQ |
+| `loader_rows_inserted_total` | Counter | Rows inserted into ClickHouse |
+| `loader_batches_flushed_total` | Counter | Batch flushes to ClickHouse |
+| `loader_buffer_bytes` | Gauge | Current buffer memory usage |
+| `loader_kafka_lag` | GaugeVec | Consumer lag by topic/partition |
+| `loader_insert_latency_seconds` | Histogram | ClickHouse insert latency |
+| `loader_kafka_offsets_committed_total` | Counter | Kafka offsets committed |
 
 ### Viewing Metrics
 
@@ -537,9 +539,9 @@ Prometheus metrics are exposed at the configured address (default: `:9090`).
 curl http://localhost:9090/metrics
 
 # Example output
-dfe_messages_received_total{topic="events"} 12345
-dfe_rows_inserted_total{table="benchmark.events"} 12340
-dfe_buffer_bytes 524288
+loader_messages_received_total 12345
+loader_rows_inserted_total 12340
+loader_buffer_bytes 524288
 ```
 
 ## Testing
@@ -666,8 +668,9 @@ RUST_LOG=dfe_loader::transform=debug ./target/release/dfe-loader --config config
 
 | Version | Date | Notes |
 |---------|------|-------|
+| 1.9.3 | 2026-03 | Config cascade (figment), config hot-reload, DFE_LOADER__ env prefix |
 | 1.3.1 | 2026-01 | Registry migration (clickhouse-arrow 0.4.2, hyperi-rustlib 1.2.2) |
-| 1.3.0 | 2026-01 | Auto-initialization, text search indexes |
+| 1.3.0 | 2026-01 | Auto-initialisation, text search indexes |
 | 1.2.0 | 2025-12 | Enrichment modules (GeoIP, reputation, risk) |
-| 1.1.0 | 2025-12 | Arrow-only pipeline, SIMD optimizations |
+| 1.1.0 | 2025-12 | Arrow-only pipeline, SIMD optimisations |
 | 1.0.0 | 2025-12 | Initial release |

@@ -10,15 +10,49 @@
 
 ---
 
-## Current: Config Reload & Registry Publishing
+## Current: Zenoh → gRPC Transport Migration
 
-- [ ] **Publish hyperi-rustlib with config-reload feature** to Artifactory
-  - Switch dfe-loader back from path dep to registry dep
-  - Switch dfe-archiver and dfe-receiver back from path dep to registry dep
+**Goal:** Replace `ZenohTransport` with `GrpcTransport` (tonic) across all DFE projects.
 
-- [ ] **CI pipeline validation** - Verify build + publish after merge
-  - Confirm arrow <58.0 pin works with clickhouse-arrow 0.4.2
-  - Confirm figment config cascade loads correctly in CI
+**Design:** `reference/grpc_transport_design.md`
+**Analysis:** `reference/devtest_transport_analysis.md`
+
+### Phase 1: rustlib (hyperi-rustlib)
+
+1. [ ] Create `proto/dfe_transport.proto` — PushEvents RPC definition
+2. [ ] Add `tonic-build` to build deps, write `build.rs` for proto codegen
+3. [ ] Create `src/transport/grpc/` module (config, token, client, server)
+4. [ ] Implement `GrpcTransport` with existing `Transport` trait
+5. [ ] Update `TransportType` enum — Zenoh → Grpc
+6. [ ] Update `TransportConfig` — zenoh field → grpc field
+7. [ ] Update feature flags — `transport-zenoh` → `transport-grpc` (tonic + prost)
+8. [ ] Remove `src/transport/zenoh/` directory
+9. [ ] Remove `zenoh` dependency from Cargo.toml
+10. [ ] Write unit tests (config, token, round-trip, backpressure, shutdown)
+11. [ ] Publish to Artifactory (major bump — v2.0.0)
+
+### Phase 2: dfe-loader
+
+1. [ ] Update Cargo.toml — `transport-zenoh` → `transport-grpc`, rustlib `>=2.0`
+2. [ ] Remove `ZenohConfig` from `src/config/loader.rs`
+3. [ ] Add `GrpcConfig` to `src/config/loader.rs`
+4. [ ] Remove `ZenohTransportAdapter` from `src/kafka/transport.rs`
+5. [ ] Add `GrpcTransportAdapter` to `src/kafka/transport.rs`
+6. [ ] Update `TransportBackend` enum — Zenoh → Grpc
+7. [ ] Update config examples and docs
+8. [ ] Run tests, verify CI passes
+
+### Phase 3: dfe-archiver
+
+1. [ ] Update Cargo.toml — swap `transport-zenoh` for `transport-grpc`, rustlib `>=2.0`
+2. [ ] No code changes needed (uses rustlib transport directly)
+
+### Phase 4: dfe-receiver
+
+1. [ ] Add `transport-grpc` to Cargo.toml features
+2. [ ] Add gRPC client config to `LoaderConfig`
+3. [ ] Wire up gRPC client for direct-to-loader delivery
+4. [ ] Test: receiver → gRPC → loader → ClickHouse
 
 ---
 
@@ -79,14 +113,14 @@
 
 ## Code TODOs (from source)
 
-- `Cargo.toml:25` - Switch hyperi-rustlib back to registry dep after config-reload published
+- None currently
 
 ---
 
 ## Deferred
 
-- [ ] **WAL** - Kafka has consumer groups, Zenoh acceptable for dev/test
-- [ ] **Chunking** - Kafka handles 1MB, Zenoh fragments internally
+- [ ] **Receiver WAL** - Required for at-least-once with gRPC mesh (separate from transport)
+- [ ] **Chunking** - Kafka handles 1MB, gRPC has configurable max_message_size (16MB default)
 - [ ] **Envelope format** - Not needed, raw JSON/MsgPack works
 - [ ] **simd-json integration** - sonic-rs benchmarks show it's already faster
 - [ ] **TLS Configuration** - Use when needed
@@ -96,6 +130,15 @@
 ---
 
 ## Completed
+
+### 2026-03-02: Config Reload & Registry Publishing
+
+- [x] **Publish hyperi-rustlib with config-reload feature** to Artifactory
+- [x] **Switch dfe-loader back to registry dep** — `>=1.7.0` from Artifactory
+- [x] **CI pipeline validated** — Detect Config, Quality, Test all green
+- [x] **Fixed cargo fmt** — 9 files formatted
+- [x] **Fixed auto-commit race** — `continue-on-error: true` on markdown auto-fix step
+- [x] All CI passing, v1.9.3 published
 
 ### 2026-02-25: Config Cascade & Config-Reload Migration
 
@@ -265,4 +308,4 @@
 
 ---
 
-**Last Updated:** 2026-02-28
+**Last Updated:** 2026-03-02

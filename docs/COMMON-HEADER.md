@@ -295,7 +295,7 @@ include_raw = true   # Global default: include _raw in all tables
 
 # Per-table overrides (table name → include_raw)
 [metadata.raw_overrides]
-"events" = false     # Drop _raw for the catch-all events table
+"default" = false    # Drop _raw for the catch-all default table
 "syslog" = true      # Keep _raw for syslog (original format is valuable)
 ```
 
@@ -699,7 +699,7 @@ org_id_field = "org_id"           # Field to extract for _org_id
 db_fields = []                     # Empty = shared schema
 table_fields = ["event_category"]  # Field for table routing
 default_db = "common"
-default_table = "events"
+default_table = "default"
 
 [metadata]
 capture_raw = true                 # Store _raw
