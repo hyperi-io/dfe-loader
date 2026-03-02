@@ -1,3 +1,10 @@
+## [1.9.7](https://github.com/hyperi-io/dfe-loader/compare/v1.9.6...v1.9.7) (2026-03-02)
+
+
+### Bug Fixes
+
+* replace bespoke DLQ with unified rustlib dlq module ([42a4dbc](https://github.com/hyperi-io/dfe-loader/commit/42a4dbc92b43ab33ebdc490459412f0d21d5e8c2))
+
 ## [1.9.6](https://github.com/hyperi-io/dfe-loader/compare/v1.9.5...v1.9.6) (2026-03-02)
 
 
