@@ -1,3 +1,10 @@
+## [1.9.5](https://github.com/hyperi-io/dfe-loader/compare/v1.9.4...v1.9.5) (2026-03-02)
+
+
+### Bug Fixes
+
+* add scaling pressure integration for KEDA autoscaling ([f668864](https://github.com/hyperi-io/dfe-loader/commit/f6688648050ba5e61a2f661cd05a5eaa9f6992b2))
+
 ## [1.9.4](https://github.com/hyperi-io/dfe-loader/compare/v1.9.3...v1.9.4) (2026-03-02)
 
 
