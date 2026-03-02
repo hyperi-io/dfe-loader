@@ -21,6 +21,8 @@ use tracing::{debug, error, info, warn};
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
+use hyperi_rustlib::ScalingPressure;
+
 use crate::buffer::{BufferManager, FlushBatch, KafkaOffset};
 use crate::clickhouse::{ArrowClickHouseClient, Inserter, InserterConfig};
 use crate::config::{Config, MetadataConfig, SharedConfig, TableCaptureConfig};
@@ -146,6 +148,7 @@ pub struct Orchestrator {
     shutdown: CancellationToken,
     stats: PipelineStats,
     metrics: Option<Metrics>,
+    scaling: Option<Arc<ScalingPressure>>,
 }
 
 impl Orchestrator {
@@ -157,6 +160,7 @@ impl Orchestrator {
             shutdown: CancellationToken::new(),
             stats: PipelineStats::default(),
             metrics: None,
+            scaling: None,
         }
     }
 
@@ -168,12 +172,19 @@ impl Orchestrator {
             shutdown: CancellationToken::new(),
             stats: PipelineStats::default(),
             metrics: Some(metrics),
+            scaling: None,
         }
     }
 
     /// Set shared config for hot-reload support
     pub fn with_shared_config(mut self, shared: SharedConfig) -> Self {
         self.shared_config = Some(shared);
+        self
+    }
+
+    /// Set scaling pressure for KEDA autoscaling
+    pub fn with_scaling(mut self, scaling: Arc<ScalingPressure>) -> Self {
+        self.scaling = Some(scaling);
         self
     }
 
@@ -375,6 +386,16 @@ impl Orchestrator {
                 }
 
                 _ = flush_interval.tick() => {
+                    // Update memory scaling pressure (periodic, low cost)
+                    if let Some(ref scaling) = self.scaling {
+                        if let Some((used, limit)) = read_process_memory() {
+                            scaling.set_memory(used, limit);
+                            if limit > 0 {
+                                scaling.set_component("memory", used as f64 / limit as f64);
+                            }
+                        }
+                    }
+
                     // Check for buffers ready to flush
                     match buffer_manager.get_ready_for_flush() {
                         Ok(batches) if !batches.is_empty() => {
@@ -457,13 +478,19 @@ impl Orchestrator {
                             }
 
                             // Update buffer stats (once per batch, not per message)
+                            let buf_stats = buffer_manager.stats();
                             if let Some(ref m) = self.metrics {
-                                let stats = buffer_manager.stats();
                                 m.update_buffer_stats(
-                                    stats.pending_rows,
-                                    stats.pending_bytes,
-                                    stats.pending_chunks,
+                                    buf_stats.pending_rows,
+                                    buf_stats.pending_bytes,
+                                    buf_stats.pending_chunks,
                                 );
+                            }
+
+                            // Update scaling pressure components
+                            if let Some(ref scaling) = self.scaling {
+                                scaling.set_component("buffer_depth", buf_stats.pending_rows as f64);
+                                scaling.set_component("errors", self.stats.errors as f64);
                             }
 
                             // Resolve pending DDL capture tags for newly seen tables
@@ -723,6 +750,11 @@ impl Orchestrator {
         let results = inserter.insert_batches(batches_for_insert).await;
         let latency = start.elapsed().as_secs_f64();
 
+        // Update scaling pressure with insert latency
+        if let Some(ref scaling) = self.scaling {
+            scaling.set_component("insert_latency", latency);
+        }
+
         let mut all_success = true;
         let mut success_count = 0;
 
@@ -787,6 +819,49 @@ impl Default for Orchestrator {
     fn default() -> Self {
         Self::new(Config::default())
     }
+}
+
+/// Read process RSS from /proc/self/status (Linux only).
+/// Returns (rss_bytes, memory_limit_bytes) or None if unavailable.
+#[cfg(target_os = "linux")]
+fn read_process_memory() -> Option<(u64, u64)> {
+    // RSS from /proc/self/status
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    let rss_kb = status
+        .lines()
+        .find(|l| l.starts_with("VmRSS:"))
+        .and_then(|l| l.split_whitespace().nth(1))
+        .and_then(|v| v.parse::<u64>().ok())?;
+    let rss_bytes = rss_kb * 1024;
+
+    // Memory limit from cgroup v2 (k8s containers)
+    let limit = std::fs::read_to_string("/sys/fs/cgroup/memory.max")
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        // Fallback: cgroup v1
+        .or_else(|| {
+            std::fs::read_to_string("/sys/fs/cgroup/memory/memory.limit_in_bytes")
+                .ok()
+                .and_then(|s| s.trim().parse::<u64>().ok())
+        })
+        // Fallback: total system memory from /proc/meminfo
+        .or_else(|| {
+            let meminfo = std::fs::read_to_string("/proc/meminfo").ok()?;
+            meminfo
+                .lines()
+                .find(|l| l.starts_with("MemTotal:"))
+                .and_then(|l| l.split_whitespace().nth(1))
+                .and_then(|v| v.parse::<u64>().ok())
+                .map(|kb| kb * 1024)
+        })
+        .unwrap_or(0);
+
+    Some((rss_bytes, limit))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn read_process_memory() -> Option<(u64, u64)> {
+    None
 }
 
 #[cfg(test)]

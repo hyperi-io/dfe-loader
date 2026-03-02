@@ -120,16 +120,18 @@ async fn main() -> anyhow::Result<()> {
         "Starting dfe-loader"
     );
 
-    // Initialize metrics
+    // Initialize metrics and scaling pressure
     let metrics = Metrics::new();
-    let server_state = Arc::new(ServerState::new(metrics.clone()));
+    let scaling = Arc::new(config.scaling.build_pressure());
+    let server_state = Arc::new(ServerState::new(metrics.clone(), Arc::clone(&scaling)));
 
     // Create shared config for hot-reload
     let shared_config = SharedConfig::new(config.clone());
 
-    // Create orchestrator with hot-reload support
+    // Create orchestrator with hot-reload support and scaling pressure
     let mut orchestrator = Orchestrator::with_metrics(config.clone(), metrics)
-        .with_shared_config(shared_config.clone());
+        .with_shared_config(shared_config.clone())
+        .with_scaling(Arc::clone(&scaling));
     let shutdown_token = orchestrator.shutdown_token();
 
     // Start config watcher if hot-reload is enabled
