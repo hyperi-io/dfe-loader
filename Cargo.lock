@@ -1150,7 +1150,7 @@ dependencies = [
  "parking_lot",
  "prometheus",
  "proptest",
- "rdkafka 0.39.0",
+ "rdkafka",
  "rmp-serde",
  "rstest",
  "rustc-hash",
@@ -1338,6 +1338,16 @@ dependencies = [
  "toml",
  "uncased",
  "version_check",
+]
+
+[[package]]
+name = "file-rotate"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6e8e2fa049328a1f3295991407a88585805d126dfaadf74b9fe8c194c730aafc"
+dependencies = [
+ "chrono",
+ "flate2",
 ]
 
 [[package]]
@@ -1778,20 +1788,22 @@ dependencies = [
 
 [[package]]
 name = "hyperi-rustlib"
-version = "1.9.0"
+version = "1.10.0"
 source = "sparse+https://hypersec.jfrog.io/artifactory/api/cargo/hyperi-cargo-virtual/index/"
-checksum = "8361270cf9717b50334a602ae77465bb2bab204f9d4dad9f39a07ccd7167f960"
+checksum = "8e0105f6dfe690a5bb792447d03fb2d63e78c0b5793bf8df7649236e721dfe1c"
 dependencies = [
  "async-trait",
+ "base64 0.22.1",
  "chrono",
  "dirs",
  "dotenvy",
  "figment",
+ "file-rotate",
  "metrics",
  "metrics-exporter-prometheus",
  "owo-colors",
  "parking_lot",
- "rdkafka 0.38.0",
+ "rdkafka",
  "reqwest",
  "rmp-serde",
  "serde",
@@ -3209,24 +3221,6 @@ checksum = "22e18b0f0062d30d4230b2e85ff77fdfe4326feb054b9783a3460d8435c8ab91"
 dependencies = [
  "crossbeam-deque",
  "crossbeam-utils",
-]
-
-[[package]]
-name = "rdkafka"
-version = "0.38.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5f1856d72dbbbea0d2a5b2eaf6af7fb3847ef2746e883b11781446a51dbc85c0"
-dependencies = [
- "futures-channel",
- "futures-util",
- "libc",
- "log",
- "rdkafka-sys",
- "serde",
- "serde_derive",
- "serde_json",
- "slab",
- "tokio",
 ]
 
 [[package]]

@@ -61,9 +61,7 @@
 
 - [x] **rustlib `scaling` module** — ScalingPressure engine, RateWindow, 29 tests (v1.9.0)
 - [x] **dfe-loader `ScalingConfig`** — weight/saturation config in loader.rs, wired to ServerState
-- [ ] **IMPORTANT: Switch Cargo.toml back to registry dep** — currently using local path for dev
-  - Change `hyperi-rustlib = { path = ... }` back to `{ version = ">=1.9.0", registry = "hyperi" }`
-  - v1.9.0 CI publish was running — check JFrog before switching
+- [x] **Switched Cargo.toml back to registry dep** — >=1.10.0 from Artifactory
 - [ ] **Wire orchestrator component updates** — set_component calls in pipeline loop
 - [ ] **dfe-receiver migration** — replace hard-coded keda_scaling_metric() with rustlib ScalingPressure
 - [ ] **dfe-archiver integration** — add scaling config and wiring
@@ -73,10 +71,10 @@
 
 ## Current: Dependency Updates
 
-- [ ] **Update hyperi-rustlib** to v1.9.0+ across all DFE projects
-  - dfe-loader: currently local path dep (switch to >=1.9.0 registry)
-  - dfe-receiver: 1.8.1 → >=1.9.0 (add scaling feature)
-  - dfe-archiver: 1.4.3 → >=1.9.0 (add scaling feature)
+- [x] **Update hyperi-rustlib** to v1.10.0 across DFE projects
+  - dfe-loader: >=1.10.0 (dlq-kafka, scaling features)
+  - dfe-receiver: >=1.10.0 (dlq-kafka, scaling features)
+  - dfe-archiver: 1.4.3 → >=1.10.0 (add scaling, dlq features) — pending
 
 - [ ] **Update all dependency crates** to latest versions in dfe-loader, dfe-receiver, dfe-archiver
   - Use `cargo outdated` and web search to identify updates
@@ -109,16 +107,30 @@ Remaining: wire orchestrator component updates (kafka_lag, buffer_depth, etc.)
 
 ---
 
-## Next: DLQ to File Option
+## Completed: Unified DLQ Module (rustlib + DFE Services)
 
-- [ ] **Add file-based DLQ sink** — write failed messages to local files
-  - Configurable output directory and rotation (size/time-based)
-  - JSON-lines format with metadata (error reason, original topic, timestamp)
-  - Useful when Kafka DLQ topic is unavailable or for debugging
-  - Config: `dlq.mode = "kafka" | "file"`, `dlq.file.directory`, `dlq.file.max_size_mb`
-- [ ] Wire into existing `DlqProducer` as alternative sink
-- [ ] Unit tests for file DLQ write and rotation
-- [ ] Integration test: verify failed messages land in DLQ file
+- [x] **rustlib `dlq` module** — `DlqBackend` trait, `Dlq` orchestrator, cascade/fan-out modes
+  - File backend (NDJSON + file-rotate), Kafka backend, pluggable custom backends
+  - `DlqEntry` shared envelope with base64 payload, source tracking, builder pattern
+  - Feature flags: `dlq` (file), `dlq-kafka` (Kafka + file), 22 unit tests
+  - Published as hyperi-rustlib v1.10.0
+- [x] **dfe-loader** — Replaced bespoke `DlqProducer`/`DlqMessage` with rustlib `Dlq`/`DlqEntry`
+  - Deleted `src/kafka/dlq.rs` (340 lines), all DLQ via rustlib cascade (Kafka → file fallback)
+  - 367 lib + 156 integration tests passing
+- [x] **dfe-receiver** — Replaced hard-coded `dlq_land` topic routing with rustlib `Dlq`
+  - Cascade mode: Kafka primary, file fallback. Legacy routing preserved as fallback.
+  - 200 tests passing
+
+### DLQ Future Backends (Backlog)
+
+- [ ] **dfe-archiver DLQ integration** — add `dlq-kafka` feature, wire `Dlq` into archive pipeline
+  - Discuss at integration time whether archiver needs DLQ (failed archive writes → DLQ?)
+- [ ] **S3/MinIO backend** — long-term DLQ archive, cross-region replication
+- [ ] **ClickHouse backend** — query DLQ entries with SQL, dashboards
+- [ ] **HTTP webhook backend** — alert on DLQ writes (PagerDuty, Slack, OpsGenie)
+- [ ] **Spool (yaque) backend** — high-throughput binary DLQ for replay pipelines
+
+Each is a new file implementing `DlqBackend` trait + feature flag. No changes to existing code.
 
 ---
 
@@ -207,6 +219,14 @@ dfe-app provides its `DeploymentContract` values and gets artefacts generated as
 ---
 
 ## Completed
+
+### 2026-03-02: Unified DLQ Module
+
+- [x] **rustlib v1.10.0** — `dlq` module with DlqBackend trait, file + Kafka backends, cascade/fan-out orchestrator
+- [x] **dfe-loader** — Replaced bespoke DlqProducer with rustlib Dlq (deleted 340 lines)
+- [x] **dfe-receiver** — Replaced hard-coded dlq_land routing with rustlib Dlq cascade
+- [x] **env_compat test fix** — Serialised parallel env var tests with Mutex
+- [x] All tests passing: rustlib (22 DLQ), loader (367+156), receiver (200)
 
 ### 2026-03-02: gRPC Transport, Zenoh Removal, CI Modernisation
 

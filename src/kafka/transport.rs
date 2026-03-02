@@ -49,7 +49,7 @@ impl TransportAdapter {
     }
 
     /// Convert local KafkaConfig to hyperi-rustlib TransportKafkaConfig.
-    fn convert_config(config: &KafkaConfig) -> TransportKafkaConfig {
+    pub fn convert_config(config: &KafkaConfig) -> TransportKafkaConfig {
         let mut transport_config = TransportKafkaConfig {
             brokers: config.brokers.clone(),
             group: config.group.clone(),

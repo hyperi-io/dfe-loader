@@ -432,14 +432,54 @@ impl Default for RoutingConfig {
 #[serde(default)]
 pub struct DlqConfig {
     pub enabled: bool,
+    /// Backend mode: cascade (default), fan_out, file_only, kafka_only
+    pub mode: String,
     pub topic_suffix: String,
+    /// File backend settings
+    pub file_enabled: bool,
+    pub file_path: String,
+    /// Kafka backend settings
+    pub kafka_enabled: bool,
 }
 
 impl Default for DlqConfig {
     fn default() -> Self {
         Self {
             enabled: true,
+            mode: "cascade".to_string(),
             topic_suffix: ".dlq".to_string(),
+            file_enabled: true,
+            file_path: "/var/spool/dfe/dlq".to_string(),
+            kafka_enabled: true,
+        }
+    }
+}
+
+impl DlqConfig {
+    /// Convert to rustlib DlqConfig for the unified DLQ module.
+    pub fn to_rustlib_config(&self) -> hyperi_rustlib::dlq::DlqConfig {
+        use hyperi_rustlib::dlq::{DlqMode, FileDlqConfig};
+
+        let mode = match self.mode.as_str() {
+            "fan_out" => DlqMode::FanOut,
+            "file_only" => DlqMode::FileOnly,
+            "kafka_only" => DlqMode::KafkaOnly,
+            _ => DlqMode::Cascade,
+        };
+
+        hyperi_rustlib::dlq::DlqConfig {
+            enabled: self.enabled,
+            mode,
+            file: FileDlqConfig {
+                enabled: self.file_enabled,
+                path: self.file_path.clone().into(),
+                ..FileDlqConfig::default()
+            },
+            kafka: hyperi_rustlib::dlq::KafkaDlqConfig {
+                enabled: self.kafka_enabled,
+                topic_suffix: self.topic_suffix.clone(),
+                ..hyperi_rustlib::dlq::KafkaDlqConfig::default()
+            },
         }
     }
 }

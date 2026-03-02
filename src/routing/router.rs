@@ -577,10 +577,7 @@ mod tests {
             mapping_file: None,
             topic_suffixes: vec!["_land".to_string(), "_load".to_string()],
             compat_v2_source: false,
-            dlq: crate::config::DlqConfig {
-                enabled: true,
-                topic_suffix: ".dlq".to_string(),
-            },
+            dlq: crate::config::DlqConfig::default(),
         }
     }
 
