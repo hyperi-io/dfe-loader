@@ -46,6 +46,7 @@ pub struct Config {
     pub hot_reload: HotReloadConfig,
     pub profiles: ProfilesConfig,
     pub keda: KedaConfig,
+    pub scaling: ScalingConfig,
 }
 
 fn default_transport() -> String {
@@ -762,6 +763,88 @@ impl Default for KedaConfig {
             cpu_enabled: true,
             cpu_threshold: 80,
         }
+    }
+}
+
+// ============================================================================
+// Scaling Pressure Configuration
+// ============================================================================
+
+/// Scaling pressure configuration for KEDA autoscaling.
+///
+/// Produces a 0-100 composite metric (`loader_scaling_pressure`) based on
+/// weighted application signals with two hard gates (circuit breaker, memory).
+///
+/// Override weights at runtime via env vars:
+///   DFE_LOADER__SCALING__WEIGHT_KAFKA_LAG=0.45
+///   DFE_LOADER__SCALING__SATURATION_BUFFER_DEPTH=20000
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ScalingConfig {
+    /// Enable scaling pressure calculation.
+    pub enabled: bool,
+    /// Memory usage ratio (0.0-1.0) that forces scaling_pressure to 100.
+    pub memory_gate_threshold: f64,
+    // Component weights (should sum to ~1.0)
+    pub weight_kafka_lag: f64,
+    pub weight_buffer_depth: f64,
+    pub weight_insert_latency: f64,
+    pub weight_memory: f64,
+    pub weight_errors: f64,
+    // Component saturation points
+    pub saturation_kafka_lag: f64,
+    pub saturation_buffer_depth: f64,
+    pub saturation_insert_latency: f64,
+    pub saturation_errors: f64,
+}
+
+impl Default for ScalingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            memory_gate_threshold: 0.8,
+            weight_kafka_lag: 0.35,
+            weight_buffer_depth: 0.25,
+            weight_insert_latency: 0.15,
+            weight_memory: 0.15,
+            weight_errors: 0.10,
+            saturation_kafka_lag: 100_000.0,
+            saturation_buffer_depth: 10_000.0,
+            saturation_insert_latency: 5.0,
+            saturation_errors: 100.0,
+        }
+    }
+}
+
+impl ScalingConfig {
+    /// Build a `ScalingPressure` engine from this config.
+    pub fn build_pressure(&self) -> hyperi_rustlib::ScalingPressure {
+        use hyperi_rustlib::{ScalingComponent, ScalingPressureConfig};
+
+        let base = ScalingPressureConfig {
+            enabled: self.enabled,
+            memory_gate_threshold: self.memory_gate_threshold,
+        };
+        let components = vec![
+            ScalingComponent::new(
+                "kafka_lag",
+                self.weight_kafka_lag,
+                self.saturation_kafka_lag,
+            ),
+            ScalingComponent::new(
+                "buffer_depth",
+                self.weight_buffer_depth,
+                self.saturation_buffer_depth,
+            ),
+            ScalingComponent::new(
+                "insert_latency",
+                self.weight_insert_latency,
+                self.saturation_insert_latency,
+            ),
+            ScalingComponent::new("memory", self.weight_memory, 1.0),
+            ScalingComponent::new("errors", self.weight_errors, self.saturation_errors),
+        ];
+        hyperi_rustlib::ScalingPressure::new(base, components)
     }
 }
 

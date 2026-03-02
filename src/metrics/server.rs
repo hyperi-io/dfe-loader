@@ -17,6 +17,8 @@ use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info};
 
+use hyperi_rustlib::ScalingPressure;
+
 use super::Metrics;
 
 /// Health status for the application
@@ -31,13 +33,15 @@ pub struct HealthStatus {
 pub struct ServerState {
     pub metrics: Metrics,
     pub health: std::sync::RwLock<HealthStatus>,
+    pub scaling: Arc<ScalingPressure>,
 }
 
 impl ServerState {
-    pub fn new(metrics: Metrics) -> Self {
+    pub fn new(metrics: Metrics, scaling: Arc<ScalingPressure>) -> Self {
         Self {
             metrics,
             health: std::sync::RwLock::new(HealthStatus::default()),
+            scaling,
         }
     }
 
@@ -83,7 +87,20 @@ async fn handle_request(
         // Prometheus metrics endpoint
         (&Method::GET, "/metrics") => {
             debug!("Serving metrics");
-            let metrics_text = state.metrics.gather();
+            let mut metrics_text = state.metrics.gather();
+
+            // Append scaling pressure gauge
+            if state.scaling.is_enabled() {
+                use std::fmt::Write;
+                let _ = write!(
+                    metrics_text,
+                    "# HELP loader_scaling_pressure Gated scaling pressure for autoscaling (0-100)\n\
+                     # TYPE loader_scaling_pressure gauge\n\
+                     loader_scaling_pressure {:.2}\n",
+                    state.scaling.calculate()
+                );
+            }
+
             full_response(StatusCode::OK, "text/plain; charset=utf-8", metrics_text)
         }
 
@@ -175,6 +192,11 @@ pub async fn run_server(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::ScalingConfig;
+
+    fn test_scaling() -> Arc<ScalingPressure> {
+        Arc::new(ScalingConfig::default().build_pressure())
+    }
 
     #[test]
     fn test_health_status_default() {
@@ -187,7 +209,7 @@ mod tests {
     #[test]
     fn test_server_state_set_ready() {
         let metrics = Metrics::new();
-        let state = ServerState::new(metrics);
+        let state = ServerState::new(metrics, test_scaling());
 
         state.set_ready(true);
         let health = state.health.read().unwrap();
@@ -197,7 +219,7 @@ mod tests {
     #[test]
     fn test_server_state_set_connections() {
         let metrics = Metrics::new();
-        let state = ServerState::new(metrics);
+        let state = ServerState::new(metrics, test_scaling());
 
         state.set_kafka_connected(true);
         state.set_clickhouse_connected(true);
@@ -216,7 +238,7 @@ mod tests {
     #[tokio::test]
     async fn test_server_starts_and_stops() {
         let metrics = Metrics::new();
-        let _state = Arc::new(ServerState::new(metrics));
+        let _state = Arc::new(ServerState::new(metrics, test_scaling()));
         let shutdown = CancellationToken::new();
 
         // Verify cancellation token works
