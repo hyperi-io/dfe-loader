@@ -1,3 +1,11 @@
+## [1.9.4](https://github.com/hyperi-io/dfe-loader/compare/v1.9.3...v1.9.4) (2026-03-02)
+
+
+### Bug Fixes
+
+* update rustlib to v1.8.1, remove zenoh transport, update ci/ai submodules ([acdacc2](https://github.com/hyperi-io/dfe-loader/commit/acdacc2d39d6b839623454f06d8a9c6db5b2e105))
+* use jfrog registry for container and helm publishing ([62b3268](https://github.com/hyperi-io/dfe-loader/commit/62b3268068dd4fe7d057f72ea41ff715e2e99394))
+
 ## [1.9.3](https://github.com/hyperi-io/dfe-loader/compare/v1.9.2...v1.9.3) (2026-02-28)
 
 
