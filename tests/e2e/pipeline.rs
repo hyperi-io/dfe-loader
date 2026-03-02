@@ -183,7 +183,11 @@ async fn test_metrics_server_integration() {
     metrics.record_received();
     metrics.record_processed("test_table");
 
-    let state = Arc::new(ServerState::new(metrics));
+    let scaling = Arc::new(hyperi_rustlib::ScalingPressure::new(
+        hyperi_rustlib::scaling::ScalingPressureConfig::default(),
+        vec![],
+    ));
+    let state = Arc::new(ServerState::new(metrics, scaling));
     state.set_ready(true);
 
     // We can't easily test the full server without binding to a port

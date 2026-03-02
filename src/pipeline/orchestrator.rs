@@ -21,12 +21,13 @@ use tracing::{debug, error, info, warn};
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
+use hyperi_rustlib::dlq::{Dlq, DlqEntry, DlqSource};
 use hyperi_rustlib::ScalingPressure;
 
 use crate::buffer::{BufferManager, FlushBatch, KafkaOffset};
 use crate::clickhouse::{ArrowClickHouseClient, Inserter, InserterConfig};
 use crate::config::{Config, MetadataConfig, SharedConfig, TableCaptureConfig};
-use crate::kafka::{DlqMessage, DlqProducer, KafkaMessage, TransportBackend};
+use crate::kafka::{KafkaMessage, TransportAdapter, TransportBackend};
 use crate::metrics::Metrics;
 use crate::payload::{FormatDetector, FormatMode, PayloadFormat};
 use crate::routing::{RouteResult, Router};
@@ -207,21 +208,22 @@ impl Orchestrator {
         // Inserter uses Arrow-only path (gets its own Arc clone)
         let inserter = Inserter::new(Arc::clone(&arrow_client), InserterConfig::default());
 
-        // DLQ producer (optional - only if enabled in config)
-        let dlq_config = &self.config.routing.dlq;
-        let dlq_producer: Option<Arc<DlqProducer>> = if dlq_config.enabled {
-            match DlqProducer::new(&self.config.kafka, dlq_config) {
-                Ok(producer) => {
-                    info!(suffix = %dlq_config.topic_suffix, "DLQ producer enabled");
-                    Some(Arc::new(producer))
+        // DLQ (unified rustlib module — cascade: Kafka primary, file fallback)
+        let dlq_config = self.config.routing.dlq.to_rustlib_config();
+        let transport_kafka_config = TransportAdapter::convert_config(&self.config.kafka);
+        let dlq: Option<Arc<Dlq>> = if self.config.routing.dlq.enabled {
+            match Dlq::with_kafka(&dlq_config, "loader", &transport_kafka_config) {
+                Ok(d) => {
+                    info!(mode = ?dlq_config.mode, "DLQ enabled");
+                    Some(Arc::new(d))
                 }
                 Err(e) => {
-                    warn!(error = %e, "Failed to create DLQ producer, DLQ disabled");
+                    warn!(error = %e, "Failed to create DLQ, disabled");
                     None
                 }
             }
         } else {
-            debug!("DLQ producer disabled by config");
+            debug!("DLQ disabled by config");
             None
         };
 
@@ -393,29 +395,23 @@ impl Orchestrator {
                                             m.record_dlq();
                                         }
 
-                                        // Send to DLQ if producer is available
-                                        if let Some(ref dlq) = dlq_producer {
-                                            // Clone Arc for the spawned task
-                                            let dlq_clone: Arc<DlqProducer> = Arc::clone(dlq);
-                                            let reason_owned = e.to_string();
-                                            let payload_owned = kafka_msg.payload.clone();
-                                            let topic_owned = kafka_msg.topic.to_string();
-                                            let partition = kafka_msg.partition;
-                                            let offset = kafka_msg.offset;
-                                            let key_owned = kafka_msg.key.clone();
+                                        // Send to DLQ if available
+                                        if let Some(ref dlq) = dlq {
+                                            let dlq_clone = Arc::clone(dlq);
+                                            let entry = DlqEntry::new(
+                                                "loader",
+                                                e.to_string(),
+                                                kafka_msg.payload.clone(),
+                                            )
+                                            .with_source(DlqSource::kafka(
+                                                kafka_msg.topic.to_string(),
+                                                kafka_msg.partition,
+                                                kafka_msg.offset,
+                                            ));
 
                                             // Fire-and-forget DLQ send (don't block pipeline)
                                             tokio::spawn(async move {
-                                                let msg = DlqMessage {
-                                                    payload: &payload_owned,
-                                                    reason: &reason_owned,
-                                                    destination: None,
-                                                    original_topic: &topic_owned,
-                                                    original_partition: partition,
-                                                    original_offset: offset,
-                                                    key: key_owned.as_deref(),
-                                                };
-                                                if let Err(dlq_err) = dlq_clone.send(msg).await {
+                                                if let Err(dlq_err) = dlq_clone.send(entry).await {
                                                     error!(error = %dlq_err, "Failed to send message to DLQ");
                                                 }
                                             });
