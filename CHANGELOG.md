@@ -1,3 +1,10 @@
+## [1.9.6](https://github.com/hyperi-io/dfe-loader/compare/v1.9.5...v1.9.6) (2026-03-02)
+
+
+### Bug Fixes
+
+* remove schema/profile/DDL system — table creation moves to dfe-engine ([9cd56b5](https://github.com/hyperi-io/dfe-loader/commit/9cd56b57de67b532647ecef27ca89c1750aa17b3))
+
 ## [1.9.5](https://github.com/hyperi-io/dfe-loader/compare/v1.9.4...v1.9.5) (2026-03-02)
 
 
