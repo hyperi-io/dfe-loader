@@ -55,6 +55,73 @@
 
 ---
 
+## Current: ScalingPressure Integration (IN PROGRESS)
+
+**rustlib v1.9.0** — `scaling` module published (ScalingPressure, RateWindow, config)
+
+- [x] **rustlib `scaling` module** — ScalingPressure engine, RateWindow, 29 tests (v1.9.0)
+- [x] **dfe-loader `ScalingConfig`** — weight/saturation config in loader.rs, wired to ServerState
+- [ ] **IMPORTANT: Switch Cargo.toml back to registry dep** — currently using local path for dev
+  - Change `hyperi-rustlib = { path = ... }` back to `{ version = ">=1.9.0", registry = "hyperi" }`
+  - v1.9.0 CI publish was running — check JFrog before switching
+- [ ] **Wire orchestrator component updates** — set_component calls in pipeline loop
+- [ ] **dfe-receiver migration** — replace hard-coded keda_scaling_metric() with rustlib ScalingPressure
+- [ ] **dfe-archiver integration** — add scaling config and wiring
+- [ ] **Config documentation** — scaling.* config keys with defaults for all services
+
+---
+
+## Current: Dependency Updates
+
+- [ ] **Update hyperi-rustlib** to v1.9.0+ across all DFE projects
+  - dfe-loader: currently local path dep (switch to >=1.9.0 registry)
+  - dfe-receiver: 1.8.1 → >=1.9.0 (add scaling feature)
+  - dfe-archiver: 1.4.3 → >=1.9.0 (add scaling feature)
+
+- [ ] **Update all dependency crates** to latest versions in dfe-loader, dfe-receiver, dfe-archiver
+  - Use `cargo outdated` and web search to identify updates
+  - Check for breaking changes before upgrading
+  - Run full test suite after each project update
+
+---
+
+## Next: DFE Shared Schemas (dfe-schemas submodule)
+
+**Design:** `docs/DFE-SCHEMAS.md`
+
+- [ ] Create `hyperi-io/dfe-schemas` repo with common header YAML definitions
+  - `common-header/timeseries.yaml` (9 columns — default for event ingestion)
+  - `common-header/minimal.yaml` (4 columns — high-volume structured data)
+  - `common-header/passthrough.yaml` (4 columns — transparent bridge mode)
+  - `hunt-results/detection.yaml` (6 hunt detection output columns)
+- [ ] Add `dfe-schemas` as git submodule at `schemas/`
+- [ ] Implement profile loader with resolution order: env var → submodule → bundled fallback
+- [ ] Wire profile selection into schema module (`src/schema/mod.rs`)
+- [ ] Unit tests for profile loading and column type mapping
+- [ ] Keep bundled `schemas/profiles/` in sync as fallback
+
+---
+
+## Next: KEDA Scaling Metrics — MOSTLY DONE (see ScalingPressure above)
+
+**Implemented:** `loader_scaling_pressure` gauge (0-100) via rustlib `ScalingPressure` engine.
+Remaining: wire orchestrator component updates (kafka_lag, buffer_depth, etc.)
+
+---
+
+## Next: DLQ to File Option
+
+- [ ] **Add file-based DLQ sink** — write failed messages to local files
+  - Configurable output directory and rotation (size/time-based)
+  - JSON-lines format with metadata (error reason, original topic, timestamp)
+  - Useful when Kafka DLQ topic is unavailable or for debugging
+  - Config: `dlq.mode = "kafka" | "file"`, `dlq.file.directory`, `dlq.file.max_size_mb`
+- [ ] Wire into existing `DlqProducer` as alternative sink
+- [ ] Unit tests for file DLQ write and rotation
+- [ ] Integration test: verify failed messages land in DLQ file
+
+---
+
 ## Next: Defaults & Per-Table _raw Config
 
 - [x] **Change `default_table` from `"dfe"` to `"default"`** — destination becomes `dfe.default`
@@ -71,13 +138,25 @@
 
 ---
 
-## Next: Container Image + Helm Chart Publishing
+## Next: Container Image + Helm Chart Publishing (All DFE Services)
 
-- [ ] **Container image + Helm chart** (see plan: groovy-munching-blanket.md)
-  1. [ ] Create `Dockerfile` in repo root (COPY pre-built binary, Option B)
-  2. [ ] Create `chart/` directory with Helm chart (KEDA autoscaling)
-  3. [ ] Container + Helm config already in `.hyperi-ci.yaml` (jfrog registry)
-  4. [ ] Test: trigger release, verify container + chart published to JFrog
+**Status:** NOT IMPLEMENTED — Dockerfile and Helm chart do not exist for any dfe-<service> yet.
+
+**Approach:** Maximise in rustlib — canonical Helm chart templates + Dockerfile generation so each
+dfe-app provides its `DeploymentContract` values and gets artefacts generated as standard.
+
+- [ ] **rustlib `deployment` module enhancements**
+  1. [ ] Add Helm chart template generation (canonical templates in rustlib, app values injected)
+  2. [ ] Add Dockerfile generation from `DeploymentContract` (port, healthcheck, entrypoint)
+  3. [ ] `generate_helm_chart(contract, output_dir)` — writes chart/ with values.yaml, templates/
+  4. [ ] `generate_dockerfile(contract, output_path)` — writes Dockerfile (Option B: COPY binary)
+  5. [ ] CLI flag: `--emit-helm` / `--emit-dockerfile` for CI integration
+  6. [ ] Apps only define ~10-20% (app name, port, config mount, components)
+
+- [ ] **dfe-loader** — Generate chart/ + Dockerfile from DeploymentContract
+- [ ] **dfe-receiver** — Same pattern
+- [ ] **dfe-archiver** — Same pattern
+- [ ] **CI integration** — Container + Helm config in `.hyperi-ci.yaml` (jfrog registry)
 
 ---
 
