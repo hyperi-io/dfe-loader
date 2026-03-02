@@ -731,9 +731,10 @@ topic_replication_factor = 1
 
 | File | Purpose |
 |------|---------|
-| `schemas/profiles/timeseries.yaml` | Default profile — full common header |
-| `schemas/profiles/minimal.yaml` | Minimal profile — no _raw, _tags, _source |
-| `schemas/profiles/passthrough.yaml` | Passthrough profile — no field injection |
+| `schemas/common-header/timeseries.yaml` | Default profile — full common header (via [dfe-schemas](DFE_SCHEMAS.md) submodule) |
+| `schemas/common-header/minimal.yaml` | Minimal profile — no _raw, _tags, _source (via dfe-schemas submodule) |
+| `schemas/common-header/passthrough.yaml` | Passthrough profile — no field injection (via dfe-schemas submodule) |
+| `schemas/profiles/` | Bundled fallback profiles (kept in sync with submodule) |
 | `src/schema/profile.rs` | Profile types, registry, DDL generation, migration |
 | `src/schema/mod.rs` | Schema parsing, table tags, capability detection |
 | `src/transform/transformer.rs` | Profile-driven field injection |
