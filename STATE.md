@@ -795,7 +795,7 @@ must `chmod +x` after downloading artifacts before `find -perm -u=x` searches.
 
 ---
 
-**Last Updated:** 2026-02-28
+**Last Updated:** 2026-03-02
 **ClickHouse:** 25.12 (native protocol)
-**Version:** 1.8.0
-**Status:** FSL-1.1-ALv2 Licensed, CI publishing amd64 + arm64 binaries
+**Version:** 1.9.3
+**Status:** FSL-1.1-ALv2 Licensed, CI publishing amd64 + arm64 binaries, ARC runner

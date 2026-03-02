@@ -10,41 +10,40 @@
 
 ---
 
-## Current: Zenoh → gRPC Transport Migration
+## Current: gRPC Transport Migration
 
-**Goal:** Replace `ZenohTransport` with `GrpcTransport` (tonic) across all DFE projects.
+**Goal:** Add `GrpcTransport` (tonic) with Vector wire-protocol compatibility across DFE projects.
 
 **Design:** `reference/grpc_transport_design.md`
 **Analysis:** `reference/devtest_transport_analysis.md`
 
-### Phase 1: rustlib (hyperi-rustlib)
+### Phase 1: rustlib (hyperi-rustlib) — COMPLETE
 
-1. [ ] Create `proto/dfe_transport.proto` — PushEvents RPC definition
-2. [ ] Add `tonic-build` to build deps, write `build.rs` for proto codegen
-3. [ ] Create `src/transport/grpc/` module (config, token, client, server)
-4. [ ] Implement `GrpcTransport` with existing `Transport` trait
-5. [ ] Update `TransportType` enum — Zenoh → Grpc
-6. [ ] Update `TransportConfig` — zenoh field → grpc field
-7. [ ] Update feature flags — `transport-zenoh` → `transport-grpc` (tonic + prost)
-8. [ ] Remove `src/transport/zenoh/` directory
-9. [ ] Remove `zenoh` dependency from Cargo.toml
-10. [ ] Write unit tests (config, token, round-trip, backpressure, shutdown)
-11. [ ] Publish to Artifactory (major bump — v2.0.0)
+- [x] Proto files vendored (DFE lean + Vector wire compat)
+- [x] tonic/prost dependencies + feature flags (`transport-grpc`, `transport-grpc-vector-compat`)
+- [x] `GrpcTransport` implementing `Transport` trait (client + server modes)
+- [x] `VectorCompatService` + `VectorCompatClient` for Vector agent interop
+- [x] `EventWrapper` ↔ `serde_json::Value` bidirectional conversion
+- [x] Zenoh transport removed from rustlib
+- [x] Published to JFrog Artifactory (v1.8.1+)
 
-### Phase 2: dfe-loader
+### Phase 2: dfe-loader — Zenoh Cleanup COMPLETE, gRPC Wiring Pending
 
-1. [ ] Update Cargo.toml — `transport-zenoh` → `transport-grpc`, rustlib `>=2.0`
-2. [ ] Remove `ZenohConfig` from `src/config/loader.rs`
-3. [ ] Add `GrpcConfig` to `src/config/loader.rs`
-4. [ ] Remove `ZenohTransportAdapter` from `src/kafka/transport.rs`
-5. [ ] Add `GrpcTransportAdapter` to `src/kafka/transport.rs`
-6. [ ] Update `TransportBackend` enum — Zenoh → Grpc
-7. [ ] Update config examples and docs
-8. [ ] Run tests, verify CI passes
+- [x] Removed `transport-zenoh` feature from Cargo.toml
+- [x] Removed `ZenohConfig` from config
+- [x] Removed `ZenohTransportAdapter` from transport
+- [x] Updated `TransportBackend` enum (Kafka only for now)
+- [x] Updated rustlib to v1.8.1 from JFrog
+- [x] All 433 tests passing, CI green on ARC runner
+- [ ] Add `transport-grpc` feature to Cargo.toml
+- [ ] Add `GrpcConfig` to `src/config/loader.rs`
+- [ ] Add `GrpcTransportAdapter` to `src/kafka/transport.rs`
+- [ ] Update `TransportBackend` enum — add Grpc variant
+- [ ] Update config examples and docs
 
 ### Phase 3: dfe-archiver
 
-1. [ ] Update Cargo.toml — swap `transport-zenoh` for `transport-grpc`, rustlib `>=2.0`
+1. [ ] Update Cargo.toml — add `transport-grpc`, update rustlib
 2. [ ] No code changes needed (uses rustlib transport directly)
 
 ### Phase 4: dfe-receiver
@@ -72,14 +71,13 @@
 
 ---
 
-## Next: GHCR Container Image Publishing
+## Next: Container Image + Helm Chart Publishing
 
-- [ ] **Container image publishing** (see `docs/CONTAINER-PUBLISHING.md`)
-  1. [ ] Create `Dockerfile` in repo root (wraps pre-built binary, Option B)
-  2. [ ] Add `publish.container` section to `.hyperi-ci.yaml`
-  3. [ ] Update ci submodule to v1.59.0+
-  4. [ ] Update publish workflow for container inputs
-  5. [ ] Test: trigger release, verify `ghcr.io/hyperi-io/dfe-loader`
+- [ ] **Container image + Helm chart** (see plan: groovy-munching-blanket.md)
+  1. [ ] Create `Dockerfile` in repo root (COPY pre-built binary, Option B)
+  2. [ ] Create `chart/` directory with Helm chart (KEDA autoscaling)
+  3. [ ] Container + Helm config already in `.hyperi-ci.yaml` (jfrog registry)
+  4. [ ] Test: trigger release, verify container + chart published to JFrog
 
 ---
 
@@ -130,6 +128,16 @@
 ---
 
 ## Completed
+
+### 2026-03-02: gRPC Transport, Zenoh Removal, CI Modernisation
+
+- [x] **rustlib v1.8.1 gRPC transport** — Published to JFrog with Vector wire-compat
+- [x] **Removed zenoh transport** — ZenohConfig, ZenohTransportAdapter, transport-zenoh feature
+- [x] **Updated rustlib to v1.8.1** from JFrog Artifactory
+- [x] **CI on ARC runner** — `GH_RUNNER_DEFAULT=arc-runner-16cpu`, regenerated workflows
+- [x] **Registry fix** — Container/Helm publishing switched from ghcr to jfrog
+- [x] **Updated ci/ai submodules** to latest
+- [x] All 433 tests passing, CI green (Quality + Test) on ARC runner
 
 ### 2026-03-02: Config Reload & Registry Publishing
 
@@ -238,10 +246,10 @@
 - [x] `Message<T>` struct (key, payload, token, timestamp, format)
 - [x] `SendResult` enum (Ok, Backpressured, Fatal)
 - [x] `TransportError` and `TransportResult` types
-- [x] Feature flags: `transport-memory`, `transport-kafka`, `transport-zenoh`, `transport-all`
+- [x] Feature flags: `transport-memory`, `transport-kafka`, `transport-grpc`, `transport-all`
 - [x] `MemoryTransport` using tokio::mpsc (5 unit tests)
 - [x] `KafkaTransport` wrapping rdkafka with SASL/SSL support
-- [x] `ZenohTransport` with Zenoh 1.x API and SHM support
+- [x] `GrpcTransport` with tonic + Vector wire-protocol compatibility
 - [x] `PayloadFormat` auto-detection (JSON/MsgPack by first byte)
 - [x] Payload utilities: parse, serialize, extract_field, extract_nested_field
 - [x] All 52 transport tests passing
