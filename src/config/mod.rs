@@ -33,7 +33,7 @@ pub use loader::{
     FieldMappingConfig, FieldMappingOverride, FieldSanitizationConfig, HotReloadConfig,
     KafkaConfig, LoggingConfig, MemoryConfig, MetadataConfig, MetricsConfig, NullHandling,
     PayloadConfig, ProfilesConfig, RoutingConfig, SaslConfig, SaslMechanism, SchemaConfig,
-    TableCaptureConfig, TimestampDqConfig, TlsConfig, ZenohConfig,
+    TableCaptureConfig, TimestampDqConfig, TlsConfig,
 };
 pub use shared::SharedConfig;
 pub use watcher::{ConfigWatcher, WatcherConfig};
