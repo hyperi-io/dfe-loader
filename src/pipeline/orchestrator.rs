@@ -5,7 +5,7 @@
 //!
 //! Orchestrates the Transport → Transform → Buffer → ClickHouse pipeline.
 //!
-//! Uses the hyperi-rustlib Transport abstraction for message sources (Kafka/Zenoh/Memory).
+//! Uses the hyperi-rustlib Transport abstraction for message sources (Kafka/Memory).
 //! Processes messages in batches for efficiency.
 //!
 //! Uses Arrow batching: accumulates multiple messages, converts to
@@ -211,7 +211,7 @@ impl Orchestrator {
             "Profile registry initialized"
         );
 
-        // Initialize transport backend (Kafka, Zenoh, etc. based on config)
+        // Initialize transport backend (Kafka based on config)
         let transport = TransportBackend::from_config(&self.config).await?;
         info!(transport = transport.name(), "Transport initialized");
 

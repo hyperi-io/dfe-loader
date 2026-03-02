@@ -181,6 +181,5 @@ jemalloc = ["dep:tikv-jemallocator", "dep:tikv-jemalloc-ctl"]  # Best for large 
 mimalloc = ["dep:mimalloc"]  # Often faster, better security, consistent performance
 # Transport backends
 transport-memory = ["hyperi-rustlib/transport-memory"]  # Memory transport for unit tests
-transport-zenoh = ["hyperi-rustlib/transport-zenoh"]    # Zenoh transport for dev/test
 # Testing
 testcontainers = []  # Enable testcontainers for CI/CD (Docker required)
