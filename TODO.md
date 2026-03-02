@@ -150,7 +150,7 @@ Each is a new file implementing `DlqBackend` trait + feature flag. No changes to
 
 ---
 
-## Next: Container Image + Helm Chart Publishing (All DFE Services)
+## Current: Container Image + Helm Chart Publishing (All DFE Services)
 
 **Status:** NOT IMPLEMENTED — Dockerfile and Helm chart do not exist for any dfe-<service> yet.
 
