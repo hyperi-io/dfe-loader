@@ -15,15 +15,24 @@
 //! Uses `Cow<str>` internally to avoid String allocations when returning references.
 
 use std::borrow::Cow;
+use std::collections::HashMap;
 
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde_json::Value;
+use tracing::warn;
 
 use crate::config::{MetadataConfig, RoutingConfig};
 use crate::payload::parse::{
     extract_field_json, extract_field_json_cow, extract_nested_field_json,
     extract_nested_field_json_cow,
 };
+
+/// A pre-compiled CEL routing rule.
+struct CompiledRoutingRule {
+    program: cel_interpreter::Program,
+    target: String,
+    db: Option<String>,
+}
 
 /// Route result with destination info
 #[derive(Debug, Clone, PartialEq)]
@@ -52,6 +61,8 @@ pub enum RouteResult {
 /// - `routed_orgs`: allowlist of org_ids that get own database
 /// - `route_all_by_org`: route ALL orgs to own database
 pub struct Router {
+    /// Pre-compiled CEL routing rules (top-to-bottom, first match wins)
+    compiled_rules: Vec<CompiledRoutingRule>,
     /// Fields to check for database name (first match wins)
     /// Empty = always use default_db (shared schema)
     db_fields: Vec<String>,
@@ -118,7 +129,32 @@ impl Router {
             table_fields = combined_table;
         }
 
+        // Compile CEL routing rules (invalid rules are skipped with warning)
+        let compiled_rules: Vec<CompiledRoutingRule> = config
+            .rules
+            .iter()
+            .filter_map(
+                |rule| match hyperi_rustlib::expression::compile(&rule.when) {
+                    Ok(program) => Some(CompiledRoutingRule {
+                        program,
+                        target: rule.target.clone(),
+                        db: rule.db.clone(),
+                    }),
+                    Err(e) => {
+                        warn!(
+                            expr = %rule.when,
+                            target = %rule.target,
+                            error = %e,
+                            "Skipping invalid routing rule"
+                        );
+                        None
+                    }
+                },
+            )
+            .collect();
+
         Self {
+            compiled_rules,
             db_fields: config.db_fields.clone(),
             table_fields,
             default_db: config.default_db.clone(),
@@ -336,13 +372,56 @@ impl Router {
     /// **This is the preferred method** when you've already parsed the JSON,
     /// as it avoids a second parse. The orchestrator should use this.
     ///
+    /// CEL routing rules are evaluated first (top-to-bottom, first match wins).
+    /// If no rule matches, falls through to field-extraction routing.
+    ///
     /// Returns "db.table" string for buffer routing.
     #[inline]
     pub fn route_value(&self, value: &Value) -> RouteResult {
+        // Try CEL rules first (top-to-bottom, first match wins)
+        if let Some(result) = self.try_cel_rules(value) {
+            return result;
+        }
+
+        // Fall through to field-extraction routing
         let db = self.extract_db_from_value(value);
         let table = self.extract_table_from_value(value);
 
         self.build_route_result(&db, &table)
+    }
+
+    /// Evaluate CEL routing rules against the message.
+    ///
+    /// Builds a CEL context from the JSON value's top-level keys, then
+    /// evaluates each compiled rule. Returns the first match.
+    /// Returns None if no rules exist or none match.
+    fn try_cel_rules(&self, value: &Value) -> Option<RouteResult> {
+        if self.compiled_rules.is_empty() {
+            return None;
+        }
+
+        // Convert top-level JSON object to HashMap for CEL context
+        let obj = value.as_object()?;
+        let data: HashMap<String, serde_json::Value> =
+            obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+
+        let context = match hyperi_rustlib::expression::build_context(&data) {
+            Ok(ctx) => ctx,
+            Err(_) => return None,
+        };
+
+        for rule in &self.compiled_rules {
+            match rule.program.execute(&context) {
+                Ok(cel_interpreter::Value::Bool(true)) => {
+                    let db = rule.db.as_deref().unwrap_or(&self.default_db);
+                    return Some(RouteResult::Table(build_db_table_string(db, &rule.target)));
+                }
+                // Non-true (false, error, wrong type) → try next rule
+                _ => continue,
+            }
+        }
+
+        None
     }
 
     /// Build RouteResult from db and table strings
@@ -534,6 +613,7 @@ fn build_db_table_string(db: &str, table: &str) -> String {
 impl Default for Router {
     fn default() -> Self {
         Self {
+            compiled_rules: vec![],
             // Default: db_fields empty = shared schema (all to dfe.*)
             db_fields: vec![],
             table_fields: vec!["_source".to_string()],
@@ -578,6 +658,7 @@ mod tests {
             topic_suffixes: vec!["_land".to_string(), "_load".to_string()],
             compat_v2_source: false,
             dlq: crate::config::DlqConfig::default(),
+            rules: vec![],
         }
     }
 
@@ -1055,6 +1136,245 @@ mod tests {
         assert_eq!(
             router.route(p2),
             RouteResult::Table("dfe.network".to_string())
+        );
+    }
+
+    // ========================================================================
+    // CEL routing rule tests
+    // ========================================================================
+
+    #[test]
+    fn test_cel_rule_basic_match() {
+        let config = RoutingConfig {
+            rules: vec![crate::config::RoutingRule {
+                when: r#"severity == "critical""#.to_string(),
+                target: "alerts".to_string(),
+                db: None,
+            }],
+            ..Default::default()
+        };
+        let router = Router::new(&config);
+
+        let value = serde_json::json!({"severity": "critical", "message": "disk full"});
+        assert_eq!(
+            router.route_value(&value),
+            RouteResult::Table("dfe.alerts".to_string())
+        );
+    }
+
+    #[test]
+    fn test_cel_rule_no_match_falls_through() {
+        let config = RoutingConfig {
+            rules: vec![crate::config::RoutingRule {
+                when: r#"severity == "critical""#.to_string(),
+                target: "alerts".to_string(),
+                db: None,
+            }],
+            table_fields: vec!["event_category".to_string()],
+            ..Default::default()
+        };
+        let router = Router::new(&config);
+
+        // Rule doesn't match — falls through to field extraction
+        let value = serde_json::json!({"severity": "info", "event_category": "auth"});
+        assert_eq!(
+            router.route_value(&value),
+            RouteResult::Table("dfe.auth".to_string())
+        );
+    }
+
+    #[test]
+    fn test_cel_rule_first_match_wins() {
+        let config = RoutingConfig {
+            rules: vec![
+                crate::config::RoutingRule {
+                    when: r#"severity == "critical""#.to_string(),
+                    target: "critical_alerts".to_string(),
+                    db: None,
+                },
+                crate::config::RoutingRule {
+                    when: r#"severity == "critical""#.to_string(),
+                    target: "other_alerts".to_string(),
+                    db: None,
+                },
+            ],
+            ..Default::default()
+        };
+        let router = Router::new(&config);
+
+        let value = serde_json::json!({"severity": "critical"});
+        assert_eq!(
+            router.route_value(&value),
+            RouteResult::Table("dfe.critical_alerts".to_string())
+        );
+    }
+
+    #[test]
+    fn test_cel_rule_with_custom_db() {
+        let config = RoutingConfig {
+            rules: vec![crate::config::RoutingRule {
+                when: r#"severity == "critical""#.to_string(),
+                target: "alerts".to_string(),
+                db: Some("critical_db".to_string()),
+            }],
+            ..Default::default()
+        };
+        let router = Router::new(&config);
+
+        let value = serde_json::json!({"severity": "critical"});
+        assert_eq!(
+            router.route_value(&value),
+            RouteResult::Table("critical_db.alerts".to_string())
+        );
+    }
+
+    #[test]
+    fn test_cel_rule_string_functions() {
+        let config = RoutingConfig {
+            rules: vec![crate::config::RoutingRule {
+                when: r#"message.contains("audit")"#.to_string(),
+                target: "audit_table".to_string(),
+                db: None,
+            }],
+            ..Default::default()
+        };
+        let router = Router::new(&config);
+
+        let value = serde_json::json!({"message": "user audit trail logged"});
+        assert_eq!(
+            router.route_value(&value),
+            RouteResult::Table("dfe.audit_table".to_string())
+        );
+
+        // No match
+        let value2 = serde_json::json!({"message": "normal log"});
+        assert_eq!(
+            router.route_value(&value2),
+            RouteResult::Table("dfe.default".to_string())
+        );
+    }
+
+    #[test]
+    fn test_cel_rule_in_operator() {
+        let config = RoutingConfig {
+            rules: vec![crate::config::RoutingRule {
+                when: r#"status in ["active", "pending"]"#.to_string(),
+                target: "active_events".to_string(),
+                db: None,
+            }],
+            ..Default::default()
+        };
+        let router = Router::new(&config);
+
+        let value = serde_json::json!({"status": "active"});
+        assert_eq!(
+            router.route_value(&value),
+            RouteResult::Table("dfe.active_events".to_string())
+        );
+
+        let value2 = serde_json::json!({"status": "closed"});
+        assert_eq!(
+            router.route_value(&value2),
+            RouteResult::Table("dfe.default".to_string())
+        );
+    }
+
+    #[test]
+    fn test_cel_rule_logical_operators() {
+        let config = RoutingConfig {
+            rules: vec![crate::config::RoutingRule {
+                when: r#"severity == "critical" && action == "login""#.to_string(),
+                target: "critical_auth".to_string(),
+                db: None,
+            }],
+            ..Default::default()
+        };
+        let router = Router::new(&config);
+
+        // Both conditions met
+        let value = serde_json::json!({"severity": "critical", "action": "login"});
+        assert_eq!(
+            router.route_value(&value),
+            RouteResult::Table("dfe.critical_auth".to_string())
+        );
+
+        // Only one condition met
+        let value2 = serde_json::json!({"severity": "critical", "action": "logout"});
+        assert_eq!(
+            router.route_value(&value2),
+            RouteResult::Table("dfe.default".to_string())
+        );
+    }
+
+    #[test]
+    fn test_cel_rule_invalid_expression_skipped() {
+        let config = RoutingConfig {
+            rules: vec![
+                crate::config::RoutingRule {
+                    when: "this is not valid CEL <<<>>>".to_string(),
+                    target: "broken".to_string(),
+                    db: None,
+                },
+                crate::config::RoutingRule {
+                    when: r#"severity == "critical""#.to_string(),
+                    target: "alerts".to_string(),
+                    db: None,
+                },
+            ],
+            ..Default::default()
+        };
+        let router = Router::new(&config);
+
+        // Invalid rule skipped, valid rule still works
+        let value = serde_json::json!({"severity": "critical"});
+        assert_eq!(
+            router.route_value(&value),
+            RouteResult::Table("dfe.alerts".to_string())
+        );
+    }
+
+    #[test]
+    fn test_cel_rule_missing_field_no_match() {
+        let config = RoutingConfig {
+            rules: vec![crate::config::RoutingRule {
+                when: r#"severity == "critical""#.to_string(),
+                target: "alerts".to_string(),
+                db: None,
+            }],
+            ..Default::default()
+        };
+        let router = Router::new(&config);
+
+        // severity field not present — rule should not match
+        let value = serde_json::json!({"message": "hello"});
+        assert_eq!(
+            router.route_value(&value),
+            RouteResult::Table("dfe.default".to_string())
+        );
+    }
+
+    #[test]
+    fn test_cel_rule_arithmetic() {
+        let config = RoutingConfig {
+            rules: vec![crate::config::RoutingRule {
+                when: "amount > 10000".to_string(),
+                target: "high_value".to_string(),
+                db: None,
+            }],
+            ..Default::default()
+        };
+        let router = Router::new(&config);
+
+        let value = serde_json::json!({"amount": 15000});
+        assert_eq!(
+            router.route_value(&value),
+            RouteResult::Table("dfe.high_value".to_string())
+        );
+
+        let value2 = serde_json::json!({"amount": 500});
+        assert_eq!(
+            router.route_value(&value2),
+            RouteResult::Table("dfe.default".to_string())
         );
     }
 }

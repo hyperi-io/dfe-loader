@@ -35,6 +35,7 @@ async fn test_org_id_field_population() {
         topic_suffixes: vec!["_land".to_string(), "_load".to_string()],
         compat_v2_source: false,
         dlq: DlqConfig::default(),
+        rules: vec![],
     };
 
     let router = Router::new(&routing_config);
@@ -93,6 +94,7 @@ async fn test_org_id_custom_field_name() {
         topic_suffixes: vec!["_land".to_string(), "_load".to_string()],
         compat_v2_source: false,
         dlq: DlqConfig::default(),
+        rules: vec![],
     };
 
     let router = Router::new(&routing_config);
@@ -141,6 +143,7 @@ async fn test_shared_schema_multiple_orgs() {
         topic_suffixes: vec!["_land".to_string(), "_load".to_string()],
         compat_v2_source: false,
         dlq: DlqConfig::default(),
+        rules: vec![],
     };
 
     let router = Router::new(&routing_config);

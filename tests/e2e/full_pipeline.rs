@@ -90,6 +90,7 @@ async fn test_full_pipeline_e2e() {
         topic_suffixes: vec!["_land".to_string(), "_load".to_string()],
         compat_v2_source: false,
         dlq: DlqConfig::default(),
+        rules: vec![],
     };
 
     let router = Router::new(&routing_config);
@@ -265,6 +266,7 @@ async fn test_pipeline_multi_table_routing() {
         topic_suffixes: vec!["_land".to_string(), "_load".to_string()],
         compat_v2_source: false,
         dlq: DlqConfig::default(),
+        rules: vec![],
     };
 
     let router = Router::new(&routing_config);
@@ -398,6 +400,7 @@ async fn test_pipeline_with_flattening() {
         topic_suffixes: vec!["_land".to_string(), "_load".to_string()],
         compat_v2_source: false,
         dlq: DlqConfig::default(),
+        rules: vec![],
     };
 
     let transformer = Transformer::with_routing(
@@ -559,6 +562,7 @@ async fn test_pipeline_dlq_routing() {
         topic_suffixes: vec!["_land".to_string(), "_load".to_string()],
         compat_v2_source: false,
         dlq: DlqConfig::default(),
+        rules: vec![],
     };
 
     let router = Router::new(&routing_config);

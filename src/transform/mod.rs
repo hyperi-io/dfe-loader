@@ -5,6 +5,7 @@
 
 pub mod arrow;
 pub mod coerce;
+pub mod computed;
 pub mod field_mapping;
 pub mod flatten;
 pub mod mapping_builder;
@@ -18,6 +19,7 @@ pub use arrow::{
     json_to_arrow_batch, ArrowBatchBuilder, SimdBatchBuilder,
 };
 pub use coerce::Coercer;
+pub use computed::{parse_computed_directive, ComputedColumnCache};
 pub use field_mapping::{
     parse_renamed_directive, FieldMappingRule, MappingAction, RuleOrigin, TableFieldMapping,
 };
