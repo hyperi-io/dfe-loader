@@ -1353,6 +1353,84 @@ impl Config {
 
         Ok(())
     }
+
+    /// Build a deployment contract from loader config defaults.
+    ///
+    /// Apps provide ~20% customisation; rustlib generates ~80% boilerplate
+    /// (Dockerfile, Helm chart, Compose fragment).
+    pub fn deployment_contract() -> hyperi_rustlib::deployment::DeploymentContract {
+        use hyperi_rustlib::deployment::{
+            DeploymentContract, HealthContract, KedaContract, SecretEnvContract,
+            SecretGroupContract,
+        };
+
+        DeploymentContract {
+            app_name: "dfe-loader".into(),
+            binary_name: "dfe-loader".into(),
+            description: "High-performance Kafka to ClickHouse data loader".into(),
+            metrics_port: 9090,
+            health: HealthContract {
+                liveness_path: "/healthz".into(),
+                readiness_path: "/readyz".into(),
+                metrics_path: "/metrics".into(),
+            },
+            env_prefix: "DFE_LOADER".into(),
+            metric_prefix: "loader".into(),
+            config_mount_path: "/etc/dfe/loader.yaml".into(),
+            image_registry: "ghcr.io/hyperi-io".into(),
+            extra_ports: vec![],
+            entrypoint_args: vec!["--config".into(), "/etc/dfe/loader.yaml".into()],
+            secrets: vec![
+                SecretGroupContract {
+                    group_name: "kafka".into(),
+                    env_vars: vec![
+                        SecretEnvContract {
+                            env_var: "DFE_LOADER__KAFKA__SASL__USERNAME".into(),
+                            key_name: "username".into(),
+                            secret_key: "kafka-username".into(),
+                        },
+                        SecretEnvContract {
+                            env_var: "DFE_LOADER__KAFKA__SASL__PASSWORD".into(),
+                            key_name: "password".into(),
+                            secret_key: "kafka-password".into(),
+                        },
+                    ],
+                },
+                SecretGroupContract {
+                    group_name: "clickhouse".into(),
+                    env_vars: vec![SecretEnvContract {
+                        env_var: "DFE_LOADER__CLICKHOUSE__PASSWORD".into(),
+                        key_name: "password".into(),
+                        secret_key: "clickhouse-password".into(),
+                    }],
+                },
+            ],
+            default_config: Some(serde_json::json!({
+                "kafka": {
+                    "brokers": "kafka:9092",
+                    "group_id": "dfe-loader",
+                    "topics": ["dfe.default"],
+                    "security_protocol": "SASL_PLAINTEXT",
+                    "sasl_mechanism": "SCRAM-SHA-512"
+                },
+                "clickhouse": {
+                    "url": "http://clickhouse:8123",
+                    "database": "dfe",
+                    "username": "default"
+                },
+                "routing": {
+                    "default_db": "dfe",
+                    "default_table": "default"
+                },
+                "metrics": {
+                    "enabled": true,
+                    "address": "0.0.0.0:9090"
+                }
+            })),
+            depends_on: vec!["kafka".into(), "clickhouse".into()],
+            keda: Some(KedaContract::default()),
+        }
+    }
 }
 
 #[cfg(test)]

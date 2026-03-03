@@ -13,37 +13,10 @@
 use std::path::Path;
 
 use dfe_loader::config::Config;
-use hyperi_rustlib::deployment::{DeploymentContract, HealthContract, KedaContract};
-
-// ============================================================================
-// Build contract from app defaults
-// ============================================================================
+use hyperi_rustlib::deployment::DeploymentContract;
 
 fn app_contract() -> DeploymentContract {
-    let config = Config::default();
-
-    DeploymentContract {
-        app_name: "dfe-loader".into(),
-        metrics_port: 9090, // from config.metrics.address
-        health: HealthContract {
-            liveness_path: "/healthz".into(),
-            readiness_path: "/readyz".into(),
-            metrics_path: "/metrics".into(),
-        },
-        env_prefix: "DFE_LOADER".into(),
-        metric_prefix: "loader".into(),
-        config_mount_path: "/etc/dfe/loader.yaml".into(),
-        keda: Some(KedaContract {
-            min_replicas: config.keda.min_replicas,
-            max_replicas: config.keda.max_replicas,
-            polling_interval: config.keda.polling_interval,
-            cooldown_period: config.keda.cooldown_period,
-            kafka_lag_threshold: config.keda.kafka_lag_threshold,
-            activation_lag_threshold: config.keda.activation_lag_threshold,
-            cpu_enabled: config.keda.cpu_enabled,
-            cpu_threshold: config.keda.cpu_threshold,
-        }),
-    }
+    Config::deployment_contract()
 }
 
 // ============================================================================
