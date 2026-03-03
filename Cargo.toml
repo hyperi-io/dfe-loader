@@ -22,7 +22,7 @@ tokio = { version = ">=1.48", features = ["full"] }
 tokio-util = { version = ">=0.7", features = ["rt"] }
 
 # Shared library with transport abstraction
-hyperi-rustlib = { version = ">=1.11.0", registry = "hyperi", features = ["transport-kafka", "dlq-kafka", "config", "config-reload", "deployment", "version-check", "scaling"] }
+hyperi-rustlib = { version = ">=1.12.1", registry = "hyperi", features = ["transport-kafka", "dlq-kafka", "config", "config-reload", "deployment", "version-check", "scaling", "cli", "top"] }
 
 # Kafka (SASL/SCRAM required for auth) - also needed for DLQ producer
 rdkafka = { version = ">=0.38", features = ["cmake-build", "ssl", "sasl"] }
