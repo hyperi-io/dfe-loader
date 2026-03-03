@@ -1007,11 +1007,15 @@ mod tests {
     #[test]
     fn test_compat_v2_source() {
         // Pre-DFE 2.2 compat: event_category/tags.event_category prepended
-        let mut routing_config = RoutingConfig::default();
-        routing_config.compat_v2_source = true;
+        let routing_config = RoutingConfig {
+            compat_v2_source: true,
+            ..Default::default()
+        };
 
-        let mut metadata_config = MetadataConfig::default();
-        metadata_config.source_fields = vec!["_source".to_string()];
+        let metadata_config = MetadataConfig {
+            source_fields: vec!["_source".to_string()],
+            ..Default::default()
+        };
 
         let router = Router::with_metadata(&routing_config, &metadata_config);
 
@@ -1035,8 +1039,10 @@ mod tests {
     #[test]
     fn test_compat_v2_source_routing() {
         // Compat mode also prepends to table_fields for routing
-        let mut routing_config = RoutingConfig::default();
-        routing_config.compat_v2_source = true;
+        let routing_config = RoutingConfig {
+            compat_v2_source: true,
+            ..Default::default()
+        };
 
         let router = Router::with_metadata(&routing_config, &MetadataConfig::default());
 
