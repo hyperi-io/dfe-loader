@@ -48,11 +48,11 @@ mod testcontainers_impl {
         }
 
         /// Get ClickHouse configuration
-        pub fn clickhouse_config(&self) -> Option<ClickHouseConfig> {
+        pub async fn clickhouse_config(&self) -> Option<ClickHouseConfig> {
             let container = self.clickhouse.as_ref()?;
             let host = container.get_host().await.ok()?;
             let native_port = container.get_host_port_ipv4(9000).await.ok()?;
-            let http_port = container.get_host_port_ipv4(8123).await.ok()?;
+            let _http_port = container.get_host_port_ipv4(8123).await.ok()?;
 
             Some(ClickHouseConfig {
                 hosts: vec![format!("{}:{}", host, native_port)],
@@ -66,7 +66,7 @@ mod testcontainers_impl {
         }
 
         /// Get Kafka configuration
-        pub fn kafka_config(&self) -> Option<KafkaConfig> {
+        pub async fn kafka_config(&self) -> Option<KafkaConfig> {
             let container = self.kafka.as_ref()?;
             let host = container.get_host().await.ok()?;
             let port = container.get_host_port_ipv4(9093).await.ok()?;

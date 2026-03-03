@@ -155,7 +155,6 @@ fn validate_config(config: &Config) -> Result<()> {
 mod tests {
     use super::*;
     use std::fs;
-    use std::io::Write;
     use tempfile::TempDir;
 
     fn create_test_config(dir: &TempDir) -> PathBuf {

@@ -36,10 +36,7 @@ fn test_dlq_config_to_rustlib() {
     let config = DlqConfig::default();
     let rustlib_config = config.to_rustlib_config();
     assert!(rustlib_config.enabled);
-    assert_eq!(
-        rustlib_config.mode,
-        hyperi_rustlib::dlq::DlqMode::Cascade
-    );
+    assert_eq!(rustlib_config.mode, hyperi_rustlib::dlq::DlqMode::Cascade);
     assert!(rustlib_config.file.enabled);
 }
 
@@ -51,10 +48,7 @@ fn test_dlq_config_file_only_mode() {
         ..DlqConfig::default()
     };
     let rustlib_config = config.to_rustlib_config();
-    assert_eq!(
-        rustlib_config.mode,
-        hyperi_rustlib::dlq::DlqMode::FileOnly
-    );
+    assert_eq!(rustlib_config.mode, hyperi_rustlib::dlq::DlqMode::FileOnly);
 }
 
 #[test]
@@ -77,20 +71,17 @@ fn test_dlq_file_backend_write() {
         .unwrap();
 
     rt.block_on(async {
-        let entry = hyperi_rustlib::dlq::DlqEntry::new(
-            "loader",
-            "parse_error",
-            b"bad data".to_vec(),
-        )
-        .with_destination("acme.auth")
-        .with_source(hyperi_rustlib::dlq::DlqSource::kafka("events", 1, 42));
+        let entry =
+            hyperi_rustlib::dlq::DlqEntry::new("loader", "parse_error", b"bad data".to_vec())
+                .with_destination("acme.auth")
+                .with_source(hyperi_rustlib::dlq::DlqSource::kafka("events", 1, 42));
 
         dlq.send(entry).await.expect("DLQ send");
     });
 
     // Verify NDJSON file was created
-    let content = std::fs::read_to_string(dir.path().join("loader/dlq.ndjson"))
-        .expect("read DLQ file");
+    let content =
+        std::fs::read_to_string(dir.path().join("loader/dlq.ndjson")).expect("read DLQ file");
     assert!(!content.is_empty());
     let parsed: serde_json::Value = serde_json::from_str(content.trim()).expect("parse JSON");
     assert_eq!(parsed["service"], "loader");

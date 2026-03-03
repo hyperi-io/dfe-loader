@@ -657,11 +657,13 @@ mod tests {
     #[test]
     fn test_transformer_removes_legacy_routing_fields() {
         // Test with legacy event_category routing (pre-DFE 2.2 compat)
-        let mut transformer = Transformer::default();
-        transformer.routing_table_fields = vec![
-            "event_category".to_string(),
-            "tags.event_category".to_string(),
-        ];
+        let transformer = Transformer {
+            routing_table_fields: vec![
+                "event_category".to_string(),
+                "tags.event_category".to_string(),
+            ],
+            ..Default::default()
+        };
 
         let raw = br#"{"org_id": "acme", "event_category": "auth", "data": "test"}"#;
         let value: Value = serde_json::from_slice(raw).unwrap();
@@ -818,5 +820,4 @@ mod tests {
         assert_eq!(transformer.json_output(), "_json");
         assert_eq!(transformer.raw_output(), "_raw");
     }
-
 }
