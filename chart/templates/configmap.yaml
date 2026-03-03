@@ -6,20 +6,4 @@ metadata:
     {{- include "dfe-loader.labels" . | nindent 4 }}
 data:
   loader.yaml: |
-    kafka:
-      brokers: {{ .Values.config.kafka.brokers | quote }}
-      group_id: {{ .Values.config.kafka.group_id | quote }}
-      topics:
-        {{- toYaml .Values.config.kafka.topics | nindent 8 }}
-      security_protocol: {{ .Values.config.kafka.security_protocol | quote }}
-      sasl_mechanism: {{ .Values.config.kafka.sasl_mechanism | quote }}
-    clickhouse:
-      url: {{ .Values.config.clickhouse.url | quote }}
-      database: {{ .Values.config.clickhouse.database | quote }}
-      username: {{ .Values.config.clickhouse.username | quote }}
-    routing:
-      default_db: {{ .Values.config.routing.default_db | quote }}
-      default_table: {{ .Values.config.routing.default_table | quote }}
-    metrics:
-      enabled: {{ .Values.config.metrics.enabled }}
-      address: {{ .Values.config.metrics.address | quote }}
+    {{- toYaml .Values.config | nindent 4 }}

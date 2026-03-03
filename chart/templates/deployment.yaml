@@ -41,18 +41,18 @@ spec:
               containerPort: {{ .Values.service.port }}
               protocol: TCP
           env:
-            # Kafka credentials via Secret (figment env cascade overrides file config)
-            - name: DFE_LOADER__KAFKA__USERNAME
+            # kafka credentials via Secret (figment env cascade overrides file config)
+            - name: DFE_LOADER__KAFKA__SASL__USERNAME
               valueFrom:
                 secretKeyRef:
                   name: {{ include "dfe-loader.kafkaSecretName" . }}
                   key: {{ .Values.kafka.secretKeys.username }}
-            - name: DFE_LOADER__KAFKA__PASSWORD
+            - name: DFE_LOADER__KAFKA__SASL__PASSWORD
               valueFrom:
                 secretKeyRef:
                   name: {{ include "dfe-loader.kafkaSecretName" . }}
                   key: {{ .Values.kafka.secretKeys.password }}
-            # ClickHouse password via Secret
+            # clickhouse credentials via Secret (figment env cascade overrides file config)
             - name: DFE_LOADER__CLICKHOUSE__PASSWORD
               valueFrom:
                 secretKeyRef:
