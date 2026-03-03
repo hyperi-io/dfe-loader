@@ -96,6 +96,7 @@ From clickhouse-arrow benchmarks and architecture analysis:
 | Variant/Dynamic | Medium | Discriminator + per-type columns |
 
 For a typical 10K-row batch with 8 columns (our common header):
+
 - Serialization: ~2-3ms uncompressed
 - LZ4 compression: ~5-10ms
 - Total client-side overhead: ~7-13ms per 10K rows
@@ -158,6 +159,7 @@ clickhouse-rs is the official Rust client maintained by ClickHouse Inc.
 The most interesting alternative: what if Mison's `ExtractedValue<'a>` could be serialized directly to ClickHouse native blocks, skipping Arrow entirely?
 
 **What this would save:**
+
 - Arrow buffer allocation (~1 copy for strings, 0 for primitives)
 - Arrow → native serialization pass
 
@@ -192,33 +194,43 @@ Column = Name (string) + TypeName (string) + [CustomSerFlag] + [Prefix] + Data
 ### 5.2 Per-Type Serialization
 
 **Primitives (Int8-UInt64, Float32/64, Date, DateTime):**
+
 ```
 Arrow buffer bytes → bytemuck::cast_slice → write_all (single syscall)
 ```
+
 Cost: effectively zero. The Arrow buffer IS the wire data (both little-endian).
 
 **Nullable primitives:**
+
 ```
 Arrow null bitmap (packed bits) → expand to byte-per-row → vectored I/O with values
 ```
+
 Cost: bitmap expansion (SIMD-accelerated, 2.2x faster than scalar).
 
 **String/Binary:**
+
 ```
 For each value: write varint(length) + write raw bytes from Arrow buffer
 ```
+
 Cost: varint encoding overhead. Data bytes are referenced from Arrow's buffer, not copied.
 
 **LowCardinality (used for `_org_id`):**
+
 ```
 Write dictionary values + write index array (UInt8/16/32 based on cardinality)
 ```
+
 Cost: dictionary + indices. Efficient for repeated values (org_id is typically 1 value per batch).
 
 **Variant/Dynamic (used for `_json` type internally by ClickHouse):**
+
 ```
 Write discriminator bytes + per-variant column data
 ```
+
 Cost: discriminator array + type-specific serialization. Note: we send `_json` as String; ClickHouse decomposes to JSON type server-side.
 
 ### 5.3 Compression
@@ -265,7 +277,7 @@ CI builds and publishes on every release. dfe-loader consumes from registry, not
 
 **Arrow via clickhouse-arrow over native TCP protocol is the correct architecture.**
 
-### Reasons (ranked by importance):
+### Reasons (ranked by importance)
 
 1. **Native protocol is non-negotiable for CPU efficiency.** 5.5% CPU vs 17% for JSONEachRow (209% difference). At scale, this is the difference between 1 pod and 3 pods.
 
@@ -277,7 +289,7 @@ CI builds and publishes on every release. dfe-loader consumes from registry, not
 
 5. **The fork is manageable.** 863 lines of custom code (6.7%) on top of a stable, well-structured upstream. Published to Artifactory with CI.
 
-### What this means for the WBS:
+### What this means for the WBS
 
 Arrow as intermediate format is settled. The WBS (Phase 0 benchmarks, Phase 1 integration) focuses on how we get FROM raw JSON bytes TO Arrow -- comparing Mison vs arrow-json Decoder. Both paths produce Arrow RecordBatch as output; the insert side doesn't change.
 

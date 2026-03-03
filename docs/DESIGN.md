@@ -62,6 +62,7 @@ See [GRPC-MESH.md](./GRPC-MESH.md) for the complete gRPC transport design.
 ## Core Principle: Column Operations, Not Row-by-Row
 
 **BAD (row-by-row):**
+
 ```rust
 for row in batch.iter_rows() {
     row.set("country", geoip.lookup(row.get("ip")));  // O(n) overhead per row
@@ -69,6 +70,7 @@ for row in batch.iter_rows() {
 ```
 
 **GOOD (column operations):**
+
 ```rust
 // Get entire IP column at once
 let ips: &StringArray = batch.column("ip").as_string();
@@ -172,6 +174,7 @@ fn get_nested_value<'a>(event: &'a Value, path: &str) -> Option<&'a Value> {
 ```
 
 With default config:
+
 - `db_fields = ["org_id"]` → finds "acme"
 - `table_fields = ["event_category", "tags.event_category"]` → finds "auth"
 - Result: `acme.auth`

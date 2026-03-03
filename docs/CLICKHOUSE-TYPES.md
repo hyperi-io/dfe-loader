@@ -5,6 +5,7 @@
 **Last Updated:** 2026-03-02
 
 **Sources:**
+
 - [ClickHouse Data Types Documentation](https://clickhouse.com/docs/en/sql-reference/data-types)
 - [ClickHouse Native Protocol - Columns](https://clickhouse.com/docs/native-protocol/columns)
 - [clickhouse-cpp GitHub](https://github.com/ClickHouse/clickhouse-cpp)
@@ -89,6 +90,7 @@
 | `Time64(P)` | High precision time | 10⁻ᴾ seconds | Int64 |
 
 **DateTime64 Precision:**
+
 - P=0: seconds
 - P=3: milliseconds
 - P=6: microseconds
@@ -159,11 +161,13 @@ Variant(T1, T2, T3, ...)
 **Description:** Discriminated union of types. Each value is exactly one of the specified types.
 
 **Example:**
+
 ```sql
 Variant(String, UInt64, Array(String))
 ```
 
 **Native Protocol:**
+
 - Discriminator column (UInt8) indicating which type
 - Separate column for each type variant
 - Only the active variant has data for each row
@@ -178,11 +182,13 @@ Dynamic(max_types=N)
 **Description:** Can store ANY type without pre-specification. Like Variant but types discovered at runtime.
 
 **Features:**
+
 - No need to declare types upfront
 - `max_types` limits separate storage columns (default 32)
 - Types beyond limit stored as String
 
 **Native Protocol:**
+
 - Type descriptor column
 - Multiple data columns
 - Overflow column for excess types
@@ -197,21 +203,25 @@ JSON(max_dynamic_paths=N, max_dynamic_types=M)
 **Description:** Native columnar JSON storage. NOT the old Object('json') type.
 
 **Features:**
+
 - Paths flattened to subcolumns
 - Dynamic types per path via Variant
 - Typed paths extracted for efficient queries
 - Subpath access: `json_column.path.to.field`
 
 **Parameters:**
+
 - `max_dynamic_paths`: Limit dynamic path columns (default 1024)
 - `max_dynamic_types`: Limit types per path (default 32)
 
 **Native Protocol:**
+
 - Serialized as dynamic column structure
 - Each path becomes separate column
 - Uses Dynamic type internally for varying types
 
 **Example:**
+
 ```sql
 CREATE TABLE events (
     data JSON
@@ -232,6 +242,7 @@ SELECT data.user, data.score FROM events;
 | `SimpleAggregateFunction(name, T)` | Simplified aggregate state |
 
 **Common aggregates:**
+
 - `AggregateFunction(sum, UInt64)`
 - `AggregateFunction(avg, Float64)`
 - `AggregateFunction(uniq, String)`
@@ -284,31 +295,38 @@ exclusively. See [DESIGN.md](./DESIGN.md) for the architecture.
 ## Native Protocol Serialization Notes
 
 ### Numeric Types
+
 All numeric types use **little-endian** byte order, matching x86/x64 memory layout for zero-copy operations.
 
 ### String/FixedString
+
 - String: Varint length prefix + raw bytes
 - FixedString(N): Exactly N bytes, zero-padded
 
 ### Arrays
+
 ```
 Offsets: [UInt64 offsets array]
 Data: [T elements array]
 ```
+
 Offset[i] = end index of array[i] in data
 
 ### Nullable
+
 ```
 Nulls: [UInt8 mask, 1=null]
 Values: [T values, null positions have default]
 ```
 
 ### LowCardinality
+
 ```
 Index type + Keys + Dictionary
 ```
 
 ### DateTime with Timezone
+
 Timezone stored in column metadata, not per-value. All values in column share timezone.
 
 ---
