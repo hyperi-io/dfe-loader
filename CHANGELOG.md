@@ -1,3 +1,16 @@
+# [1.10.0](https://github.com/hyperi-io/dfe-loader/compare/v1.9.7...v1.10.0) (2026-03-03)
+
+
+### Bug Fixes
+
+* gate semantic-release on CI, add rustlib cli+top features ([e72ffb4](https://github.com/hyperi-io/dfe-loader/commit/e72ffb47cb95e11e930e9f4a77f53cc618b70316))
+* resolve clippy warnings and test routing assertions ([b888c57](https://github.com/hyperi-io/dfe-loader/commit/b888c57d6bb9fc06c248d4ab7417f1771cb89b79))
+
+
+### Features
+
+* replace hand-written Dockerfile and chart with generated artifacts ([10e1005](https://github.com/hyperi-io/dfe-loader/commit/10e1005ff3effe12ac812259f30fb6c415cd73ce))
+
 ## [1.9.7](https://github.com/hyperi-io/dfe-loader/compare/v1.9.6...v1.9.7) (2026-03-02)
 
 
