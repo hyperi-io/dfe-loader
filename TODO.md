@@ -10,6 +10,36 @@
 
 ---
 
+## Current: CEL Expression Integration `[IN PROGRESS]`
+
+**Goal:** Integrate rustlib CEL expression module into dfe-loader for conditional routing,
+transform conditions, computed fields, and alert triggers.
+
+**Blocker:** rustlib v1.13.0 CI failed on pre-existing flaky test (`test_instance_id_stable`
+race condition). Expression module code is correct (425/426 tests pass). Need to fix the
+flaky test and re-push.
+
+- [ ] Fix `test_instance_id_stable` flaky test in rustlib (race condition on `~/.config/hyperi/instance_id`)
+- [ ] Get rustlib v1.13.0 published to JFrog (expression feature)
+- [ ] Update dfe-loader Cargo.toml — add `expression` feature to hyperi-rustlib dep
+- [ ] Integrate CEL into conditional routing (`when` conditions on routes)
+- [ ] Integrate CEL into conditional field mapping
+- [ ] Integrate CEL into conditional enrichment
+- [ ] Integrate CEL into conditional transformation
+- [ ] Integrate CEL into computed fields
+
+---
+
+## Current: CLI + Top Module — DONE
+
+- [x] **rustlib cli module** — CommonArgs, StandardCommand, DfeApp trait, run_app lifecycle
+- [x] **rustlib top module** — ratatui TUI dashboard, Prometheus parser, oneshot mode
+- [x] **dfe-loader** — Updated Cargo.toml with `cli` and `top` features (v>=1.12.1)
+- [x] **CI gating fix** — Semantic Release now gated on CI success via workflow_run
+- [x] **Deployed CI fix** — All 17 projects updated with `[skip ci]` commits
+
+---
+
 ## Current: gRPC Transport Migration
 
 **Goal:** Add `GrpcTransport` (tonic) with Vector wire-protocol compatibility across DFE projects.
@@ -415,4 +445,4 @@ dfe-app provides its `DeploymentContract` values and gets artefacts generated as
 
 ---
 
-**Last Updated:** 2026-03-02
+**Last Updated:** 2026-03-04
