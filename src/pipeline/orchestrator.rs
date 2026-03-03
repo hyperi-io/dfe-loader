@@ -33,7 +33,7 @@ use crate::payload::{FormatDetector, FormatMode, PayloadFormat};
 use crate::routing::{RouteResult, Router};
 use crate::schema::TableTags;
 use crate::transform::Transformer;
-use crate::transform::{FieldMappingCache, MappingBuilder};
+use crate::transform::{ComputedColumnCache, FieldMappingCache, MappingBuilder};
 use crate::Result;
 
 /// Pipeline statistics
@@ -267,6 +267,10 @@ impl Orchestrator {
                 None
             };
 
+        // Per-table computed columns (CEL expressions producing column values)
+        let mut computed_column_cache =
+            ComputedColumnCache::new(self.config.computed_columns.clone());
+
         // Flush interval timer
         let mut flush_interval = interval(Duration::from_secs(self.config.buffer.flush_age_secs));
 
@@ -382,6 +386,7 @@ impl Orchestrator {
                                     &mut buffer_manager,
                                     &mut capture_overrides,
                                     &mut field_mapping_cache,
+                                    &mut computed_column_cache,
                                 ) {
                                     Ok(table) => {
                                         self.stats.messages_processed += 1;
@@ -479,6 +484,23 @@ impl Orchestrator {
                                 }
                             }
 
+                            // Resolve pending computed columns for newly seen tables
+                            {
+                                let cc_pending = computed_column_cache.take_pending();
+                                for table in cc_pending {
+                                    let comments_result = arrow_client.fetch_column_comments(&table).await;
+                                    match comments_result {
+                                        Ok(comments) => {
+                                            computed_column_cache.build_and_cache(&table, &comments);
+                                        }
+                                        Err(e) => {
+                                            debug!(table = %table, error = %e, "Column comments unavailable for computed columns");
+                                            computed_column_cache.build_and_cache_no_comments(&table);
+                                        }
+                                    }
+                                }
+                            }
+
                             // Check for immediate flush (fast path: skip if nothing ready)
                             if buffer_manager.should_flush() {
                                 match buffer_manager.get_ready_for_flush() {
@@ -552,6 +574,7 @@ impl Orchestrator {
         buffer_manager: &mut BufferManager,
         capture_overrides: &mut CaptureOverrides,
         field_mapping_cache: &mut Option<FieldMappingCache>,
+        computed_column_cache: &mut ComputedColumnCache,
     ) -> Result<String> {
         // Step 1: Check/detect format
         let format = match format_detector.check_and_detect(&msg.payload) {
@@ -643,6 +666,12 @@ impl Orchestrator {
             if let Some(mapping) = fm_cache.get(&table) {
                 mapping.apply(&mut data);
             }
+        }
+
+        // Step 4.8: Apply computed columns (CEL expressions producing column values)
+        computed_column_cache.mark_pending(&table);
+        if let Some(computed) = computed_column_cache.get(&table) {
+            computed.evaluate(&mut data);
         }
 
         // Step 5: Push to per-table buffer with raw payload sidecar for _json

@@ -216,6 +216,7 @@ impl RoutingConfigBuilder {
             topic_suffixes: vec!["_land".to_string(), "_load".to_string()],
             compat_v2_source: false,
             dlq: DlqConfig::default(),
+            rules: vec![],
         }
     }
 }

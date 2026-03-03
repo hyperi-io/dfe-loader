@@ -103,6 +103,7 @@ fn test_error_missing_routing_fields() {
         topic_suffixes: vec!["_land".to_string(), "_load".to_string()],
         compat_v2_source: false,
         dlq: DlqConfig::default(),
+        rules: vec![],
     };
 
     let router = Router::new(&routing_config);
@@ -141,6 +142,7 @@ fn test_error_null_routing_fields() {
         topic_suffixes: vec!["_land".to_string(), "_load".to_string()],
         compat_v2_source: false,
         dlq: DlqConfig::default(),
+        rules: vec![],
     };
 
     let router = Router::new(&routing_config);
@@ -180,6 +182,7 @@ fn test_error_non_string_routing_fields() {
         topic_suffixes: vec!["_land".to_string(), "_load".to_string()],
         compat_v2_source: false,
         dlq: DlqConfig::default(),
+        rules: vec![],
     };
 
     let router = Router::new(&routing_config);

@@ -42,6 +42,7 @@ pub struct Config {
     pub coercion: CoercionConfig,
     pub schema: SchemaConfig,
     pub field_mapping: FieldMappingConfig,
+    pub computed_columns: ComputedColumnsConfig,
     pub hot_reload: HotReloadConfig,
     pub keda: KedaConfig,
     pub scaling: ScalingConfig,
@@ -352,9 +353,32 @@ impl Default for PayloadConfig {
 // Routing Configuration
 // ============================================================================
 
+/// CEL-based routing rule. When `when` evaluates to true against the message,
+/// route to the specified `target` table (and optionally `db` database).
+///
+/// Rules are evaluated top-to-bottom, first match wins. If no rule matches,
+/// falls through to field-extraction routing (db_fields/table_fields).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoutingRule {
+    /// CEL expression that must evaluate to true for this rule to match
+    pub when: String,
+
+    /// Target table name
+    pub target: String,
+
+    /// Target database (optional — uses default_db if omitted)
+    #[serde(default)]
+    pub db: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RoutingConfig {
+    /// CEL-based routing rules (top-to-bottom, first match wins).
+    /// Falls through to field-extraction routing if no rule matches.
+    #[serde(default)]
+    pub rules: Vec<RoutingRule>,
+
     /// Fields to check for database name (first match wins, dot notation for nested)
     /// Example: ["org_id", "tenant.id"]
     /// NOTE: Leave empty to always use default_db (recommended for shared schema)
@@ -409,6 +433,8 @@ pub struct RoutingConfig {
 impl Default for RoutingConfig {
     fn default() -> Self {
         Self {
+            // No CEL routing rules by default (field extraction only)
+            rules: vec![],
             // Default: db_fields empty = shared schema (all to dfe.*)
             db_fields: vec![],
             table_fields: vec!["_source".to_string()],
@@ -424,6 +450,39 @@ impl Default for RoutingConfig {
             topic_suffixes: vec!["_land".to_string(), "_load".to_string()],
             compat_v2_source: false,
             dlq: DlqConfig::default(),
+        }
+    }
+}
+
+// ============================================================================
+// Computed Columns Configuration
+// ============================================================================
+
+/// Config cascade overrides for computed columns.
+///
+/// CEL expressions that produce column values at insert time.
+/// Expressions are also read from ClickHouse column COMMENTs (`@computed:` directive).
+///
+/// Precedence (highest wins):
+/// 1. Config per-table override (`overrides."db.table".column`)
+/// 2. Config global (`columns.column`)
+/// 3. ClickHouse column COMMENT `@computed:` directive
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ComputedColumnsConfig {
+    /// Global computed columns (applied to all tables).
+    /// Key: destination column name, Value: CEL expression.
+    pub columns: indexmap::IndexMap<String, String>,
+
+    /// Per-table overrides. Key: "db.table", Value: column→expression map.
+    pub overrides: indexmap::IndexMap<String, indexmap::IndexMap<String, String>>,
+}
+
+impl Default for ComputedColumnsConfig {
+    fn default() -> Self {
+        Self {
+            columns: indexmap::IndexMap::new(),
+            overrides: indexmap::IndexMap::new(),
         }
     }
 }
