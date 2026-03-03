@@ -1,3 +1,10 @@
+# [1.11.0](https://github.com/hyperi-io/dfe-loader/compare/v1.10.1...v1.11.0) (2026-03-03)
+
+
+### Features
+
+* add CEL expressions, DfeApp CLI framework, ubuntu 24.04 base ([6d06c7b](https://github.com/hyperi-io/dfe-loader/commit/6d06c7b22896b1fca1be13b2ccf26709307ea2cc))
+
 ## [1.10.1](https://github.com/hyperi-io/dfe-loader/compare/v1.10.0...v1.10.1) (2026-03-03)
 
 
