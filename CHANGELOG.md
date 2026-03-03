@@ -1,3 +1,10 @@
+## [1.10.1](https://github.com/hyperi-io/dfe-loader/compare/v1.10.0...v1.10.1) (2026-03-03)
+
+
+### Bug Fixes
+
+* gate semantic-release on CI, add rustlib cli+top features ([61d0f59](https://github.com/hyperi-io/dfe-loader/commit/61d0f59b888e164e7665e5c280d4ddaef1512ba9))
+
 # [1.10.0](https://github.com/hyperi-io/dfe-loader/compare/v1.9.7...v1.10.0) (2026-03-03)
 
 
