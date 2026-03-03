@@ -320,6 +320,7 @@ Vector.dev solved this exact problem with their v2 protocol:
 Our approach mirrors Vector's evolution: broker (Kafka) → mesh (gRPC) with receiver-side buffering.
 
 **In-process pattern also borrowed from Vector:**
+
 - `BatchNotifier` / `BatchReceiver` for in-process event tracking
 - `EventFinalizer` attached to `EventMetadata`, travels through pipeline
 - Drop impl ensures filtered events still ACK

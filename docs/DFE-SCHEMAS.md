@@ -74,6 +74,7 @@ The `expr` field carries loader directives. The `comment` field is for
 human-readable descriptions only.
 
 When both are present, the DDL COMMENT combines them:
+
 ```sql
 COMMENT '@source: timestamp | now() — Event timestamp from source data'
 ```

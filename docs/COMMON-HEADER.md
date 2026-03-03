@@ -20,7 +20,7 @@ schema itself. The loader injects these system fields into every event.
 - **Default table** (`dfe.default`): Schema IS just the common header. This is the
   catch-all for unrouted events and the only table auto-created by the loader.
 - **Non-default tables** (e.g., `dfe.auth`, `dfe.metrics`): Schema = common header
-  + data-specific columns. These tables are created externally (by DBAs or IaC)
+  - data-specific columns. These tables are created externally (by DBAs or IaC)
   with their own columns alongside the common header.
 
 ```text
@@ -732,7 +732,7 @@ topic_replication_factor = 1
 | File | Purpose |
 |------|---------|
 | `schemas/common-header/timeseries.yaml` | Default profile — full common header (via [dfe-schemas](DFE_SCHEMAS.md) submodule) |
-| `schemas/common-header/minimal.yaml` | Minimal profile — no _raw, _tags, _source (via dfe-schemas submodule) |
+| `schemas/common-header/minimal.yaml` | Minimal profile — no _raw,_tags, _source (via dfe-schemas submodule) |
 | `schemas/common-header/passthrough.yaml` | Passthrough profile — no field injection (via dfe-schemas submodule) |
 | `schemas/profiles/` | Bundled fallback profiles (kept in sync with submodule) |
 | `src/schema/profile.rs` | Profile types, registry, DDL generation, migration |
@@ -798,10 +798,11 @@ definitions that specify which system fields to inject and how to populate them.
 | Profile | Fields | Use Case |
 |---------|--------|----------|
 | `timeseries` (default) | 9 | Full common header for event ingestion |
-| `minimal` | 5 | High-volume structured data (no _raw, _tags, _source) |
+| `minimal` | 5 | High-volume structured data (no _raw,_tags, _source) |
 | `passthrough` | 4 | Transparent bridge (no _timestamp injection) |
 
 Profiles define:
+
 - **Field set**: which common header columns to inject
 - **Field behaviour**: source expression for each field (how it's populated)
 - **DDL structure**: ORDER BY, PARTITION BY, indexes (for default table creation)
