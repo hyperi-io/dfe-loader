@@ -92,18 +92,25 @@ See Container Image + Helm Chart Publishing section below for full WBS.
 
 ---
 
-## Next: Wire Enrichment into Pipeline
+## Current: Wire Enrichment into Pipeline `[IN PROGRESS]`
 
 **Goal:** Connect existing enrichment modules (GeoIP, reputation, risk) into the pipeline
 orchestrator. All three modules are implemented as library code but NOT wired into the hot path.
 
-- [ ] Add `EnrichmentConfig` to main `Config` (or use existing `GeoIpConfig`)
-- [ ] Initialise `GeoIpEnricher::from_config()` in orchestrator startup (async)
-- [ ] Initialise `ReputationEnricher` with blocklist loading in orchestrator startup
-- [ ] Initialise `RiskScorer` with config-driven preset/weights
-- [ ] Add enrichment step to pipeline between transform and buffer (per-message or per-batch)
-- [ ] Extract IP field(s) from event, run through GeoIP → reputation → risk
-- [ ] Inject enrichment results into event data (configurable field names)
+**Current state:** Code written, NOT yet compiled or tested. Three files modified (uncommitted).
+
+- [x] `EnrichmentConfig` added to main `Config` (with `ip_fields`, `reputation`, `risk_scoring` sub-structs)
+- [x] `ReputationEnrichmentConfig`, `RiskScoringConfig` structs added to `src/config/loader.rs`
+- [x] Config re-exports added to `src/config/mod.rs`
+- [x] `EnrichmentPipeline` struct added to orchestrator (GeoIP + reputation + risk, all optional)
+- [x] `EnrichmentPipeline::init()` async fn — inits from config, non-fatal failures
+- [x] Enrichment step 4.9 added to `process_message()` between computed columns and buffer push
+- [x] `inject_geo()`, `inject_reputation()`, `inject_risk()` helpers added to orchestrator
+- [x] `extract_enrich_ip()` helper added — checks ip_fields list, first match wins
+- [ ] **Next: `cargo build`** — verify compile (not yet done, host restart pending)
+- [ ] `cargo clippy` — clean warnings
+- [ ] `cargo test --lib` — all tests pass
+- [ ] Commit enrichment pipeline wiring
 - [ ] Add enrichment metrics (lookup latency, cache hit rate, enriched count)
 
 ---

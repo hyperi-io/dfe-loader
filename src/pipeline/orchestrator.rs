@@ -26,7 +26,10 @@ use hyperi_rustlib::ScalingPressure;
 
 use crate::buffer::{BufferManager, FlushBatch, KafkaOffset};
 use crate::clickhouse::{ArrowClickHouseClient, Inserter, InserterConfig};
-use crate::config::{Config, MetadataConfig, SharedConfig, TableCaptureConfig};
+use crate::config::{Config, EnrichmentConfig, MetadataConfig, SharedConfig, TableCaptureConfig};
+use crate::enrich::geoip::GeoIpEnricher;
+use crate::enrich::reputation::{ReputationEnricher, ThreatSource, ThreatType};
+use crate::enrich::risk::{RiskInput, RiskPreset, RiskScorer};
 use crate::kafka::{KafkaMessage, TransportAdapter, TransportBackend};
 use crate::metrics::Metrics;
 use crate::payload::{FormatDetector, FormatMode, PayloadFormat};
@@ -45,6 +48,104 @@ pub struct PipelineStats {
     pub batches_flushed: u64,
     pub rows_inserted: u64,
     pub errors: u64,
+}
+
+/// Active enrichment pipeline (GeoIP + reputation + risk scoring)
+///
+/// All components are optional — each is only active if configured and
+/// initialised successfully. Failures are non-fatal (logged as warnings).
+struct EnrichmentPipeline {
+    /// IP field names to check in event data (first match wins)
+    ip_fields: Vec<String>,
+    /// GeoIP lookup (city + ASN)
+    geoip: Option<GeoIpEnricher>,
+    /// IP reputation lookup (VPN, Tor, proxy, botnet, ...)
+    reputation: Option<ReputationEnricher>,
+    /// Risk scorer (weighted composite of geo + reputation data)
+    risk: Option<RiskScorer>,
+}
+
+impl EnrichmentPipeline {
+    /// Initialise enrichment pipeline from config
+    ///
+    /// All failures are non-fatal — the pipeline continues with whatever
+    /// components were successfully initialised.
+    async fn init(config: &Config) -> Self {
+        // GeoIP enricher (async — may download MMDB files)
+        let geoip = if config.geoip.enabled {
+            let enricher = GeoIpEnricher::from_config(&config.geoip).await;
+            if enricher.is_available() {
+                info!(provider = ?config.geoip.provider, "GeoIP enrichment enabled");
+                Some(enricher)
+            } else {
+                warn!(provider = ?config.geoip.provider, "GeoIP enabled but no databases loaded");
+                None
+            }
+        } else {
+            None
+        };
+
+        // Reputation enricher (sync — loads local blocklist files)
+        let reputation = if config.enrichment.reputation.enabled {
+            let mut enricher = ReputationEnricher::new()
+                .with_cache_capacity(config.enrichment.reputation.cache_capacity);
+
+            let mut loaded = 0usize;
+            for path in &config.enrichment.reputation.blocklist_files {
+                match std::fs::read_to_string(path) {
+                    Ok(content) => {
+                        enricher.load_plain_list(&content, ThreatType::Unknown, ThreatSource::Custom);
+                        loaded += 1;
+                        debug!(path = %path, "Loaded reputation blocklist");
+                    }
+                    Err(e) => {
+                        warn!(path = %path, error = %e, "Failed to load reputation blocklist");
+                    }
+                }
+            }
+
+            if enricher.is_available() {
+                info!(blocklists = loaded, "Reputation enrichment enabled");
+                Some(enricher)
+            } else if !config.enrichment.reputation.blocklist_files.is_empty() {
+                warn!("Reputation enabled but no blocklists loaded");
+                None
+            } else {
+                // Enabled with no files configured — allow it (user may add IPs programmatically)
+                info!("Reputation enrichment enabled (no blocklist files configured)");
+                Some(enricher)
+            }
+        } else {
+            None
+        };
+
+        // Risk scorer (sync — just config, no I/O)
+        let risk = if config.enrichment.risk_scoring.enabled {
+            let preset = match config.enrichment.risk_scoring.preset.as_str() {
+                "us_enterprise" => RiskPreset::UsEnterprise,
+                "eu_enterprise" => RiskPreset::EuEnterprise,
+                "apac_enterprise" => RiskPreset::ApacEnterprise,
+                "high_security" => RiskPreset::HighSecurity,
+                _ => RiskPreset::Global,
+            };
+            info!(preset = %config.enrichment.risk_scoring.preset, "Risk scoring enabled");
+            Some(RiskScorer::from_preset(preset))
+        } else {
+            None
+        };
+
+        Self {
+            ip_fields: config.enrichment.ip_fields.clone(),
+            geoip,
+            reputation,
+            risk,
+        }
+    }
+
+    /// Returns true if any enrichment is active
+    fn is_active(&self) -> bool {
+        self.geoip.is_some() || self.reputation.is_some() || self.risk.is_some()
+    }
 }
 
 /// Per-table capture override resolution cache.
@@ -271,6 +372,19 @@ impl Orchestrator {
         let mut computed_column_cache =
             ComputedColumnCache::new(self.config.computed_columns.clone());
 
+        // Enrichment pipeline (GeoIP + reputation + risk scoring)
+        // Initialised here once — not rebuilt on hot-reload (databases are stable)
+        let enrichment = EnrichmentPipeline::init(&self.config).await;
+        if enrichment.is_active() {
+            info!(
+                geoip = enrichment.geoip.is_some(),
+                reputation = enrichment.reputation.is_some(),
+                risk = enrichment.risk.is_some(),
+                ip_fields = ?self.config.enrichment.ip_fields,
+                "Enrichment pipeline active"
+            );
+        }
+
         // Flush interval timer
         let mut flush_interval = interval(Duration::from_secs(self.config.buffer.flush_age_secs));
 
@@ -383,6 +497,7 @@ impl Orchestrator {
                                     &format_detector,
                                     &router,
                                     &transformer,
+                                    &enrichment,
                                     &mut buffer_manager,
                                     &mut capture_overrides,
                                     &mut field_mapping_cache,
@@ -571,6 +686,7 @@ impl Orchestrator {
         format_detector: &FormatDetector,
         router: &Router,
         transformer: &Transformer,
+        enrichment: &EnrichmentPipeline,
         buffer_manager: &mut BufferManager,
         capture_overrides: &mut CaptureOverrides,
         field_mapping_cache: &mut Option<FieldMappingCache>,
@@ -672,6 +788,35 @@ impl Orchestrator {
         computed_column_cache.mark_pending(&table);
         if let Some(computed) = computed_column_cache.get(&table) {
             computed.evaluate(&mut data);
+        }
+
+        // Step 4.9: IP enrichment (GeoIP + reputation + risk scoring)
+        // Only runs if an enricher is active and we can find an IP in the data.
+        if enrichment.is_active() {
+            if let Some(ip) = extract_enrich_ip(&data, &enrichment.ip_fields) {
+                let geo_result = enrichment.geoip.as_ref().and_then(|g| g.lookup(&ip));
+                let rep_result = enrichment
+                    .reputation
+                    .as_ref()
+                    .and_then(|r| r.lookup(&ip));
+
+                if let Some(ref geo) = geo_result {
+                    inject_geo(&mut data, geo);
+                }
+                if let Some(ref rep) = rep_result {
+                    inject_reputation(&mut data, rep);
+                }
+                if let Some(ref scorer) = enrichment.risk {
+                    if geo_result.is_some() || rep_result.is_some() {
+                        let input = RiskInput::from_enrichment(
+                            geo_result.as_ref(),
+                            rep_result.as_ref(),
+                        );
+                        let output = scorer.score(&input);
+                        inject_risk(&mut data, &output);
+                    }
+                }
+            }
         }
 
         // Step 5: Push to per-table buffer with raw payload sidecar for _json
@@ -837,6 +982,130 @@ fn read_process_memory() -> Option<(u64, u64)> {
 #[cfg(not(target_os = "linux"))]
 fn read_process_memory() -> Option<(u64, u64)> {
     None
+}
+
+// =============================================================================
+// Enrichment helpers (module-private)
+// =============================================================================
+
+/// Extract the first IP string found in `data` by checking `ip_fields` in order.
+///
+/// Returns `Some(ip_string)` for the first field that exists and is a non-empty
+/// string value. Returns `None` if no IP field is found.
+fn extract_enrich_ip(
+    data: &serde_json::Map<String, Value>,
+    ip_fields: &[String],
+) -> Option<String> {
+    for field in ip_fields {
+        if let Some(Value::String(s)) = data.get(field.as_str()) {
+            if !s.is_empty() {
+                return Some(s.clone());
+            }
+        }
+    }
+    None
+}
+
+/// Inject GeoIP result fields into event data as `geo_*` prefixed fields.
+///
+/// Only non-None fields are injected. If a `geo_*` field already exists in
+/// the data, it is preserved (not overwritten) to allow source-provided values.
+fn inject_geo(data: &mut serde_json::Map<String, Value>, result: &crate::enrich::geoip::GeoIpResult) {
+    macro_rules! insert_if_absent {
+        ($key:expr, $val:expr) => {
+            if !data.contains_key($key) {
+                data.insert($key.to_string(), $val);
+            }
+        };
+    }
+    if let Some(ref v) = result.continent_code {
+        insert_if_absent!("geo_continent_code", Value::String(v.clone()));
+    }
+    if let Some(ref v) = result.country_code {
+        insert_if_absent!("geo_country_code", Value::String(v.clone()));
+    }
+    if let Some(ref v) = result.country_name {
+        insert_if_absent!("geo_country", Value::String(v.clone()));
+    }
+    if let Some(ref v) = result.city {
+        insert_if_absent!("geo_city", Value::String(v.clone()));
+    }
+    if let Some(v) = result.latitude {
+        insert_if_absent!("geo_latitude", serde_json::json!(v));
+    }
+    if let Some(v) = result.longitude {
+        insert_if_absent!("geo_longitude", serde_json::json!(v));
+    }
+    if let Some(ref v) = result.timezone {
+        insert_if_absent!("geo_timezone", Value::String(v.clone()));
+    }
+    if let Some(ref v) = result.subdivision {
+        insert_if_absent!("geo_region", Value::String(v.clone()));
+    }
+    if let Some(ref v) = result.subdivision_code {
+        insert_if_absent!("geo_region_code", Value::String(v.clone()));
+    }
+    if let Some(v) = result.asn {
+        insert_if_absent!("geo_asn", serde_json::json!(v));
+    }
+    if let Some(ref v) = result.asn_org {
+        insert_if_absent!("geo_asn_org", Value::String(v.clone()));
+    }
+    insert_if_absent!("geo_is_private", Value::Bool(result.is_private));
+}
+
+/// Inject reputation result fields as `rep_*` prefixed fields.
+fn inject_reputation(
+    data: &mut serde_json::Map<String, Value>,
+    result: &crate::enrich::reputation::ReputationResult,
+) {
+    macro_rules! insert_if_absent {
+        ($key:expr, $val:expr) => {
+            if !data.contains_key($key) {
+                data.insert($key.to_string(), $val);
+            }
+        };
+    }
+    insert_if_absent!("rep_is_vpn", Value::Bool(result.is_vpn));
+    insert_if_absent!("rep_is_proxy", Value::Bool(result.is_proxy));
+    insert_if_absent!("rep_is_tor", Value::Bool(result.is_tor));
+    insert_if_absent!("rep_is_relay", Value::Bool(result.is_relay));
+    insert_if_absent!("rep_is_datacenter", Value::Bool(result.is_datacenter));
+    insert_if_absent!("rep_is_botnet", Value::Bool(result.is_botnet));
+    insert_if_absent!("rep_is_spam", Value::Bool(result.is_spam));
+    insert_if_absent!("rep_is_scanner", Value::Bool(result.is_scanner));
+    insert_if_absent!("rep_is_malicious", Value::Bool(result.is_malicious));
+    insert_if_absent!(
+        "rep_threat_type",
+        Value::String(format!("{:?}", result.threat_type).to_lowercase())
+    );
+    if result.abuse_score > 0 {
+        insert_if_absent!("rep_abuse_score", serde_json::json!(result.abuse_score));
+    }
+}
+
+/// Inject risk scoring output as `risk_*` prefixed fields.
+fn inject_risk(
+    data: &mut serde_json::Map<String, Value>,
+    output: &crate::enrich::risk::RiskOutput,
+) {
+    if !data.contains_key("risk_score") {
+        data.insert("risk_score".to_string(), serde_json::json!(output.risk_score));
+    }
+    if !data.contains_key("risk_level") {
+        data.insert(
+            "risk_level".to_string(),
+            Value::String(output.risk_level.as_str().to_string()),
+        );
+    }
+    if !output.risk_factors.is_empty() && !data.contains_key("risk_factors") {
+        let factors: Vec<Value> = output
+            .risk_factors
+            .iter()
+            .map(|s| Value::String(s.to_string()))
+            .collect();
+        data.insert("risk_factors".to_string(), Value::Array(factors));
+    }
 }
 
 #[cfg(test)]
