@@ -44,6 +44,7 @@ pub struct Config {
     pub field_mapping: FieldMappingConfig,
     pub computed_columns: ComputedColumnsConfig,
     pub geoip: GeoIpConfig,
+    pub enrichment: EnrichmentConfig,
     pub hot_reload: HotReloadConfig,
     pub keda: KedaConfig,
     pub scaling: ScalingConfig,
@@ -582,6 +583,90 @@ impl Default for GeoIpConfig {
         }
     }
 }
+
+// ============================================================================
+// Enrichment Configuration
+// ============================================================================
+
+/// IP enrichment pipeline configuration (GeoIP + reputation + risk scoring)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct EnrichmentConfig {
+    /// Fields to check for IP addresses (first match wins, order matters)
+    ///
+    /// Common field names to try: ["src_ip", "client_ip", "ip", "source_ip"]
+    pub ip_fields: Vec<String>,
+
+    /// IP reputation enrichment (VPN, Tor, proxy, botnet detection)
+    pub reputation: ReputationEnrichmentConfig,
+
+    /// Risk scoring (weighted composite score from geo + reputation data)
+    pub risk_scoring: RiskScoringConfig,
+}
+
+impl Default for EnrichmentConfig {
+    fn default() -> Self {
+        Self {
+            ip_fields: vec![
+                "src_ip".into(),
+                "client_ip".into(),
+                "ip".into(),
+                "source_ip".into(),
+            ],
+            reputation: ReputationEnrichmentConfig::default(),
+            risk_scoring: RiskScoringConfig::default(),
+        }
+    }
+}
+
+/// Reputation enrichment configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ReputationEnrichmentConfig {
+    /// Enable reputation lookups
+    pub enabled: bool,
+
+    /// LRU cache capacity for lookup results
+    pub cache_capacity: usize,
+
+    /// Load blocklists from local files (plain text, one IP or CIDR per line)
+    pub blocklist_files: Vec<String>,
+}
+
+impl Default for ReputationEnrichmentConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            cache_capacity: 100_000,
+            blocklist_files: Vec::new(),
+        }
+    }
+}
+
+/// Risk scoring configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RiskScoringConfig {
+    /// Enable risk scoring (requires at least GeoIP or reputation to be useful)
+    pub enabled: bool,
+
+    /// Risk preset to use for country risk tables
+    ///
+    /// Options: "global" (default), "us_enterprise", "eu_enterprise",
+    ///          "apac_enterprise", "high_security"
+    pub preset: String,
+}
+
+impl Default for RiskScoringConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            preset: "global".into(),
+        }
+    }
+}
+
+// ============================================================================
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
