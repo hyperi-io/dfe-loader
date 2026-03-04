@@ -1,0 +1,1 @@
+../../ai/standards/rules/clickhouse-sql.md

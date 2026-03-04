@@ -1,0 +1,1 @@
+../../ai/standards/rules/golang.md
