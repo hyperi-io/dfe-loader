@@ -795,10 +795,7 @@ impl Orchestrator {
         if enrichment.is_active() {
             if let Some(ip) = extract_enrich_ip(&data, &enrichment.ip_fields) {
                 let geo_result = enrichment.geoip.as_ref().and_then(|g| g.lookup(&ip));
-                let rep_result = enrichment
-                    .reputation
-                    .as_ref()
-                    .and_then(|r| r.lookup(&ip));
+                let rep_result = enrichment.reputation.as_ref().and_then(|r| r.lookup(&ip));
 
                 if let Some(ref geo) = geo_result {
                     inject_geo(&mut data, geo);
@@ -808,10 +805,8 @@ impl Orchestrator {
                 }
                 if let Some(ref scorer) = enrichment.risk {
                     if geo_result.is_some() || rep_result.is_some() {
-                        let input = RiskInput::from_enrichment(
-                            geo_result.as_ref(),
-                            rep_result.as_ref(),
-                        );
+                        let input =
+                            RiskInput::from_enrichment(geo_result.as_ref(), rep_result.as_ref());
                         let output = scorer.score(&input);
                         inject_risk(&mut data, &output);
                     }
@@ -1010,7 +1005,10 @@ fn extract_enrich_ip(
 ///
 /// Only non-None fields are injected. If a `geo_*` field already exists in
 /// the data, it is preserved (not overwritten) to allow source-provided values.
-fn inject_geo(data: &mut serde_json::Map<String, Value>, result: &crate::enrich::geoip::GeoIpResult) {
+fn inject_geo(
+    data: &mut serde_json::Map<String, Value>,
+    result: &crate::enrich::geoip::GeoIpResult,
+) {
     macro_rules! insert_if_absent {
         ($key:expr, $val:expr) => {
             if !data.contains_key($key) {
@@ -1090,7 +1088,10 @@ fn inject_risk(
     output: &crate::enrich::risk::RiskOutput,
 ) {
     if !data.contains_key("risk_score") {
-        data.insert("risk_score".to_string(), serde_json::json!(output.risk_score));
+        data.insert(
+            "risk_score".to_string(),
+            serde_json::json!(output.risk_score),
+        );
     }
     if !data.contains_key("risk_level") {
         data.insert(
