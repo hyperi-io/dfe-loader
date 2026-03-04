@@ -10,33 +10,12 @@
 
 ---
 
-## Current: CEL Expression Integration `[IN PROGRESS]`
+## Current: Helm + Dockerfile Automation `[IN PROGRESS]`
 
-**Goal:** Integrate rustlib CEL expression module into dfe-loader for conditional routing,
-transform conditions, computed fields, and alert triggers.
+**Goal:** Maximise in rustlib — canonical Helm chart templates + Dockerfile generation so each
+dfe-app provides its `DeploymentContract` values and gets artefacts generated as standard.
 
-**Blocker:** rustlib v1.13.0 CI failed on pre-existing flaky test (`test_instance_id_stable`
-race condition). Expression module code is correct (425/426 tests pass). Need to fix the
-flaky test and re-push.
-
-- [ ] Fix `test_instance_id_stable` flaky test in rustlib (race condition on `~/.config/hyperi/instance_id`)
-- [ ] Get rustlib v1.13.0 published to JFrog (expression feature)
-- [ ] Update dfe-loader Cargo.toml — add `expression` feature to hyperi-rustlib dep
-- [ ] Integrate CEL into conditional routing (`when` conditions on routes)
-- [ ] Integrate CEL into conditional field mapping
-- [ ] Integrate CEL into conditional enrichment
-- [ ] Integrate CEL into conditional transformation
-- [ ] Integrate CEL into computed fields
-
----
-
-## Current: CLI + Top Module — DONE
-
-- [x] **rustlib cli module** — CommonArgs, StandardCommand, DfeApp trait, run_app lifecycle
-- [x] **rustlib top module** — ratatui TUI dashboard, Prometheus parser, oneshot mode
-- [x] **dfe-loader** — Updated Cargo.toml with `cli` and `top` features (v>=1.12.1)
-- [x] **CI gating fix** — Semantic Release now gated on CI success via workflow_run
-- [x] **Deployed CI fix** — All 17 projects updated with `[skip ci]` commits
+See Container Image + Helm Chart Publishing section below for full WBS.
 
 ---
 
@@ -110,6 +89,22 @@ flaky test and re-push.
   - Use `cargo outdated` and web search to identify updates
   - Check for breaking changes before upgrading
   - Run full test suite after each project update
+
+---
+
+## Next: Wire Enrichment into Pipeline
+
+**Goal:** Connect existing enrichment modules (GeoIP, reputation, risk) into the pipeline
+orchestrator. All three modules are implemented as library code but NOT wired into the hot path.
+
+- [ ] Add `EnrichmentConfig` to main `Config` (or use existing `GeoIpConfig`)
+- [ ] Initialise `GeoIpEnricher::from_config()` in orchestrator startup (async)
+- [ ] Initialise `ReputationEnricher` with blocklist loading in orchestrator startup
+- [ ] Initialise `RiskScorer` with config-driven preset/weights
+- [ ] Add enrichment step to pipeline between transform and buffer (per-message or per-batch)
+- [ ] Extract IP field(s) from event, run through GeoIP → reputation → risk
+- [ ] Inject enrichment results into event data (configurable field names)
+- [ ] Add enrichment metrics (lookup latency, cache hit rate, enriched count)
 
 ---
 
@@ -249,6 +244,28 @@ dfe-app provides its `DeploymentContract` values and gets artefacts generated as
 ---
 
 ## Completed
+
+### 2026-03-04: Multi-Provider GeoIP with Auto-Download
+
+- [x] **Config structs** — `GeoIpConfig`, `GeoIpProvider` (6 variants), `AutoDownloadConfig`
+- [x] **Auto-download module** — `src/enrich/geoip_download.rs` with `ensure_databases()`
+  - DB-IP Lite (anonymous, gzip), MaxMind GeoLite2 (Basic Auth, tar.gz)
+  - IPLocate (anonymous, raw), IPinfo Lite (token, raw), sapics (anonymous, raw), Custom (user paths)
+  - Freshness checking, atomic writes, graceful failure (non-fatal)
+- [x] **GeoIP enricher updates** — `continent_code`/`continent_name` fields, `from_config()` async constructor
+- [x] **Risk scorer wiring** — `continent_code` from `GeoIpResult` into `RiskInput` (was dead field)
+- [x] **CI bundling** — `scripts/download-geoip.sh` downloads DB-IP Lite MMDB (CC BY 4.0)
+- [x] **Dockerfile** — `COPY geoip/ /var/lib/dfe/geoip/` for bundled databases
+- [x] **Dependencies** — `reqwest`, `flate2`, `tar` added to Cargo.toml
+- [x] GeoIP is off by default (`enabled: false`), 407 lib tests pass, clippy clean
+
+### 2026-03-04: CEL Expressions + CLI Migration + Ubuntu 24.04
+
+- [x] **CEL routing rules** — `when` field on `RoutingRule` with compiled `cel_interpreter::Program`
+- [x] **Computed columns** — CEL expressions in ClickHouse column comments (`@computed` directive)
+- [x] **CLI migration** — `DfeApp` trait + `run_app()` lifecycle (replaced hand-rolled Args)
+- [x] **Ubuntu 24.04** — Dockerfile base image updated from debian:bookworm-slim
+- [x] **rustlib v1.13.0** — Published with `expression` feature (OnceLock fix for flaky test)
 
 ### 2026-03-02: Unified DLQ Module
 
@@ -445,4 +462,4 @@ dfe-app provides its `DeploymentContract` values and gets artefacts generated as
 
 ---
 
-**Last Updated:** 2026-03-04
+**Last Updated:** 2026-03-05

@@ -29,11 +29,12 @@ pub mod shared;
 pub mod watcher;
 
 pub use loader::{
-    BufferConfig, ClickHouseConfig, CoercionConfig, ComputedColumnsConfig, Config, DlqConfig,
-    FieldMappingConfig, FieldMappingOverride, FieldSanitizationConfig, HotReloadConfig,
-    KafkaConfig, LoggingConfig, MemoryConfig, MetadataConfig, MetricsConfig, NullHandling,
-    PayloadConfig, RoutingConfig, RoutingRule, SaslConfig, SaslMechanism, ScalingConfig,
-    SchemaConfig, TableCaptureConfig, TimestampDqConfig, TlsConfig,
+    AutoDownloadConfig, BufferConfig, ClickHouseConfig, CoercionConfig, ComputedColumnsConfig,
+    Config, DlqConfig, FieldMappingConfig, FieldMappingOverride, FieldSanitizationConfig,
+    GeoIpConfig, GeoIpProvider, HotReloadConfig, KafkaConfig, LoggingConfig, MemoryConfig,
+    MetadataConfig, MetricsConfig, NullHandling, PayloadConfig, RoutingConfig, RoutingRule,
+    SaslConfig, SaslMechanism, ScalingConfig, SchemaConfig, TableCaptureConfig, TimestampDqConfig,
+    TlsConfig,
 };
 pub use shared::SharedConfig;
 pub use watcher::{ConfigWatcher, WatcherConfig};

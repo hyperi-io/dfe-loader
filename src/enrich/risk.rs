@@ -90,6 +90,7 @@ impl<'a> RiskInput<'a> {
 
         if let Some(g) = geo {
             input.country_code = g.country_code.as_deref();
+            input.continent_code = g.continent_code.as_deref();
             input.is_private = g.is_private;
         }
 

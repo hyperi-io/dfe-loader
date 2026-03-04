@@ -903,7 +903,7 @@ dependencies = [
  "parking_lot",
  "paste",
  "pin-project",
- "reqwest",
+ "reqwest 0.13.2",
  "rustc-hash",
  "rustc_version",
  "serde",
@@ -1339,7 +1339,7 @@ dependencies = [
 
 [[package]]
 name = "dfe-loader"
-version = "1.10.0"
+version = "1.10.1"
 dependencies = [
  "anyhow",
  "arrow",
@@ -1357,6 +1357,7 @@ dependencies = [
  "dashmap",
  "dotenvy",
  "figment",
+ "flate2",
  "futures",
  "futures-util",
  "http-body-util",
@@ -1371,6 +1372,7 @@ dependencies = [
  "prometheus",
  "proptest",
  "rdkafka",
+ "reqwest 0.12.28",
  "rmp-serde",
  "rstest",
  "rustc-hash",
@@ -1378,6 +1380,7 @@ dependencies = [
  "serde_json",
  "serde_yaml_ng",
  "sonic-rs",
+ "tar",
  "tempfile",
  "test-case",
  "testcontainers",
@@ -2038,6 +2041,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tower-service",
+ "webpki-roots",
 ]
 
 [[package]]
@@ -2099,7 +2103,7 @@ dependencies = [
  "parking_lot",
  "ratatui",
  "rdkafka",
- "reqwest",
+ "reqwest 0.13.2",
  "rmp-serde",
  "serde",
  "serde_json",
@@ -3528,7 +3532,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "27c6023962132f4b30eb4c172c91ce92d933da334c59c23cddee82358ddafb0b"
 dependencies = [
  "anyhow",
- "itertools 0.13.0",
+ "itertools 0.14.0",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
@@ -3982,6 +3986,44 @@ name = "rend"
 version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cadadef317c2f20755a64d7fdc48f9e7178ee6b0e1f7fce33fa60f1d68a276e6"
+
+[[package]]
+name = "reqwest"
+version = "0.12.28"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "eddd3ca559203180a307f12d114c268abf583f59b03cb906fd0b3ff8646c1147"
+dependencies = [
+ "base64 0.22.1",
+ "bytes",
+ "futures-core",
+ "http",
+ "http-body",
+ "http-body-util",
+ "hyper",
+ "hyper-rustls",
+ "hyper-util",
+ "js-sys",
+ "log",
+ "percent-encoding",
+ "pin-project-lite",
+ "quinn",
+ "rustls",
+ "rustls-pki-types",
+ "serde",
+ "serde_json",
+ "serde_urlencoded",
+ "sync_wrapper",
+ "tokio",
+ "tokio-rustls",
+ "tower",
+ "tower-http",
+ "tower-service",
+ "url",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+ "webpki-roots",
+]
 
 [[package]]
 name = "reqwest"
@@ -4808,6 +4850,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "tar"
+version = "0.4.44"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1d863878d212c87a19c1a610eb53bb01fe12951c0501cf5a0d65f724914a667a"
+dependencies = [
+ "filetime",
+ "libc",
+ "xattr",
+]
+
+[[package]]
 name = "tempfile"
 version = "3.26.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4943,7 +4996,7 @@ dependencies = [
  "memchr",
  "parse-display",
  "pin-project-lite",
- "reqwest",
+ "reqwest 0.13.2",
  "serde",
  "serde_json",
  "serde_with",

@@ -19,11 +19,17 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::RwLock;
 
 use maxminddb::{geoip2, MaxMindDbError, Reader};
-use tracing::debug;
+use tracing::{debug, info, warn};
+
+use crate::config::GeoIpConfig;
 
 /// GeoIP lookup result with all available fields
 #[derive(Debug, Clone, Default)]
 pub struct GeoIpResult {
+    /// Continent code (e.g., "NA", "EU", "AS")
+    pub continent_code: Option<String>,
+    /// Continent name in English (e.g., "North America", "Europe")
+    pub continent_name: Option<String>,
     /// ISO 3166-1 alpha-2 country code (e.g., "US", "GB")
     pub country_code: Option<String>,
     /// Country name in English
@@ -69,6 +75,16 @@ impl GeoIpResult {
 
         for &field in schema_fields {
             match field {
+                "continent_code" | "continent" => {
+                    if let Some(ref v) = self.continent_code {
+                        out.insert(field.to_string(), Value::String(v.clone()));
+                    }
+                }
+                "continent_name" => {
+                    if let Some(ref v) = self.continent_name {
+                        out.insert(field.to_string(), Value::String(v.clone()));
+                    }
+                }
                 "country_code" => {
                     if let Some(ref v) = self.country_code {
                         out.insert(field.to_string(), Value::String(v.clone()));
@@ -351,6 +367,10 @@ impl GeoIpEnricher {
                 if let Ok(Some(city)) = lookup_result.decode::<geoip2::City>() {
                     found = true;
 
+                    // Continent data
+                    result.continent_code = city.continent.code.map(|s| s.to_string());
+                    result.continent_name = city.continent.names.english.map(|s| s.to_string());
+
                     // Country data - new API has flat access
                     result.country_code = city.country.iso_code.map(|s| s.to_string());
                     result.country_name = city.country.names.english.map(|s| s.to_string());
@@ -392,6 +412,70 @@ impl GeoIpEnricher {
         } else {
             None
         }
+    }
+}
+
+impl GeoIpEnricher {
+    /// Create enricher from config, downloading databases if needed.
+    ///
+    /// This is the primary constructor for production use. It resolves
+    /// database paths (downloading if necessary) and loads them.
+    /// Download failures are non-fatal — the enricher works with
+    /// zero, one, or both databases.
+    pub async fn from_config(config: &GeoIpConfig) -> Self {
+        let paths = match super::geoip_download::ensure_databases(config).await {
+            Ok(paths) => paths,
+            Err(e) => {
+                warn!(error = %e, "Failed to resolve GeoIP databases, enricher will be inactive");
+                return Self::new().with_cache_capacity(config.cache_capacity);
+            }
+        };
+
+        let city_reader = if let Some(ref city_path) = paths.city {
+            match Reader::open_readfile(city_path) {
+                Ok(reader) => {
+                    info!(path = %city_path.display(), "Loaded GeoIP city database");
+                    Some(reader)
+                }
+                Err(e) => {
+                    warn!(error = %e, path = %city_path.display(), "Failed to load city database");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        let asn_reader = if let Some(ref asn_path) = paths.asn {
+            match Reader::open_readfile(asn_path) {
+                Ok(reader) => {
+                    info!(path = %asn_path.display(), "Loaded GeoIP ASN database");
+                    Some(reader)
+                }
+                Err(e) => {
+                    warn!(error = %e, path = %asn_path.display(), "Failed to load ASN database");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        let enricher = Self {
+            city_reader,
+            asn_reader,
+            cache: RwLock::new(HashMap::with_capacity(1024)),
+            cache_capacity: config.cache_capacity,
+            access_counter: AtomicU64::new(0),
+            cache_hits: AtomicU64::new(0),
+            cache_misses: AtomicU64::new(0),
+        };
+
+        if !enricher.is_available() {
+            warn!(provider = ?config.provider, "No GeoIP databases loaded, enricher inactive");
+        }
+
+        enricher
     }
 }
 
