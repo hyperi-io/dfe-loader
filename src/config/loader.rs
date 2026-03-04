@@ -43,6 +43,7 @@ pub struct Config {
     pub schema: SchemaConfig,
     pub field_mapping: FieldMappingConfig,
     pub computed_columns: ComputedColumnsConfig,
+    pub geoip: GeoIpConfig,
     pub hot_reload: HotReloadConfig,
     pub keda: KedaConfig,
     pub scaling: ScalingConfig,
@@ -483,6 +484,101 @@ impl Default for ComputedColumnsConfig {
         Self {
             columns: indexmap::IndexMap::new(),
             overrides: indexmap::IndexMap::new(),
+        }
+    }
+}
+
+// ============================================================================
+// GeoIP Configuration
+// ============================================================================
+
+/// GeoIP enrichment provider
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum GeoIpProvider {
+    /// DB-IP Lite — free, anonymous download, city-level, CC BY 4.0
+    #[default]
+    DbIpLite,
+    /// MaxMind GeoLite2 — free account required (account_id + license_key)
+    MaxMindGeoLite2,
+    /// IPLocate.io — free, anonymous, country + ASN only
+    IpLocate,
+    /// IPinfo Lite — free token required, country + ASN only
+    IpInfoLite,
+    /// sapics/ip-location-db — free CC0, country + ASN only
+    Sapics,
+    /// User provides MMDB file paths directly
+    Custom,
+}
+
+/// Auto-download settings for GeoIP databases
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AutoDownloadConfig {
+    /// Enable auto-download on startup if MMDB files missing or stale
+    pub enabled: bool,
+
+    /// Directory to store downloaded MMDB files
+    pub data_dir: String,
+
+    /// MaxMind account ID (required for max_mind_geo_lite2 provider)
+    pub maxmind_account_id: Option<String>,
+
+    /// MaxMind license key (required for max_mind_geo_lite2 provider)
+    pub maxmind_license_key: Option<String>,
+
+    /// IPinfo token (required for ip_info_lite provider)
+    pub ipinfo_token: Option<String>,
+
+    /// Max age in days before re-downloading (default: 30)
+    pub max_age_days: u32,
+}
+
+impl Default for AutoDownloadConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            data_dir: "/var/lib/dfe/geoip".into(),
+            maxmind_account_id: None,
+            maxmind_license_key: None,
+            ipinfo_token: None,
+            max_age_days: 30,
+        }
+    }
+}
+
+/// GeoIP enrichment configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GeoIpConfig {
+    /// Enable GeoIP enrichment
+    pub enabled: bool,
+
+    /// GeoIP database provider
+    pub provider: GeoIpProvider,
+
+    /// Explicit path to city MMDB file (overrides auto-download)
+    pub city_db_path: Option<String>,
+
+    /// Explicit path to ASN MMDB file (overrides auto-download)
+    pub asn_db_path: Option<String>,
+
+    /// Auto-download settings
+    pub auto_download: AutoDownloadConfig,
+
+    /// LRU cache capacity for lookup results
+    pub cache_capacity: usize,
+}
+
+impl Default for GeoIpConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            provider: GeoIpProvider::DbIpLite,
+            city_db_path: None,
+            asn_db_path: None,
+            auto_download: AutoDownloadConfig::default(),
+            cache_capacity: 100_000,
         }
     }
 }

@@ -14,6 +14,11 @@ COPY dfe-loader /usr/local/bin/dfe-loader
 RUN chmod +x /usr/local/bin/dfe-loader
 
 RUN useradd --create-home --uid 1000 appuser
+
+# GeoIP databases (DB-IP Lite, CC BY 4.0)
+# Downloaded by CI via scripts/download-geoip.sh — optional, non-fatal if missing
+COPY --chown=appuser:appuser geoip/ /var/lib/dfe/geoip/
+
 USER appuser
 
 EXPOSE 9090
