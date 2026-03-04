@@ -3,7 +3,6 @@
 **Project:** dfe-loader
 **DFE:** Data Fusion Engine
 **Purpose:** High-performance Kafka to ClickHouse data loader (Rust port of Go clickhouse-loader)
-**Status:** Arrow-Only Pipeline Complete with SIMD Optimizations
 **Reference:** Feature parity (or better) with `/projects/clickhouse-loader` (Go version)
 
 ---
@@ -794,8 +793,3 @@ must `chmod +x` after downloading artifacts before `find -perm -u=x` searches.
 | clickhouse-arrow CI via workflow dispatch | Private CI without polluting public fork |
 
 ---
-
-**Last Updated:** 2026-03-02
-**ClickHouse:** 25.12 (native protocol)
-**Version:** 1.9.3
-**Status:** FSL-1.1-ALv2 Licensed, CI publishing amd64 + arm64 binaries, ARC runner
