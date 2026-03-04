@@ -1,3 +1,18 @@
+# [1.12.0](https://github.com/hyperi-io/dfe-loader/compare/v1.11.0...v1.12.0) (2026-03-04)
+
+
+### Bug Fixes
+
+* cargo fmt and update ci submodule ([582e023](https://github.com/hyperi-io/dfe-loader/commit/582e02306edee694d419a2d18a582b44eb3f0795))
+* resolve typos CI failures from ci submodule v1.14.5 upgrade ([79b8094](https://github.com/hyperi-io/dfe-loader/commit/79b8094e84480ac3916e2188106bef043644062f))
+* wire enrichment pipeline into orchestrator (not yet compiled) ([18063cc](https://github.com/hyperi-io/dfe-loader/commit/18063cc856364a34de0faf4bd4b65ddb2ac59cad))
+
+
+### Features
+
+* multi-provider GeoIP auto-download with continent enrichment ([52804d7](https://github.com/hyperi-io/dfe-loader/commit/52804d7294721ae83625d97b6e2ffaf29d9728c4))
+* wire enrichment pipeline into orchestrator ([69f8e6c](https://github.com/hyperi-io/dfe-loader/commit/69f8e6cc00adcecb2d7e01b6eeadacbeb1a4b57d))
+
 # [1.11.0](https://github.com/hyperi-io/dfe-loader/compare/v1.10.1...v1.11.0) (2026-03-03)
 
 
