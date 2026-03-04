@@ -10,6 +10,7 @@
 //! ## Supported Transports
 //!
 //! - **Kafka** (always compiled): Production transport with at-least-once delivery
+//! - **gRPC** (always compiled): Receives Push RPCs from dfe-receiver (server mode)
 //! - **Memory** (feature `transport-memory`): In-process channels for unit tests
 //!
 //! ## TransportBackend
@@ -18,7 +19,8 @@
 //! The orchestrator uses this to be transport-agnostic.
 
 use hyperi_rustlib::transport::{
-    KafkaConfig as TransportKafkaConfig, KafkaToken, KafkaTransport, Transport, TransportError,
+    GrpcConfig as TransportGrpcConfig, GrpcTransport, KafkaConfig as TransportKafkaConfig,
+    KafkaToken, KafkaTransport, Transport, TransportError,
 };
 
 use crate::buffer::KafkaOffset;
@@ -165,6 +167,99 @@ impl From<TransportError> for crate::Error {
 }
 
 // ============================================================================
+// GrpcTransportAdapter - Receives Push RPCs from dfe-receiver
+// ============================================================================
+
+/// Adapter that wraps hyperi-rustlib GrpcTransport for receiving mode.
+///
+/// dfe-loader acts as a gRPC server: remote senders (e.g. dfe-receiver) call
+/// the `Push` RPC to deliver messages. The adapter converts those into the
+/// common `KafkaMessage` type used by the rest of the pipeline.
+///
+/// gRPC has no broker-side persistence, so commit is always a no-op.
+pub struct GrpcTransportAdapter {
+    transport: GrpcTransport,
+    /// Fallback topic when the sender doesn't set one in gRPC metadata.
+    default_topic: std::sync::Arc<str>,
+}
+
+impl GrpcTransportAdapter {
+    /// Create a new gRPC transport adapter in server (receive) mode.
+    ///
+    /// Requires `config.listen` to be set. The adapter starts a tonic gRPC
+    /// server that accepts incoming Push RPCs.
+    pub async fn new(config: &crate::config::GrpcConfig) -> Result<Self> {
+        let transport_config = TransportGrpcConfig {
+            listen: config.listen.clone(),
+            endpoint: None, // receive-only
+            recv_buffer_size: config.recv_buffer_size,
+            recv_timeout_ms: config.recv_timeout_ms,
+            max_message_size: config.max_message_size,
+            compression: config.compression,
+            ..Default::default()
+        };
+
+        let transport = GrpcTransport::new(&transport_config)
+            .await
+            .map_err(|e| crate::Error::Kafka(format!("gRPC transport error: {e}")))?;
+
+        Ok(Self {
+            transport,
+            default_topic: std::sync::Arc::from(config.default_topic.as_str()),
+        })
+    }
+
+    /// Receive up to `max` messages from incoming gRPC Push RPCs.
+    ///
+    /// The sender sets the topic via gRPC metadata field "topic". If absent,
+    /// `default_topic` is used as the routing key.
+    pub async fn recv(&self, max: usize) -> Result<Vec<KafkaMessage>> {
+        let messages = self
+            .transport
+            .recv(max)
+            .await
+            .map_err(|e| crate::Error::Kafka(format!("gRPC recv error: {e}")))?;
+
+        let default = self.default_topic.clone();
+        Ok(messages
+            .into_iter()
+            .map(|msg| KafkaMessage {
+                payload: msg.payload,
+                // Use sender-provided topic from metadata, or fall back to default.
+                topic: msg.key.unwrap_or_else(|| default.clone()),
+                partition: 0, // gRPC has no partition concept
+                offset: msg.token.seq as i64,
+                key: None,
+                timestamp_ms: msg.timestamp_ms,
+            })
+            .collect())
+    }
+
+    /// Commit (no-op — gRPC ACK is the Push RPC response itself).
+    pub async fn commit(&self, _offsets: &[crate::buffer::KafkaOffset]) -> Result<()> {
+        Ok(())
+    }
+
+    /// Close the gRPC server.
+    pub async fn close(&self) -> Result<()> {
+        self.transport
+            .close()
+            .await
+            .map_err(|e| crate::Error::Kafka(format!("gRPC close error: {e}")))
+    }
+
+    /// Check if the transport is healthy.
+    pub fn is_healthy(&self) -> bool {
+        self.transport.is_healthy()
+    }
+
+    /// Get transport name.
+    pub fn name(&self) -> &'static str {
+        self.transport.name()
+    }
+}
+
+// ============================================================================
 // MemoryTransportAdapter - For unit testing without Kafka
 // ============================================================================
 
@@ -295,31 +390,41 @@ mod memory_adapter {
 /// The orchestrator uses this instead of a concrete adapter type, making the
 /// pipeline transport-agnostic at runtime.
 pub enum TransportBackend {
-    /// Kafka transport (production)
+    /// Kafka transport (production, default)
     Kafka(TransportAdapter),
+    /// gRPC transport — dfe-loader acts as server receiving Push RPCs
+    Grpc(GrpcTransportAdapter),
 }
 
 impl TransportBackend {
     /// Create a transport backend from the application config.
     ///
-    /// Selects transport type based on `config.transport` field.
-    /// Defaults to Kafka if not specified.
+    /// Selects transport type based on `config.transport`:
+    /// - `"grpc"` → gRPC server mode (receives from dfe-receiver)
+    /// - anything else → Kafka (default)
     pub async fn from_config(config: &crate::config::Config) -> Result<Self> {
-        let adapter = TransportAdapter::new(&config.kafka).await?;
-        Ok(Self::Kafka(adapter))
+        if config.transport == "grpc" {
+            let adapter = GrpcTransportAdapter::new(&config.grpc).await?;
+            Ok(Self::Grpc(adapter))
+        } else {
+            let adapter = TransportAdapter::new(&config.kafka).await?;
+            Ok(Self::Kafka(adapter))
+        }
     }
 
     /// Receive up to `max` messages.
     pub async fn recv(&self, max: usize) -> Result<Vec<super::KafkaMessage>> {
         match self {
             Self::Kafka(a) => a.recv(max).await,
+            Self::Grpc(a) => a.recv(max).await,
         }
     }
 
-    /// Commit offsets (no-op for non-Kafka transports).
+    /// Commit offsets (no-op for gRPC).
     pub async fn commit(&self, offsets: &[crate::buffer::KafkaOffset]) -> Result<()> {
         match self {
             Self::Kafka(a) => a.commit(offsets).await,
+            Self::Grpc(a) => a.commit(offsets).await,
         }
     }
 
@@ -327,6 +432,7 @@ impl TransportBackend {
     pub async fn close(&self) -> Result<()> {
         match self {
             Self::Kafka(a) => a.close().await,
+            Self::Grpc(a) => a.close().await,
         }
     }
 
@@ -334,6 +440,7 @@ impl TransportBackend {
     pub fn is_healthy(&self) -> bool {
         match self {
             Self::Kafka(a) => a.is_healthy(),
+            Self::Grpc(a) => a.is_healthy(),
         }
     }
 
@@ -341,6 +448,7 @@ impl TransportBackend {
     pub fn name(&self) -> &'static str {
         match self {
             Self::Kafka(a) => a.name(),
+            Self::Grpc(a) => a.name(),
         }
     }
 }
