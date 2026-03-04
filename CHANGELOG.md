@@ -1,3 +1,10 @@
+## [1.12.1](https://github.com/hyperi-io/dfe-loader/compare/v1.12.0...v1.12.1) (2026-03-04)
+
+
+### Bug Fixes
+
+* exclude .claude, ai, ci, docs dirs from cargo publish package ([c04d001](https://github.com/hyperi-io/dfe-loader/commit/c04d00119aa17e8306b9b3f677a83beb1af6b1f0))
+
 # [1.12.0](https://github.com/hyperi-io/dfe-loader/compare/v1.11.0...v1.12.0) (2026-03-04)
 
 
