@@ -25,10 +25,11 @@ use crate::Result;
 #[serde(default)]
 #[derive(Default)]
 pub struct Config {
-    /// Transport backend: "kafka" (default)
+    /// Transport backend: "kafka" (default) or "grpc"
     #[serde(default = "default_transport")]
     pub transport: String,
     pub kafka: KafkaConfig,
+    pub grpc: GrpcConfig,
     pub clickhouse: ClickHouseConfig,
     pub payload: PayloadConfig,
     pub routing: RoutingConfig,
@@ -80,6 +81,51 @@ impl Default for KafkaConfig {
             client_id: "clickhouse-loader".to_string(),
             sasl: None,
             tls: None,
+        }
+    }
+}
+
+// ============================================================================
+// gRPC Transport Configuration
+// ============================================================================
+
+/// gRPC transport configuration for receiving messages from dfe-receiver.
+///
+/// When `transport = "grpc"`, the loader starts a gRPC server listening on
+/// `listen` and accepts Push RPCs from remote senders (e.g. dfe-receiver).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GrpcConfig {
+    /// Server listen address (e.g., "0.0.0.0:6000").
+    /// Required when `transport = "grpc"`.
+    pub listen: Option<String>,
+
+    /// Receive buffer size (messages buffered from incoming RPCs).
+    pub recv_buffer_size: usize,
+
+    /// Receive timeout in milliseconds (0 = non-blocking).
+    pub recv_timeout_ms: u64,
+
+    /// Maximum message size in bytes (both send and receive).
+    pub max_message_size: usize,
+
+    /// Enable gzip compression for gRPC messages.
+    pub compression: bool,
+
+    /// Default topic name for messages without a topic in gRPC metadata.
+    /// Used as the routing key when the sender doesn't set a topic.
+    pub default_topic: String,
+}
+
+impl Default for GrpcConfig {
+    fn default() -> Self {
+        Self {
+            listen: None,
+            recv_buffer_size: 10_000,
+            recv_timeout_ms: 100,
+            max_message_size: 16 * 1024 * 1024,
+            compression: false,
+            default_topic: "events".to_string(),
         }
     }
 }

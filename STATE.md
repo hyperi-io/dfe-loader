@@ -7,6 +7,14 @@
 
 ---
 
+## CI Workflow Rule
+
+**Always run `./ci/local-build.sh` and confirm it passes locally before pushing to CI.**
+
+Do not push to CI to discover compile or test failures — fix them locally first.
+
+---
+
 ## Licensing
 
 | Component | Value |
