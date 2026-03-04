@@ -1,3 +1,10 @@
+# [1.13.0](https://github.com/hyperi-io/dfe-loader/compare/v1.12.1...v1.13.0) (2026-03-04)
+
+
+### Features
+
+* add gRPC transport receiving (dfe-receiver → dfe-loader) ([52d890a](https://github.com/hyperi-io/dfe-loader/commit/52d890a67e037fb197c2d5381ec0b5cfd8300cee))
+
 ## [1.12.1](https://github.com/hyperi-io/dfe-loader/compare/v1.12.0...v1.12.1) (2026-03-04)
 
 
