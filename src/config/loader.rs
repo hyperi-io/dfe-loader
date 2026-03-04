@@ -463,7 +463,7 @@ impl Default for RoutingConfig {
 /// Config cascade overrides for computed columns.
 ///
 /// CEL expressions that produce column values at insert time.
-/// Expressions are also read from ClickHouse column COMMENTs (`@computed:` directive).
+/// Expressions are also read from ClickHouse column comments (`@computed:` directive).
 ///
 /// Precedence (highest wins):
 /// 1. Config per-table override (`overrides."db.table".column`)

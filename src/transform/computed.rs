@@ -4,7 +4,7 @@
 //! Computed columns — CEL expressions that produce column values at insert time.
 //!
 //! Expressions are sourced from:
-//! 1. ClickHouse column COMMENTs (`@computed: <expr>` directive)
+//! 1. ClickHouse column comments (`@computed: <expr>` directive)
 //! 2. Config cascade overrides (`computed_columns` section)
 //!
 //! Precedence (highest wins):

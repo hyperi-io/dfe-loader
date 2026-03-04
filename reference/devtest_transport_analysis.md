@@ -171,7 +171,7 @@ impl DfeTransport for TransportServer {
 Reasons for removal:
 
 1. **Redundant** — gRPC covers all Zenoh use cases with better semantics
-2. **No ACK** — would need custom protocol, essentially reimplenting gRPC
+2. **No ACK** — would need custom protocol, essentially reimplementing gRPC
 3. **No backpressure** — pub/sub model doesn't support it natively
 4. **Maintenance cost** — separate transport impl + feature flag + dependency
 5. **Mental model split** — team doesn't need to understand pub/sub AND request/response

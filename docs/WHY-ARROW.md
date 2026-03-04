@@ -188,7 +188,7 @@ To be concrete about what clickhouse-arrow does when converting a RecordBatch to
 ```
 Block = BlockInfo + ColumnCount (varint) + RowCount (varint) + Column[]
 
-Column = Name (string) + TypeName (string) + [CustomSerFlag] + [Prefix] + Data
+Column = Name (string) + TypeName (string) + [CustomSerialisationFlag] + [Prefix] + Data
 ```
 
 ### 5.2 Per-Type Serialization
