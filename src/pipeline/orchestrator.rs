@@ -26,7 +26,7 @@ use hyperi_rustlib::ScalingPressure;
 
 use crate::buffer::{BufferManager, FlushBatch, KafkaOffset};
 use crate::clickhouse::{ArrowClickHouseClient, Inserter, InserterConfig};
-use crate::config::{Config, EnrichmentConfig, MetadataConfig, SharedConfig, TableCaptureConfig};
+use crate::config::{Config, MetadataConfig, SharedConfig, TableCaptureConfig};
 use crate::enrich::geoip::GeoIpEnricher;
 use crate::enrich::reputation::{ReputationEnricher, ThreatSource, ThreatType};
 use crate::enrich::risk::{RiskInput, RiskPreset, RiskScorer};
@@ -87,14 +87,14 @@ impl EnrichmentPipeline {
 
         // Reputation enricher (sync — loads local blocklist files)
         let reputation = if config.enrichment.reputation.enabled {
-            let mut enricher = ReputationEnricher::new()
+            let enricher = ReputationEnricher::new()
                 .with_cache_capacity(config.enrichment.reputation.cache_capacity);
 
             let mut loaded = 0usize;
             for path in &config.enrichment.reputation.blocklist_files {
                 match std::fs::read_to_string(path) {
                     Ok(content) => {
-                        enricher.load_plain_list(&content, ThreatType::Unknown, ThreatSource::Custom);
+                        enricher.load_plain_list(&content, ThreatType::None, ThreatSource::Custom);
                         loaded += 1;
                         debug!(path = %path, "Loaded reputation blocklist");
                     }
