@@ -10,6 +10,38 @@
 
 ---
 
+## CI Infrastructure Overhaul `[PLANNED]`
+
+**Goal:** Fix registry routing, migrate bash→Python, add Claude CI helpers, fast test project.
+
+### Phase A: Claude Code CI Helpers
+- [ ] ci/scripts/claude/ci-watch.py — poll run to completion, structured output
+- [ ] ci/scripts/claude/ci-logs.py — fetch/filter logs, --grep, --failed, --tail
+- [ ] ci/scripts/claude/ci-trigger.py — dispatch + optional watch
+
+### Phase B: Registry Routing Fix
+- [ ] ci/scripts/core/detect_build_config.py — explicit VALID_REGISTRIES, fail on unknown
+- [ ] ci/actions/setup/detect-build-config/action.yml — replace inline bash with Python call
+- [ ] Verify publish action dispatch has no wildcard fallthrough
+
+### Phase C: Bash → Python Migration
+- [ ] detect_build_config.py (replaces inline bash, 25+ jq calls) — covered in Phase B
+- [ ] ci_common.py: add YAML key extraction (replaces sed/grep in common.sh)
+- [ ] publish-binary.sh: migrate artifact logic to Python, keep bash wrapper
+- [ ] rust/build.sh: migrate config logic, keep cross-compile bash
+
+### Phase D: Fast CI Test Project
+- [ ] ci/.tmp/ci-test-rust-minimal/ — zero-dep Rust binary, full .hyperi-ci.yaml
+- [ ] Attach CI, confirm builds in <5 min
+- [ ] Use for all future CI script iteration
+
+### Phase E: Documentation
+- [ ] ci/docs/CONFIGURATION.md — document Claude helper scripts (usage, args, exit codes)
+- [ ] ci/docs/CONFIGURATION.md — document Python migration rationale and bash/Python split rule
+- [ ] ci/README.md — update with new script locations
+
+---
+
 ## Current: Helm + Dockerfile Automation `[IN PROGRESS]`
 
 **Goal:** Maximise in rustlib — canonical Helm chart templates + Dockerfile generation so each
