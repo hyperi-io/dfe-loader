@@ -141,7 +141,7 @@ impl Coercer {
             "Float" | "Decimal" => serde_json::json!(0.0),
             "Bool" => Value::Bool(false),
             "Date" => Value::String("1970-01-01".to_string()),
-            "DateTime" | "DateTime64" => Value::String("1970-01-01T00:00:00Z".to_string()),
+            "DateTime" | "DateTime64" => Value::String("1970-01-01 00:00:00.000".to_string()),
             "UUID" => Value::String("00000000-0000-0000-0000-000000000000".to_string()),
             "IPv4" => Value::String("0.0.0.0".to_string()),
             "IPv6" => Value::String("::".to_string()),

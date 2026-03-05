@@ -6,7 +6,7 @@
 //! Pipeline: Parse → Extract tags → Flatten → Timestamp → _raw rename → Metadata → Sanitize → Remove routing fields
 //! Note: _json is handled by ArrowBatchBuilder sidecar (zero-copy from raw bytes), not by the transformer.
 
-use chrono::{DateTime, SecondsFormat, Utc};
+use chrono::{DateTime, Utc};
 use serde_json::{Map, Value};
 
 use crate::config::{FieldSanitizationConfig, MetadataConfig, RoutingConfig, TimestampDqConfig};
@@ -23,11 +23,12 @@ static TIMESTAMP_OUTPUT_FIELD: &str = "_timestamp";
 static TIMESTAMP_RECEIVED_OUTPUT_FIELD: &str = "_timestamp_received";
 static TIMESTAMP_COLLECTOR_FIELD: &str = "_timestamp_collector";
 
-/// Format a DateTime as RFC3339 with millisecond precision and Z suffix.
-/// ClickHouse DateTime64(3) can only parse up to 3 decimal places.
+/// Format a DateTime for ClickHouse DateTime64(3) native protocol insertion.
+/// Uses space separator and no timezone suffix — the native Arrow protocol
+/// parser doesn't support RFC3339 'Z' or '+00:00' suffixes.
 #[inline]
 fn fmt_ts(dt: &DateTime<Utc>) -> String {
-    dt.to_rfc3339_opts(SecondsFormat::Millis, true)
+    dt.format("%Y-%m-%d %H:%M:%S%.3f").to_string()
 }
 
 /// Transform result with metadata
