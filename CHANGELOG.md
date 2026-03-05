@@ -1,3 +1,10 @@
+## [1.13.1](https://github.com/hyperi-io/dfe-loader/compare/v1.13.0...v1.13.1) (2026-03-05)
+
+
+### Bug Fixes
+
+* update ci/ai submodules and publish workflow for JFrog registries ([f7a5c1c](https://github.com/hyperi-io/dfe-loader/commit/f7a5c1c0b5d5d7e87c022d75d4c6c7971de88c36))
+
 # [1.13.0](https://github.com/hyperi-io/dfe-loader/compare/v1.12.1...v1.13.0) (2026-03-04)
 
 
