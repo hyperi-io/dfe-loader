@@ -10,25 +10,6 @@
 
 ---
 
-## Blocking: Fix DeploymentContract compile error
-
-**Error:** `struct 'hyperi_rustlib::DeploymentContract' has no field named 'base_image'`
-**File:** `src/config/loader.rs:1656`
-**Cause:** rustlib API change removed/renamed `base_image` from `DeploymentContract`.
-**Fix:** Check current `DeploymentContract` fields in rustlib v1.13.0, update `deployment_contract()`.
-
----
-
-## Next: Per-Table `_raw` Drop Config
-
-- [ ] Add `include_raw: bool` and `raw_overrides: HashMap<String, bool>` to `MetadataConfig`
-- [ ] Transformer checks table name against overrides before injecting `_raw`
-- [ ] Default: `include_raw = true`, `default` table override to `false`
-- [ ] Unit tests for global default, per-table override, and precedence logic
-- [ ] Integration test: verify `_raw` NULL when dropped, present when included
-
----
-
 ## Completed: DFE Shared Schemas (dfe-schemas submodule)
 
 - [x] `hyperi-io/dfe-schemas` repo exists with full schema set
@@ -43,24 +24,24 @@ Rust services read `system.columns` at runtime only. The submodule is reference/
 
 ---
 
-## Next: Helm + Dockerfile Generation from DeploymentContract (rustlib)
+## Completed: Helm + Dockerfile Generation from DeploymentContract
 
-`chart/` and `Dockerfile` exist as hand-crafted files. The planned approach is to generate
-them from `DeploymentContract` so all DFE services stay consistent with zero per-app effort.
+- [x] `generate_chart(contract, output_dir)` in rustlib — fully implemented
+- [x] `generate_dockerfile(contract)` in rustlib — fully implemented
+- [x] `--emit-helm [DIR]` CLI flag — writes chart/ from contract (default: ./chart)
+- [x] `--emit-dockerfile [FILE]` CLI flag — writes Dockerfile from contract (default: ./Dockerfile)
+- [x] chart/ regenerated from contract — in sync
 
-- [ ] `generate_helm_chart(contract, output_dir)` in rustlib — writes chart/ from templates
-- [ ] `generate_dockerfile(contract, output_path)` in rustlib — writes Dockerfile
-- [ ] CLI flag: `--emit-helm` / `--emit-dockerfile` for CI integration
-- [ ] Replace hand-crafted `chart/` and `Dockerfile` in dfe-loader with generated outputs
-- [ ] Same for dfe-receiver and dfe-archiver
+**Note on Dockerfile:** dfe-loader maintains a hand-crafted Dockerfile due to project-specific
+requirements not expressible in DeploymentContract (Ubuntu 24.04 base, `userdel ubuntu` workaround,
+GeoIP database COPY). Use `--emit-dockerfile` for new projects without custom needs.
 
 ---
 
-## Next: Dependency Updates
+## Completed: Dependency Updates
 
-- [ ] Run `cargo outdated` and check for major updates (web search for breaking changes first)
-- [ ] Update all third-party crates in dfe-loader
-- [ ] Run full test suite after updates
+- [x] `cargo update` — rustlib bumped 1.13.3 → 1.13.5, all other deps at latest compatible versions
+- [x] 407 lib tests pass after update
 
 ---
 
