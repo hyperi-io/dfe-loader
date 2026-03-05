@@ -86,6 +86,7 @@ impl DfeApp for App {
         .check_on_startup();
 
         info!(
+            version = env!("CARGO_PKG_VERSION"),
             kafka_brokers = ?config.kafka.brokers,
             clickhouse_hosts = ?config.clickhouse.hosts,
             payload_format = %config.payload.format,
