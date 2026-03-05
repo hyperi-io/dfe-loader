@@ -1,3 +1,10 @@
+## [1.13.2](https://github.com/hyperi-io/dfe-loader/compare/v1.13.1...v1.13.2) (2026-03-05)
+
+
+### Bug Fixes
+
+* add geoip dir and update ci submodule for Docker staging ([8a6a2be](https://github.com/hyperi-io/dfe-loader/commit/8a6a2be01440fefe2dc6d9235da6fdf4f7558afc))
+
 ## [1.13.1](https://github.com/hyperi-io/dfe-loader/compare/v1.13.0...v1.13.1) (2026-03-05)
 
 
