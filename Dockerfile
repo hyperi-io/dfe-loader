@@ -13,7 +13,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY dfe-loader /usr/local/bin/dfe-loader
 RUN chmod +x /usr/local/bin/dfe-loader
 
-RUN useradd --create-home --uid 1000 appuser
+# Ubuntu 24.04 ships with ubuntu user at UID 1000 — remove before creating appuser
+RUN userdel -r ubuntu && useradd --create-home --uid 1000 appuser
 
 # GeoIP databases (DB-IP Lite, CC BY 4.0)
 # Downloaded by CI via scripts/download-geoip.sh — optional, non-fatal if missing
