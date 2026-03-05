@@ -789,6 +789,26 @@ must `chmod +x` after downloading artifacts before `find -perm -u=x` searches.
 
 ---
 
+## Claude Code: Auto-Approval Settings
+
+`.claude/settings.local.json` grants broad auto-approval for CI monitoring so Claude Code does not
+block waiting for the user to press OK on every command during long builds.
+
+**Covered without prompting:** `gh *`, `git *`, `sleep *`, `bash *`, `cargo *`, `helm *`,
+`Read/Write/Edit` on dfe-loader and ci project trees.
+
+**Requires new session to take effect** — Claude Code reads `settings.local.json` at startup.
+Start a fresh session after any changes to this file.
+
+**CI fix workflow (no approval needed):**
+1. Claude monitors `gh run list` / `gh run view --log-failed`
+2. Finds root cause in logs
+3. If CI bug → fixes in `/projects/ci`, commits, pushes, then `git submodule update --remote ci` in dfe-loader
+4. If dfe-loader bug → fixes here, commits, pushes
+5. New CI run triggers automatically; Semantic Release → Publish follows on success
+
+---
+
 ## Decisions Log
 
 | Decision | Rationale |
@@ -799,5 +819,6 @@ must `chmod +x` after downloading artifacts before `find -perm -u=x` searches.
 | HyperI casing | Capital H, capital I for brand; HYPERI for legal entity |
 | Registry over git deps | Required for cargo publish to work |
 | clickhouse-arrow CI via workflow dispatch | Private CI without polluting public fork |
+| settings.local.json broad permissions | Prevents Claude Code blocking on approval during AFK CI monitoring sessions |
 
 ---
