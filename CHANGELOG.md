@@ -1,3 +1,10 @@
+## [1.13.3](https://github.com/hyperi-io/dfe-loader/compare/v1.13.2...v1.13.3) (2026-03-05)
+
+
+### Bug Fixes
+
+* remove ubuntu user before creating appuser in Ubuntu 24.04 image ([b475506](https://github.com/hyperi-io/dfe-loader/commit/b475506ad82e0f53d2f679a6bc71b32d70f2a029))
+
 ## [1.13.2](https://github.com/hyperi-io/dfe-loader/compare/v1.13.1...v1.13.2) (2026-03-05)
 
 
