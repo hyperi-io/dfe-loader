@@ -1653,7 +1653,6 @@ impl Config {
         DeploymentContract {
             app_name: "dfe-loader".into(),
             binary_name: "dfe-loader".into(),
-            base_image: "ubuntu:24.04".into(),
             description: "High-performance Kafka to ClickHouse data loader".into(),
             metrics_port: 9090,
             health: HealthContract {
