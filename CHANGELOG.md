@@ -1,3 +1,10 @@
+## [1.13.5](https://github.com/hyperi-io/dfe-loader/compare/v1.13.4...v1.13.5) (2026-03-05)
+
+
+### Bug Fixes
+
+* Making changes to allow for native arrow protocol times ([a86bf40](https://github.com/hyperi-io/dfe-loader/commit/a86bf4052ab473798875138e39300823b85e9652))
+
 ## [1.13.4](https://github.com/hyperi-io/dfe-loader/compare/v1.13.3...v1.13.4) (2026-03-05)
 
 
