@@ -1,3 +1,10 @@
+## [1.13.4](https://github.com/hyperi-io/dfe-loader/compare/v1.13.3...v1.13.4) (2026-03-05)
+
+
+### Bug Fixes
+
+* update Dockerfile header and align with HyperI file header standard ([a857876](https://github.com/hyperi-io/dfe-loader/commit/a857876004d5890d358188563007b05568aa24d8))
+
 ## [1.13.3](https://github.com/hyperi-io/dfe-loader/compare/v1.13.2...v1.13.3) (2026-03-05)
 
 
