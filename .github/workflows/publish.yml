@@ -34,6 +34,7 @@ jobs:
       container_platforms: ${{ steps.config.outputs.container_platforms }}
       helm_enabled: ${{ steps.config.outputs.helm_enabled }}
       helm_chart_path: ${{ steps.config.outputs.helm_chart_path }}
+      helm_registry: ${{ steps.config.outputs.helm_registry }}
       helm_registry_url: ${{ steps.config.outputs.helm_registry_url }}
     steps:
       - name: Generate token
@@ -119,6 +120,7 @@ jobs:
           # Helm chart publishing (optional - enable in .hyperi-ci.yaml)
           helm-enabled: ${{ needs.detect.outputs.helm_enabled }}
           helm-chart-path: ${{ needs.detect.outputs.helm_chart_path }}
+          helm-registry: ${{ needs.detect.outputs.helm_registry }}
           helm-registry-url: ${{ needs.detect.outputs.helm_registry_url }}
           linear-api-key: ${{ secrets.LINEAR_API_KEY }}
           linear-prefixes: ${{ vars.LINEAR_PREFIXES || 'DFE' }}
