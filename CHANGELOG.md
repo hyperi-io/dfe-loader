@@ -1,3 +1,12 @@
+## [1.13.6](https://github.com/hyperi-io/dfe-loader/compare/v1.13.5...v1.13.6) (2026-03-06)
+
+
+### Bug Fixes
+
+* add base_image field to DeploymentContract ([5c9de7c](https://github.com/hyperi-io/dfe-loader/commit/5c9de7ccca5d2dc6d66a966a298d6f0273317e3f))
+* attach dfe-schemas submodule at schemas/ ([39a1315](https://github.com/hyperi-io/dfe-loader/commit/39a131530c730d960478a29438b8cf1348575692))
+* remove base_image from DeploymentContract, add emit flags, update deps ([6d7e22f](https://github.com/hyperi-io/dfe-loader/commit/6d7e22f342ffdf0b322bc49918191111ce39bc24))
+
 ## [1.13.5](https://github.com/hyperi-io/dfe-loader/compare/v1.13.4...v1.13.5) (2026-03-05)
 
 
