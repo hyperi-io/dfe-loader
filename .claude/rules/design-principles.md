@@ -1,1 +1,1 @@
-../../ai/standards/rules/design-principles.md
+../../hyperi-ai/standards/rules/design-principles.md

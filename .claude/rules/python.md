@@ -1,1 +1,1 @@
-../../ai/standards/rules/python.md
+../../hyperi-ai/standards/rules/python.md

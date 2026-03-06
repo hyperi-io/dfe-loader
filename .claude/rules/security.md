@@ -1,1 +1,1 @@
-../../ai/standards/rules/security.md
+../../hyperi-ai/standards/rules/security.md

@@ -1,1 +1,1 @@
-../../ai/standards/rules/docker.md
+../../hyperi-ai/standards/rules/docker.md

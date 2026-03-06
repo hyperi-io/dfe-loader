@@ -1,1 +1,1 @@
-../../ai/templates/claude-code/commands/simplify.md
+../../hyperi-ai/templates/claude-code/commands/simplify.md

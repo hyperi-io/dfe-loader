@@ -1,1 +1,1 @@
-../../ai/standards/rules/error-handling.md
+../../hyperi-ai/standards/rules/error-handling.md

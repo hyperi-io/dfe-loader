@@ -1,1 +1,1 @@
-../../ai/standards/rules/k8s.md
+../../hyperi-ai/standards/rules/k8s.md

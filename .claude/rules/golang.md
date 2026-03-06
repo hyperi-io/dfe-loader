@@ -1,1 +1,1 @@
-../../ai/standards/rules/golang.md
+../../hyperi-ai/standards/rules/golang.md

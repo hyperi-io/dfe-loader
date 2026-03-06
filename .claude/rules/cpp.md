@@ -1,1 +1,1 @@
-../../ai/standards/rules/cpp.md
+../../hyperi-ai/standards/rules/cpp.md

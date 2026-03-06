@@ -1,1 +1,1 @@
-../../ai/standards/rules/testing.md
+../../hyperi-ai/standards/rules/testing.md

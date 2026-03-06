@@ -1,1 +1,1 @@
-../../ai/standards/rules/bash.md
+../../hyperi-ai/standards/rules/bash.md

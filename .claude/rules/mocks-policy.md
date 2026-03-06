@@ -1,1 +1,1 @@
-../../ai/standards/rules/mocks-policy.md
+../../hyperi-ai/standards/rules/mocks-policy.md

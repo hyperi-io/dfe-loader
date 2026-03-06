@@ -1,1 +1,1 @@
-../../ai/templates/claude-code/commands/review.md
+../../hyperi-ai/templates/claude-code/commands/review.md

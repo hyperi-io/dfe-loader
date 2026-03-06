@@ -1,1 +1,1 @@
-../../ai/standards/rules/clickhouse-sql.md
+../../hyperi-ai/standards/rules/clickhouse-sql.md

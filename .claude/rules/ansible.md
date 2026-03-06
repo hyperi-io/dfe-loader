@@ -1,1 +1,1 @@
-../../ai/standards/rules/ansible.md
+../../hyperi-ai/standards/rules/ansible.md

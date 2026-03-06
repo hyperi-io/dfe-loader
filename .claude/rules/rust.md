@@ -1,1 +1,1 @@
-../../ai/standards/rules/rust.md
+../../hyperi-ai/standards/rules/rust.md

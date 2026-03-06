@@ -1,1 +1,1 @@
-../../ai/standards/rules/typescript.md
+../../hyperi-ai/standards/rules/typescript.md

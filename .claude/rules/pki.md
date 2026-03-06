@@ -1,1 +1,1 @@
-../../ai/standards/rules/pki.md
+../../hyperi-ai/standards/rules/pki.md
