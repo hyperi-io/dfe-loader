@@ -1,0 +1,215 @@
+# OCSF (Open Cybersecurity Schema Framework) Field Mapping Preset
+#
+# Maps common raw field names from various log sources to OCSF-compatible
+# destination field names. First match wins when multiple sources listed.
+#
+# Reference: https://schema.ocsf.io/1.3.0/
+# OCSF Version: 1.3.0
+#
+# Format:
+#   destination_field:
+#     sources: [source1, source2, ...]  # first present wins
+#     action: rename|copy               # optional, defaults to config default_action
+
+mappings:
+  # ===========================================================================
+  # Network: Source Endpoint
+  # ===========================================================================
+  src_endpoint.ip:
+    sources: [src_ip, srcip, source_ip, sourceIPAddress, s_ip, SrcAddr, clientIP, client_ip, source.ip]
+  src_endpoint.port:
+    sources: [src_port, srcport, source_port, s_port, SrcPort, clientPort, client_port, source.port]
+  src_endpoint.mac:
+    sources: [src_mac, source_mac, SrcMac]
+  src_endpoint.hostname:
+    sources: [src_host, source_host, src_domain, source_domain, source.domain]
+  src_endpoint.domain:
+    sources: [src_domain, source_domain, src_host]
+
+  # ===========================================================================
+  # Network: Destination Endpoint
+  # ===========================================================================
+  dst_endpoint.ip:
+    sources: [dst_ip, dstip, dest_ip, destinationIPAddress, d_ip, DstAddr, serverIP, server_ip, destination.ip]
+  dst_endpoint.port:
+    sources: [dst_port, dstport, dest_port, d_port, DstPort, serverPort, server_port, destination.port]
+  dst_endpoint.mac:
+    sources: [dst_mac, dest_mac, DstMac]
+  dst_endpoint.hostname:
+    sources: [dst_host, dest_host, dst_domain, dest_domain, destination.domain]
+  dst_endpoint.domain:
+    sources: [dst_domain, dest_domain, dst_host, dest_host]
+
+  # ===========================================================================
+  # Network: Traffic
+  # ===========================================================================
+  traffic.bytes_in:
+    sources: [bytes_in, src_bytes, source_bytes, bytesIn, BytesReceived]
+  traffic.bytes_out:
+    sources: [bytes_out, dst_bytes, dest_bytes, bytesOut, BytesSent]
+  traffic.bytes:
+    sources: [total_bytes, bytes, network_bytes]
+  traffic.packets_in:
+    sources: [packets_in, src_packets, pkts_in]
+  traffic.packets_out:
+    sources: [packets_out, dst_packets, pkts_out]
+  traffic.packets:
+    sources: [total_packets, packets, network_packets]
+
+  # ===========================================================================
+  # Network: Connection Info
+  # ===========================================================================
+  connection_info.protocol_name:
+    sources: [protocol, transport, proto, ip_protocol, network.transport]
+  connection_info.direction:
+    sources: [direction, traffic_direction, flow_direction, network.direction]
+  connection_info.direction_id:
+    sources: [direction_id]
+
+  # ===========================================================================
+  # Activity / Event
+  # ===========================================================================
+  activity_name:
+    sources: [action, event_action, EventAction, activity, event.action]
+  severity_id:
+    sources: [severity, priority, level, SeverityLevel, event_severity, event.severity]
+  status:
+    sources: [outcome, result, status, event_outcome, EventOutcome, event.outcome]
+  message:
+    sources: [message, msg, description, summary]
+  duration:
+    sources: [duration, elapsed, response_time, elapsed_time, event.duration]
+
+  # ===========================================================================
+  # Actor / User
+  # ===========================================================================
+  actor.user.name:
+    sources: [user, username, user_name, userName, login, account_name, user.name]
+  actor.user.uid:
+    sources: [user_id, uid, userId, account_id, subject_user_id, user.id]
+  actor.user.email_addr:
+    sources: [user_email, email, mail, userEmail, user.email]
+  actor.user.domain:
+    sources: [user_domain, domain, logon_domain, account_domain, user.domain]
+
+  # ===========================================================================
+  # Device
+  # ===========================================================================
+  device.name:
+    sources: [hostname, host, computer_name, ComputerName, host_name, device_name, host.name]
+  device.ip:
+    sources: [host_ip, hostip, device_ip, host.ip]
+    action: copy
+  device.hostname:
+    sources: [fqdn, host_fqdn, host.hostname]
+  device.os.name:
+    sources: [os, os_name, operating_system, os_type, host.os.name]
+
+  # ===========================================================================
+  # Process
+  # ===========================================================================
+  process.name:
+    sources: [process_name, proc_name, ProcessName, process, program]
+  process.pid:
+    sources: [process_id, pid, ProcessId, proc_id]
+  process.file.path:
+    sources: [process_path, exe, executable, binary, process_exec, process.executable]
+  process.cmd_line:
+    sources: [command_line, cmdline, cmd, CommandLine, process_command, process.command_line]
+
+  # ===========================================================================
+  # File
+  # ===========================================================================
+  file.name:
+    sources: [file_name, filename, FileName]
+  file.path:
+    sources: [file_path, filepath, FilePath, full_path]
+  file.size:
+    sources: [file_size, filesize, FileSize, size]
+
+  # OCSF uses hashes array with algorithm_id + value, but flat fields
+  # are mapped for convenience (consumer can restructure)
+  file.hashes.md5:
+    sources: [md5, file_md5, MD5, hash_md5, file.hash.md5]
+  file.hashes.sha256:
+    sources: [sha256, file_sha256, SHA256, hash_sha256, file.hash.sha256]
+  file.hashes.sha1:
+    sources: [sha1, file_sha1, SHA1, hash_sha1, file.hash.sha1]
+
+  # ===========================================================================
+  # HTTP Request / URL
+  # ===========================================================================
+  http_request.url.text:
+    sources: [url, request_url, uri, URL, requestUrl, full_url, url.full]
+  http_request.url.hostname:
+    sources: [url_domain, http_host, request_host, url.domain]
+  http_request.url.path:
+    sources: [url_path, uri_path, request_path, url.path]
+  http_request.url.query_string:
+    sources: [url_query, query_string, uri_query, url.query]
+  http_request.http_method:
+    sources: [http_method, method, request_method, verb, HttpMethod, http.request.method]
+  http_response.code:
+    sources: [http_status, status_code, response_code, http_response_code, HttpStatusCode, http.response.status_code]
+  http_request.referrer:
+    sources: [referrer, referer, http_referrer, http.request.referrer]
+  http_request.user_agent:
+    sources: [user_agent, useragent, UserAgent, http_user_agent, user_agent.original]
+
+  # ===========================================================================
+  # DNS
+  # ===========================================================================
+  dns_query.hostname:
+    sources: [query, dns_query, QueryName, dns_name, question_name, dns.question.name]
+  dns_query.type:
+    sources: [query_type, dns_type, QueryType, question_type, dns.question.type]
+  dns_query.opcode:
+    sources: [rcode, dns_rcode, ResponseCode, dns.response_code]
+
+  # ===========================================================================
+  # Metadata / Agent / Observer
+  # ===========================================================================
+  metadata.product.name:
+    sources: [vendor_product, product, device_product, observer.product]
+  metadata.product.vendor_name:
+    sources: [vendor, device_vendor, observer.vendor]
+
+  # ===========================================================================
+  # Findings / Rule
+  # ===========================================================================
+  finding_info.title:
+    sources: [signature, rule_name, alert_name, sig_name, rule.name]
+  finding_info.uid:
+    sources: [rule_id, signature_id, sig_id, alert_id, rule.id]
+
+  # ===========================================================================
+  # Cloud
+  # ===========================================================================
+  cloud.provider:
+    sources: [cloud_provider, provider]
+  cloud.region:
+    sources: [cloud_region, region, aws_region]
+  cloud.account.uid:
+    sources: [cloud_account_id, account_id, aws_account_id]
+
+  # ===========================================================================
+  # Enrichments / Related (pivot fields - always copy)
+  # ===========================================================================
+  observables.ip:
+    sources: [src_ip, dst_ip, host_ip, client_ip, server_ip]
+    action: copy
+  observables.user:
+    sources: [user, username, target_user, source_user]
+    action: copy
+
+  # ===========================================================================
+  # Log
+  # ===========================================================================
+  severity:
+    sources: [log_level, loglevel, LogLevel, syslog_severity, log.level]
+
+  # ===========================================================================
+  # App
+  # ===========================================================================
+  app_name:
+    sources: [app, application, app_name, service_name, network.application]
