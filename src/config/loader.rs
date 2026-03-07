@@ -76,7 +76,7 @@ impl Default for KafkaConfig {
         Self {
             brokers: vec!["localhost:9092".to_string()],
             group: "clickhouse-loader".to_string(),
-            topics: vec!["events".to_string()],
+            topics: vec!["default_land".to_string()],
             topic_regex: None,
             client_id: "clickhouse-loader".to_string(),
             sasl: None,
@@ -125,7 +125,7 @@ impl Default for GrpcConfig {
             recv_timeout_ms: 100,
             max_message_size: 16 * 1024 * 1024,
             compression: false,
-            default_topic: "events".to_string(),
+            default_topic: "default_land".to_string(),
         }
     }
 }
@@ -1695,7 +1695,7 @@ impl Config {
                 "kafka": {
                     "brokers": "kafka:9092",
                     "group_id": "dfe-loader",
-                    "topics": ["dfe.default"],
+                    "topics": ["default_land"],
                     "security_protocol": "SASL_PLAINTEXT",
                     "sasl_mechanism": "SCRAM-SHA-512"
                 },

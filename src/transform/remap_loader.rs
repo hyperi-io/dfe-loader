@@ -22,6 +22,7 @@ use super::field_mapping::{FieldMappingRule, MappingAction, RuleOrigin};
 // ============================================================================
 
 const BUILTIN_ECS: &str = include_str!("../../mappings/ecs.yaml");
+const BUILTIN_OCSF: &str = include_str!("../../mappings/ocsf.yaml");
 const BUILTIN_CIM_TO_ECS: &str = include_str!("../../mappings/cim_to_ecs.csv");
 const BUILTIN_BEATS_LEGACY: &str = include_str!("../../mappings/beats_legacy.csv");
 
@@ -30,6 +31,8 @@ const BUILTIN_BEATS_LEGACY: &str = include_str!("../../mappings/beats_legacy.csv
 pub enum BuiltinPreset {
     /// Common raw field names → ECS
     Ecs,
+    /// Common raw field names → OCSF
+    Ocsf,
     /// Splunk CIM → ECS crosswalk
     Cim,
     /// Pre-7.0 Beats → ECS
@@ -41,6 +44,7 @@ impl BuiltinPreset {
     pub fn parse(s: &str) -> Option<Self> {
         match s.to_ascii_lowercase().as_str() {
             "ecs" => Some(Self::Ecs),
+            "ocsf" => Some(Self::Ocsf),
             "cim" | "splunk" | "splunk_cim" => Some(Self::Cim),
             "beats" | "beats_legacy" => Some(Self::Beats),
             _ => None,
@@ -55,12 +59,14 @@ pub fn load_builtin(
 ) -> crate::Result<Vec<FieldMappingRule>> {
     let origin_name = match preset {
         BuiltinPreset::Ecs => "builtin:ecs",
+        BuiltinPreset::Ocsf => "builtin:ocsf",
         BuiltinPreset::Cim => "builtin:cim",
         BuiltinPreset::Beats => "builtin:beats",
     };
 
     match preset {
         BuiltinPreset::Ecs => load_yaml_str(BUILTIN_ECS, default_action, origin_name),
+        BuiltinPreset::Ocsf => load_yaml_str(BUILTIN_OCSF, default_action, origin_name),
         BuiltinPreset::Cim => load_csv_str(BUILTIN_CIM_TO_ECS, default_action, origin_name),
         BuiltinPreset::Beats => load_csv_str(BUILTIN_BEATS_LEGACY, default_action, origin_name),
     }
@@ -362,9 +368,36 @@ mappings:
     }
 
     #[test]
+    fn test_builtin_ocsf() {
+        let rules = load_builtin(BuiltinPreset::Ocsf, MappingAction::Rename).unwrap();
+        assert!(!rules.is_empty(), "OCSF preset should have rules");
+
+        // Verify known OCSF mappings exist
+        let has_src_endpoint_ip = rules.iter().any(|r| r.destination == "src_endpoint.ip");
+        assert!(
+            has_src_endpoint_ip,
+            "OCSF preset should map src_endpoint.ip"
+        );
+
+        let has_dst_endpoint_ip = rules.iter().any(|r| r.destination == "dst_endpoint.ip");
+        assert!(
+            has_dst_endpoint_ip,
+            "OCSF preset should map dst_endpoint.ip"
+        );
+
+        let has_actor_user_name = rules.iter().any(|r| r.destination == "actor.user.name");
+        assert!(
+            has_actor_user_name,
+            "OCSF preset should map actor.user.name"
+        );
+    }
+
+    #[test]
     fn test_builtin_preset_parse() {
         assert_eq!(BuiltinPreset::parse("ecs"), Some(BuiltinPreset::Ecs));
         assert_eq!(BuiltinPreset::parse("ECS"), Some(BuiltinPreset::Ecs));
+        assert_eq!(BuiltinPreset::parse("ocsf"), Some(BuiltinPreset::Ocsf));
+        assert_eq!(BuiltinPreset::parse("OCSF"), Some(BuiltinPreset::Ocsf));
         assert_eq!(BuiltinPreset::parse("cim"), Some(BuiltinPreset::Cim));
         assert_eq!(BuiltinPreset::parse("splunk"), Some(BuiltinPreset::Cim));
         assert_eq!(BuiltinPreset::parse("beats"), Some(BuiltinPreset::Beats));
