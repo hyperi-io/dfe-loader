@@ -98,6 +98,13 @@ Each is a new file implementing `DlqBackend` trait + feature flag. No changes to
 
 ## Completed
 
+### 2026-03-08: OCSF Remap Preset + Default Topic
+
+- [x] OCSF builtin field mapping preset (`mappings/ocsf.yaml`, ~50 mappings, v1.3.0)
+- [x] `BuiltinPreset::Ocsf` variant wired in `remap_loader.rs`
+- [x] Default Kafka input topic changed: `events` → `default_land` (aligns with `_land`/`_load` suffix convention)
+- [x] 408 lib tests pass
+
 ### 2026-03-06: CI Infrastructure Overhaul
 
 - [x] `ci/scripts/claude/ci-watch.py` — poll run to completion, exponential backoff
@@ -216,4 +223,4 @@ Each is a new file implementing `DlqBackend` trait + feature flag. No changes to
 
 ---
 
-**Last Updated:** 2026-03-06
+**Last Updated:** 2026-03-08
