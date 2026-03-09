@@ -696,11 +696,47 @@ maxminddb = { version = ">=0.24", features = ["mmap", "simdutf8"] }
 
 ## Test Environment
 
-Located at k8s.tyrell.com.au with:
+Located at devex.hyperi.io with:
 
-- ClickHouse 25.12: port 30900 (native), 30123 (HTTP)
-- Kafka: port 30092 with SCRAM-SHA-512
-- See `.env` for credentials
+- ClickHouse 26.x: `clickhouse.devex.hyperi.io:8123` (HTTP), `:9000` (native)
+- **3-node replicated cluster** (`default` cluster, Keeper-managed)
+- Kafka: `kafka.devex.hyperi.io:9092` with SCRAM-SHA-512
+- See `.env` for credentials (`CLICKHOUSE_CLUSTER=default`)
+
+### Test Cluster Database Types
+
+| Database | Engine | Notes |
+|----------|--------|-------|
+| `benchmark` | `Atomic` | Standard. Use `ON CLUSTER 'default'` + `MergeTree()`. Tables are independent per node — no data replication. Avoid query-back tests. |
+| `default` | `Replicated` | DDL auto-propagated. Use `ReplicatedMergeTree()` (no args — ZK paths auto-filled). DO NOT specify explicit ZK paths (forbidden). DO NOT use `ON CLUSTER` for CREATE. |
+
+### Test Table Convention
+
+**Standard pattern (most tests — `benchmark` database):**
+```rust
+// ON CLUSTER creates on all 3 nodes. MergeTree stays as MergeTree (no data replication).
+"CREATE TABLE {} ON CLUSTER 'default' (...) ENGINE = MergeTree() ORDER BY tuple()"
+```
+
+**Query-back verification pattern (`default` Replicated database):**
+```rust
+// No ON CLUSTER — Replicated DB propagates DDL automatically and replicates data.
+// ReplicatedMergeTree() with no args — ZK paths auto-filled by Replicated DB.
+"CREATE TABLE default.{} (...) ENGINE = ReplicatedMergeTree() ORDER BY ..."
+// After INSERT, sync before query-back:
+"SYSTEM SYNC REPLICA ON CLUSTER 'default' default.{table_name}"
+```
+
+**Wrong (do not use):**
+```rust
+// ❌ Explicit ZK paths forbidden in Replicated database
+"ENGINE = ReplicatedMergeTree('/clickhouse/{{cluster}}/tables/{{database}}/{{table}}', '{{replica}}')"
+// ❌ No ON CLUSTER in Atomic database — only creates on one node
+"CREATE TABLE {} (...) ENGINE = MergeTree()"
+```
+
+**Why:** Load-balanced cluster with no sticky sessions — INSERT and SELECT may hit different nodes.
+Without ON CLUSTER in Atomic DBs, or without data replication in Replicated DBs, queries return 0.
 
 ---
 
@@ -830,5 +866,9 @@ Start a fresh session after any changes to this file.
 | Registry over git deps | Required for cargo publish to work |
 | clickhouse-arrow CI via workflow dispatch | Private CI without polluting public fork |
 | settings.local.json broad permissions | Prevents Claude Code blocking on approval during AFK CI monitoring sessions |
+| MSRV 1.94 (rust-version = "1.94") | Pin to current stable. Track latest until OSS, then stabilise as the project matures |
+| Never kill cargo processes | Multiple projects share this host — NEVER kill cargo to free locks. Wait for builds to finish. |
+| Test tables: ReplicatedMergeTree ON CLUSTER | ClickHouse test cluster has 3 nodes behind a load balancer. CREATE TABLE without ON CLUSTER creates on one node only; inserts to other nodes fail. Always use ReplicatedMergeTree + ON CLUSTER 'default'. |
+| Edition 2024 | Using Rust edition 2024. `std::env::set_var/remove_var` require `unsafe` blocks. Pattern matching on `&mut T` is implicit in 2024 (remove `ref mut` from `if let Some` on `&mut Option`). |
 
 ---

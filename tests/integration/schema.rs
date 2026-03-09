@@ -5,13 +5,12 @@
 //!
 //! Tests for schema introspection, caching, and refresh
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use dfe_loader::clickhouse::schema::{SchemaCache, SchemaCacheConfig};
 use dfe_loader::clickhouse::{ColumnInfo, ParsedType, TableSchema};
 
-use crate::common::{create_test_client, drop_test_table, unique_table_name};
+use crate::common::{create_http_test_client, drop_http_test_table, unique_table_name};
 use crate::skip_if_no_clickhouse;
 
 // ============================================================================
@@ -210,8 +209,8 @@ fn test_schema_cache_needs_refresh() {
 async fn test_schema_introspection_from_clickhouse() {
     skip_if_no_clickhouse!();
 
-    let client = match create_test_client().await {
-        Some(c) => Arc::new(c),
+    let client = match create_http_test_client() {
+        Some(c) => c,
         None => return,
     };
 
@@ -219,17 +218,17 @@ async fn test_schema_introspection_from_clickhouse() {
 
     // Create test table with various types
     let ddl = format!(
-        "CREATE TABLE {} (
+        "CREATE TABLE {} ON CLUSTER 'default' (
             id UInt64,
             name String,
             score Float64,
             created DateTime64(3),
             active Bool,
             tags Array(String)
-        ) ENGINE = Memory",
+        ) ENGINE = MergeTree() ORDER BY tuple()",
         table_name
     );
-    client.query(&ddl).await.expect("Failed to create table");
+    client.execute(&ddl).await.expect("Failed to create table");
 
     // Get schema from ClickHouse
     let schema_result = client.fetch_table_schema(&table_name).await;
@@ -251,15 +250,15 @@ async fn test_schema_introspection_from_clickhouse() {
 
     eprintln!("✓ Schema introspection: {} columns", schema.columns.len());
 
-    drop_test_table(&client, &table_name).await;
+    drop_http_test_table(&client, &table_name).await;
 }
 
 #[tokio::test]
 async fn test_schema_cache_with_clickhouse() {
     skip_if_no_clickhouse!();
 
-    let client = match create_test_client().await {
-        Some(c) => Arc::new(c),
+    let client = match create_http_test_client() {
+        Some(c) => c,
         None => return,
     };
 
@@ -267,13 +266,13 @@ async fn test_schema_cache_with_clickhouse() {
 
     // Create test table
     let ddl = format!(
-        "CREATE TABLE {} (
+        "CREATE TABLE {} ON CLUSTER 'default' (
             id UInt64,
             data String
-        ) ENGINE = Memory",
+        ) ENGINE = MergeTree() ORDER BY tuple()",
         table_name
     );
-    client.query(&ddl).await.expect("Failed to create table");
+    client.execute(&ddl).await.expect("Failed to create table");
 
     // Create cache and fetch schema
     let cache = SchemaCache::new(300);
@@ -292,7 +291,7 @@ async fn test_schema_cache_with_clickhouse() {
 
     eprintln!("✓ Schema cache with ClickHouse: {} hits", stats.hits);
 
-    drop_test_table(&client, &table_name).await;
+    drop_http_test_table(&client, &table_name).await;
 }
 
 // ============================================================================

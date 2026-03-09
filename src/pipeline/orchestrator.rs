@@ -1,15 +1,15 @@
 // SPDX-License-Identifier: FSL-1.1-ALv2
 // Copyright (c) 2026 HYPERI PTY LIMITED
 
-//! Main pipeline coordinator
+//! Main pipeline coordinator.
 //!
 //! Orchestrates the Transport → Transform → Buffer → ClickHouse pipeline.
 //!
 //! Uses the hyperi-rustlib Transport abstraction for message sources (Kafka/Memory).
 //! Processes messages in batches for efficiency.
 //!
-//! Uses Arrow batching: accumulates multiple messages, converts to
-//! columnar Arrow RecordBatch, then pushes to buffer for ClickHouse insert.
+//! Accumulates rows as `Map<String, Value>` per table, then flushes via
+//! JSONEachRow HTTP inserts to ClickHouse.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -25,7 +25,7 @@ use hyperi_rustlib::dlq::{Dlq, DlqEntry, DlqSource};
 use hyperi_rustlib::ScalingPressure;
 
 use crate::buffer::{BufferManager, FlushBatch, KafkaOffset};
-use crate::clickhouse::{ArrowClickHouseClient, Inserter, InserterConfig};
+use crate::clickhouse::{HttpClickHouseClient, Inserter, InserterConfig};
 use crate::config::{Config, MetadataConfig, SharedConfig, TableCaptureConfig};
 use crate::enrich::geoip::GeoIpEnricher;
 use crate::enrich::reputation::{ReputationEnricher, ThreatSource, ThreatType};
@@ -301,13 +301,15 @@ impl Orchestrator {
         let transport = TransportBackend::from_config(&self.config).await?;
         info!(transport = transport.name(), "Transport initialized");
 
-        // Create Arrow client for native protocol inserts and schema queries
-        // Convert from dfe-loader config::ClickHouseConfig to clickhouse::ClickHouseConfig
+        // Create HTTP client for JSONEachRow inserts and DDL/schema queries
         let ch_config: crate::clickhouse::ClickHouseConfig = (&self.config.clickhouse).into();
-        let arrow_client = Arc::new(ArrowClickHouseClient::new(&ch_config).await?);
+        let http_client = Arc::new(
+            HttpClickHouseClient::new(&ch_config)
+                .map_err(|e| crate::Error::ClickHouse(e.to_string()))?,
+        );
 
-        // Inserter uses Arrow-only path (gets its own Arc clone)
-        let inserter = Inserter::new(Arc::clone(&arrow_client), InserterConfig::default());
+        // Inserter uses JSONEachRow HTTP inserts
+        let inserter = Inserter::new(Arc::clone(&http_client), InserterConfig::default());
 
         // DLQ (unified rustlib module — cascade: Kafka primary, file fallback)
         let dlq_config = self.config.routing.dlq.to_rustlib_config();
@@ -467,14 +469,9 @@ impl Orchestrator {
                     }
 
                     // Check for buffers ready to flush
-                    match buffer_manager.get_ready_for_flush() {
-                        Ok(batches) if !batches.is_empty() => {
-                            self.flush_batches_transport(&inserter, &transport, batches).await;
-                        }
-                        Ok(_) => {} // No batches ready
-                        Err(e) => {
-                            warn!(error = %e, "Failed to get flush batches");
-                        }
+                    let batches = buffer_manager.get_ready_for_flush();
+                    if !batches.is_empty() {
+                        self.flush_batches_transport(&inserter, &transport, batches).await;
                     }
                 }
 
@@ -563,7 +560,7 @@ impl Orchestrator {
                             // This is async but runs once per new table, not per message
                             let pending = capture_overrides.take_pending();
                             for table in pending {
-                                match arrow_client.fetch_table_comment(&table).await {
+                                match http_client.fetch_table_comment(&table).await {
                                     Ok(comment) if !comment.is_empty() => {
                                         capture_overrides.update_from_comment(&table, &comment);
                                         debug!(table = %table, "Resolved DDL capture tags");
@@ -580,8 +577,8 @@ impl Orchestrator {
                                 let fm_pending = fm_cache.take_pending();
                                 for table in fm_pending {
                                     // Fetch schema and column comments for this table
-                                    let schema_result = arrow_client.fetch_table_schema(&table).await;
-                                    let comments_result = arrow_client.fetch_column_comments(&table).await;
+                                    let schema_result = http_client.fetch_table_schema(&table).await;
+                                    let comments_result = http_client.fetch_column_comments(&table).await;
 
                                     match (schema_result, comments_result) {
                                         (Ok(schema), Ok(comments)) => {
@@ -603,7 +600,7 @@ impl Orchestrator {
                             {
                                 let cc_pending = computed_column_cache.take_pending();
                                 for table in cc_pending {
-                                    let comments_result = arrow_client.fetch_column_comments(&table).await;
+                                    let comments_result = http_client.fetch_column_comments(&table).await;
                                     match comments_result {
                                         Ok(comments) => {
                                             computed_column_cache.build_and_cache(&table, &comments);
@@ -618,14 +615,9 @@ impl Orchestrator {
 
                             // Check for immediate flush (fast path: skip if nothing ready)
                             if buffer_manager.should_flush() {
-                                match buffer_manager.get_ready_for_flush() {
-                                    Ok(batches) if !batches.is_empty() => {
-                                        self.flush_batches_transport(&inserter, &transport, batches).await;
-                                    }
-                                    Ok(_) => {} // No batches ready
-                                    Err(e) => {
-                                        warn!(error = %e, "Failed to get flush batches");
-                                    }
+                                let batches = buffer_manager.get_ready_for_flush();
+                                if !batches.is_empty() {
+                                    self.flush_batches_transport(&inserter, &transport, batches).await;
                                 }
                             }
                         }
@@ -648,16 +640,11 @@ impl Orchestrator {
         }
 
         // Final flush
-        match buffer_manager.flush_all() {
-            Ok(final_batches) if !final_batches.is_empty() => {
-                info!(batches = final_batches.len(), "Flushing remaining buffers");
-                self.flush_batches_transport(&inserter, &transport, final_batches)
-                    .await;
-            }
-            Ok(_) => {} // No batches to flush
-            Err(e) => {
-                error!(error = %e, "Failed to flush remaining buffers");
-            }
+        let final_batches = buffer_manager.flush_all();
+        if !final_batches.is_empty() {
+            info!(batches = final_batches.len(), "Flushing remaining buffers");
+            self.flush_batches_transport(&inserter, &transport, final_batches)
+                .await;
         }
 
         // Close transport
@@ -748,7 +735,6 @@ impl Orchestrator {
         };
 
         // Step 4: Transform (flatten, timestamp validation, _raw rename, routing field removal)
-        // Note: _json is NOT injected here — it's built from raw bytes in ArrowBatchBuilder sidecar
         let transform_result = transformer.transform_with_raw(
             value,
             org_id_owned.as_deref(),
@@ -760,16 +746,17 @@ impl Orchestrator {
         capture_overrides.mark_pending(&table);
         let mut data = transform_result.data;
 
-        // Determine raw_payload for _json sidecar:
-        // Pass Some(bytes) to enable _json, None to suppress.
-        // Checks: global capture_json config, common header enabled, AND per-table override.
+        // Inject _json: the original Kafka payload as a JSON string value.
+        // ClickHouse will parse this into native JSON type via JSONEachRow.
         let table_capture = capture_overrides.get_or_default(&table);
-        let raw_payload: Option<&[u8]> =
-            if common_header && self.config.metadata.capture_json && !table_capture.disable_json {
-                Some(&msg.payload)
-            } else {
-                None
-            };
+        if common_header && self.config.metadata.capture_json && !table_capture.disable_json {
+            if let Ok(json_str) = std::str::from_utf8(&msg.payload) {
+                data.insert(
+                    "_json".to_string(),
+                    Value::String(json_str.to_string()),
+                );
+            }
+        }
 
         // Remove _raw if disabled for this table (config list or DDL tags)
         if common_header && table_capture.disable_raw {
@@ -777,7 +764,7 @@ impl Orchestrator {
         }
 
         // Step 4.7: Apply per-table field mapping (rename/copy source fields)
-        if let Some(ref mut fm_cache) = field_mapping_cache {
+        if let Some(fm_cache) = field_mapping_cache {
             fm_cache.mark_pending(&table);
             if let Some(mapping) = fm_cache.get(&table) {
                 mapping.apply(&mut data);
@@ -814,23 +801,20 @@ impl Orchestrator {
             }
         }
 
-        // Step 5: Push to per-table buffer with raw payload sidecar for _json
-        // Each table has its own ArrowBatchBuilder for schema uniformity.
-        // The data stays as JSON Map until the batch is ready, then converts to Arrow.
-        // _json is built from raw_payload directly in ArrowBatchBuilder (zero-copy).
+        // Step 5: Push to per-table buffer
         let kafka_offset = KafkaOffset::with_shared_topic(
-            msg.topic.clone(), // Arc::clone is cheap (just increments refcount)
+            msg.topic.clone(),
             msg.partition,
             msg.offset,
         );
 
-        buffer_manager.push(&table, data, Some(kafka_offset), raw_payload);
+        buffer_manager.push(&table, data, Some(kafka_offset));
 
-        debug!(table = %table, "Message buffered for Arrow batch");
+        debug!(table = %table, "Message buffered");
         Ok(table)
     }
 
-    /// Flush Arrow batches to ClickHouse and commit Kafka offsets via transport on success
+    /// Flush batches to ClickHouse and commit Kafka offsets via transport on success
     async fn flush_batches_transport(
         &mut self,
         inserter: &Inserter,
@@ -840,12 +824,12 @@ impl Orchestrator {
         use std::time::Instant;
 
         let batch_count = batches.len();
-        let total_rows: usize = batches.iter().map(|b| b.batch.num_rows()).sum();
+        let total_rows: usize = batches.iter().map(|b| b.rows.len()).sum();
 
         debug!(
             batches = batch_count,
             rows = total_rows,
-            "Flushing Arrow batches"
+            "Flushing batches"
         );
 
         // Pre-calculate total offset count for efficient allocation
@@ -883,7 +867,7 @@ impl Orchestrator {
                     }
                 }
                 Err(e) => {
-                    error!(error = %e, "Arrow batch insert failed");
+                    error!(error = %e, "Batch insert failed");
                     self.stats.errors += 1;
                     all_success = false;
                     if let Some(ref m) = self.metrics {

@@ -15,7 +15,6 @@ tests/
 ├── fixtures/            # Test data builders
 │   ├── events.rs       # EventBuilder, BatchEventBuilder
 │   ├── config.rs       # Config builders
-│   ├── arrow_schema.rs # Arrow schema builders
 │   └── ddl.rs          # ClickHouse DDL builders
 ├── integration/         # Integration tests
 │   ├── clickhouse.rs   # ClickHouse Arrow client tests
@@ -61,7 +60,7 @@ cargo test --test integration_tests
 
 **Key Tests:**
 
-- [clickhouse.rs](tests/integration/clickhouse.rs) - Arrow protocol tests
+- [clickhouse.rs](tests/integration/clickhouse.rs) - ClickHouse HTTP client tests
 - [inserter.rs](tests/integration/inserter.rs) - Batch insert tests
 - [datatypes.rs](tests/integration/datatypes.rs) - Type handling tests
 - [rls.rs](tests/integration/rls.rs) - Row-level security tests
@@ -159,46 +158,77 @@ assert_eq!(count, 500, "ACME should have 500 rows");
 
 **Helpers Available:**
 
-- `query_count(client, table, where_clause)` - Get row count with optional WHERE clause
-- `query_one(client, sql)` - Get first row as HashMap<String, String>
+- `client.query_count(table, where_clause)` - Get row count with optional WHERE clause (method on `HttpClickHouseClient`)
+- `create_http_test_client()` - Creates a test HTTP client from `.env` config
+- `drop_http_test_table(client, table)` - Drops a table with `ON CLUSTER 'default'`
 
-**Note:** ClickHouse returns `String` columns as `Binary` via Arrow protocol. Use:
+### Test DDL Convention
+
+All test CREATE TABLE statements MUST use `ON CLUSTER 'default'` and `MergeTree()`.
+This is required because the test ClickHouse is a 3-node load-balanced cluster — without
+`ON CLUSTER`, CREATE goes to one node and INSERT may go to another.
+
+**Cluster database types:**
+- `benchmark` — `Atomic` engine (standard). Needs `ON CLUSTER` to create on all 3 nodes.
+  `MergeTree()` stays as MergeTree (no auto-conversion). Inserts and queries are NOT
+  consistent across nodes — avoid query-back verification tests in this database.
+- `default` — `Replicated` engine. DDL propagates automatically. Use `ReplicatedMergeTree()`
+  (empty args, ZK paths auto-filled) for tables that need data replication and query-back.
+  Do NOT specify explicit ZK paths — forbidden in Replicated databases.
+
+**Standard pattern (benchmark database — most tests):**
 
 ```rust
-use arrow::array::BinaryArray;
-if let Some(col) = batch.column(0).as_any().downcast_ref::<BinaryArray>() {
-    let value = std::str::from_utf8(col.value(0))?;
-    // ...
-}
+// ✅ CORRECT — creates on all 3 nodes via ON CLUSTER
+let ddl = format!(
+    "CREATE TABLE {} ON CLUSTER 'default' (
+        id UInt64,
+        name String
+    ) ENGINE = MergeTree()
+    ORDER BY id",
+    table_name
+);
+client.execute(&ddl).await.expect("Failed to create table");
 ```
 
-### Explicit Arrow Schemas
-
-**Problem:** JSON schema inference can mismatch ClickHouse types (especially timestamps).
-
-**Solution:** Always use explicit Arrow schemas for RecordBatches.
-
-**Example:**
+**Pattern for query-back verification (default database):**
 
 ```rust
-// ❌ BAD - JSON inference
-let batch = json_batch_to_arrow(&rows)?;
+// ✅ CORRECT — ReplicatedMergeTree in Replicated DB, no ON CLUSTER needed
+// Auto-fills ZK paths; use SYSTEM SYNC REPLICA before query-back
+let ddl = format!(
+    "CREATE TABLE default.{} (
+        id UInt64,
+        name String
+    ) ENGINE = ReplicatedMergeTree()
+    ORDER BY id",
+    table_name
+);
+client.execute(&ddl).await.expect("Failed to create table");
+// Sync all replicas after INSERT before querying back:
+client.execute(&format!("SYSTEM SYNC REPLICA ON CLUSTER 'default' default.{}", table_name))
+    .await.expect("sync failed");
+```
 
-// ✅ GOOD - Explicit schema
-let schema = Arc::new(Schema::new(vec![
-    Field::new("timestamp", DataType::Timestamp(TimeUnit::Millisecond, None), false),
-    Field::new("_org_id", DataType::Utf8, false),
-    Field::new("action", DataType::Utf8, false),
-]));
+**Wrong patterns:**
 
-let batch = RecordBatch::try_new(
-    schema,
-    vec![
-        Arc::new(TimestampMillisecondArray::from(vec![1705315200000_i64])),
-        Arc::new(StringArray::from(vec!["acme"])),
-        Arc::new(StringArray::from(vec!["login"])),
-    ],
-)?;
+```rust
+// ❌ WRONG — only creates on one node (no ON CLUSTER in benchmark Atomic DB)
+let ddl = format!("CREATE TABLE {} (id UInt64) ENGINE = MergeTree() ORDER BY id", table_name);
+
+// ❌ WRONG — explicit ZK paths forbidden in Replicated database
+let ddl = format!(
+    "CREATE TABLE default.{} ON CLUSTER 'default' (id UInt64)
+    ENGINE = ReplicatedMergeTree('/clickhouse/{{cluster}}/tables/{{database}}/{{table}}', '{{replica}}')
+    ORDER BY id",
+    table_name
+);
+```
+
+Drop tables also use `ON CLUSTER`:
+
+```rust
+drop_http_test_table(&client, &full_name).await;  // Calls ON CLUSTER 'default' internally
 ```
 
 ### Fixture Builders
@@ -237,19 +267,6 @@ let config = BufferConfigBuilder::new()
     .flush_rows(5000)
     .flush_bytes(2_000_000)
     .flush_age_secs(120)
-    .build();
-```
-
-**Arrow Schemas:**
-
-```rust
-use crate::fixtures::{rls_schema, auth_schema, api_schema};
-
-let schema = rls_schema(); // Pre-defined schema for RLS tests
-let custom = ArrowSchemaBuilder::new()
-    .with_timestamp("timestamp", false)
-    .with_string("org_id", false)
-    .with_uint64("user_id", true)
     .build();
 ```
 

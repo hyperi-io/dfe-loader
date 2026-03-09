@@ -7,7 +7,7 @@
 //! - JSON flattening (nested to flat)
 //! - Timestamp validation and correction
 //! - Type coercion
-//! - Arrow batch building
+//! - Map batch building (Vec<Map<String, Value>> accumulation)
 //!
 //! Run with: cargo bench --bench transform
 
@@ -15,9 +15,7 @@ use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Through
 use serde_json::{json, Map, Value};
 use std::hint::black_box;
 
-use dfe_loader::transform::{
-    flatten_value_owned, ArrowBatchBuilder, BatchFlattener, TimestampValidator,
-};
+use dfe_loader::transform::{flatten_value_owned, BatchFlattener, TimestampValidator};
 
 /// Sample nested JSON structures of varying depth
 fn shallow_nested() -> Value {
@@ -138,11 +136,10 @@ fn bench_timestamp_validation(c: &mut Criterion) {
     group.finish();
 }
 
-/// Arrow batch builder benchmarks
-fn bench_arrow_batch_builder(c: &mut Criterion) {
-    let mut group = c.benchmark_group("arrow_batch_builder");
+/// Map batch building benchmarks — measures Vec<Map<String, Value>> accumulation cost.
+fn bench_map_batch_builder(c: &mut Criterion) {
+    let mut group = c.benchmark_group("map_batch_builder");
 
-    // Create sample flattened data
     fn create_sample_row(i: usize) -> Map<String, Value> {
         let mut map = Map::new();
         map.insert("id".to_string(), json!(i));
@@ -153,44 +150,20 @@ fn bench_arrow_batch_builder(c: &mut Criterion) {
         map
     }
 
-    // Benchmark push operations
     for batch_size in [100, 1000, 10000] {
         group.throughput(Throughput::Elements(batch_size as u64));
 
         group.bench_with_input(
-            BenchmarkId::new("push_rows", batch_size),
+            BenchmarkId::new("collect_rows", batch_size),
             &batch_size,
             |b, &size| {
                 b.iter(|| {
-                    let mut builder = ArrowBatchBuilder::new(size);
+                    let mut batch: Vec<Map<String, Value>> = Vec::with_capacity(size);
                     for i in 0..size {
-                        let row = create_sample_row(i);
-                        builder.push(row, "test.table", None);
+                        batch.push(create_sample_row(i));
                     }
-                    builder
+                    black_box(batch)
                 })
-            },
-        );
-    }
-
-    // Benchmark build operation
-    for batch_size in [100, 1000] {
-        group.bench_with_input(
-            BenchmarkId::new("build_batch", batch_size),
-            &batch_size,
-            |b, &size| {
-                b.iter_batched(
-                    || {
-                        let mut builder = ArrowBatchBuilder::new(size);
-                        for i in 0..size {
-                            let row = create_sample_row(i);
-                            builder.push(row, "test.table", None);
-                        }
-                        builder
-                    },
-                    |mut builder| builder.build(),
-                    criterion::BatchSize::SmallInput,
-                )
             },
         );
     }
@@ -264,7 +237,7 @@ criterion_group!(
     bench_flatten_depth,
     bench_batch_flatten,
     bench_timestamp_validation,
-    bench_arrow_batch_builder,
+    bench_map_batch_builder,
     bench_allocation_patterns,
 );
 criterion_main!(benches);

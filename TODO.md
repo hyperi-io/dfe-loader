@@ -6,7 +6,46 @@
 
 **Reference:** `/projects/clickhouse-loader` (Go version)
 
-**Architecture:** Per-table Arrow buffers with clickhouse-arrow native protocol
+**Architecture:** Per-table row buffers with JSONEachRow inserts via `clickhouse` crate (HTTP)
+
+---
+
+## Active: Completed Migrations
+
+The Arrow → HTTP/JSONEachRow migration is complete (Phases 0–5). See completed section below.
+
+### Phase 5.5: Migrate to clickhouse-rs Feature Branch
+
+Our feature branch at `/projects/clickhouse-rs` adds capabilities not in upstream:
+- Native protocol option (upstream HTTP-only for v0.12+)
+- Full ClickHouse type support (upstream missing: JSON, Variant, Dynamic, Nested, BFloat16, etc.)
+
+Tasks:
+- [ ] Review `/projects/clickhouse-rs` branch — document exact patches vs upstream
+- [ ] Publish feature branch to Artifactory (`hyperi-cargo-local`) as a versioned crate
+- [ ] Update `Cargo.toml` to use Artifactory version instead of crates.io upstream
+- [ ] Confirm JSON type (GA v25.3) insert/query works end-to-end via both protocols
+- [ ] Confirm full type support: Variant, Dynamic, Nested, BFloat16, Time, AggregateFunction
+
+### Phase 6: Dependency Audit + Version Bumps
+
+- [ ] Web search ALL external crate versions for latest
+- [ ] Update `Cargo.toml` with verified latest versions
+- [ ] Remove stale/unused dependencies
+- [ ] `cargo update` + full test suite
+
+### Phase 7: Crates Workspace Extraction (Post-Migration)
+
+Extract reusable modules into workspace crates (following `dfe-transform-wasm/crates/` pattern):
+
+- [ ] Create workspace root `Cargo.toml` with `[workspace]` section
+- [ ] Extract `crates/clickhouse` — HTTP client, types, schema cache, inserter, circuit breaker
+- [ ] Extract `crates/buffer` — Row buffer management, pool
+- [ ] Main binary stays at workspace root or `crates/loader`
+- [ ] Shared workspace dependencies in `[workspace.dependencies]`
+- [ ] Compile + test
+
+**Benefits:** Cleaner dep boundaries, faster incremental compilation, reusable by other DFE services.
 
 ---
 
@@ -31,10 +70,6 @@ Rust services read `system.columns` at runtime only. The submodule is reference/
 - [x] `--emit-helm [DIR]` CLI flag — writes chart/ from contract (default: ./chart)
 - [x] `--emit-dockerfile [FILE]` CLI flag — writes Dockerfile from contract (default: ./Dockerfile)
 - [x] chart/ regenerated from contract — in sync
-
-**Note on Dockerfile:** dfe-loader maintains a hand-crafted Dockerfile due to project-specific
-requirements not expressible in DeploymentContract (Ubuntu 24.04 base, `userdel ubuntu` workaround,
-GeoIP database COPY). Use `--emit-dockerfile` for new projects without custom needs.
 
 ---
 
@@ -79,11 +114,19 @@ Each is a new file implementing `DlqBackend` trait + feature flag. No changes to
 
 ---
 
-## Backlog: Performance Validation
+## Backlog: Kafka Transport Consolidation
 
-- [ ] Run Mison benchmarks on dedicated host — benches/mison.rs exists, just needs to run
-- [ ] Full async hot-path review (benches/pipeline.rs, benches/bakeoff.rs)
-- [ ] Production load testing against real Kafka/ClickHouse
+The project has TWO Kafka consumers:
+- `src/kafka/transport.rs` — uses rustlib `KafkaTransport` (via `TransportAdapter`)
+- `src/kafka/consumer.rs` — uses `rdkafka` directly (legacy)
+
+Both are compiled. The orchestrator uses `TransportBackend` (rustlib transport).
+The legacy `consumer.rs` should be removed once transport adapter coverage is confirmed complete.
+Direct `rdkafka` dependency in `Cargo.toml` can be dropped after removal.
+
+- [ ] Verify `TransportAdapter` covers all consumer.rs functionality (commit, seek, pause/resume)
+- [ ] Remove `src/kafka/consumer.rs` (legacy direct rdkafka)
+- [ ] Remove `rdkafka` from `Cargo.toml` dependencies
 
 ---
 
@@ -97,6 +140,23 @@ Each is a new file implementing `DlqBackend` trait + feature flag. No changes to
 ---
 
 ## Completed
+
+### 2026-03-09: Arrow → HTTP/JSONEachRow Migration (Phases 0–5, Complete)
+
+- [x] Insert bakeoff benchmark (`benches/insert_bakeoff.rs`) — 3 paths × 4 batch sizes
+- [x] Fixed clustered ClickHouse table creation (ON CLUSTER + ReplicatedMergeTree/MergeTree)
+- [x] Decision: Drop Mison (zero advantage over sonic-rs)
+- [x] Decision: Drop Arrow/clickhouse-arrow, use `clickhouse` crate (HTTP, JSONEachRow)
+- [x] Decision: JSONEachRow via reqwest (no DynamicRow — serde overhead negligible)
+- [x] Phase 0: Mison deleted (3,436 lines), archive branch created
+- [x] Phase 1: `HttpClickHouseClient` created (clickhouse + reqwest dual-client)
+- [x] Phase 2: Buffer layer migrated to `Vec<Map<String, Value>>` — `FlushBatch`, `BufferManager`
+- [x] Phase 3: Arrow dependencies removed (`clickhouse-arrow`, `arrow`, `arrow-json`, `futures-util`)
+  - Deleted `src/clickhouse/client.rs` (ArrowClickHouseClient, 644 lines)
+  - Deleted `src/transform/arrow.rs`, `src/buffer/arrow.rs`, `src/mison/` (6 files)
+- [x] Phase 4: Inserter updated for `Vec<Map<String, Value>>` + `HttpClickHouseClient`
+- [x] Phase 5: Pipeline wired, integration tests migrated, benchmarks rewritten
+  - 520 tests passing, all bench files compile clean
 
 ### 2026-03-08: OCSF Remap Preset + Default Topic
 
@@ -196,7 +256,7 @@ Each is a new file implementing `DlqBackend` trait + feature flag. No changes to
 - [x] Project rename: dfe-loader-clickhouse → dfe-loader
 - [x] hyperi-rustlib v0.2.0 published to Artifactory
 
-### 2025-12-28: Mison Structural Index
+### 2025-12-28: Mison Structural Index (ARCHIVED — dropped after benchmarks)
 
 - [x] SIMD structural index, leveled bitmap, schema-guided extractor
 - [x] Direct-to-Arrow column builders
@@ -218,9 +278,10 @@ Each is a new file implementing `DlqBackend` trait + feature flag. No changes to
 ## Notes
 
 - Test environment: k8s.tyrell.com.au (see .env for credentials)
-- clickhouse-arrow fork: `crates/clickhouse-arrow/`
-- Run benchmarks: `cargo bench --bench mison`
+- Benchmark results: `benches/insert_bakeoff.rs` (run with `cargo bench --bench insert_bakeoff`)
+- clickhouse crate: HTTP + JSONEachRow (official, v0.14.x) for DDL/queries
+- reqwest: HTTP POST with JSONEachRow for data inserts (dynamic schemas)
 
 ---
 
-**Last Updated:** 2026-03-08
+**Last Updated:** 2026-03-09

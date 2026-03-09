@@ -291,15 +291,15 @@ fn test_buffer_offset_accumulation() {
             partition: 0,
             offset: 100 + i as i64,
         };
-        buffer_manager.push("test.events", data, Some(offset), None);
+        buffer_manager.push("test.events", data, Some(offset));
     }
 
     // Flush and check offsets are included
-    let batches = buffer_manager.get_ready_for_flush().unwrap();
+    let batches = buffer_manager.get_ready_for_flush();
     assert_eq!(batches.len(), 1);
 
     let batch = &batches[0];
-    assert_eq!(batch.batch.num_rows(), 5);
+    assert_eq!(batch.rows.len(), 5);
     assert_eq!(batch.offsets.len(), 5);
 
     // Verify offsets
@@ -332,7 +332,7 @@ fn test_buffer_mixed_offset_tracking() {
             partition: 0,
             offset: i as i64,
         };
-        buffer_manager.push("default.auth", data, Some(offset), None);
+        buffer_manager.push("default.auth", data, Some(offset));
     }
 
     for i in 0..5 {
@@ -345,14 +345,14 @@ fn test_buffer_mixed_offset_tracking() {
             partition: 1,
             offset: 100 + i as i64,
         };
-        buffer_manager.push("default.api", data, Some(offset), None);
+        buffer_manager.push("default.api", data, Some(offset));
     }
 
     // Both tables should have 5 rows but not trigger flush (threshold is 10)
     assert_eq!(buffer_manager.pending_rows(), 10);
 
     // Force flush all
-    let batches = buffer_manager.flush_all().unwrap();
+    let batches = buffer_manager.flush_all();
     assert_eq!(batches.len(), 2);
 
     // Check offsets are partitioned correctly

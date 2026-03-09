@@ -35,7 +35,8 @@ impl DdlBuilder {
 
     /// Add a column
     pub fn column<S: Into<String>>(mut self, name: S, col_type: S, extra: S) -> Self {
-        self.columns.push((name.into(), col_type.into(), extra.into()));
+        self.columns
+            .push((name.into(), col_type.into(), extra.into()));
         self
     }
 
@@ -165,7 +166,10 @@ impl DdlBuilder {
 
     /// Build the CREATE TABLE statement
     pub fn build(self) -> String {
-        let mut ddl = format!("CREATE TABLE IF NOT EXISTS {}.{} (\n", self.database, self.table);
+        let mut ddl = format!(
+            "CREATE TABLE IF NOT EXISTS {}.{} (\n",
+            self.database, self.table
+        );
 
         // Add columns
         for (i, (name, col_type, extra)) in self.columns.iter().enumerate() {

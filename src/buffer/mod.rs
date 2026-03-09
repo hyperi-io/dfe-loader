@@ -1,37 +1,33 @@
 // SPDX-License-Identifier: FSL-1.1-ALv2
 // Copyright (c) 2026 HYPERI PTY LIMITED
 
-//! Per-table Arrow buffer management
+// Project:   dfe-loader
+// File:      src/buffer/mod.rs
+// Purpose:   Per-table row buffer management
+// Language:  Rust
+//
+// License:   FSL-1.1-ALv2
+// Copyright: (c) 2026 HYPERI PTY LIMITED
+
+//! Per-table row buffer management for JSONEachRow inserts.
 //!
-//! Each destination table (db.table) has its own ArrowBatchBuilder to ensure
-//! schema uniformity. Schema is derived from the target ClickHouse table via
-//! introspection.
+//! Each destination table (db.table) has its own row buffer to ensure
+//! schema uniformity per batch.
 //!
 //! ## Architecture
 //!
 //! ```text
 //! Kafka message → Route to db.table
-//!              → Push to per-table ArrowBatchBuilder
-//!              → Batch accumulates messages with SAME schema
-//!              → Build RecordBatch when threshold reached
-//!              → Insert to ClickHouse via native protocol
+//!              → Push Map<String, Value> to per-table buffer
+//!              → Flush when threshold reached
+//!              → Insert to ClickHouse via JSONEachRow HTTP
 //!              → Ack Kafka offsets on success
 //! ```
-//!
-//! ## Benefits
-//!
-//! - **Schema uniformity**: Each RecordBatch has consistent schema (same table)
-//! - **Schema introspection**: Arrow schema derived from ClickHouse table
-//! - **Efficient batching**: Accumulate N messages before Arrow conversion
-//! - **Per-table flush**: Independent flush triggers per destination
-//! - **Offset tracking**: Track Kafka offsets per batch for at-least-once
 
-pub mod arrow;
 pub mod manager;
 pub mod pool;
 
-pub use arrow::KafkaOffset;
-pub use manager::{ArrowBufferStats, BufferManager, FlushBatch, TableSchema};
+pub use manager::{BufferManager, BufferStats, FlushBatch, KafkaOffset};
 pub use pool::{
     BufferPools, BufferPoolsStats, MapPool, ObjectPool, OffsetsPool, PoolConfig, PoolStats,
     Poolable, Pooled, PooledMap, PooledOffsets, PooledString, StringPool,

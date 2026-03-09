@@ -1,12 +1,12 @@
 [package]
 name = "dfe-loader"
 version = "1.13.6"
-edition = "2021"
+edition = "2024"
 authors = ["HyperI <dev@hyperi.com.au>"]
 description = "High-performance Kafka to ClickHouse data loader"
 license = "FSL-1.1-ALv2"
 repository = "https://github.com/hyperi-io/dfe-loader"
-rust-version = "1.75"
+rust-version = "1.94"
 exclude = [".claude/", "ai/", "ci/", "docs/", "reference/", "scripts/", "schemas/"]
 
 [lib]
@@ -30,15 +30,6 @@ cel-interpreter = { version = ">=0.10.0, <0.11", features = ["json"] }
 
 # Kafka (SASL/SCRAM required for auth) - also needed for DLQ producer
 rdkafka = { version = ">=0.38", features = ["cmake-build", "ssl", "sasl"] }
-
-# ClickHouse Arrow client (hyperi-io/clickhouse-arrow fork)
-# Native Arrow protocol for efficient columnar inserts
-clickhouse-arrow = { version = ">=0.4.0", registry = "hyperi", features = ["http"] }
-futures-util = ">=0.3"  # For stream handling with clickhouse-arrow
-
-# Arrow for columnar data handling
-arrow = { version = ">=54.0, <58.0", features = ["prettyprint"] }
-arrow-json = ">=54.0, <58.0"  # JSON to Arrow conversion (SIMD)
 
 # JSON parsing (SIMD-accelerated)
 sonic-rs = ">=0.5"
@@ -81,6 +72,10 @@ reqwest = { version = ">=0.12", default-features = false, features = ["rustls-tl
 flate2 = ">=1.0"
 tar = ">=0.4"
 
+# ClickHouse official crate (HTTP/RowBinary for DDL and schema queries)
+clickhouse = { version = ">=0.14", features = ["lz4", "time"] }
+time = ">=0.3"
+
 # Utilities
 uuid = { version = ">=1.10", features = ["v4", "v7"] }
 rustc-hash = ">=2.0"  # FxHashMap - faster hashing for internal maps
@@ -115,6 +110,10 @@ mockall = ">=0.13"
 testcontainers = ">=0.26"
 testcontainers-modules = { version = ">=0.10", features = ["kafka", "clickhouse"] }
 
+# ClickHouse official crate (HTTP/RowBinary) — bakeoff comparison vs JSONEachRow path
+clickhouse = { version = ">=0.14", features = ["lz4", "time"] }
+time = ">=0.3"
+
 # Async test utilities
 tokio-test = ">=0.4"
 tempfile = ">=3.10"
@@ -136,11 +135,11 @@ name = "enrichment"
 harness = false
 
 [[bench]]
-name = "mison"
+name = "bakeoff"
 harness = false
 
 [[bench]]
-name = "bakeoff"
+name = "insert_bakeoff"
 harness = false
 
 [profile.release]
@@ -181,9 +180,7 @@ inherits = "release"
 debug = true
 
 [features]
-default = ["http"]
-# ClickHouse HTTP transport (enable for proxied/load-balanced deployments)
-http = ["clickhouse-arrow/http"]
+default = []
 # Alternative allocators (choose one for production)
 jemalloc = ["dep:tikv-jemallocator", "dep:tikv-jemalloc-ctl"]  # Best for large allocations, long-running
 mimalloc = ["dep:mimalloc"]  # Often faster, better security, consistent performance

@@ -561,12 +561,12 @@ fn test_cache_mark_pending_skips_already_cached() {
 mod clickhouse_tests {
     use super::*;
 
-    use crate::common::{create_test_client, drop_test_table, load_dotenv, unique_table_name};
+    use crate::common::{create_http_test_client, drop_http_test_table, load_dotenv, unique_table_name};
 
     #[tokio::test]
     async fn test_fetch_column_comments_with_renamed() {
         load_dotenv();
-        let client = match create_test_client().await {
+        let client = match create_http_test_client() {
             Some(c) => c,
             None => {
                 eprintln!("Skipping: ClickHouse not reachable");
@@ -579,15 +579,15 @@ mod clickhouse_tests {
 
         // Create table with @renamed directives in column comments
         let ddl = format!(
-            "CREATE TABLE default.{} (\
+            "CREATE TABLE default.{} ON CLUSTER 'default' (\
                 _timestamp DateTime64(3),\
                 source_ip String COMMENT '@renamed: first(src_ip/srcip)',\
                 dest_ip String COMMENT '@renamed: dst_ip',\
                 user_name String\
-            ) ENGINE = Memory",
+            ) ENGINE = MergeTree() ORDER BY tuple()",
             table_name
         );
-        client.query(&ddl).await.expect("DDL failed");
+        client.execute(&ddl).await.expect("DDL failed");
 
         // Fetch column comments
         let comments = client
@@ -636,7 +636,7 @@ mod clickhouse_tests {
             "renamed source should be removed"
         );
 
-        drop_test_table(&client, &full_name).await;
+        drop_http_test_table(&client, &full_name).await;
     }
 }
 

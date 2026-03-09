@@ -4,7 +4,7 @@
 //! Main transformer that applies all transformations
 //!
 //! Pipeline: Parse → Extract tags → Flatten → Timestamp → _raw rename → Metadata → Sanitize → Remove routing fields
-//! Note: _json is handled by ArrowBatchBuilder sidecar (zero-copy from raw bytes), not by the transformer.
+//! Note: _json is injected by the orchestrator, not by the transformer.
 
 use chrono::{DateTime, Utc};
 use serde_json::{Map, Value};
@@ -23,9 +23,9 @@ static TIMESTAMP_OUTPUT_FIELD: &str = "_timestamp";
 static TIMESTAMP_RECEIVED_OUTPUT_FIELD: &str = "_timestamp_received";
 static TIMESTAMP_COLLECTOR_FIELD: &str = "_timestamp_collector";
 
-/// Format a DateTime for ClickHouse DateTime64(3) native protocol insertion.
-/// Uses space separator and no timezone suffix — the native Arrow protocol
-/// parser doesn't support RFC3339 'Z' or '+00:00' suffixes.
+/// Format a DateTime for ClickHouse DateTime64(3) insertion via JSONEachRow.
+/// Uses space separator and no timezone suffix — ClickHouse's JSONEachRow parser
+/// doesn't support RFC3339 'Z' or '+00:00' suffixes in datetime strings.
 #[inline]
 fn fmt_ts(dt: &DateTime<Utc>) -> String {
     dt.format("%Y-%m-%d %H:%M:%S%.3f").to_string()
@@ -64,8 +64,8 @@ pub struct Transformer {
     drop_tags: bool,
 
     // Common Header v2: _json field name (used for sanitization preservation)
-    // Note: _json capture is controlled at the orchestrator/buffer level, not here.
-    // The ArrowBatchBuilder builds _json from raw bytes via sidecar (zero-copy).
+    // Note: _json capture is controlled at the buffer manager level, not here.
+    // The buffer manager injects _json from raw Kafka bytes into the row map.
     json_output: String,
 
     // Common Header v2: _raw injection (zero-copy rename from source field)
@@ -176,8 +176,8 @@ impl Transformer {
     /// When common header is disabled (`metadata.enabled = false`), only flattening and
     /// sanitization are applied — no common header fields are injected.
     ///
-    /// Note: `_json` is NOT injected here. It's built from raw Kafka bytes directly
-    /// in `ArrowBatchBuilder` sidecar (zero-copy via `Buffer::from_vec`).
+    /// Note: `_json` is NOT injected here. It's injected by the buffer manager
+    /// directly from raw Kafka bytes into the row map before insertion.
     ///
     /// ## Parameters
     ///
@@ -273,9 +273,8 @@ impl Transformer {
                 data.insert(TIMESTAMP_RECEIVED_OUTPUT_FIELD.into(), ts);
             }
 
-            // Step 5: _json is now built from raw bytes directly in ArrowBatchBuilder sidecar
-            // (zero-copy via Buffer::from_vec). No longer injected into the Map here.
-            // The orchestrator passes raw_payload to BufferManager.push() instead.
+            // Step 5: _json is injected by the buffer manager from raw Kafka bytes.
+            // Not injected here — the orchestrator passes raw_payload to BufferManager.push().
 
             // Step 5b: @renamed: first(logoriginal/_raw/raw/raw_log/message) → _raw
             // Zero-copy rename via data.remove() — ownership transfer, no clone.
@@ -626,7 +625,7 @@ mod tests {
 
     #[test]
     fn test_transformer_no_json_in_map() {
-        // _json is built from raw bytes in ArrowBatchBuilder sidecar,
+        // _json is injected by the buffer manager from raw Kafka bytes,
         // NOT injected into the Map by the transformer.
         let transformer = Transformer::default();
         let raw = br#"{"event": "login", "user_id": 123}"#;
@@ -803,15 +802,15 @@ mod tests {
 
     #[test]
     fn test_transformer_does_not_inject_json() {
-        // _json is now built from raw bytes in ArrowBatchBuilder sidecar,
-        // not injected by the transformer. Verify it's absent from the Map.
+        // _json is injected by the buffer manager from raw Kafka bytes,
+        // not by the transformer. Verify it's absent from the Map.
         let transformer = Transformer::default();
         let raw = br#"{"event": "test"}"#;
         let value: Value = serde_json::from_slice(raw).unwrap();
 
         let result = transformer.transform_with_raw(value, None, None).unwrap();
 
-        // _json should NEVER be in the Map (handled by ArrowBatchBuilder sidecar)
+        // _json should NEVER be in the Map (injected by buffer manager, not transformer)
         assert!(!result.data.contains_key("_json"));
     }
 

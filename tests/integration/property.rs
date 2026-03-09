@@ -205,7 +205,7 @@ proptest! {
             });
 
             let map: Map<String, Value> = serde_json::from_value(data).unwrap();
-            buffer.push(table, map, None, None);
+            buffer.push(table, map, None);
         }
 
         let stats = buffer.stats();
@@ -244,7 +244,7 @@ proptest! {
                 });
 
                 let map: Map<String, Value> = serde_json::from_value(data).unwrap();
-                buffer.push(&table, map, None, None);
+                buffer.push(&table, map, None);
             }
         }
 

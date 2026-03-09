@@ -3,7 +3,6 @@
 
 //! JSON transformation pipeline
 
-pub mod arrow;
 pub mod coerce;
 pub mod computed;
 pub mod field_mapping;
@@ -14,10 +13,6 @@ pub mod remap_loader;
 pub mod timestamp;
 pub mod transformer;
 
-pub use arrow::{
-    infer_schema_from_json_bytes, json_batch_to_arrow, json_bytes_to_arrow_simd,
-    json_to_arrow_batch, ArrowBatchBuilder, SimdBatchBuilder,
-};
 pub use coerce::Coercer;
 pub use computed::{parse_computed_directive, ComputedColumnCache};
 pub use field_mapping::{
