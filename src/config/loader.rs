@@ -786,7 +786,7 @@ impl Default for BufferConfig {
     fn default() -> Self {
         Self {
             flush_bytes: 1_048_576, // 1MB
-            flush_rows: 10_000,
+            flush_rows: 20_000,
             flush_age_secs: 5,
         }
     }
@@ -2100,68 +2100,64 @@ mod tests {
 
     #[test]
     fn test_load_with_env_and_yaml() {
+        // SAFETY: Test-only env manipulation. Tests in this function run
+        // sequentially in scoped blocks with set/remove pairs.
+
         // Sub-test 1: Flat env var overrides (sequential, no parallel contamination)
         {
-            // Kafka brokers (comma-separated list)
-            std::env::set_var("DFE_LOADER_KAFKA_BROKERS", "broker1:9092,broker2:9092");
+            unsafe { std::env::set_var("DFE_LOADER_KAFKA_BROKERS", "broker1:9092,broker2:9092") };
             let config = Config::load(None).unwrap();
             assert_eq!(
                 config.kafka.brokers,
                 vec!["broker1:9092".to_string(), "broker2:9092".to_string()]
             );
-            std::env::remove_var("DFE_LOADER_KAFKA_BROKERS");
+            unsafe { std::env::remove_var("DFE_LOADER_KAFKA_BROKERS") };
         }
 
         {
-            // Kafka group ID
-            std::env::set_var("DFE_LOADER_KAFKA_GROUP_ID", "test-group-env");
+            unsafe { std::env::set_var("DFE_LOADER_KAFKA_GROUP_ID", "test-group-env") };
             let config = Config::load(None).unwrap();
             assert_eq!(config.kafka.group, "test-group-env");
-            std::env::remove_var("DFE_LOADER_KAFKA_GROUP_ID");
+            unsafe { std::env::remove_var("DFE_LOADER_KAFKA_GROUP_ID") };
         }
 
         {
-            // ClickHouse hosts (comma-separated list)
-            std::env::set_var("DFE_LOADER_CLICKHOUSE_HOSTS", "ch1:9000,ch2:9000");
+            unsafe { std::env::set_var("DFE_LOADER_CLICKHOUSE_HOSTS", "ch1:9000,ch2:9000") };
             let config = Config::load(None).unwrap();
             assert_eq!(
                 config.clickhouse.hosts,
                 vec!["ch1:9000".to_string(), "ch2:9000".to_string()]
             );
-            std::env::remove_var("DFE_LOADER_CLICKHOUSE_HOSTS");
+            unsafe { std::env::remove_var("DFE_LOADER_CLICKHOUSE_HOSTS") };
         }
 
         {
-            // Buffer flush rows (parsed integer)
-            std::env::set_var("DFE_LOADER_BUFFER_FLUSH_ROWS", "50000");
+            unsafe { std::env::set_var("DFE_LOADER_BUFFER_FLUSH_ROWS", "50000") };
             let config = Config::load(None).unwrap();
             assert_eq!(config.buffer.flush_rows, 50000);
-            std::env::remove_var("DFE_LOADER_BUFFER_FLUSH_ROWS");
+            unsafe { std::env::remove_var("DFE_LOADER_BUFFER_FLUSH_ROWS") };
         }
 
         {
-            // Metadata enabled (boolean)
-            std::env::set_var("DFE_LOADER_METADATA_ENABLED", "false");
+            unsafe { std::env::set_var("DFE_LOADER_METADATA_ENABLED", "false") };
             let config = Config::load(None).unwrap();
             assert!(!config.metadata.enabled);
-            std::env::remove_var("DFE_LOADER_METADATA_ENABLED");
+            unsafe { std::env::remove_var("DFE_LOADER_METADATA_ENABLED") };
         }
 
         {
-            // Config reload secs (auto-enables hot_reload)
-            std::env::set_var("DFE_LOADER_CONFIG_RELOAD_SECS", "30");
+            unsafe { std::env::set_var("DFE_LOADER_CONFIG_RELOAD_SECS", "30") };
             let config = Config::load(None).unwrap();
             assert!(config.hot_reload.enabled);
             assert_eq!(config.hot_reload.poll_interval_secs, 30);
-            std::env::remove_var("DFE_LOADER_CONFIG_RELOAD_SECS");
+            unsafe { std::env::remove_var("DFE_LOADER_CONFIG_RELOAD_SECS") };
         }
 
         {
-            // Log level
-            std::env::set_var("DFE_LOADER_LOG_LEVEL", "debug");
+            unsafe { std::env::set_var("DFE_LOADER_LOG_LEVEL", "debug") };
             let config = Config::load(None).unwrap();
             assert_eq!(config.logging.level, "debug");
-            std::env::remove_var("DFE_LOADER_LOG_LEVEL");
+            unsafe { std::env::remove_var("DFE_LOADER_LOG_LEVEL") };
         }
 
         // Sub-test 2: YAML file loading
@@ -2212,11 +2208,11 @@ clickhouse:
             )
             .unwrap();
 
-            std::env::set_var("DFE_LOADER_KAFKA_BROKERS", "env-broker:9092");
+            unsafe { std::env::set_var("DFE_LOADER_KAFKA_BROKERS", "env-broker:9092") };
             let config = Config::load(Some(config_path.to_str().unwrap())).unwrap();
             assert_eq!(config.kafka.brokers, vec!["env-broker:9092"]);
             assert_eq!(config.kafka.group, "yaml-group");
-            std::env::remove_var("DFE_LOADER_KAFKA_BROKERS");
+            unsafe { std::env::remove_var("DFE_LOADER_KAFKA_BROKERS") };
         }
 
         // Sub-test 4: Defaults when no config

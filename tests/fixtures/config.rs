@@ -198,7 +198,8 @@ impl RoutingConfigBuilder {
     }
 
     pub fn category_to_table(mut self, category: &str, table: &str) -> Self {
-        self.category_to_table.insert(category.to_string(), table.to_string());
+        self.category_to_table
+            .insert(category.to_string(), table.to_string());
         self
     }
 
@@ -377,7 +378,10 @@ mod tests {
         assert_eq!(config.table_fields, vec!["event_category"]);
         assert_eq!(config.default_db, "shared");
         assert_eq!(config.default_table, "events");
-        assert_eq!(config.category_to_table.get("auth"), Some(&"auth_events".to_string()));
+        assert_eq!(
+            config.category_to_table.get("auth"),
+            Some(&"auth_events".to_string())
+        );
     }
 
     #[test]

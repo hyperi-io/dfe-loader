@@ -8,20 +8,15 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use arrow::array::{ArrayRef, Float64Array, RecordBatch, StringArray, UInt64Array};
-use arrow::datatypes::{DataType, Field, Schema};
 use serde_json::json;
 
 use dfe_loader::buffer::{BufferManager, KafkaOffset};
 use dfe_loader::config::BufferConfig;
 
 use crate::common::{
-    check_clickhouse_reachable, create_test_client, drop_test_table, load_dotenv, unique_table_name,
+    check_clickhouse_reachable, create_http_test_client, drop_http_test_table, load_dotenv,
+    unique_table_name,
 };
-
-// ============================================================================
-// Skip Helper
-// ============================================================================
 
 fn skip_if_no_clickhouse() -> bool {
     load_dotenv();
@@ -31,11 +26,45 @@ fn skip_if_no_clickhouse() -> bool {
     !check_clickhouse_reachable()
 }
 
-// ============================================================================
-// High-Volume Insert Tests
-// ============================================================================
+fn make_stress_rows(
+    count: usize,
+    columns: &[&str],
+) -> Vec<serde_json::Map<String, serde_json::Value>> {
+    (0..count)
+        .map(|i| {
+            let mut row = serde_json::Map::new();
+            for &col in columns {
+                match col {
+                    "id" => {
+                        row.insert("id".into(), json!(i as u64));
+                    }
+                    "event" => {
+                        row.insert("event".into(), json!(format!("event_{}", i % 100)));
+                    }
+                    "category" => {
+                        let categories = ["auth", "api", "web", "mobile", "backend"];
+                        row.insert("category".into(), json!(categories[i % categories.len()]));
+                    }
+                    "value" => {
+                        row.insert("value".into(), json!(i as f64 * 0.1));
+                    }
+                    "batch_id" => {
+                        row.insert("batch_id".into(), json!(0_u64));
+                    }
+                    "data" => {
+                        row.insert("data".into(), json!(format!("data_{}", i)));
+                    }
+                    "thread_id" => {
+                        row.insert("thread_id".into(), json!(0_u64));
+                    }
+                    _ => {}
+                }
+            }
+            row
+        })
+        .collect()
+}
 
-/// Test inserting 10,000 rows in a single batch
 #[tokio::test]
 async fn test_stress_10k_single_batch() {
     if skip_if_no_clickhouse() {
@@ -43,14 +72,14 @@ async fn test_stress_10k_single_batch() {
         return;
     }
 
-    let client = match create_test_client().await {
+    let client = match create_http_test_client() {
         Some(c) => c,
         None => return,
     };
 
     let table_name = unique_table_name("stress_10k");
     let ddl = format!(
-        "CREATE TABLE {} (
+        "CREATE TABLE {} ON CLUSTER 'default' (
             id UInt64,
             event String,
             value Float64
@@ -58,34 +87,13 @@ async fn test_stress_10k_single_batch() {
         ORDER BY id",
         table_name
     );
-    client.query(&ddl).await.expect("Failed to create table");
+    client.execute(&ddl).await.expect("Failed to create table");
 
     let row_count: usize = 10_000;
-
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("id", DataType::UInt64, false),
-        Field::new("event", DataType::Utf8, false),
-        Field::new("value", DataType::Float64, false),
-    ]));
-
-    let ids: Vec<u64> = (0..row_count as u64).collect();
-    let events: Vec<String> = (0..row_count)
-        .map(|i| format!("event_{}", i % 100))
-        .collect();
-    let values: Vec<f64> = (0..row_count).map(|i| i as f64 * 0.1).collect();
-
-    let batch = RecordBatch::try_new(
-        schema,
-        vec![
-            Arc::new(UInt64Array::from(ids)) as ArrayRef,
-            Arc::new(StringArray::from(events)) as ArrayRef,
-            Arc::new(Float64Array::from(values)) as ArrayRef,
-        ],
-    )
-    .unwrap();
+    let rows = make_stress_rows(row_count, &["id", "event", "value"]);
 
     let start = Instant::now();
-    let result = client.insert(&table_name, batch).await;
+    let result = client.insert_json_rows(&table_name, &rows).await;
     let elapsed = start.elapsed();
 
     assert!(result.is_ok(), "10k insert failed: {:?}", result.err());
@@ -98,10 +106,9 @@ async fn test_stress_10k_single_batch() {
         inserted, elapsed, rows_per_sec
     );
 
-    drop_test_table(&client, &table_name).await;
+    drop_http_test_table(&client, &table_name).await;
 }
 
-/// Test inserting 50,000 rows in a single batch
 #[tokio::test]
 async fn test_stress_50k_single_batch() {
     if skip_if_no_clickhouse() {
@@ -109,14 +116,14 @@ async fn test_stress_50k_single_batch() {
         return;
     }
 
-    let client = match create_test_client().await {
+    let client = match create_http_test_client() {
         Some(c) => c,
         None => return,
     };
 
     let table_name = unique_table_name("stress_50k");
     let ddl = format!(
-        "CREATE TABLE {} (
+        "CREATE TABLE {} ON CLUSTER 'default' (
             id UInt64,
             category String,
             value Float64
@@ -124,35 +131,13 @@ async fn test_stress_50k_single_batch() {
         ORDER BY id",
         table_name
     );
-    client.query(&ddl).await.expect("Failed to create table");
+    client.execute(&ddl).await.expect("Failed to create table");
 
     let row_count = 50_000;
-    let categories = ["auth", "api", "web", "mobile", "backend"];
-
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("id", DataType::UInt64, false),
-        Field::new("category", DataType::Utf8, false),
-        Field::new("value", DataType::Float64, false),
-    ]));
-
-    let ids: Vec<u64> = (0..row_count as u64).collect();
-    let cats: Vec<&str> = (0..row_count)
-        .map(|i| categories[i % categories.len()])
-        .collect();
-    let values: Vec<f64> = (0..row_count).map(|i| i as f64 * 0.01).collect();
-
-    let batch = RecordBatch::try_new(
-        schema,
-        vec![
-            Arc::new(UInt64Array::from(ids)) as ArrayRef,
-            Arc::new(StringArray::from(cats)) as ArrayRef,
-            Arc::new(Float64Array::from(values)) as ArrayRef,
-        ],
-    )
-    .unwrap();
+    let rows = make_stress_rows(row_count, &["id", "category", "value"]);
 
     let start = Instant::now();
-    let result = client.insert(&table_name, batch).await;
+    let result = client.insert_json_rows(&table_name, &rows).await;
     let elapsed = start.elapsed();
 
     assert!(result.is_ok(), "50k insert failed: {:?}", result.err());
@@ -165,10 +150,9 @@ async fn test_stress_50k_single_batch() {
         inserted, elapsed, rows_per_sec
     );
 
-    drop_test_table(&client, &table_name).await;
+    drop_http_test_table(&client, &table_name).await;
 }
 
-/// Test multiple sequential batch inserts
 #[tokio::test]
 async fn test_stress_multiple_batches() {
     if skip_if_no_clickhouse() {
@@ -176,14 +160,14 @@ async fn test_stress_multiple_batches() {
         return;
     }
 
-    let client = match create_test_client().await {
+    let client = match create_http_test_client() {
         Some(c) => c,
         None => return,
     };
 
     let table_name = unique_table_name("stress_multi");
     let ddl = format!(
-        "CREATE TABLE {} (
+        "CREATE TABLE {} ON CLUSTER 'default' (
             id UInt64,
             batch_id UInt64,
             data String
@@ -191,38 +175,29 @@ async fn test_stress_multiple_batches() {
         ORDER BY (batch_id, id)",
         table_name
     );
-    client.query(&ddl).await.expect("Failed to create table");
+    client.execute(&ddl).await.expect("Failed to create table");
 
-    let batch_count = 10;
-    let rows_per_batch = 5_000;
-
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("id", DataType::UInt64, false),
-        Field::new("batch_id", DataType::UInt64, false),
-        Field::new("data", DataType::Utf8, false),
-    ]));
+    let batch_count = 10_u64;
+    let rows_per_batch = 5_000_usize;
 
     let start = Instant::now();
     let mut total_inserted = 0;
 
     for batch_id in 0..batch_count {
-        let ids: Vec<u64> = (0..rows_per_batch).collect();
-        let batch_ids: Vec<u64> = vec![batch_id; rows_per_batch as usize];
-        let data: Vec<String> = (0..rows_per_batch)
-            .map(|i| format!("data_{}_{}", batch_id, i))
+        let rows: Vec<serde_json::Map<String, serde_json::Value>> = (0..rows_per_batch)
+            .map(|i| {
+                json!({
+                    "id": i as u64,
+                    "batch_id": batch_id,
+                    "data": format!("data_{}_{}", batch_id, i)
+                })
+                .as_object()
+                .unwrap()
+                .clone()
+            })
             .collect();
 
-        let batch = RecordBatch::try_new(
-            schema.clone(),
-            vec![
-                Arc::new(UInt64Array::from(ids)) as ArrayRef,
-                Arc::new(UInt64Array::from(batch_ids)) as ArrayRef,
-                Arc::new(StringArray::from(data)) as ArrayRef,
-            ],
-        )
-        .unwrap();
-
-        let result = client.insert(&table_name, batch).await;
+        let result = client.insert_json_rows(&table_name, &rows).await;
         assert!(result.is_ok(), "Batch {} insert failed", batch_id);
         total_inserted += result.unwrap();
     }
@@ -235,12 +210,11 @@ async fn test_stress_multiple_batches() {
         total_inserted, batch_count, elapsed, rows_per_sec
     );
 
-    assert_eq!(total_inserted, (batch_count * rows_per_batch) as usize);
+    assert_eq!(total_inserted, (batch_count as usize) * rows_per_batch);
 
-    drop_test_table(&client, &table_name).await;
+    drop_http_test_table(&client, &table_name).await;
 }
 
-/// Test concurrent batch inserts
 #[tokio::test]
 async fn test_stress_concurrent_inserts() {
     if skip_if_no_clickhouse() {
@@ -248,14 +222,14 @@ async fn test_stress_concurrent_inserts() {
         return;
     }
 
-    let client = Arc::new(match create_test_client().await {
+    let client = Arc::new(match create_http_test_client() {
         Some(c) => c,
         None => return,
     });
 
     let table_name = unique_table_name("stress_concurrent");
     let ddl = format!(
-        "CREATE TABLE {} (
+        "CREATE TABLE {} ON CLUSTER 'default' (
             id UInt64,
             thread_id UInt64,
             value Float64
@@ -263,16 +237,10 @@ async fn test_stress_concurrent_inserts() {
         ORDER BY (thread_id, id)",
         table_name
     );
-    client.query(&ddl).await.expect("Failed to create table");
+    client.execute(&ddl).await.expect("Failed to create table");
 
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("id", DataType::UInt64, false),
-        Field::new("thread_id", DataType::UInt64, false),
-        Field::new("value", DataType::Float64, false),
-    ]));
-
-    let concurrent_count = 8;
-    let rows_per_task = 2_000;
+    let concurrent_count = 8_u64;
+    let rows_per_task = 2_000_usize;
 
     let start = Instant::now();
     let mut handles = Vec::new();
@@ -280,30 +248,27 @@ async fn test_stress_concurrent_inserts() {
     for thread_id in 0..concurrent_count {
         let client = client.clone();
         let table_name = table_name.clone();
-        let schema = schema.clone();
 
         let handle = tokio::spawn(async move {
-            let ids: Vec<u64> = (0..rows_per_task).collect();
-            let thread_ids: Vec<u64> = vec![thread_id; rows_per_task as usize];
-            let values: Vec<f64> = (0..rows_per_task).map(|i| i as f64 * 0.5).collect();
+            let rows: Vec<serde_json::Map<String, serde_json::Value>> = (0..rows_per_task)
+                .map(|i| {
+                    json!({
+                        "id": i as u64,
+                        "thread_id": thread_id,
+                        "value": i as f64 * 0.5
+                    })
+                    .as_object()
+                    .unwrap()
+                    .clone()
+                })
+                .collect();
 
-            let batch = RecordBatch::try_new(
-                schema,
-                vec![
-                    Arc::new(UInt64Array::from(ids)) as ArrayRef,
-                    Arc::new(UInt64Array::from(thread_ids)) as ArrayRef,
-                    Arc::new(Float64Array::from(values)) as ArrayRef,
-                ],
-            )
-            .unwrap();
-
-            client.insert(&table_name, batch).await
+            client.insert_json_rows(&table_name, &rows).await
         });
 
         handles.push(handle);
     }
 
-    // Wait for all inserts
     let mut total_inserted = 0;
     for (i, handle) in handles.into_iter().enumerate() {
         let result = handle.await.expect("Task panicked");
@@ -319,16 +284,11 @@ async fn test_stress_concurrent_inserts() {
         total_inserted, concurrent_count, elapsed, rows_per_sec
     );
 
-    assert_eq!(total_inserted, (concurrent_count * rows_per_task) as usize);
+    assert_eq!(total_inserted, (concurrent_count as usize) * rows_per_task);
 
-    drop_test_table(&client, &table_name).await;
+    drop_http_test_table(&client, &table_name).await;
 }
 
-// ============================================================================
-// Buffer Manager Stress Tests
-// ============================================================================
-
-/// Test buffer manager with high message volume
 #[test]
 fn test_stress_buffer_high_volume() {
     let mut buffer_manager = BufferManager::new(&BufferConfig {
@@ -358,22 +318,20 @@ fn test_stress_buffer_high_volume() {
             offset: i as i64,
         };
 
-        buffer_manager.push("test.events", data, Some(offset), None);
+        buffer_manager.push("test.events", data, Some(offset));
 
-        // Periodically flush
         if i > 0 && i % 1000 == 0 {
-            let batches = buffer_manager.get_ready_for_flush().unwrap();
+            let batches = buffer_manager.get_ready_for_flush();
             if !batches.is_empty() {
                 // In real scenario, we'd insert to ClickHouse here
             }
         }
     }
 
-    // Final flush
-    let batches = buffer_manager.flush_all().unwrap();
+    let batches = buffer_manager.flush_all();
     let elapsed = start.elapsed();
 
-    let total_rows: usize = batches.iter().map(|b| b.batch.num_rows()).sum();
+    let total_rows: usize = batches.iter().map(|b| b.rows.len()).sum();
     let msgs_per_sec = message_count as f64 / elapsed.as_secs_f64();
 
     eprintln!(
@@ -382,7 +340,6 @@ fn test_stress_buffer_high_volume() {
     );
 }
 
-/// Test buffer manager with multi-table routing
 #[test]
 fn test_stress_buffer_multi_table() {
     let mut buffer_manager = BufferManager::new(&BufferConfig {
@@ -416,14 +373,14 @@ fn test_stress_buffer_multi_table() {
             offset: i as i64,
         };
 
-        buffer_manager.push(&destination, data, Some(offset), None);
+        buffer_manager.push(&destination, data, Some(offset));
     }
 
-    let batches = buffer_manager.flush_all().unwrap();
+    let batches = buffer_manager.flush_all();
     let elapsed = start.elapsed();
 
     let stats = buffer_manager.stats();
-    let total_rows: usize = batches.iter().map(|b| b.batch.num_rows()).sum();
+    let total_rows: usize = batches.iter().map(|b| b.rows.len()).sum();
 
     eprintln!(
         "✓ Buffer multi-table stress: {} messages → {} batches in {:?}",
@@ -437,7 +394,6 @@ fn test_stress_buffer_multi_table() {
     );
 }
 
-/// Test offset tracking under load
 #[test]
 fn test_stress_offset_tracking() {
     let mut buffer_manager = BufferManager::new(&BufferConfig {
@@ -457,15 +413,14 @@ fn test_stress_offset_tracking() {
         let offset = KafkaOffset {
             topic: topic.clone(),
             partition: (i % partition_count),
-            offset: (i / partition_count) as i64, // Offset per partition
+            offset: (i / partition_count) as i64,
         };
-        buffer_manager.push("test.events", data, Some(offset), None);
+        buffer_manager.push("test.events", data, Some(offset));
     }
 
-    let batches = buffer_manager.flush_all().unwrap();
+    let batches = buffer_manager.flush_all();
     let elapsed = start.elapsed();
 
-    // Verify all offsets are tracked
     let total_offsets: usize = batches.iter().map(|b| b.offsets.len()).sum();
     assert_eq!(total_offsets, message_count as usize);
 
@@ -476,22 +431,17 @@ fn test_stress_offset_tracking() {
     );
 }
 
-// ============================================================================
-// Memory Stress Tests
-// ============================================================================
-
-/// Test memory usage with large payloads
 #[test]
 fn test_stress_large_payloads() {
     let mut buffer_manager = BufferManager::new(&BufferConfig {
-        flush_rows: 100, // Low threshold to trigger flushes
+        flush_rows: 100,
         flush_bytes: 50_000_000,
         flush_age_secs: 60,
     });
 
     let topic: Arc<str> = Arc::from("large-payload");
     let message_count = 500;
-    let payload_size = 10_000; // 10KB per message
+    let payload_size = 10_000;
 
     let large_value = "x".repeat(payload_size);
 
@@ -513,15 +463,15 @@ fn test_stress_large_payloads() {
             offset: i as i64,
         };
 
-        buffer_manager.push("test.large", data, Some(offset), None);
+        buffer_manager.push("test.large", data, Some(offset));
 
-        let batches = buffer_manager.get_ready_for_flush().unwrap();
+        let batches = buffer_manager.get_ready_for_flush();
         if !batches.is_empty() {
             flush_count += batches.len();
         }
     }
 
-    let final_batches = buffer_manager.flush_all().unwrap();
+    let final_batches = buffer_manager.flush_all();
     flush_count += final_batches.len();
     let elapsed = start.elapsed();
 
@@ -534,11 +484,10 @@ fn test_stress_large_payloads() {
     );
 }
 
-/// Test rapid buffer flush cycles
 #[test]
 fn test_stress_rapid_flush_cycles() {
     let mut buffer_manager = BufferManager::new(&BufferConfig {
-        flush_rows: 10, // Very low threshold
+        flush_rows: 10,
         flush_bytes: 1_000_000,
         flush_age_secs: 60,
     });
@@ -550,7 +499,6 @@ fn test_stress_rapid_flush_cycles() {
     let mut total_batches = 0;
 
     for cycle in 0..cycle_count {
-        // Push 10 messages to trigger flush
         for i in 0..10 {
             let data = json!({"cycle": cycle, "id": i})
                 .as_object()
@@ -561,10 +509,10 @@ fn test_stress_rapid_flush_cycles() {
                 partition: 0,
                 offset: (cycle * 10 + i) as i64,
             };
-            buffer_manager.push("test.rapid", data, Some(offset), None);
+            buffer_manager.push("test.rapid", data, Some(offset));
         }
 
-        let batches = buffer_manager.get_ready_for_flush().unwrap();
+        let batches = buffer_manager.get_ready_for_flush();
         total_batches += batches.len();
     }
 
@@ -576,7 +524,6 @@ fn test_stress_rapid_flush_cycles() {
         cycle_count, total_batches, elapsed, cycles_per_sec
     );
 
-    // Should have roughly cycle_count batches (one per cycle)
     assert!(
         total_batches >= cycle_count as usize * 9 / 10,
         "Expected ~{} batches, got {}",

@@ -5,10 +5,6 @@
 //!
 //! Tests for error conditions, edge cases, and recovery scenarios
 
-use std::sync::Arc;
-
-use arrow::array::{ArrayRef, Float64Array, RecordBatch, StringArray, UInt64Array};
-use arrow::datatypes::{DataType, Field, Schema};
 use serde_json::json;
 
 use dfe_loader::buffer::BufferManager;
@@ -18,12 +14,9 @@ use dfe_loader::routing::{RouteResult, Router};
 use dfe_loader::transform::Transformer;
 
 use crate::common::{
-    check_clickhouse_reachable, create_test_client, drop_test_table, load_dotenv, unique_table_name,
+    check_clickhouse_reachable, create_http_test_client, drop_http_test_table, load_dotenv,
+    unique_table_name,
 };
-
-// ============================================================================
-// Skip Helper
-// ============================================================================
 
 fn skip_if_no_clickhouse() -> bool {
     load_dotenv();
@@ -33,33 +26,24 @@ fn skip_if_no_clickhouse() -> bool {
     !check_clickhouse_reachable()
 }
 
-// ============================================================================
-// Parse Error Tests
-// ============================================================================
-
 #[test]
 fn test_error_invalid_json() {
     let detector = FormatDetector::with_mode(FormatMode::ForceJson);
 
-    // Invalid JSON
     let invalid_payloads = vec![
         b"not json at all".as_slice(),
         b"{incomplete".as_slice(),
         b"[1, 2, 3".as_slice(),
         b"{'single': 'quotes'}".as_slice(),
         b"".as_slice(),
-        b"null".as_slice(), // Valid JSON but not an object/array we want
+        b"null".as_slice(),
     ];
 
     for payload in invalid_payloads {
         let result = detector.check_and_detect(payload);
-        // Some will be detected as JSON but fail parsing
-        // The key is they're handled gracefully
         match result {
             Ok(_) => {
-                // Detected format, but parsing may still fail
                 let parse_result = sonic_rs::from_slice::<serde_json::Value>(payload);
-                // We expect some of these to fail
                 if parse_result.is_err() {
                     eprintln!("Parse error (expected): {:?}", parse_result.err().unwrap());
                 }
@@ -75,7 +59,6 @@ fn test_error_invalid_json() {
 fn test_error_msgpack_when_json_forced() {
     let detector = FormatDetector::with_mode(FormatMode::ForceJson);
 
-    // MessagePack binary data
     let msgpack_bytes: &[u8] = &[
         0x82, 0xa4, b't', b'e', b's', b't', 0xa5, b'v', b'a', b'l', b'u', b'e',
     ];
@@ -84,16 +67,12 @@ fn test_error_msgpack_when_json_forced() {
     assert!(result.is_err(), "Should reject msgpack when JSON is forced");
 }
 
-// ============================================================================
-// Routing Error Tests
-// ============================================================================
-
 #[test]
 fn test_error_missing_routing_fields() {
     let routing_config = RoutingConfig {
         db_fields: vec!["org_id".to_string()],
         table_fields: vec!["category".to_string()],
-        default_db: "".to_string(), // Empty = triggers DLQ
+        default_db: "".to_string(),
         default_table: "".to_string(),
         org_id_field: Some("org_id".to_string()),
         routed_orgs: vec![],
@@ -108,7 +87,6 @@ fn test_error_missing_routing_fields() {
 
     let router = Router::new(&routing_config);
 
-    // Message with neither routing field
     let msg = json!({
         "id": 1,
         "data": "test",
@@ -121,7 +99,6 @@ fn test_error_missing_routing_fields() {
             eprintln!("✓ DLQ routing for missing fields: {}", reason);
         }
         RouteResult::Table(t) => {
-            // With empty defaults, route to "." which is essentially DLQ-worthy
             eprintln!("Routed to empty/invalid: '{}'", t);
         }
     }
@@ -147,7 +124,6 @@ fn test_error_null_routing_fields() {
 
     let router = Router::new(&routing_config);
 
-    // Message with null values for routing fields
     let msg = json!({
         "org_id": null,
         "category": null,
@@ -157,7 +133,6 @@ fn test_error_null_routing_fields() {
     let result = router.route_value(&msg);
     match result {
         RouteResult::Table(t) => {
-            // Should use defaults
             assert_eq!(t, "default.common");
             eprintln!("✓ Null fields use defaults: {}", t);
         }
@@ -187,7 +162,6 @@ fn test_error_non_string_routing_fields() {
 
     let router = Router::new(&routing_config);
 
-    // Numeric values for string fields
     let msg = json!({
         "org_id": 12345,
         "category": 67890,
@@ -195,7 +169,6 @@ fn test_error_non_string_routing_fields() {
     });
 
     let result = router.route_value(&msg);
-    // Should handle gracefully - either convert or use defaults
     match result {
         RouteResult::Table(t) => {
             eprintln!("✓ Non-string fields handled: {}", t);
@@ -206,22 +179,16 @@ fn test_error_non_string_routing_fields() {
     }
 }
 
-// ============================================================================
-// Transform Error Tests
-// ============================================================================
-
 #[test]
 fn test_error_deeply_nested_json() {
     let transformer = Transformer::default();
 
-    // Create deeply nested structure (10 levels)
     let mut nested = json!({"leaf": "value"});
     for i in 0..10 {
         nested = json!({ format!("level_{}", i): nested });
     }
 
     let result = transformer.transform(nested);
-    // Should flatten successfully (no depth limit in current impl)
     assert!(result.is_ok());
 
     let output = result.unwrap();
@@ -235,7 +202,6 @@ fn test_error_deeply_nested_json() {
 fn test_error_array_in_value() {
     let transformer = Transformer::default();
 
-    // JSON with arrays
     let msg = json!({
         "id": 1,
         "tags": ["tag1", "tag2", "tag3"],
@@ -245,7 +211,6 @@ fn test_error_array_in_value() {
     });
 
     let result = transformer.transform(msg);
-    // Arrays should be preserved or converted to strings
     assert!(result.is_ok());
 
     let output = result.unwrap();
@@ -256,7 +221,6 @@ fn test_error_array_in_value() {
 fn test_error_special_characters_in_keys() {
     let transformer = Transformer::default();
 
-    // Keys with special characters
     let msg = json!({
         "normal_key": "value",
         "key-with-dash": "value",
@@ -275,10 +239,6 @@ fn test_error_special_characters_in_keys() {
     );
 }
 
-// ============================================================================
-// Buffer Error Tests
-// ============================================================================
-
 #[test]
 fn test_error_empty_buffer_flush() {
     let mut buffer_manager = BufferManager::new(&BufferConfig {
@@ -287,11 +247,10 @@ fn test_error_empty_buffer_flush() {
         flush_age_secs: 60,
     });
 
-    // Flush empty buffer
-    let batches = buffer_manager.get_ready_for_flush().unwrap();
+    let batches = buffer_manager.get_ready_for_flush();
     assert!(batches.is_empty());
 
-    let batches = buffer_manager.flush_all().unwrap();
+    let batches = buffer_manager.flush_all();
     assert!(batches.is_empty());
 
     eprintln!("✓ Empty buffer flush handled");
@@ -305,33 +264,25 @@ fn test_error_inconsistent_schema_in_batch() {
         flush_age_secs: 60,
     });
 
-    // Push messages with different schemas to same table
     let messages = vec![
         json!({"id": 1, "name": "alice"}),
-        json!({"id": 2, "age": 30}),                    // Different field
-        json!({"id": 3, "name": "bob", "extra": true}), // Extra field
+        json!({"id": 2, "age": 30}),
+        json!({"id": 3, "name": "bob", "extra": true}),
     ];
 
     for msg in messages {
-        buffer_manager.push("test.events", msg.as_object().unwrap().clone(), None, None);
+        buffer_manager.push("test.events", msg.as_object().unwrap().clone(), None);
     }
 
-    // Flush and check handling
-    let batches = buffer_manager.flush_all().unwrap();
+    let batches = buffer_manager.flush_all();
     assert_eq!(batches.len(), 1);
 
-    // Arrow batch should include all fields as nullable
-    let batch = &batches[0].batch;
+    let rows = &batches[0].rows;
     eprintln!(
-        "✓ Inconsistent schemas merged: {} columns, {} rows",
-        batch.num_columns(),
-        batch.num_rows()
+        "✓ Inconsistent schemas merged: {} rows",
+        rows.len()
     );
 }
-
-// ============================================================================
-// ClickHouse Error Tests
-// ============================================================================
 
 #[tokio::test]
 async fn test_error_insert_nonexistent_table() {
@@ -340,21 +291,20 @@ async fn test_error_insert_nonexistent_table() {
         return;
     }
 
-    let client = match create_test_client().await {
+    let client = match create_http_test_client() {
         Some(c) => c,
         None => return,
     };
 
-    // Try to insert to non-existent table
-    let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::UInt64, false)]));
+    let rows: Vec<serde_json::Map<String, serde_json::Value>> = vec![
+        json!({"id": 1}).as_object().unwrap().clone(),
+        json!({"id": 2}).as_object().unwrap().clone(),
+        json!({"id": 3}).as_object().unwrap().clone(),
+    ];
 
-    let batch = RecordBatch::try_new(
-        schema,
-        vec![Arc::new(UInt64Array::from(vec![1, 2, 3])) as ArrayRef],
-    )
-    .unwrap();
-
-    let result = client.insert("nonexistent_table_12345", batch).await;
+    let result = client
+        .insert_json_rows("nonexistent_table_12345", &rows)
+        .await;
     assert!(result.is_err());
     eprintln!("✓ Non-existent table error: {:?}", result.err().unwrap());
 }
@@ -366,44 +316,34 @@ async fn test_error_insert_schema_mismatch() {
         return;
     }
 
-    let client = match create_test_client().await {
+    let client = match create_http_test_client() {
         Some(c) => c,
         None => return,
     };
 
     let table_name = unique_table_name("error_mismatch");
     let ddl = format!(
-        "CREATE TABLE {} (
+        "CREATE TABLE {} ON CLUSTER 'default' (
             id UInt64,
             name String
-        ) ENGINE = Memory",
+        ) ENGINE = MergeTree() ORDER BY tuple()",
         table_name
     );
-    client.query(&ddl).await.expect("Failed to create table");
+    client.execute(&ddl).await.expect("Failed to create table");
 
-    // Try to insert with wrong schema (Float instead of String)
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("id", DataType::UInt64, false),
-        Field::new("name", DataType::Float64, false), // Wrong type!
-    ]));
+    // JSONEachRow with type coercion — Float for String column
+    let rows: Vec<serde_json::Map<String, serde_json::Value>> = vec![
+        json!({"id": 1, "name": 1.5}).as_object().unwrap().clone(),
+    ];
 
-    let batch = RecordBatch::try_new(
-        schema,
-        vec![
-            Arc::new(UInt64Array::from(vec![1])) as ArrayRef,
-            Arc::new(Float64Array::from(vec![1.5])) as ArrayRef,
-        ],
-    )
-    .unwrap();
-
-    let result = client.insert(&table_name, batch).await;
-    // May succeed due to type coercion, or fail
+    let result = client.insert_json_rows(&table_name, &rows).await;
+    // ClickHouse coerces float to string in JSONEachRow
     match result {
         Ok(n) => eprintln!("Insert succeeded with coercion: {} rows", n),
         Err(e) => eprintln!("✓ Schema mismatch error (expected): {}", e),
     }
 
-    drop_test_table(&client, &table_name).await;
+    drop_http_test_table(&client, &table_name).await;
 }
 
 #[tokio::test]
@@ -413,41 +353,33 @@ async fn test_error_insert_missing_column() {
         return;
     }
 
-    let client = match create_test_client().await {
+    let client = match create_http_test_client() {
         Some(c) => c,
         None => return,
     };
 
     let table_name = unique_table_name("error_missing_col");
     let ddl = format!(
-        "CREATE TABLE {} (
+        "CREATE TABLE {} ON CLUSTER 'default' (
             id UInt64,
             required_field String
-        ) ENGINE = Memory",
+        ) ENGINE = MergeTree() ORDER BY tuple()",
         table_name
     );
-    client.query(&ddl).await.expect("Failed to create table");
+    client.execute(&ddl).await.expect("Failed to create table");
 
-    // Try to insert with missing column
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("id", DataType::UInt64, false),
-        // Missing: required_field
-    ]));
+    // Row missing required_field — ClickHouse fills defaults
+    let rows: Vec<serde_json::Map<String, serde_json::Value>> = vec![
+        json!({"id": 1}).as_object().unwrap().clone(),
+    ];
 
-    let batch = RecordBatch::try_new(
-        schema,
-        vec![Arc::new(UInt64Array::from(vec![1])) as ArrayRef],
-    )
-    .unwrap();
-
-    let result = client.insert(&table_name, batch).await;
-    // May either fail due to missing column OR succeed with ClickHouse filling defaults
+    let result = client.insert_json_rows(&table_name, &rows).await;
     match result {
         Ok(n) => eprintln!("Insert succeeded with default fill: {} rows", n),
         Err(e) => eprintln!("✓ Missing column error: {}", e),
     }
 
-    drop_test_table(&client, &table_name).await;
+    drop_http_test_table(&client, &table_name).await;
 }
 
 #[tokio::test]
@@ -457,43 +389,32 @@ async fn test_error_insert_extra_column() {
         return;
     }
 
-    let client = match create_test_client().await {
+    let client = match create_http_test_client() {
         Some(c) => c,
         None => return,
     };
 
     let table_name = unique_table_name("error_extra_col");
     let ddl = format!(
-        "CREATE TABLE {} (
+        "CREATE TABLE {} ON CLUSTER 'default' (
             id UInt64
-        ) ENGINE = Memory",
+        ) ENGINE = MergeTree() ORDER BY tuple()",
         table_name
     );
-    client.query(&ddl).await.expect("Failed to create table");
+    client.execute(&ddl).await.expect("Failed to create table");
 
-    // Try to insert with extra column
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("id", DataType::UInt64, false),
-        Field::new("extra_column", DataType::Utf8, false), // Not in table!
-    ]));
+    // Row with extra column not in table
+    let rows: Vec<serde_json::Map<String, serde_json::Value>> = vec![
+        json!({"id": 1, "extra_column": "extra"}).as_object().unwrap().clone(),
+    ];
 
-    let batch = RecordBatch::try_new(
-        schema,
-        vec![
-            Arc::new(UInt64Array::from(vec![1])) as ArrayRef,
-            Arc::new(StringArray::from(vec!["extra"])) as ArrayRef,
-        ],
-    )
-    .unwrap();
-
-    let result = client.insert(&table_name, batch).await;
-    // ClickHouse might ignore extra columns or error
+    let result = client.insert_json_rows(&table_name, &rows).await;
     match result {
         Ok(n) => eprintln!("Insert succeeded (extra column ignored): {} rows", n),
         Err(e) => eprintln!("✓ Extra column error: {}", e),
     }
 
-    drop_test_table(&client, &table_name).await;
+    drop_http_test_table(&client, &table_name).await;
 }
 
 #[tokio::test]
@@ -503,33 +424,24 @@ async fn test_error_empty_batch_insert() {
         return;
     }
 
-    let client = match create_test_client().await {
+    let client = match create_http_test_client() {
         Some(c) => c,
         None => return,
     };
 
     let table_name = unique_table_name("error_empty");
     let ddl = format!(
-        "CREATE TABLE {} (
+        "CREATE TABLE {} ON CLUSTER 'default' (
             id UInt64
-        ) ENGINE = Memory",
+        ) ENGINE = MergeTree() ORDER BY tuple()",
         table_name
     );
-    client.query(&ddl).await.expect("Failed to create table");
+    client.execute(&ddl).await.expect("Failed to create table");
 
-    // Try to insert empty batch
-    let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::UInt64, false)]));
+    // Empty row list
+    let rows: Vec<serde_json::Map<String, serde_json::Value>> = vec![];
 
-    let batch = RecordBatch::try_new(
-        schema,
-        vec![Arc::new(UInt64Array::from(Vec::<u64>::new())) as ArrayRef],
-    )
-    .unwrap();
-
-    assert_eq!(batch.num_rows(), 0);
-
-    let result = client.insert(&table_name, batch).await;
-    // Empty batch should be handled gracefully
+    let result = client.insert_json_rows(&table_name, &rows).await;
     match result {
         Ok(n) => {
             assert_eq!(n, 0);
@@ -538,44 +450,34 @@ async fn test_error_empty_batch_insert() {
         Err(e) => eprintln!("Empty batch error: {}", e),
     }
 
-    drop_test_table(&client, &table_name).await;
+    drop_http_test_table(&client, &table_name).await;
 }
-
-// ============================================================================
-// Connection Error Tests
-// ============================================================================
 
 #[tokio::test]
 async fn test_error_invalid_clickhouse_host() {
-    use dfe_loader::clickhouse::ArrowClickHouseClient;
-    use dfe_loader::config::ClickHouseConfig;
+    use dfe_loader::clickhouse::{ClickHouseConfig, HttpClickHouseClient};
 
-    let config = ClickHouseConfig {
-        hosts: vec!["invalid-host-12345.example.com:9000".to_string()],
+    let ch_config = ClickHouseConfig {
+        hosts: vec!["invalid-host-12345.example.com:8123".to_string()],
         database: "default".to_string(),
         username: "default".to_string(),
         password: "".to_string(),
-        protocol: "native".to_string(),
-        tables: Vec::new(),
-        tls: None,
+        ..Default::default()
     };
 
-    // Convert dfe-loader config to clickhouse client config
-    let ch_config: dfe_loader::clickhouse::ClickHouseConfig = (&config).into();
-    let result = ArrowClickHouseClient::new(&ch_config).await;
+    let client = HttpClickHouseClient::new(&ch_config);
+    assert!(client.is_ok(), "Client creation should succeed (lazy connect)");
+
+    // Health check should fail
+    let result = client.unwrap().health_check().await;
     assert!(result.is_err());
     eprintln!("✓ Invalid host error: {:?}", result.err().unwrap());
 }
-
-// ============================================================================
-// Edge Case Tests
-// ============================================================================
 
 #[test]
 fn test_edge_unicode_in_data() {
     let transformer = Transformer::default();
 
-    // Unicode in keys and values
     let msg = json!({
         "日本語キー": "日本語値",
         "emoji": "Hello 👋 World 🌍",
@@ -598,8 +500,7 @@ fn test_edge_unicode_in_data() {
 fn test_edge_very_long_strings() {
     let transformer = Transformer::default();
 
-    // Very long string values
-    let long_string = "x".repeat(100_000); // 100KB string
+    let long_string = "x".repeat(100_000);
 
     let msg = json!({
         "id": 1,
@@ -624,7 +525,6 @@ fn test_edge_very_long_strings() {
 fn test_edge_numeric_precision() {
     let transformer = Transformer::default();
 
-    // Various numeric edge cases
     let msg = json!({
         "max_i64": i64::MAX,
         "min_i64": i64::MIN,

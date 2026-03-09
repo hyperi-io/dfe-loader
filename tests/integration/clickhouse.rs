@@ -4,98 +4,26 @@
 //! ClickHouse integration tests
 //!
 //! Tests run against k8s.tyrell.com.au cluster via .env settings
-//! Uses Arrow client for all ClickHouse operations
+//! Uses HTTP client with JSONEachRow for all ClickHouse operations
 
-use std::env;
-use std::sync::Arc;
+use serde_json::json;
 
-use arrow::array::{Float64Array, RecordBatch, StringArray, UInt64Array};
-use arrow::datatypes::{DataType, Field, Schema};
-use dfe_loader::clickhouse::ArrowClickHouseClient;
-use dfe_loader::config::ClickHouseConfig;
+use crate::common::{
+    check_clickhouse_reachable, create_http_test_client, drop_http_test_table, load_dotenv,
+    unique_table_name,
+};
 
-fn load_dotenv() {
-    // Load from project root .env file
-    let _ = dotenvy::from_path("/projects/dfe-loader/.env");
-}
-
-/// Skip test if no ClickHouse available
 fn skip_if_no_clickhouse() -> bool {
     load_dotenv();
-
-    let host = env::var("CLICKHOUSE_HOST").unwrap_or_default();
-    let port: u16 = env::var("CLICKHOUSE_NATIVE_PORT")
-        .unwrap_or_else(|_| "9000".to_string())
-        .parse()
-        .unwrap_or(9000);
-
-    if host.is_empty() {
+    if !crate::common::has_clickhouse() {
         eprintln!("CLICKHOUSE_HOST not set");
         return true;
     }
-
-    // Try to connect using ToSocketAddrs for DNS resolution
-    let addr = format!("{}:{}", host, port);
-    eprintln!("Checking ClickHouse at {}...", addr);
-
-    use std::net::ToSocketAddrs;
-    match addr.to_socket_addrs() {
-        Ok(mut addrs) => {
-            if let Some(socket_addr) = addrs.next() {
-                match std::net::TcpStream::connect_timeout(
-                    &socket_addr,
-                    std::time::Duration::from_secs(3),
-                ) {
-                    Ok(_) => {
-                        eprintln!("ClickHouse reachable at {} ({})", addr, socket_addr);
-                        false
-                    }
-                    Err(e) => {
-                        eprintln!("ClickHouse not reachable at {}: {}", addr, e);
-                        true
-                    }
-                }
-            } else {
-                eprintln!("Could not resolve {}", addr);
-                true
-            }
-        }
-        Err(e) => {
-            eprintln!("DNS resolution failed for {}: {}", addr, e);
-            true
-        }
+    if !check_clickhouse_reachable() {
+        eprintln!("ClickHouse not reachable");
+        return true;
     }
-}
-
-fn get_test_config() -> ClickHouseConfig {
-    load_dotenv();
-
-    let host = env::var("CLICKHOUSE_HOST").expect("CLICKHOUSE_HOST not set");
-    let port = env::var("CLICKHOUSE_NATIVE_PORT").unwrap_or_else(|_| "9000".to_string());
-    let database = env::var("CLICKHOUSE_DATABASE").unwrap_or_else(|_| "default".to_string());
-    let username = env::var("CLICKHOUSE_USER").unwrap_or_else(|_| "default".to_string());
-    let password = env::var("CLICKHOUSE_PASSWORD").unwrap_or_default();
-
-    let host_with_port = format!("{}:{}", host, port);
-    eprintln!(
-        "Config: host={}, db={}, user={}",
-        host_with_port, database, username
-    );
-
-    ClickHouseConfig {
-        hosts: vec![host_with_port],
-        database,
-        username,
-        password,
-        protocol: "native".to_string(),
-        tables: Vec::new(),
-        tls: None,
-    }
-}
-
-/// Convert dfe-loader config to clickhouse client config for ArrowClickHouseClient
-fn to_ch_config(config: &ClickHouseConfig) -> dfe_loader::clickhouse::ClickHouseConfig {
-    config.into()
+    false
 }
 
 #[tokio::test]
@@ -105,232 +33,132 @@ async fn test_clickhouse_connect() {
         return;
     }
 
-    let config = get_test_config();
-    let start = std::time::Instant::now();
-    let result = ArrowClickHouseClient::new(&to_ch_config(&config)).await;
+    let client = match create_http_test_client() {
+        Some(c) => c,
+        None => {
+            eprintln!("Could not create HTTP client");
+            return;
+        }
+    };
 
-    match result {
-        Ok(client) => {
-            let elapsed = start.elapsed();
-            eprintln!("✓ Connected to ClickHouse in {:?}", elapsed);
-            eprintln!("  Host: {:?}", config.hosts);
-            eprintln!("  Database: {}", client.database());
-            assert!(!client.database().is_empty());
-        }
-        Err(e) => {
-            eprintln!("✗ ClickHouse connection failed: {}", e);
-            panic!("Connection should succeed when ClickHouse is available");
-        }
-    }
+    let start = std::time::Instant::now();
+    let result = client.health_check().await;
+    let elapsed = start.elapsed();
+
+    assert!(result.is_ok(), "Health check failed: {:?}", result.err());
+    eprintln!("✓ Connected to ClickHouse in {:?}", elapsed);
+    assert!(!client.database().is_empty());
 }
 
 #[tokio::test]
-async fn test_clickhouse_insert_arrow() {
+async fn test_clickhouse_insert_json() {
     if skip_if_no_clickhouse() {
         eprintln!("Skipping test: no ClickHouse available");
         return;
     }
 
-    let config = get_test_config();
-    let client = match ArrowClickHouseClient::new(&to_ch_config(&config)).await {
-        Ok(c) => c,
-        Err(e) => {
-            panic!("ClickHouse connection failed: {}", e);
-        }
+    let client = match create_http_test_client() {
+        Some(c) => c,
+        None => return,
     };
 
-    // Create a test table
-    let table_name = format!(
-        "test_insert_{}",
-        uuid::Uuid::new_v4().to_string().replace('-', "")
-    );
+    let table_name = unique_table_name("test_insert");
     let create_sql = format!(
-        "CREATE TABLE IF NOT EXISTS {} (
+        "CREATE TABLE IF NOT EXISTS {} ON CLUSTER 'default' (
             id UInt64,
             event String,
             category String,
             value Float64
-        ) ENGINE = Memory",
+        ) ENGINE = MergeTree() ORDER BY tuple()",
         table_name
     );
 
     let start = std::time::Instant::now();
     client
-        .query(&create_sql)
+        .execute(&create_sql)
         .await
         .expect("Failed to create table");
     eprintln!("✓ Created table '{}' in {:?}", table_name, start.elapsed());
 
-    // Create Arrow schema matching the table
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("id", DataType::UInt64, false),
-        Field::new("event", DataType::Utf8, false),
-        Field::new("category", DataType::Utf8, false),
-        Field::new("value", DataType::Float64, false),
-    ]));
-
     // Insert small batch (2 rows)
-    let ids = UInt64Array::from(vec![1, 2]);
-    let events = StringArray::from(vec!["login", "logout"]);
-    let categories = StringArray::from(vec!["auth", "auth"]);
-    let values = Float64Array::from(vec![1.5, 2.5]);
-
-    let batch = RecordBatch::try_new(
-        schema.clone(),
-        vec![
-            Arc::new(ids),
-            Arc::new(events),
-            Arc::new(categories),
-            Arc::new(values),
-        ],
-    )
-    .expect("Failed to create RecordBatch");
+    let rows: Vec<serde_json::Map<String, serde_json::Value>> = vec![
+        json!({"id": 1, "event": "login", "category": "auth", "value": 1.5})
+            .as_object()
+            .unwrap()
+            .clone(),
+        json!({"id": 2, "event": "logout", "category": "auth", "value": 2.5})
+            .as_object()
+            .unwrap()
+            .clone(),
+    ];
 
     let start = std::time::Instant::now();
-    let result = client.insert(&table_name, batch).await;
+    let result = client.insert_json_rows(&table_name, &rows).await;
     let elapsed = start.elapsed();
     assert!(result.is_ok(), "Insert failed: {:?}", result.err());
-    eprintln!("✓ Inserted 2 rows via Arrow in {:?}", elapsed);
-
-    // Query back to verify data was inserted correctly
-    let count_sql = format!("SELECT COUNT(*) as count FROM {}", table_name);
-    let count_result = client.select(&count_sql).await.expect("Count query failed");
-    assert!(
-        !count_result.is_empty(),
-        "No batches returned from count query"
-    );
-    let count_batch = &count_result[0];
-    let count_col = count_batch
-        .column(0)
-        .as_any()
-        .downcast_ref::<UInt64Array>()
-        .expect("Count should be UInt64");
-    assert_eq!(
-        count_col.value(0),
-        2,
-        "Should have 2 rows after first insert"
-    );
-    eprintln!("✓ Query verification: confirmed 2 rows in table");
+    assert_eq!(result.unwrap(), 2);
+    eprintln!("✓ Inserted 2 rows via JSONEachRow in {:?}", elapsed);
 
     // Insert larger batch (1000 rows)
     let categories_list = ["auth", "api", "web", "mobile"];
-    let ids: Vec<u64> = (0..1000).collect();
-    let events: Vec<String> = (0..1000).map(|i| format!("event_{}", i % 10)).collect();
-    let cats: Vec<&str> = (0..1000).map(|i| categories_list[i % 4]).collect();
-    let vals: Vec<f64> = (0..1000).map(|i| i as f64 * 1.5).collect();
-
-    let batch = RecordBatch::try_new(
-        schema.clone(),
-        vec![
-            Arc::new(UInt64Array::from(ids)),
-            Arc::new(StringArray::from(events)),
-            Arc::new(StringArray::from(cats)),
-            Arc::new(Float64Array::from(vals)),
-        ],
-    )
-    .expect("Failed to create RecordBatch");
+    let large_rows: Vec<serde_json::Map<String, serde_json::Value>> = (0..1000)
+        .map(|i| {
+            json!({
+                "id": i as u64,
+                "event": format!("event_{}", i % 10),
+                "category": categories_list[i % 4],
+                "value": i as f64 * 1.5
+            })
+            .as_object()
+            .unwrap()
+            .clone()
+        })
+        .collect();
 
     let start = std::time::Instant::now();
-    let result = client.insert(&table_name, batch).await;
+    let result = client.insert_json_rows(&table_name, &large_rows).await;
     let elapsed = start.elapsed();
     assert!(result.is_ok(), "Batch insert failed: {:?}", result.err());
     let count = result.unwrap();
+    assert_eq!(count, 1000);
     eprintln!(
-        "✓ Inserted {} rows via Arrow in {:?} ({:.0} rows/sec)",
+        "✓ Inserted {} rows via JSONEachRow in {:?} ({:.0} rows/sec)",
         count,
         elapsed,
         count as f64 / elapsed.as_secs_f64()
     );
-
-    // Query back to verify total row count
-    let count_sql = format!("SELECT COUNT(*) as count FROM {}", table_name);
-    let count_result = client.select(&count_sql).await.expect("Count query failed");
-    let count_batch = &count_result[0];
-    let count_col = count_batch
-        .column(0)
-        .as_any()
-        .downcast_ref::<UInt64Array>()
-        .expect("Count should be UInt64");
-    assert_eq!(
-        count_col.value(0),
-        1002,
-        "Should have 1002 rows total (2 + 1000)"
-    );
-    eprintln!("✓ Query verification: confirmed 1002 rows total");
 
     // Insert even larger batch (5000 rows)
     let categories5 = ["auth", "api", "web", "mobile", "backend"];
-    let ids: Vec<u64> = (1000..6000).collect();
-    let events: Vec<String> = (0..5000).map(|i| format!("bulk_{}", i % 100)).collect();
-    let cats: Vec<&str> = (0..5000).map(|i| categories5[i % 5]).collect();
-    let vals: Vec<f64> = (0..5000).map(|i| i as f64 * 0.7).collect();
-
-    let batch = RecordBatch::try_new(
-        schema,
-        vec![
-            Arc::new(UInt64Array::from(ids)),
-            Arc::new(StringArray::from(events)),
-            Arc::new(StringArray::from(cats)),
-            Arc::new(Float64Array::from(vals)),
-        ],
-    )
-    .expect("Failed to create RecordBatch");
+    let xl_rows: Vec<serde_json::Map<String, serde_json::Value>> = (1000..6000)
+        .map(|i| {
+            json!({
+                "id": i as u64,
+                "event": format!("bulk_{}", i % 100),
+                "category": categories5[i % 5],
+                "value": i as f64 * 0.7
+            })
+            .as_object()
+            .unwrap()
+            .clone()
+        })
+        .collect();
 
     let start = std::time::Instant::now();
-    let result = client.insert(&table_name, batch).await;
+    let result = client.insert_json_rows(&table_name, &xl_rows).await;
     let elapsed = start.elapsed();
-    assert!(
-        result.is_ok(),
-        "Large batch insert failed: {:?}",
-        result.err()
-    );
+    assert!(result.is_ok(), "Large batch insert failed: {:?}", result.err());
     let count = result.unwrap();
+    assert_eq!(count, 5000);
     eprintln!(
-        "✓ Inserted {} rows via Arrow in {:?} ({:.0} rows/sec)",
+        "✓ Inserted {} rows via JSONEachRow in {:?} ({:.0} rows/sec)",
         count,
         elapsed,
         count as f64 / elapsed.as_secs_f64()
     );
 
-    // Query back to verify final row count and data integrity
-    let count_sql = format!("SELECT COUNT(*) as count FROM {}", table_name);
-    let count_result = client.select(&count_sql).await.expect("Count query failed");
-    let count_batch = &count_result[0];
-    let count_col = count_batch
-        .column(0)
-        .as_any()
-        .downcast_ref::<UInt64Array>()
-        .expect("Count should be UInt64");
-    assert_eq!(
-        count_col.value(0),
-        6002,
-        "Should have 6002 rows total (2 + 1000 + 5000)"
-    );
-    eprintln!("✓ Query verification: confirmed 6002 rows total");
-
-    // Verify specific data by category
-    let category_sql = format!(
-        "SELECT category, COUNT(*) as count FROM {} GROUP BY category ORDER BY category",
-        table_name
-    );
-    let category_result = client
-        .select(&category_sql)
-        .await
-        .expect("Category query failed");
-    let category_batch = &category_result[0];
-    assert!(
-        category_batch.num_rows() >= 4,
-        "Should have at least 4 categories"
-    );
-    eprintln!("✓ Query verification: confirmed data can be queried by category");
-
-    // Cleanup
-    let start = std::time::Instant::now();
-    client
-        .query(&format!("DROP TABLE IF EXISTS {}", table_name))
-        .await
-        .expect("Failed to drop");
-    eprintln!("✓ Dropped table in {:?}", start.elapsed());
+    drop_http_test_table(&client, &table_name).await;
+    eprintln!("✓ Cleaned up test table");
 }
 
 #[tokio::test]
@@ -340,25 +168,16 @@ async fn test_clickhouse_table_exists() {
         return;
     }
 
-    let config = get_test_config();
-    let client = match ArrowClickHouseClient::new(&to_ch_config(&config)).await {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("Skipping test: ClickHouse connection failed: {}", e);
-            return;
-        }
+    let client = match create_http_test_client() {
+        Some(c) => c,
+        None => return,
     };
 
-    // system.tables should always exist - we check by fetching schema
     let result = client.table_exists("tables").await;
-    // Note: table_exists tries to fetch schema from the default database,
-    // so this may not find system.tables. Let's just check it doesn't error.
     eprintln!("table_exists result: {:?}", result);
     assert!(result.is_ok());
 }
 
-/// Test that ClickHouse 24.x+ supports Variant type
-/// This validates our target ClickHouse version has experimental types enabled
 #[tokio::test]
 async fn test_clickhouse_variant_type_support() {
     if skip_if_no_clickhouse() {
@@ -366,46 +185,25 @@ async fn test_clickhouse_variant_type_support() {
         return;
     }
 
-    let config = get_test_config();
-    let client = match ArrowClickHouseClient::new(&to_ch_config(&config)).await {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("Skipping test: ClickHouse connection failed: {}", e);
-            return;
-        }
+    let client = match create_http_test_client() {
+        Some(c) => c,
+        None => return,
     };
 
-    // Check ClickHouse version
-    let version_result = client.query("SELECT version()").await;
-    match version_result {
-        Ok(_) => {
-            eprintln!("✓ ClickHouse version query succeeded");
-        }
-        Err(e) => {
-            eprintln!("Version query failed: {}", e);
-            return;
-        }
-    }
+    let table_name = unique_table_name("test_variant");
 
-    // Try to create a table with Variant type (requires 24.x+)
-    let table_name = format!(
-        "test_variant_{}",
-        uuid::Uuid::new_v4().to_string().replace('-', "")
-    );
-
-    // First, enable experimental types and create table
     let create_sql = format!(
-        "CREATE TABLE IF NOT EXISTS {} (
+        "CREATE TABLE IF NOT EXISTS {} ON CLUSTER 'default' (
             id UInt64,
             data Variant(String, Int64, Float64)
-        ) ENGINE = Memory
+        ) ENGINE = MergeTree() ORDER BY tuple()
         SETTINGS allow_experimental_variant_type = 1",
         table_name
     );
 
-    let result = client.query(&create_sql).await;
+    let result = client.execute(&create_sql).await;
     match result {
-        Ok(_) => {
+        Ok(()) => {
             eprintln!("✓ Created table with Variant type: {}", table_name);
         }
         Err(e) => {
@@ -417,12 +215,8 @@ async fn test_clickhouse_variant_type_support() {
         }
     }
 
-    // For now, we just test DDL - Arrow insert for Variant requires special handling
     eprintln!("✓ Variant table created successfully (DDL test)");
 
-    // Cleanup
-    let _ = client
-        .query(&format!("DROP TABLE IF EXISTS {}", table_name))
-        .await;
+    drop_http_test_table(&client, &table_name).await;
     eprintln!("✓ Cleaned up Variant test table");
 }

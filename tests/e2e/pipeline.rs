@@ -101,7 +101,7 @@ async fn test_routing_and_buffer() {
             dfe_loader::routing::RouteResult::Table(table) => {
                 assert_eq!(table, expected_table);
                 let data = sonic_rs::from_slice::<serde_json::Value>(payload).unwrap();
-                buffer_manager.push(&table, data.as_object().unwrap().clone(), None, None);
+                buffer_manager.push(&table, data.as_object().unwrap().clone(), None);
             }
             dfe_loader::routing::RouteResult::Dlq(_) => {
                 panic!("Should not route to DLQ with default_table set");
@@ -146,19 +146,19 @@ async fn test_buffer_flush_thresholds() {
     // Add 4 rows - should not flush
     for i in 0..4 {
         let data = json!({"id": i}).as_object().unwrap().clone();
-        buffer_manager.push("events", data, None, None);
+        buffer_manager.push("events", data, None);
     }
 
-    let batches = buffer_manager.get_ready_for_flush().unwrap();
+    let batches = buffer_manager.get_ready_for_flush();
     assert!(batches.is_empty(), "Should not flush with only 4 rows");
 
     // Add 1 more - should trigger flush
     let data = json!({"id": 4}).as_object().unwrap().clone();
-    buffer_manager.push("events", data, None, None);
+    buffer_manager.push("events", data, None);
 
-    let batches = buffer_manager.get_ready_for_flush().unwrap();
+    let batches = buffer_manager.get_ready_for_flush();
     assert_eq!(batches.len(), 1, "Should flush at 5 rows");
-    assert_eq!(batches[0].batch.num_rows(), 5);
+    assert_eq!(batches[0].rows.len(), 5);
 }
 
 #[tokio::test]

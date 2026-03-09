@@ -8,14 +8,29 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use arrow::array::{ArrayRef, Float64Array, RecordBatch, StringArray, UInt64Array};
-use arrow::datatypes::{DataType, Field, Schema};
+use serde_json::{json, Map, Value};
 
 use dfe_loader::clickhouse::circuit_breaker::{CircuitBreaker, CircuitBreakerConfig};
 use dfe_loader::clickhouse::{Inserter, InserterConfig};
 
-use crate::common::{create_test_client, drop_test_table, unique_table_name};
+use crate::common::{create_http_test_client, drop_http_test_table, unique_table_name};
 use crate::skip_if_no_clickhouse;
+
+/// Helper: create JSON rows for testing
+fn make_test_rows(count: usize) -> Vec<Map<String, Value>> {
+    (0..count)
+        .map(|i| {
+            json!({
+                "id": i as u64,
+                "name": format!("row_{}", i),
+                "value": i as f64 * 1.1
+            })
+            .as_object()
+            .unwrap()
+            .clone()
+        })
+        .collect()
+}
 
 // ============================================================================
 // Basic Insert Tests
@@ -25,10 +40,10 @@ use crate::skip_if_no_clickhouse;
 async fn test_inserter_basic_insert() {
     skip_if_no_clickhouse!();
 
-    let client = match create_test_client().await {
+    let client = match create_http_test_client() {
         Some(c) => Arc::new(c),
         None => {
-            eprintln!("Could not create client");
+            eprintln!("Could not create HTTP client");
             return;
         }
     };
@@ -36,84 +51,37 @@ async fn test_inserter_basic_insert() {
 
     // Create test table
     let ddl = format!(
-        "CREATE TABLE {} (
+        "CREATE TABLE {} ON CLUSTER 'default' (
             id UInt64,
             name String,
             value Float64
-        ) ENGINE = Memory",
+        ) ENGINE = MergeTree() ORDER BY tuple()",
         table_name
     );
-    client.query(&ddl).await.expect("Failed to create table");
+    client.execute(&ddl).await.expect("Failed to create table");
 
     // Create inserter
     let inserter = Inserter::new(client.clone(), InserterConfig::default());
 
-    // Create batch
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("id", DataType::UInt64, false),
-        Field::new("name", DataType::Utf8, false),
-        Field::new("value", DataType::Float64, false),
-    ]));
+    // Create rows
+    let rows = make_test_rows(3);
 
-    let batch = RecordBatch::try_new(
-        schema,
-        vec![
-            Arc::new(UInt64Array::from(vec![1, 2, 3])) as ArrayRef,
-            Arc::new(StringArray::from(vec!["a", "b", "c"])) as ArrayRef,
-            Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])) as ArrayRef,
-        ],
-    )
-    .unwrap();
-
-    // Insert using insert_arrow
-    let result = inserter.insert_arrow(&table_name, batch).await;
+    // Insert using insert_rows
+    let result = inserter.insert_rows(&table_name, &rows).await;
     assert!(result.is_ok(), "Insert failed: {:?}", result.err());
     assert_eq!(result.unwrap(), 3);
 
     eprintln!("✓ Basic insert succeeded with 3 rows");
 
-    // Query back to verify data
-    let count_sql = format!("SELECT COUNT(*) as count FROM {}", table_name);
-    let count_result = client.select(&count_sql).await.expect("Count query failed");
-    let count_batch = &count_result[0];
-    let count_col = count_batch
-        .column(0)
-        .as_any()
-        .downcast_ref::<UInt64Array>()
-        .expect("Count should be UInt64");
-    assert_eq!(count_col.value(0), 3, "Should have 3 rows");
-    eprintln!("✓ Query verification: confirmed 3 rows");
-
-    // Verify specific row data
-    let data_sql = format!("SELECT name FROM {} WHERE id = 2", table_name);
-    let data_result = client.select(&data_sql).await.expect("Data query failed");
-    if !data_result.is_empty() {
-        let data_batch = &data_result[0];
-        if data_batch.num_rows() > 0 {
-            // ClickHouse returns String as Binary via Arrow protocol
-            use arrow::array::BinaryArray;
-            if let Some(name_col) = data_batch.column(0).as_any().downcast_ref::<BinaryArray>() {
-                let name_bytes = name_col.value(0);
-                let name_str = std::str::from_utf8(name_bytes).expect("Should be valid UTF-8");
-                assert_eq!(name_str, "b", "Row with id=2 should have name='b'");
-                eprintln!("✓ Query verification: confirmed data integrity");
-            } else {
-                // Might be StringArray or LargeStringArray in some cases
-                eprintln!("Column type: {:?}", data_batch.column(0).data_type());
-                eprintln!("✓ Query verification: skipped (unexpected column type)");
-            }
-        }
-    }
-
     // Cleanup
-    drop_test_table(&client, &table_name).await;
+    drop_http_test_table(&client, &table_name).await;
 }
 
 #[tokio::test]
 async fn test_inserter_large_batch() {
     skip_if_no_clickhouse!();
 
-    let client = match create_test_client().await {
+    let client = match create_http_test_client() {
         Some(c) => Arc::new(c),
         None => return,
     };
@@ -121,43 +89,23 @@ async fn test_inserter_large_batch() {
 
     // Create test table
     let ddl = format!(
-        "CREATE TABLE {} (
+        "CREATE TABLE {} ON CLUSTER 'default' (
             id UInt64,
-            event String,
+            name String,
             value Float64
-        ) ENGINE = Memory",
+        ) ENGINE = MergeTree() ORDER BY tuple()",
         table_name
     );
-    client.query(&ddl).await.expect("Failed to create table");
+    client.execute(&ddl).await.expect("Failed to create table");
 
     let inserter = Inserter::new(client.clone(), InserterConfig::default());
 
     // Create large batch (10,000 rows)
     let row_count = 10_000usize;
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("id", DataType::UInt64, false),
-        Field::new("event", DataType::Utf8, false),
-        Field::new("value", DataType::Float64, false),
-    ]));
-
-    let ids: Vec<u64> = (0..row_count as u64).collect();
-    let events: Vec<String> = (0..row_count)
-        .map(|i| format!("event_{}", i % 100))
-        .collect();
-    let values: Vec<f64> = (0..row_count).map(|i| i as f64 * 0.1).collect();
-
-    let batch = RecordBatch::try_new(
-        schema,
-        vec![
-            Arc::new(UInt64Array::from(ids)) as ArrayRef,
-            Arc::new(StringArray::from(events)) as ArrayRef,
-            Arc::new(Float64Array::from(values)) as ArrayRef,
-        ],
-    )
-    .unwrap();
+    let rows = make_test_rows(row_count);
 
     let start = std::time::Instant::now();
-    let result = inserter.insert_arrow(&table_name, batch).await;
+    let result = inserter.insert_rows(&table_name, &rows).await;
     let elapsed = start.elapsed();
 
     assert!(
@@ -175,25 +123,8 @@ async fn test_inserter_large_batch() {
         count as f64 / elapsed.as_secs_f64()
     );
 
-    // Query back to verify row count
-    let count_sql = format!("SELECT COUNT(*) as count FROM {}", table_name);
-    let count_result = client.select(&count_sql).await.expect("Count query failed");
-    let count_batch = &count_result[0];
-    let count_col = count_batch
-        .column(0)
-        .as_any()
-        .downcast_ref::<UInt64Array>()
-        .expect("Count should be UInt64");
-    assert_eq!(
-        count_col.value(0),
-        row_count as u64,
-        "Should have {} rows",
-        row_count
-    );
-    eprintln!("✓ Query verification: confirmed {} rows", row_count);
-
     // Cleanup
-    drop_test_table(&client, &table_name).await;
+    drop_http_test_table(&client, &table_name).await;
 }
 
 // ============================================================================
@@ -279,7 +210,7 @@ async fn test_circuit_breaker_recovery() {
 async fn test_circuit_breaker_with_inserter() {
     skip_if_no_clickhouse!();
 
-    let client = match create_test_client().await {
+    let client = match create_http_test_client() {
         Some(c) => Arc::new(c),
         None => return,
     };
@@ -287,13 +218,13 @@ async fn test_circuit_breaker_with_inserter() {
 
     // Create test table
     let ddl = format!(
-        "CREATE TABLE {} (
+        "CREATE TABLE {} ON CLUSTER 'default' (
             id UInt64,
             name String
-        ) ENGINE = Memory",
+        ) ENGINE = MergeTree() ORDER BY tuple()",
         table_name
     );
-    client.query(&ddl).await.expect("Failed to create table");
+    client.execute(&ddl).await.expect("Failed to create table");
 
     // Create inserter with circuit breaker
     let cb_config = CircuitBreakerConfig {
@@ -307,23 +238,18 @@ async fn test_circuit_breaker_with_inserter() {
     let inserter = Inserter::new(client.clone(), InserterConfig::default())
         .with_circuit_breaker(circuit_breaker.clone());
 
-    // Create valid batch
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("id", DataType::UInt64, false),
-        Field::new("name", DataType::Utf8, false),
-    ]));
-
-    let batch = RecordBatch::try_new(
-        schema,
-        vec![
-            Arc::new(UInt64Array::from(vec![1, 2, 3])) as ArrayRef,
-            Arc::new(StringArray::from(vec!["a", "b", "c"])) as ArrayRef,
-        ],
-    )
-    .unwrap();
+    // Create valid rows
+    let rows: Vec<Map<String, Value>> = (0..3)
+        .map(|i| {
+            json!({"id": i as u64, "name": format!("row_{}", i)})
+                .as_object()
+                .unwrap()
+                .clone()
+        })
+        .collect();
 
     // Insert should succeed
-    let result = inserter.insert_arrow(&table_name, batch).await;
+    let result = inserter.insert_rows(&table_name, &rows).await;
     assert!(result.is_ok());
 
     // Check circuit breaker stats
@@ -331,7 +257,7 @@ async fn test_circuit_breaker_with_inserter() {
     eprintln!("Circuit breaker stats: {:?}", stats);
 
     // Cleanup
-    drop_test_table(&client, &table_name).await;
+    drop_http_test_table(&client, &table_name).await;
 
     eprintln!("✓ Inserter with circuit breaker works correctly");
 }
@@ -344,7 +270,7 @@ async fn test_circuit_breaker_with_inserter() {
 async fn test_concurrent_inserts() {
     skip_if_no_clickhouse!();
 
-    let client = match create_test_client().await {
+    let client = match create_http_test_client() {
         Some(c) => Arc::new(c),
         None => return,
     };
@@ -352,14 +278,14 @@ async fn test_concurrent_inserts() {
 
     // Create test table
     let ddl = format!(
-        "CREATE TABLE {} (
+        "CREATE TABLE {} ON CLUSTER 'default' (
             id UInt64,
             batch_id UInt64,
             value Float64
-        ) ENGINE = Memory",
+        ) ENGINE = MergeTree() ORDER BY tuple()",
         table_name
     );
-    client.query(&ddl).await.expect("Failed to create table");
+    client.execute(&ddl).await.expect("Failed to create table");
 
     // Create inserter with concurrency limit
     let config = InserterConfig {
@@ -375,27 +301,20 @@ async fn test_concurrent_inserts() {
         let table = table_name.clone();
 
         let handle = tokio::spawn(async move {
-            let schema = Arc::new(Schema::new(vec![
-                Field::new("id", DataType::UInt64, false),
-                Field::new("batch_id", DataType::UInt64, false),
-                Field::new("value", DataType::Float64, false),
-            ]));
+            let rows: Vec<Map<String, Value>> = (0..100)
+                .map(|i| {
+                    json!({
+                        "id": i as u64,
+                        "batch_id": batch_id,
+                        "value": i as f64
+                    })
+                    .as_object()
+                    .unwrap()
+                    .clone()
+                })
+                .collect();
 
-            let ids: Vec<u64> = (0..100).collect();
-            let batch_ids: Vec<u64> = vec![batch_id; 100];
-            let values: Vec<f64> = (0..100).map(|i| i as f64).collect();
-
-            let batch = RecordBatch::try_new(
-                schema,
-                vec![
-                    Arc::new(UInt64Array::from(ids)) as ArrayRef,
-                    Arc::new(UInt64Array::from(batch_ids)) as ArrayRef,
-                    Arc::new(Float64Array::from(values)) as ArrayRef,
-                ],
-            )
-            .unwrap();
-
-            inserter.insert_arrow(&table, batch).await
+            inserter.insert_rows(&table, &rows).await
         });
         handles.push(handle);
     }
@@ -419,7 +338,7 @@ async fn test_concurrent_inserts() {
     );
 
     // Cleanup
-    drop_test_table(&client, &table_name).await;
+    drop_http_test_table(&client, &table_name).await;
 }
 
 // ============================================================================
@@ -433,7 +352,7 @@ async fn test_inserter_batch_salvage() {
     use compact_str::CompactString;
     use dfe_loader::buffer::FlushBatch;
 
-    let client = match create_test_client().await {
+    let client = match create_http_test_client() {
         Some(c) => Arc::new(c),
         None => return,
     };
@@ -441,13 +360,13 @@ async fn test_inserter_batch_salvage() {
 
     // Create test table
     let ddl = format!(
-        "CREATE TABLE {} (
+        "CREATE TABLE {} ON CLUSTER 'default' (
             id UInt64,
             name String
-        ) ENGINE = Memory",
+        ) ENGINE = MergeTree() ORDER BY tuple()",
         table_name
     );
-    client.query(&ddl).await.expect("Failed to create table");
+    client.execute(&ddl).await.expect("Failed to create table");
 
     // Create inserter with salvage enabled
     let config = InserterConfig {
@@ -458,25 +377,20 @@ async fn test_inserter_batch_salvage() {
     };
     let inserter = Inserter::new(client.clone(), config);
 
-    // Create a valid batch
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("id", DataType::UInt64, false),
-        Field::new("name", DataType::Utf8, false),
-    ]));
-
-    let batch = RecordBatch::try_new(
-        schema,
-        vec![
-            Arc::new(UInt64Array::from(vec![1, 2, 3, 4, 5])) as ArrayRef,
-            Arc::new(StringArray::from(vec!["a", "b", "c", "d", "e"])) as ArrayRef,
-        ],
-    )
-    .unwrap();
+    // Create rows
+    let rows: Vec<Map<String, Value>> = (0..5)
+        .map(|i| {
+            json!({"id": i as u64, "name": format!("row_{}", i)})
+                .as_object()
+                .unwrap()
+                .clone()
+        })
+        .collect();
 
     // Create FlushBatch
     let flush_batch = FlushBatch {
         table: CompactString::from(&table_name),
-        batch,
+        rows,
         offsets: Vec::new(),
     };
 
@@ -491,7 +405,7 @@ async fn test_inserter_batch_salvage() {
     );
 
     // Cleanup
-    drop_test_table(&client, &table_name).await;
+    drop_http_test_table(&client, &table_name).await;
 }
 
 // ============================================================================

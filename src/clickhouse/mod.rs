@@ -9,14 +9,16 @@
 // License:   FSL-1.1-ALv2
 // Copyright: (c) 2026 HYPERI PTY LIMITED
 
-//! ClickHouse client abstraction
+//! ClickHouse client abstraction.
 //!
-//! Uses clickhouse-arrow for native Arrow protocol inserts.
+//! Uses dual-client architecture:
+//! - `clickhouse::Client` for DDL, schema queries, and health checks (static Row types)
+//! - `reqwest::Client` for data inserts via JSONEachRow (dynamic `Map<String, Value>`)
 //!
 //! ## Architecture
 //!
 //! Core client and types:
-//! - `ArrowClickHouseClient` - Arrow protocol client (native or HTTP)
+//! - `HttpClickHouseClient` - DDL + JSONEachRow insert client
 //! - `ParsedType`, `ColumnInfo`, `TableSchema` - Type system
 //! - `ClickHouseConfig` - Connection configuration
 //!
@@ -26,7 +28,7 @@
 //! - `SchemaCache` - TTL-based schema caching
 
 // Core client modules
-pub mod client;
+pub mod client_http;
 pub mod config;
 pub mod error;
 pub mod types;
@@ -37,9 +39,9 @@ pub mod inserter;
 pub mod schema;
 
 // Re-export core types
-pub use client::{ArrowClickHouseClient, NativeArrowClient, SharedArrowClient};
+pub use client_http::{HttpClickHouseClient, SharedHttpClient};
 pub use config::{ClickHouseConfig, Transport};
-pub use error::{ClickHouseError, ErrorCategory, ServerError, Severity};
+pub use error::{ClickHouseError, ErrorCategory};
 pub use types::{
     default_value_for_category, is_null_string, ColumnInfo, ParsedType, TableSchema, NULL_STRINGS,
 };

@@ -8,17 +8,10 @@ pub mod containers;
 pub mod metrics;
 
 use std::env;
-use std::sync::Arc;
 use std::time::Duration;
 
-use arrow::array::{
-    ArrayRef, Float64Array, Int64Array, RecordBatch, StringArray, TimestampMillisecondArray,
-    UInt64Array,
-};
-use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 use serde_json::{json, Value};
 
-use dfe_loader::clickhouse::ArrowClickHouseClient;
 use dfe_loader::config::{ClickHouseConfig, KafkaConfig, SaslConfig};
 
 /// Load environment variables from .env file
@@ -243,266 +236,34 @@ pub fn generate_sample_events(count: usize, category: &str) -> Vec<Value> {
         .collect()
 }
 
-/// Create a simple Arrow RecordBatch for testing
-pub fn create_simple_batch(row_count: usize) -> RecordBatch {
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("id", DataType::UInt64, false),
-        Field::new("event", DataType::Utf8, false),
-        Field::new("value", DataType::Float64, false),
-    ]));
-
-    let ids: Vec<u64> = (0..row_count as u64).collect();
-    let events: Vec<String> = (0..row_count).map(|i| format!("event_{}", i)).collect();
-    let values: Vec<f64> = (0..row_count).map(|i| i as f64 * 1.5).collect();
-
-    RecordBatch::try_new(
-        schema,
-        vec![
-            Arc::new(UInt64Array::from(ids)) as ArrayRef,
-            Arc::new(StringArray::from(events)) as ArrayRef,
-            Arc::new(Float64Array::from(values)) as ArrayRef,
-        ],
-    )
-    .expect("Failed to create RecordBatch")
-}
-
-/// Create a complex Arrow RecordBatch with multiple data types
-pub fn create_complex_batch(row_count: usize) -> RecordBatch {
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("id", DataType::UInt64, false),
-        Field::new("name", DataType::Utf8, false),
-        Field::new("score", DataType::Float64, true),
-        Field::new("count", DataType::Int64, true),
-        Field::new(
-            "timestamp",
-            DataType::Timestamp(TimeUnit::Millisecond, None),
-            false,
-        ),
-    ]));
-
-    let now = chrono::Utc::now().timestamp_millis();
-    let ids: Vec<u64> = (0..row_count as u64).collect();
-    let names: Vec<String> = (0..row_count).map(|i| format!("item_{}", i)).collect();
-    let scores: Vec<Option<f64>> = (0..row_count)
-        .map(|i| {
-            if i % 3 == 0 {
-                None
-            } else {
-                Some(i as f64 * 2.5)
-            }
-        })
-        .collect();
-    let counts: Vec<Option<i64>> = (0..row_count)
-        .map(|i| if i % 5 == 0 { None } else { Some(i as i64) })
-        .collect();
-    let timestamps: Vec<i64> = (0..row_count).map(|i| now + i as i64 * 1000).collect();
-
-    RecordBatch::try_new(
-        schema,
-        vec![
-            Arc::new(UInt64Array::from(ids)) as ArrayRef,
-            Arc::new(StringArray::from(names)) as ArrayRef,
-            Arc::new(Float64Array::from(scores)) as ArrayRef,
-            Arc::new(Int64Array::from(counts)) as ArrayRef,
-            Arc::new(TimestampMillisecondArray::from(timestamps)) as ArrayRef,
-        ],
-    )
-    .expect("Failed to create complex RecordBatch")
-}
-
-/// Helper to create ClickHouse client for tests
-pub async fn create_test_client() -> Option<ArrowClickHouseClient> {
+/// Helper to create HTTP ClickHouse client for tests (JSONEachRow)
+pub fn create_http_test_client() -> Option<dfe_loader::clickhouse::HttpClickHouseClient> {
     if !check_clickhouse_reachable() {
         return None;
     }
 
     let config = get_clickhouse_config();
-    // Convert dfe-loader config to clickhouse client config
-    let ch_config: dfe_loader::clickhouse::ClickHouseConfig = (&config).into();
-    ArrowClickHouseClient::new(&ch_config).await.ok()
-}
-
-/// Create a test table and return cleanup function
-pub async fn create_test_table(
-    client: &ArrowClickHouseClient,
-    _table_name: &str,
-    ddl: &str,
-) -> Result<(), String> {
-    client
-        .query(ddl)
-        .await
-        .map_err(|e| format!("Failed to create table: {}", e))?;
-    Ok(())
-}
-
-/// Drop a test table
-pub async fn drop_test_table(client: &ArrowClickHouseClient, table_name: &str) {
-    let _ = client
-        .query(&format!("DROP TABLE IF EXISTS {}", table_name))
-        .await;
-}
-
-/// Execute query and return row count from a table
-///
-/// # Arguments
-/// * `client` - ClickHouse client
-/// * `table` - Table name (can include database: "db.table")
-/// * `where_clause` - Optional WHERE condition (without "WHERE" keyword)
-///
-/// # Returns
-/// Number of rows matching the query
-pub async fn query_count(
-    client: &ArrowClickHouseClient,
-    table: &str,
-    where_clause: Option<&str>,
-) -> Result<usize, String> {
-    let sql = match where_clause {
-        Some(w) => format!("SELECT COUNT(*) as count FROM {} WHERE {}", table, w),
-        None => format!("SELECT COUNT(*) as count FROM {}", table),
+    // Build an HTTP config from the test environment
+    let host = std::env::var("CLICKHOUSE_HOST").unwrap_or_default();
+    let http_port = std::env::var("CLICKHOUSE_HTTP_PORT").unwrap_or_else(|_| "8123".to_string());
+    let ch_config = dfe_loader::clickhouse::ClickHouseConfig {
+        hosts: vec![format!("{}:{}", host, http_port)],
+        transport: dfe_loader::clickhouse::Transport::Http,
+        database: config.database.clone(),
+        username: config.username.clone(),
+        password: config.password.clone(),
+        tls: false,
+        ..Default::default()
     };
-
-    let batch = client
-        .select(&sql)
-        .await
-        .map_err(|e| format!("Query failed: {}", e))?;
-
-    if batch.is_empty() {
-        return Ok(0);
-    }
-
-    // Extract count from first row of first batch
-    let first_batch = &batch[0];
-    if first_batch.num_rows() == 0 {
-        return Ok(0);
-    }
-
-    let count_col = first_batch
-        .column(0)
-        .as_any()
-        .downcast_ref::<UInt64Array>()
-        .ok_or_else(|| "COUNT(*) did not return UInt64".to_string())?;
-
-    Ok(count_col.value(0) as usize)
+    dfe_loader::clickhouse::HttpClickHouseClient::new(&ch_config).ok()
 }
 
-/// Execute query and return first row as HashMap<String, String>
-///
-/// All values are converted to strings for simplicity in test assertions.
-///
-/// # Returns
-/// Some(HashMap) if rows exist, None if no rows
-pub async fn query_one(
-    client: &ArrowClickHouseClient,
-    sql: &str,
-) -> Result<Option<std::collections::HashMap<String, String>>, String> {
-    use std::collections::HashMap;
-
-    let batch = client
-        .select(sql)
-        .await
-        .map_err(|e| format!("Query failed: {}", e))?;
-
-    if batch.is_empty() {
-        return Ok(None);
-    }
-
-    let first_batch = &batch[0];
-    if first_batch.num_rows() == 0 {
-        return Ok(None);
-    }
-
-    let mut row = HashMap::new();
-    let schema = first_batch.schema();
-
-    for (col_idx, field) in schema.fields().iter().enumerate() {
-        let col_name = field.name().clone();
-        let array = first_batch.column(col_idx);
-
-        // Convert first value to string
-        let value_str = match array.data_type() {
-            DataType::Utf8 => {
-                if let Some(arr) = array.as_any().downcast_ref::<StringArray>() {
-                    arr.value(0).to_string()
-                } else {
-                    "".to_string()
-                }
-            }
-            DataType::UInt64 => {
-                if let Some(arr) = array.as_any().downcast_ref::<UInt64Array>() {
-                    arr.value(0).to_string()
-                } else {
-                    "".to_string()
-                }
-            }
-            DataType::Int64 => {
-                if let Some(arr) = array.as_any().downcast_ref::<Int64Array>() {
-                    arr.value(0).to_string()
-                } else {
-                    "".to_string()
-                }
-            }
-            DataType::Float64 => {
-                if let Some(arr) = array.as_any().downcast_ref::<Float64Array>() {
-                    arr.value(0).to_string()
-                } else {
-                    "".to_string()
-                }
-            }
-            DataType::Timestamp(TimeUnit::Millisecond, _) => {
-                if let Some(arr) = array.as_any().downcast_ref::<TimestampMillisecondArray>() {
-                    arr.value(0).to_string()
-                } else {
-                    "".to_string()
-                }
-            }
-            _ => {
-                // For other types, use Debug formatting
-                format!("{:?}", array)
-            }
-        };
-
-        row.insert(col_name, value_str);
-    }
-
-    Ok(Some(row))
-}
-
-/// Convert Unix timestamp (milliseconds) to Arrow TimestampMillisecondArray
-///
-/// # Arguments
-/// * `timestamps` - Vector of Unix timestamps in milliseconds
-///
-/// # Returns
-/// Arc<dyn Array> containing TimestampMillisecondArray
-pub fn unix_ms_to_arrow_timestamp(timestamps: Vec<i64>) -> ArrayRef {
-    Arc::new(TimestampMillisecondArray::from(timestamps))
-}
-
-/// Generate sample events with proper Arrow-compatible timestamps
-///
-/// # Arguments
-/// * `count` - Number of events to generate
-///
-/// # Returns
-/// Vector of HashMaps suitable for conversion to Arrow RecordBatch
-pub fn generate_events_with_timestamps(
-    count: usize,
-) -> Vec<std::collections::HashMap<String, Value>> {
-    use std::collections::HashMap;
-
-    let base_time = chrono::Utc::now().timestamp_millis();
-
-    (0..count)
-        .map(|i| {
-            let mut event = HashMap::new();
-            event.insert("id".to_string(), json!(i as u64));
-            event.insert(
-                "timestamp".to_string(),
-                json!(base_time + (i as i64 * 1000)),
-            );
-            event.insert("action".to_string(), json!(format!("action_{}", i % 10)));
-            event.insert("value".to_string(), json!(i as f64 * 1.5));
-            event
-        })
-        .collect()
+/// Drop a test table (HTTP client), using ON CLUSTER 'default' for replicated cluster.
+pub async fn drop_http_test_table(
+    client: &dfe_loader::clickhouse::HttpClickHouseClient,
+    table_name: &str,
+) {
+    let _ = client
+        .execute(&format!("DROP TABLE IF EXISTS {} ON CLUSTER 'default'", table_name))
+        .await;
 }

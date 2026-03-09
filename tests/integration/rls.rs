@@ -6,10 +6,7 @@
 // Tests that _org_id field is correctly populated for RLS
 
 use std::collections::HashMap;
-use std::sync::Arc;
 
-use arrow::array::RecordBatch;
-use arrow::datatypes::{Field, Schema};
 use serde_json::json;
 
 use dfe_loader::buffer::BufferManager;
@@ -17,7 +14,7 @@ use dfe_loader::config::{BufferConfig, DlqConfig, RoutingConfig};
 use dfe_loader::routing::Router;
 use dfe_loader::transform::Transformer;
 
-use crate::common::{create_test_client, drop_test_table};
+use crate::common::{create_http_test_client, drop_http_test_table};
 
 /// Test that _org_id field is populated from source data
 #[tokio::test]
@@ -180,7 +177,7 @@ async fn test_shared_schema_multiple_orgs() {
             // Each should have its own org_id
             assert!(result.data.contains_key("_org_id"));
 
-            buffer.push(&table, result.data, None, None);
+            buffer.push(&table, result.data, None);
         }
     }
 
@@ -192,16 +189,14 @@ async fn test_shared_schema_multiple_orgs() {
 /// Integration test: Insert data with _org_id and verify storage
 ///
 /// Tests that _org_id field is correctly populated and stored in ClickHouse.
-/// Uses explicit Arrow schema to avoid timestamp conversion issues.
 #[tokio::test]
 async fn test_org_id_insert_to_clickhouse() {
-    use crate::common::query_count;
-    use arrow::array::ArrayRef;
-    use arrow::array::{StringArray, TimestampMillisecondArray, UInt32Array};
-    use arrow::datatypes::{DataType, TimeUnit};
+    use crate::common::unique_table_name;
+    use crate::skip_if_no_clickhouse;
 
-    // Skip if no ClickHouse available
-    let client = match create_test_client().await {
+    skip_if_no_clickhouse!();
+
+    let client = match create_http_test_client() {
         Some(c) => c,
         None => {
             eprintln!("Skipping RLS integration test: no ClickHouse available");
@@ -209,24 +204,20 @@ async fn test_org_id_insert_to_clickhouse() {
         }
     };
 
-    let table_name = "rls_test";
+    // The cluster has two relevant databases:
+    //   benchmark = Atomic engine (plain MergeTree, no replication, no auto-conversion)
+    //   default   = Replicated engine (auto-converts MergeTree to ReplicatedMergeTree)
+    //
+    // For query-back verification we need the `default` database so that writes on any node
+    // are replicated to all nodes. We omit ON CLUSTER — the Replicated DB propagates DDL itself.
+    let table_name = unique_table_name("rls_test");
+    let full_name = format!("default.{}", table_name);
 
-    // Ensure test database exists
-    if let Err(e) = client.query("CREATE DATABASE IF NOT EXISTS test").await {
-        eprintln!(
-            "Skipping RLS ClickHouse test: cannot create test database: {}",
-            e
-        );
-        return;
-    }
-
-    // Cleanup from previous run
-    drop_test_table(&client, &format!("test.{}", table_name)).await;
-
-    // Create table with _org_id field (Common Header v2 schema)
+    // Create table with _org_id field (Common Header v2 schema).
+    // No ON CLUSTER — the Replicated `default` DB propagates DDL automatically.
+    // ReplicatedMergeTree() with no args lets the Replicated DB auto-fill ZK paths.
     let create_ddl = format!(
-        r#"
-        CREATE TABLE IF NOT EXISTS test.{table_name} (
+        "CREATE TABLE {} (
             _timestamp DateTime64(3),
             _timestamp_load DateTime64(3) DEFAULT now64(3),
             _uuid UUID DEFAULT generateUUIDv7(),
@@ -234,93 +225,75 @@ async fn test_org_id_insert_to_clickhouse() {
             action String,
             user_id UInt32
         )
-        ENGINE = MergeTree()
+        ENGINE = ReplicatedMergeTree()
         ORDER BY (_timestamp, _org_id, _uuid)
-        PARTITION BY _org_id
-        "#
+        PARTITION BY _org_id",
+        full_name
     );
 
     client
-        .query(&create_ddl)
+        .execute(&create_ddl)
         .await
         .expect("Failed to create table");
 
-    // Create explicit Arrow schema matching ClickHouse DDL
-    let schema = Arc::new(Schema::new(vec![
-        Field::new(
-            "_timestamp",
-            DataType::Timestamp(TimeUnit::Millisecond, None),
-            false,
-        ),
-        Field::new("_org_id", DataType::Utf8, false),
-        Field::new("action", DataType::Utf8, false),
-        Field::new("user_id", DataType::UInt32, false),
-    ]));
+    // Brief wait for Replicated DB to propagate DDL to all 3 nodes.
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
-    // Create RecordBatch with explicit types
-    let batch = RecordBatch::try_new(
-        schema,
-        vec![
-            Arc::new(TimestampMillisecondArray::from(vec![
-                1705315200000_i64, // 2024-01-15 10:00:00
-                1705315500000_i64, // 2024-01-15 10:05:00
-                1705315800000_i64, // 2024-01-15 10:10:00
-            ])) as ArrayRef,
-            Arc::new(StringArray::from(vec!["acme", "bigcorp", "acme"])) as ArrayRef,
-            Arc::new(StringArray::from(vec!["login", "logout", "view"])) as ArrayRef,
-            Arc::new(UInt32Array::from(vec![1001, 2002, 1003])) as ArrayRef,
-        ],
-    )
-    .expect("Failed to create RecordBatch");
+    // Insert rows via JSONEachRow
+    let rows: Vec<serde_json::Map<String, serde_json::Value>> = vec![
+        json!({"_timestamp": "2024-01-15 10:00:00.000", "_org_id": "acme", "action": "login", "user_id": 1001}).as_object().unwrap().clone(),
+        json!({"_timestamp": "2024-01-15 10:05:00.000", "_org_id": "bigcorp", "action": "logout", "user_id": 2002}).as_object().unwrap().clone(),
+        json!({"_timestamp": "2024-01-15 10:10:00.000", "_org_id": "acme", "action": "view", "user_id": 1003}).as_object().unwrap().clone(),
+    ];
 
-    // Insert batch
     let inserted = client
-        .insert(&format!("test.{}", table_name), batch)
+        .insert_json_rows(&full_name, &rows)
         .await
-        .expect("Failed to insert batch");
+        .expect("Failed to insert rows");
 
     assert_eq!(inserted, 3, "Should insert 3 rows");
 
+    // Sync all replicas — the table is ReplicatedMergeTree (auto-converted by Replicated DB),
+    // so SYSTEM SYNC REPLICA forces all nodes to catch up before we query back.
+    client
+        .execute(&format!(
+            "SYSTEM SYNC REPLICA ON CLUSTER 'default' {}",
+            full_name
+        ))
+        .await
+        .expect("Failed to sync replicas");
+
     // Query back to verify data was inserted correctly
-    let total_count = query_count(&client, &format!("test.{}", table_name), None)
+    let total_count = client
+        .query_count(&full_name, None)
         .await
         .expect("Failed to query total count");
     assert_eq!(total_count, 3, "Total row count should be 3");
 
     // Verify org-specific counts
-    let acme_count = query_count(
-        &client,
-        &format!("test.{}", table_name),
-        Some("_org_id = 'acme'"),
-    )
-    .await
-    .expect("Failed to query acme count");
+    let acme_count = client
+        .query_count(&full_name, Some("_org_id = 'acme'"))
+        .await
+        .expect("Failed to query acme count");
     assert_eq!(acme_count, 2, "ACME should have 2 rows");
 
-    let bigcorp_count = query_count(
-        &client,
-        &format!("test.{}", table_name),
-        Some("_org_id = 'bigcorp'"),
-    )
-    .await
-    .expect("Failed to query bigcorp count");
+    let bigcorp_count = client
+        .query_count(&full_name, Some("_org_id = 'bigcorp'"))
+        .await
+        .expect("Failed to query bigcorp count");
     assert_eq!(bigcorp_count, 1, "BigCorp should have 1 row");
 
     // Verify specific actions
-    let acme_login_count = query_count(
-        &client,
-        &format!("test.{}", table_name),
-        Some("_org_id = 'acme' AND action = 'login'"),
-    )
-    .await
-    .expect("Failed to query acme login count");
+    let acme_login_count = client
+        .query_count(&full_name, Some("_org_id = 'acme' AND action = 'login'"))
+        .await
+        .expect("Failed to query acme login count");
     assert_eq!(acme_login_count, 1, "ACME should have 1 login");
 
     eprintln!("✓ Successfully inserted and verified 3 rows with _org_id field");
     eprintln!("✓ Query-back verification passed (acme: 2 rows, bigcorp: 1 row)");
     eprintln!("✓ Data is ready for row-level security policies");
-    eprintln!("  See reference/clickhouse_rls.md for policy setup");
 
     // Cleanup
-    drop_test_table(&client, &format!("test.{}", table_name)).await;
+    drop_http_test_table(&client, &full_name).await;
 }
