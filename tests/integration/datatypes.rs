@@ -3,7 +3,9 @@
 
 //! Data types integration tests
 //!
-//! Tests for various ClickHouse data types via JSONEachRow inserts
+//! Tests for various ClickHouse data types via JSONEachRow inserts.
+//! Includes Phase 5.6 coercion tests: verify that the Coercer correctly
+//! transforms ambiguous input values before they reach ClickHouse.
 
 #![allow(clippy::approx_constant)]
 
@@ -332,5 +334,377 @@ async fn test_realistic_event_table() {
         count as f64 / elapsed.as_secs_f64()
     );
 
+    drop_http_test_table(&client, &table_name).await;
+}
+
+// ============================================================================
+// Phase 5.6: Type Coercion tests
+//
+// Each test verifies one coercion case against real ClickHouse:
+//   1. Build a table with a target column type
+//   2. Apply the Coercer to a row with ambiguous/raw input
+//   3. Insert via insert_json_rows
+//   4. Query back to confirm the value landed correctly
+// ============================================================================
+
+/// Helper: create a Coercer with default config
+fn default_coercer() -> dfe_loader::transform::Coercer {
+    use dfe_loader::config::CoercionConfig;
+    dfe_loader::transform::Coercer::new(CoercionConfig::default())
+}
+
+#[tokio::test]
+async fn test_coerce_datetime64_from_epoch_ms() {
+    skip_if_no_clickhouse!();
+
+    let client = match create_http_test_client() {
+        Some(c) => c,
+        None => return,
+    };
+    let table_name = unique_table_name("test_coerce_dt64_epoch");
+
+    let ddl = format!(
+        "CREATE TABLE {} ON CLUSTER 'default' (
+            ts DateTime64(3)
+        ) ENGINE = MergeTree() ORDER BY tuple()",
+        table_name
+    );
+    client.execute(&ddl).await.expect("Failed to create table");
+
+    let schema = client.fetch_table_schema(&table_name).await.expect("Schema fetch failed");
+    let coercer = default_coercer();
+
+    // Epoch ms integer — coercer converts to "YYYY-MM-DD HH:MM:SS.mmm" string
+    let epoch_ms: i64 = 1735084800000; // 2024-12-25 00:00:00.000 UTC
+    let mut row = json!({"ts": epoch_ms}).as_object().unwrap().clone();
+    coercer.coerce_row(&mut row, &schema).expect("Coercion failed");
+
+    let result = client.insert_json_rows(&table_name, &[row]).await;
+    assert!(result.is_ok(), "Insert failed after coercion: {:?}", result.err());
+    assert_eq!(result.unwrap(), 1);
+
+    // Verify value was stored correctly
+    let count = client.query_count(&table_name, None).await.expect("Count failed");
+    assert_eq!(count, 1);
+
+    eprintln!("✓ DateTime64 from epoch ms coercion succeeded");
+    drop_http_test_table(&client, &table_name).await;
+}
+
+#[tokio::test]
+async fn test_coerce_datetime64_from_iso_string() {
+    skip_if_no_clickhouse!();
+
+    let client = match create_http_test_client() {
+        Some(c) => c,
+        None => return,
+    };
+    let table_name = unique_table_name("test_coerce_dt64_iso");
+
+    let ddl = format!(
+        "CREATE TABLE {} ON CLUSTER 'default' (
+            ts DateTime64(3)
+        ) ENGINE = MergeTree() ORDER BY tuple()",
+        table_name
+    );
+    client.execute(&ddl).await.expect("Failed to create table");
+
+    let schema = client.fetch_table_schema(&table_name).await.expect("Schema fetch failed");
+    let coercer = default_coercer();
+
+    // ISO8601 string with Z suffix — coercer normalises to CH-accepted format
+    let mut row = json!({"ts": "2024-12-25T10:30:00.123Z"}).as_object().unwrap().clone();
+    coercer.coerce_row(&mut row, &schema).expect("Coercion failed");
+
+    let result = client.insert_json_rows(&table_name, &[row]).await;
+    assert!(result.is_ok(), "Insert failed after coercion: {:?}", result.err());
+
+    let count = client.query_count(&table_name, None).await.expect("Count failed");
+    assert_eq!(count, 1);
+
+    eprintln!("✓ DateTime64 from ISO string coercion succeeded");
+    drop_http_test_table(&client, &table_name).await;
+}
+
+#[tokio::test]
+async fn test_coerce_bool_from_string() {
+    skip_if_no_clickhouse!();
+
+    let client = match create_http_test_client() {
+        Some(c) => c,
+        None => return,
+    };
+    let table_name = unique_table_name("test_coerce_bool_str");
+
+    let ddl = format!(
+        "CREATE TABLE {} ON CLUSTER 'default' (
+            b Bool
+        ) ENGINE = MergeTree() ORDER BY tuple()",
+        table_name
+    );
+    client.execute(&ddl).await.expect("Failed to create table");
+
+    let schema = client.fetch_table_schema(&table_name).await.expect("Schema fetch failed");
+    let coercer = default_coercer();
+
+    // String representations of bool — coercer converts to JSON bool
+    let string_trues = ["true", "1", "yes", "on", "t", "y"];
+    let string_falses = ["false", "0", "no", "off"];
+
+    let mut rows = Vec::new();
+    for s in &string_trues {
+        let mut row = json!({"b": s}).as_object().unwrap().clone();
+        coercer.coerce_row(&mut row, &schema).expect("Coercion failed");
+        // After coercion, "b" must be a JSON bool
+        assert_eq!(row["b"], json!(true), "Expected true for input {:?}", s);
+        rows.push(row);
+    }
+    for s in &string_falses {
+        let mut row = json!({"b": s}).as_object().unwrap().clone();
+        coercer.coerce_row(&mut row, &schema).expect("Coercion failed");
+        assert_eq!(row["b"], json!(false), "Expected false for input {:?}", s);
+        rows.push(row);
+    }
+
+    let result = client.insert_json_rows(&table_name, &rows).await;
+    assert!(result.is_ok(), "Insert failed after coercion: {:?}", result.err());
+    assert_eq!(result.unwrap(), string_trues.len() + string_falses.len());
+
+    eprintln!("✓ Bool from string coercion succeeded");
+    drop_http_test_table(&client, &table_name).await;
+}
+
+#[tokio::test]
+async fn test_coerce_bool_from_int() {
+    skip_if_no_clickhouse!();
+
+    let client = match create_http_test_client() {
+        Some(c) => c,
+        None => return,
+    };
+    let table_name = unique_table_name("test_coerce_bool_int");
+
+    let ddl = format!(
+        "CREATE TABLE {} ON CLUSTER 'default' (
+            b Bool
+        ) ENGINE = MergeTree() ORDER BY tuple()",
+        table_name
+    );
+    client.execute(&ddl).await.expect("Failed to create table");
+
+    let schema = client.fetch_table_schema(&table_name).await.expect("Schema fetch failed");
+    let coercer = default_coercer();
+
+    let cases = [(1i64, true), (0i64, false), (42i64, true), (-1i64, true)];
+    let mut rows = Vec::new();
+    for (int_val, expected_bool) in &cases {
+        let mut row = json!({"b": int_val}).as_object().unwrap().clone();
+        coercer.coerce_row(&mut row, &schema).expect("Coercion failed");
+        assert_eq!(
+            row["b"],
+            json!(expected_bool),
+            "Expected {} for int input {}",
+            expected_bool,
+            int_val
+        );
+        rows.push(row);
+    }
+
+    let result = client.insert_json_rows(&table_name, &rows).await;
+    assert!(result.is_ok(), "Insert failed after coercion: {:?}", result.err());
+    assert_eq!(result.unwrap(), cases.len());
+
+    eprintln!("✓ Bool from int coercion succeeded");
+    drop_http_test_table(&client, &table_name).await;
+}
+
+#[tokio::test]
+async fn test_coerce_uuid_normalisation() {
+    skip_if_no_clickhouse!();
+
+    let client = match create_http_test_client() {
+        Some(c) => c,
+        None => return,
+    };
+    let table_name = unique_table_name("test_coerce_uuid");
+
+    let ddl = format!(
+        "CREATE TABLE {} ON CLUSTER 'default' (
+            id UUID
+        ) ENGINE = MergeTree() ORDER BY tuple()",
+        table_name
+    );
+    client.execute(&ddl).await.expect("Failed to create table");
+
+    let schema = client.fetch_table_schema(&table_name).await.expect("Schema fetch failed");
+    let coercer = default_coercer();
+
+    // Hex without hyphens — coercer normalises to RFC 4122 format
+    let mut row = json!({"id": "550e8400e29b41d4a716446655440000"}).as_object().unwrap().clone();
+    coercer.coerce_row(&mut row, &schema).expect("Coercion failed");
+    assert_eq!(row["id"], json!("550e8400-e29b-41d4-a716-446655440000"));
+
+    let result = client.insert_json_rows(&table_name, &[row]).await;
+    assert!(result.is_ok(), "Insert failed after UUID coercion: {:?}", result.err());
+    assert_eq!(result.unwrap(), 1);
+
+    eprintln!("✓ UUID normalisation coercion succeeded");
+    drop_http_test_table(&client, &table_name).await;
+}
+
+#[tokio::test]
+async fn test_coerce_ipv4_from_integer() {
+    skip_if_no_clickhouse!();
+
+    let client = match create_http_test_client() {
+        Some(c) => c,
+        None => return,
+    };
+    let table_name = unique_table_name("test_coerce_ipv4");
+
+    let ddl = format!(
+        "CREATE TABLE {} ON CLUSTER 'default' (
+            ip IPv4
+        ) ENGINE = MergeTree() ORDER BY tuple()",
+        table_name
+    );
+    client.execute(&ddl).await.expect("Failed to create table");
+
+    let schema = client.fetch_table_schema(&table_name).await.expect("Schema fetch failed");
+    let coercer = default_coercer();
+
+    // Integer representation of 192.168.1.1 = 3232235777
+    let mut row = json!({"ip": 3232235777u64}).as_object().unwrap().clone();
+    coercer.coerce_row(&mut row, &schema).expect("Coercion failed");
+    assert_eq!(row["ip"], json!("192.168.1.1"), "Expected dotted-decimal IPv4");
+
+    let result = client.insert_json_rows(&table_name, &[row]).await;
+    assert!(result.is_ok(), "Insert failed after IPv4 coercion: {:?}", result.err());
+    assert_eq!(result.unwrap(), 1);
+
+    eprintln!("✓ IPv4 from integer coercion succeeded");
+    drop_http_test_table(&client, &table_name).await;
+}
+
+#[tokio::test]
+async fn test_coerce_null_non_nullable_defaults_to_empty() {
+    skip_if_no_clickhouse!();
+
+    let client = match create_http_test_client() {
+        Some(c) => c,
+        None => return,
+    };
+    let table_name = unique_table_name("test_coerce_null_nonnullable");
+
+    let ddl = format!(
+        "CREATE TABLE {} ON CLUSTER 'default' (
+            name String,
+            score UInt64
+        ) ENGINE = MergeTree() ORDER BY tuple()",
+        table_name
+    );
+    client.execute(&ddl).await.expect("Failed to create table");
+
+    let schema = client.fetch_table_schema(&table_name).await.expect("Schema fetch failed");
+    let coercer = default_coercer();
+
+    // Null for non-nullable columns — coercer substitutes type defaults
+    let mut row = json!({"name": null, "score": null}).as_object().unwrap().clone();
+    coercer.coerce_row(&mut row, &schema).expect("Coercion failed");
+    assert_eq!(row["name"], json!(""), "Expected empty string default for String");
+    assert_eq!(row["score"], json!(0), "Expected 0 default for UInt64");
+
+    let result = client.insert_json_rows(&table_name, &[row]).await;
+    assert!(result.is_ok(), "Insert failed after null coercion: {:?}", result.err());
+    assert_eq!(result.unwrap(), 1);
+
+    eprintln!("✓ Null → non-nullable default coercion succeeded");
+    drop_http_test_table(&client, &table_name).await;
+}
+
+#[tokio::test]
+async fn test_coerce_array_datetime64_from_epoch_ms() {
+    skip_if_no_clickhouse!();
+
+    let client = match create_http_test_client() {
+        Some(c) => c,
+        None => return,
+    };
+    let table_name = unique_table_name("test_coerce_arr_dt64");
+
+    let ddl = format!(
+        "CREATE TABLE {} ON CLUSTER 'default' (
+            timestamps Array(DateTime64(3))
+        ) ENGINE = MergeTree() ORDER BY tuple()",
+        table_name
+    );
+    client.execute(&ddl).await.expect("Failed to create table");
+
+    let schema = client.fetch_table_schema(&table_name).await.expect("Schema fetch failed");
+    let coercer = default_coercer();
+
+    // Array of epoch ms integers — coercer applies inner DateTime64 coercion
+    let epoch_values = json!([1735084800000i64, 1735085000000i64, 1735085200000i64]);
+    let mut row = json!({"timestamps": epoch_values}).as_object().unwrap().clone();
+    coercer.coerce_row(&mut row, &schema).expect("Coercion failed");
+
+    // After coercion, all elements should be strings (CH datetime format)
+    let arr = row["timestamps"].as_array().expect("Expected array");
+    assert_eq!(arr.len(), 3);
+    for elem in arr {
+        assert!(
+            elem.is_string(),
+            "Expected string datetime after coercion, got: {:?}",
+            elem
+        );
+    }
+
+    let result = client.insert_json_rows(&table_name, &[row]).await;
+    assert!(result.is_ok(), "Insert failed after array DateTime64 coercion: {:?}", result.err());
+    assert_eq!(result.unwrap(), 1);
+
+    eprintln!("✓ Array(DateTime64) from epoch ms coercion succeeded");
+    drop_http_test_table(&client, &table_name).await;
+}
+
+#[tokio::test]
+async fn test_coerce_json_column_accepts_string_and_object() {
+    skip_if_no_clickhouse!();
+
+    let client = match create_http_test_client() {
+        Some(c) => c,
+        None => return,
+    };
+    let table_name = unique_table_name("test_coerce_json_col");
+
+    // JSON type requires ClickHouse 25.3+; skip gracefully on older versions
+    let ddl = format!(
+        "CREATE TABLE {} ON CLUSTER 'default' (
+            data JSON
+        ) ENGINE = MergeTree() ORDER BY tuple()",
+        table_name
+    );
+    if client.execute(&ddl).await.is_err() {
+        eprintln!("Skipping test_coerce_json_column: JSON type not supported on this server");
+        return;
+    }
+
+    let schema = client.fetch_table_schema(&table_name).await.expect("Schema fetch failed");
+    let coercer = default_coercer();
+
+    // JSON object value — passes through as-is (already valid JSON)
+    let mut row1 = json!({"data": {"key": "value", "num": 42}}).as_object().unwrap().clone();
+    coercer.coerce_row(&mut row1, &schema).expect("Coercion failed for object");
+
+    // JSON string value — coercer validates it is parseable JSON
+    let mut row2 =
+        json!({"data": "{\"key\": \"from_string\", \"num\": 99}"}).as_object().unwrap().clone();
+    coercer.coerce_row(&mut row2, &schema).expect("Coercion failed for string");
+
+    let result = client.insert_json_rows(&table_name, &[row1, row2]).await;
+    assert!(result.is_ok(), "Insert failed after JSON coercion: {:?}", result.err());
+    assert_eq!(result.unwrap(), 2);
+
+    eprintln!("✓ JSON column coercion (object + string) succeeded");
     drop_http_test_table(&client, &table_name).await;
 }

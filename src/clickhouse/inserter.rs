@@ -40,7 +40,8 @@ use tracing::{debug, error, info, warn};
 use crate::buffer::{FlushBatch, KafkaOffset};
 use crate::clickhouse::circuit_breaker::CircuitBreaker;
 use crate::clickhouse::error::ErrorCategory;
-use crate::clickhouse::HttpClickHouseClient;
+use crate::clickhouse::{HttpClickHouseClient, SchemaCache};
+use crate::transform::Coercer;
 use crate::Result;
 
 /// Configuration for the inserter
@@ -139,6 +140,10 @@ pub struct Inserter {
     semaphore: Option<Arc<Semaphore>>,
     /// Circuit breaker for per-table failure detection
     circuit_breaker: Option<Arc<CircuitBreaker>>,
+    /// Schema cache for type-aware coercion (Phase 5.6)
+    schema_cache: Option<Arc<SchemaCache>>,
+    /// Type coercer applied before each insert (Phase 5.6)
+    coercer: Option<Arc<Coercer>>,
 }
 
 impl Inserter {
@@ -159,6 +164,54 @@ impl Inserter {
             max_salvage_depth: config.max_salvage_depth,
             semaphore,
             circuit_breaker: None,
+            schema_cache: None,
+            coercer: None,
+        }
+    }
+
+    /// Enable schema-driven type coercion before each insert.
+    ///
+    /// When enabled, the inserter fetches the table schema (from cache or live)
+    /// and applies the coercer to each row before sending to ClickHouse. This
+    /// covers cases that ClickHouse's JSONEachRow server-side coercion does not
+    /// handle automatically — e.g., epoch ms integers into DateTime64 columns,
+    /// UUID normalisation, string "true"/"1" into Bool, and null handling for
+    /// non-nullable columns.
+    pub fn with_schema_coercion(mut self, schema_cache: Arc<SchemaCache>, coercer: Arc<Coercer>) -> Self {
+        self.schema_cache = Some(schema_cache);
+        self.coercer = Some(coercer);
+        self
+    }
+
+    /// Apply schema-driven coercion to a batch of rows.
+    ///
+    /// Fetches schema from cache (or live from ClickHouse on cache miss), then
+    /// applies the coercer to every row. On schema fetch failure, rows are sent
+    /// as-is and ClickHouse's server-side coercion handles them.
+    async fn coerce_batch(&self, table: &str, rows: &mut Vec<Map<String, Value>>) {
+        let (coercer, cache) = match (&self.coercer, &self.schema_cache) {
+            (Some(c), Some(sc)) => (c, sc),
+            _ => return, // Coercion not configured — pass through
+        };
+
+        let schema = match cache.get(table) {
+            Some(s) => s,
+            None => match self.http_client.fetch_table_schema(table).await {
+                Ok(s) => {
+                    cache.insert(table.to_string(), s.clone());
+                    s
+                }
+                Err(e) => {
+                    warn!(table = %table, error = %e, "Schema fetch failed, skipping coercion");
+                    return;
+                }
+            },
+        };
+
+        for row in rows.iter_mut() {
+            if let Err(e) = coercer.coerce_row(row, &schema) {
+                warn!(table = %table, error = %e, "Row coercion failed, row sent as-is");
+            }
         }
     }
 
@@ -257,9 +310,13 @@ impl Inserter {
     /// - **Fatal errors**: Fail entire batch (no salvage, no DLQ)
     pub async fn insert_with_salvage(&self, batch: FlushBatch) -> InsertResult {
         let table = batch.table;
-        let rows = batch.rows;
+        let mut rows = batch.rows;
         let offsets = batch.offsets;
         let num_rows = rows.len();
+
+        // Apply schema-driven coercion if configured (Phase 5.6).
+        // Done once here — salvage sub-batches reuse already-coerced rows.
+        self.coerce_batch(&table, &mut rows).await;
 
         match self.insert_rows(&table, &rows).await {
             Ok(count) => {
@@ -467,6 +524,8 @@ impl Inserter {
             let max_salvage_depth = self.max_salvage_depth;
             let table = batch.table.to_string();
             let semaphore = self.semaphore.clone();
+            let schema_cache = self.schema_cache.clone();
+            let coercer = self.coercer.clone();
 
             handles.push(tokio::spawn(async move {
                 let _permit = match &semaphore {
@@ -483,6 +542,8 @@ impl Inserter {
                     max_salvage_depth,
                     semaphore: None,
                     circuit_breaker: None,
+                    schema_cache,
+                    coercer,
                 };
                 let result = inserter.insert_with_salvage(batch).await;
                 (table, result)
@@ -524,6 +585,8 @@ impl Inserter {
             let enable_salvage = self.enable_salvage;
             let max_salvage_depth = self.max_salvage_depth;
             let semaphore = self.semaphore.clone();
+            let schema_cache = self.schema_cache.clone();
+            let coercer = self.coercer.clone();
 
             handles.push(tokio::spawn(async move {
                 let _permit = match &semaphore {
@@ -540,6 +603,8 @@ impl Inserter {
                     max_salvage_depth,
                     semaphore: None,
                     circuit_breaker: None,
+                    schema_cache,
+                    coercer,
                 };
                 inserter.insert_batch(batch).await
             }));

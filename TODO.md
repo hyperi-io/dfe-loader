@@ -31,18 +31,22 @@ The old `clickhouse-arrow` fork handled explicit client-side coercions. JSONEach
 relies on ClickHouse server-side coercion. Before Stage 1 is production-ready, we
 must verify coverage and fill any gaps in the Rust transformer layer.
 
-Known areas to audit and test:
-- [ ] DateTime64 — does CH reliably parse `"2024-01-15T10:30:00.123Z"` ISO strings?
-- [ ] Epoch auto-detection — seconds vs millis vs micros was done client-side; confirm/implement
-- [ ] Non-nullable columns — what does CH do when we send `null` for a NOT NULL column?
-- [ ] UUID — confirm CH accepts RFC 4122 string format for UUID columns
-- [ ] Int/Float overflow — CH may silently truncate; add client-side bounds check if needed
-- [ ] Array(DateTime64) — inner type coercion for arrays of timestamps
-- [ ] JSON column — confirm CH accepts JSON string or object for a JSON-typed column
-- [ ] Bool — confirm CH accepts all of: `true`, `1`, `"true"` for Bool columns
+Implementation complete — pending local build + test run:
+- [x] `coerce_row(&mut Map<String, Value>)` added to `Coercer` (hot-path method, no Value wrap overhead)
+- [x] `Inserter` wired with optional `schema_cache` + `coercer` fields via `with_schema_coercion()` builder
+- [x] `coerce_batch()` called once in `insert_with_salvage()` before first insert; salvage reuses coerced rows
+- [x] DateTime64 from epoch ms (`i64`) — client-side conversion to ISO string
+- [x] DateTime64 from ISO string — pass-through (CH handles RFC 3339)
+- [x] Bool from string (`"true"/"1"/"yes"/"on"/"t"/"y"`) and inverse
+- [x] Bool from int (`1/0/42/-1`)
+- [x] UUID normalisation — hex no-hyphens → RFC 4122 format
+- [x] IPv4 from integer — u32/u64 to dotted-decimal string
+- [x] Null → non-nullable default (`""` for String, `0` for numeric types)
+- [x] Array(DateTime64) inner coercion for arrays of epoch-ms values
+- [x] JSON column — object pass-through + JSON-string pass-through (CH 25.3+)
+- [x] Integration tests in `tests/integration/datatypes.rs` (9 tests, real ClickHouse)
 
-**Deliverable:** Integration tests for each case + any fixes in `src/clickhouse/coerce.rs`
-or `src/transform/transformer.rs`. Tests must run against real ClickHouse (testcontainers).
+**Next:** Run `./ci/local-build.sh`, fix any compile/clippy/test failures.
 
 ### Phase 5.5: Migrate to clickhouse-rs Feature Branch (Stage 2)
 

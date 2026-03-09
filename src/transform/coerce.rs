@@ -38,11 +38,22 @@ impl Coercer {
             Some(o) => o,
             None => return Ok(()), // Not an object, nothing to coerce
         };
+        self.coerce_row(obj, schema)
+    }
 
+    /// Coerce a JSON row map to match the table schema.
+    ///
+    /// Preferred over `coerce_record` in hot paths — avoids wrapping/unwrapping `Value`.
+    /// Fields not in the schema are passed through unchanged.
+    pub fn coerce_row(
+        &self,
+        row: &mut serde_json::Map<String, Value>,
+        schema: &TableSchema,
+    ) -> Result<()> {
         for col in &schema.columns {
             let field_name = col.name.as_str();
 
-            if let Some(value) = obj.get_mut(field_name) {
+            if let Some(value) = row.get_mut(field_name) {
                 match self.coerce_value(value, &col.parsed_type) {
                     Ok(coerced) => {
                         *value = coerced;
