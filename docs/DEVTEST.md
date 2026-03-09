@@ -133,7 +133,7 @@ clickhouse:
   database: default
   username: default
   password: ""
-  protocol: native  # Only native supported (no HTTP)
+  protocol: http  # HTTP with JSONEachRow (default)
 
   tls:
     enabled: false
@@ -668,9 +668,9 @@ RUST_LOG=dfe_loader::transform=debug ./target/release/dfe-loader --config config
 
 | Version | Date | Notes |
 |---------|------|-------|
+| 1.13.6 | 2026-03 | Arrow/Mison dropped; JSONEachRow via reqwest (simpler, schema-flexible) |
+| 1.13.5 | 2026-03 | OCSF remap preset, default topic changed to `default_land` |
 | 1.9.3 | 2026-03 | Config cascade (figment), config hot-reload, DFE_LOADER__ env prefix |
-| 1.3.1 | 2026-01 | Registry migration (clickhouse-arrow 0.4.2, hyperi-rustlib 1.2.2) |
 | 1.3.0 | 2026-01 | Auto-initialisation, text search indexes |
 | 1.2.0 | 2025-12 | Enrichment modules (GeoIP, reputation, risk) |
-| 1.1.0 | 2025-12 | Arrow-only pipeline, SIMD optimisations |
 | 1.0.0 | 2025-12 | Initial release |

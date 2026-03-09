@@ -111,26 +111,28 @@ cargo build --release --features mimalloc
 | jemalloc  | +15-25%    | +5-10% | Best for large batches |
 | mimalloc  | +10-20%    | Similar | Better for mixed sizes |
 
-## clickhouse-arrow Optimizations
+## Insert Throughput
 
-dfe-loader uses clickhouse-arrow via hyperi-rustlib. Key optimizations:
+dfe-loader uses `reqwest` HTTP POST with JSONEachRow for data inserts. Key tuning:
 
-### SIMD-Accelerated Serialization
+### Batch Size
 
-- **Null bitmap expansion**: ~2.2x faster with AVX2/NEON
-- **Buffer pooling**: ~21% faster allocation for 4KB buffers
-- **Combined workload**: ~1.48x faster overall
+Larger batches amortise HTTP overhead. Default flush thresholds:
 
-These are applied automatically - no configuration needed.
+- `flush_rows = 10000` rows
+- `flush_bytes = 1048576` (1MB)
+- `flush_age_secs = 5`
 
-### Enable Allocator in clickhouse-arrow
+Increase `flush_rows` and `flush_bytes` for higher throughput at the cost of latency.
 
-When building hyperi-rustlib with clickhouse-arrow, the allocator features
-propagate. Ensure your hyperi-rustlib dependency enables the same allocator:
+### Allocator Feature Propagation
+
+jemalloc/mimalloc features are declared in dfe-loader's `Cargo.toml` and apply globally:
 
 ```toml
 [features]
-jemalloc = ["hyperi-rustlib/jemalloc"]
+jemalloc = ["dep:tikv-jemallocator", "dep:tikv-jemalloc-ctl"]
+mimalloc = ["dep:mimalloc"]
 ```
 
 ## Runtime Tuning

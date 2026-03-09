@@ -14,6 +14,29 @@
 
 The Arrow → HTTP/JSONEachRow migration is complete (Phases 0–5). See completed section below.
 
+### **CRITICAL: Type Coercion Gap Analysis**
+
+The old `clickhouse-arrow` fork performed explicit client-side type coercions before
+inserting. The new JSONEachRow path relies entirely on ClickHouse server-side coercion.
+
+**Gap analysis required:** Identify which coercions the Arrow fork did that ClickHouse
+JSONEachRow does NOT do automatically, and implement them in the Rust transformer layer.
+
+Known areas to audit:
+- [ ] DateTime64 precision handling — does CH parse `"2024-01-15T10:30:00.123Z"` reliably?
+- [ ] Epoch timestamp auto-detection (seconds vs millis vs micros) — was done client-side
+- [ ] LowCardinality string trimming/normalisation — Arrow had explicit handling
+- [ ] Nullable vs non-nullable coercion — Arrow had schema-driven null filling
+- [ ] UUID format normalisation — Arrow used FixedSizeBinary(16), JSON uses string
+- [ ] Int/Float overflow behaviour — Arrow enforced bounds, JSONEachRow may silently truncate
+- [ ] Array(T) inner type coercion — e.g. `Array(DateTime64)` with epoch timestamps
+- [ ] JSON type insertion — does CH accept arbitrary JSON string for a JSON-typed column?
+- [ ] Bool coercion — `"true"` string vs `true` boolean vs `1` integer
+
+**Deliverable:** Document which coercions are missing and implement them in
+`src/transform/transformer.rs` or a new `src/clickhouse/coerce.rs` module.
+Add integration tests for each coercion that ClickHouse would otherwise fail silently.
+
 ### Phase 5.5: Migrate to clickhouse-rs Feature Branch
 
 Our feature branch at `/projects/clickhouse-rs` adds capabilities not in upstream:

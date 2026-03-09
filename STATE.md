@@ -116,168 +116,85 @@ cd ci && git remote set-url --push origin https://github.com/hyperi-io/ci.git
 cd ai && git remote set-url --push origin https://github.com/hyperi-io/ai.git
 ```
 
-**Projects with push access enabled:**
-
-- `/projects/dfe-loader/ci` - Enabled 2026-01-13 (on feat/test-tiers branch)
-- `/projects/dfe-loader` - Enable after rename
-
 ---
 
-## Development Principles
+## Architecture
 
-1. **Clean Arrow approach**: Don't munge existing code patterns into new Arrow approach if a clean rewrite or restructure is better
-2. **Batch everywhere**: No row-by-row processing - batch everything for columnar efficiency
-3. **Per-table buffers**: Each db.table gets its own ArrowBatchBuilder for schema uniformity
-4. **Pre-flatten routing**: Extract db.table BEFORE flattening (dot notation for nested access)
-5. **Arrow-only inserts**: No JSON fallback - native Arrow protocol only
-6. **SIMD everywhere**: Use SIMD-accelerated parsing and conversion where possible
-
----
-
-## Current Status (2025-12-25)
-
-### Architecture: Per-Table Arrow Buffers with Native Protocol
+### Pipeline
 
 ```text
-Kafka → Parse JSON/MsgPack (SIMD) → Route → Per-table buffer → Arrow RecordBatch (SIMD) → ClickHouse (native)
+Kafka
+  │
+  ▼
+Parse JSON/MsgPack (sonic-rs SIMD) → serde_json::Value
+  │
+  ▼
+Route (pre-flatten, dot notation) → db.table
+  │
+  ▼
+Transform (flatten, timestamp, _org_id, _tags, _raw, field sanitize) → Map<String, Value>
+  │
+  ▼
+BufferManager — per-table Vec<Map<String, Value>> + KafkaOffset accumulation
+  │   (flush when: row count, byte size, or time threshold exceeded)
+  ▼
+Inserter — JSONEachRow via reqwest HTTP POST → ClickHouse
+  │   (batch salvage on failure, circuit breaker, concurrent semaphore)
+  ▼
+Kafka offset commit (at-least-once delivery)
 ```
 
 ### Key Design Decisions
 
-1. **Per-table buffers**: `HashMap<db.table, ArrowBatchBuilder>` - schema uniformity per batch
-2. **Pre-flatten routing**: Extract db.table from event BEFORE flattening (dot notation for nested)
-3. **Schema introspection**: Fetch from ClickHouse via Arrow client on first write, refresh periodically
-4. **No backwards compatibility**: Clean break from old JSON approach
-5. **Kafka offset tracking**: Per-batch offset list for at-least-once delivery (committed after successful insert)
-6. **Native Arrow inserts**: clickhouse-arrow for direct Arrow RecordBatch inserts (**NO fallback**)
+1. **JSONEachRow inserts**: `reqwest` HTTP POST with NDJSON body. Bypasses `clickhouse::Row` trait's compile-time schema requirement — dynamic `Map<String, Value>` serialises naturally to JSON. ClickHouse handles type coercion.
+2. **Per-table buffers**: `HashMap<db.table, TableBuffer>` — each table accumulates rows independently. High-volume tables flush more often.
+3. **Pre-flatten routing**: Extract db.table from the raw Value BEFORE flattening. Dot notation (`tags.event.category`) for nested field access.
+4. **sonic-rs on-demand routing**: `get_from_slice()` for routing field extraction without full DOM parse (4-8x faster than full parse for routing-only).
+5. **Kafka offset tracking**: Per-batch `Vec<KafkaOffset>`. Committed only after successful ClickHouse insert (at-least-once).
+6. **Dual ClickHouse clients**: `clickhouse::Client` for DDL/queries (static Row types, system.columns), `reqwest::Client` for JSONEachRow data inserts.
 
-### DLQ Routing (Implemented)
+### Development Principles
 
-Two options (configurable via ENV/config cascade):
-- **Option 1 (default)**: Per-table routing - `db.table.dlq` topics
-- **Option 2**: Common DLQ topic for all failures
-
-DLQ messages include: original payload, error reason, original topic/partition/offset, timestamp.
-
-### Missing db.table Handling
-
-Two options (configurable via ENV/config cascade):
-- **Option 1 (default)**: Send to DLQ
-- **Option 2**: Send to "common" (for either db or table)
+- **Batch everywhere**: No row-by-row processing — accumulate, then flush as a batch
+- **Pre-flatten routing**: Always route before flattening (dot notation for nested access)
+- **Per-table buffers**: Each db.table gets its own buffer for independent flush control
+- **SIMD parsing**: sonic-rs for JSON, rmp-serde for MessagePack
+- **No schema at compile time**: `Map<String, Value>` — ClickHouse coerces from JSON
 
 ### Libraries
 
-| Purpose        | Library          | Status      | Notes                                    |
-|----------------|------------------|-------------|------------------------------------------|
-| ClickHouse     | clickhouse-arrow | Active      | Native Arrow inserts (DFE fork with full type support) |
-| Arrow          | arrow            | Active      | Columnar data format                     |
-| JSON→Arrow     | arrow-json       | Active      | SIMD JSON to Arrow (via ReaderBuilder)   |
-| JSON (SIMD)    | sonic-rs         | Active      | Fast SIMD JSON parsing                   |
-| MsgPack        | rmp-serde        | Active      | MessagePack to serde_json::Value         |
-
-**clickhouse-arrow DFE Fork Types:**
-- Variant, Dynamic, Nested (ClickHouse 24.1+, tested with 25.12)
-- BFloat16 (ML workloads)
-- Time/Time64 (time-of-day)
-- AggregateFunction, SimpleAggregateFunction (materialized views)
-
-**Removed:**
-- klickhouse - Removed (deprecated)
+| Purpose | Library | Notes |
+|---------|---------|-------|
+| ClickHouse DDL/queries | `clickhouse` (official, HTTP) | Static Row types for system.columns |
+| ClickHouse inserts | `reqwest` (HTTP) | JSONEachRow, dynamic `Map<String, Value>` |
+| JSON parsing (SIMD) | `sonic-rs` | `from_slice::<Value>()` + `get_from_slice()` for routing |
+| MessagePack | `rmp-serde` | `from_slice::<Value>()` |
+| Internal hash maps | `rustc-hash` (FxHashMap) | 5-10% faster than std for short string keys |
+| Short strings | `compact_str` | Stack-allocated ≤24 bytes — used for `FlushBatch.table` |
+| Kafka | `rdkafka` (via rustlib) | SASL/SCRAM-SHA-512 auth |
 
 ---
 
-## SIMD Optimizations
+## Hot Path Optimisations
 
-### Implemented
+Active optimisations in the pipeline (parse → route → transform → buffer):
 
-1. **sonic-rs JSON parsing**: Direct SIMD-accelerated parsing to serde_json::Value
-   - Fixed wasteful sonic-rs → string → serde_json conversion
-   - Now uses `sonic_rs::from_slice::<serde_json::Value>()` directly
-
-2. **arrow-json SIMD conversion**: Batch JSON bytes → Arrow RecordBatch
-   - `json_bytes_to_arrow_simd()` for raw bytes with known schema
-   - `SimdBatchBuilder` for accumulating raw JSON and batch converting
-   - Schema inference via `infer_schema_from_json_bytes()`
-
-3. **Pre-computed schemas**: Cache Arrow schemas per table to avoid repeated inference
-
-### Performance Hierarchy (fastest to slowest)
-
-1. `json_bytes_to_arrow_simd()` - Direct SIMD bytes→Arrow with known schema
-2. `SimdBatchBuilder.build()` - Accumulate bytes, batch convert with SIMD
-3. `json_batch_to_arrow()` - Batch conversion with schema inference
-4. `json_to_arrow_batch()` - Single-row conversion (avoid in hot path)
-
-### Hot Path Optimizations (2025-12-25)
-
-**Round 1 - Core Optimizations:**
-
-1. **Eliminated double JSON parsing**: Added `route_value()` method to Router that operates on
-   already-parsed `serde_json::Value`. Orchestrator now parses once and routes without re-parsing.
-
-2. **Arc<str> for topic strings**: `KafkaOffset.topic` and `KafkaMessage.topic` now use `Arc<str>`
-   instead of `String`. Messages from the same topic share the same Arc, avoiding clones.
-
-3. **Ownership-based flattening**: Added `flatten_value_owned()` that takes ownership of the Value,
-   eliminating all leaf value clones. Transformer now uses this in the hot path.
-
-4. **Conditional sanitization**: `sanitize_fields()` now returns input unchanged when no sanitization
-   is enabled. When sanitization is needed, individual keys are checked before allocating.
-
-**Round 2 - Deep Lateral Analysis:**
-
-5. **Per-table destination storage**: `ArrowBatchBuilder` stores destination once per table, not
-   per-row. Saves N-1 String allocations per batch where N = row count.
-
-6. **Fast path for simple fields**: Router's `get_nested_field()` checks for `.` first. Simple
-   field access (90%+ of cases) avoids iterator allocation from `split('.')`.
-
-7. **Lazy warnings allocation**: Transformer only allocates warnings Vec when actually needed
-   (timestamp correction/invalid). 99%+ of messages have zero warnings.
-
-8. **Cached current time**: Transformer caches `Utc::now()` once per message and reuses for
-   timestamp validation, injection, and fallback. Reduces syscalls from 2-3 to 1 per message.
-
-**Round 3 - JSON Parser & Routing Optimizations (2025-12-25):**
-
-9. **sonic-rs on-demand field access**: Uses `get_from_slice()` for 4-8x faster routing field
-   extraction without building full DOM tree. Navigates directly to field via SIMD path lookup.
-
-10. **Cow<str> for routing values**: `extract_first_match_from_value()` returns `&str` borrowed
-    from the Value, eliminating String allocation. Uses `Cow<str>` to handle owned vs borrowed.
-
-11. **Efficient db.table string building**: Replaced `format!("{}.{}", db, table)` with
-    pre-allocated `String::with_capacity()` + `push_str()`. Avoids format macro overhead.
-
-12. **Collector timestamp ownership transfer**: Uses `data.remove()` instead of `get().cloned()`
-    to take ownership of collector timestamp without cloning the Value.
-
-**Round 4 - Data Structures & Memory (2025-12-25):**
-
-13. **SIMD rustflags**: Added `.cargo/config.toml` with `-C target-cpu=native` for AVX2/SSE4.2
-    SIMD instructions in sonic-rs. Required for full SIMD performance.
-
-14. **FxHashMap for internal maps**: Replaced `std::collections::HashMap` with `rustc_hash::FxHashMap`
-    in BufferManager, Router, and SchemaCache. FxHash is 5-10% faster for short string keys.
-
-15. **CompactString for table names**: `FlushBatch.table` uses `compact_str::CompactString` which
-    stores strings ≤24 bytes on the stack. Typical "db.table" names (~15-20 bytes) avoid heap.
-
-16. **Eliminated flush Vec allocation**: `get_ready_for_flush()` now iterates directly with
-    `iter_mut()` instead of collecting table names first. Saves one Vec<String> allocation per flush.
-
-17. **Pre-allocated flush Vec**: Both `get_ready_for_flush()` and `flush_all()` use
-    `Vec::with_capacity()` to avoid reallocation during batch collection.
-
-### Future Optimizations
-
-1. **simd-json integration**: Replace sonic-rs with simd-json for even faster parsing
-2. **Vectorized flattening**: SIMD-accelerated nested JSON flattening
-3. **Arrow compute kernels**: Use arrow-rs compute functions for transformations
+1. **sonic-rs on-demand field access** (`get_from_slice`): Extract routing fields without full DOM — navigates directly to field via SIMD path lookup.
+2. **`route_value()`**: Router operates on already-parsed `Value`, avoiding double-parse.
+3. **`Arc<str>` for topic strings**: Messages from the same topic share the Arc — no per-message clone.
+4. **`flatten_value_owned()`**: Takes ownership of Value, eliminating leaf value clones during flatten.
+5. **Conditional sanitization**: `sanitize_fields()` is a no-op when sanitization is disabled.
+6. **Fast path for simple fields**: Router's `get_nested_field()` checks for `.` before splitting — 90%+ of fields have no nesting.
+7. **Lazy warnings allocation**: `Vec<String>` for transform warnings only allocated when needed (99%+ of messages have zero warnings).
+8. **Cached `Utc::now()`**: Called once per message, reused for timestamp validation, injection, fallback.
+9. **`Cow<str>` for routing values**: Borrows from the Value where possible — no String allocation.
+10. **Pre-allocated flush Vec**: `Vec::with_capacity()` for batch collection in BufferManager.
+11. **FxHashMap**: `BufferManager`, `Router`, `SchemaCache` all use FxHashMap.
+12. **CompactString for table names**: `FlushBatch.table` stored on stack for typical ≤24-byte names.
 
 ---
 
-## Common Header Schema (v2 - Minimal)
+## Common Header Schema (v2)
 
 The destination tables have a minimal required schema. All other fields are dynamic.
 **All fields use underscore prefix** to avoid name collisions with source data.
@@ -285,12 +202,12 @@ The destination tables have a minimal required schema. All other fields are dyna
 | Column | Type | Default | Nullable | Notes |
 |--------|------|---------|----------|-------|
 | `_timestamp` | DateTime64(3) | - | **NO** | Event occurrence time (milliseconds) |
-| `_timestamp_load` | DateTime64(3) | `now64(3)` | **NO** | Load time (ClickHouse DEFAULT) |
+| `_timestamp_load` | DateTime64(3) | `now64(3)` | **NO** | Load time (ClickHouse DEFAULT, loader omits) |
 | `_timestamp_received` | DateTime64(3) | - | YES | When receiver/loader received the event |
-| `_uuid` | UUID | `generateUUIDv7()` | **NO** | Unique event ID. UUIDv7 (time-ordered) |
+| `_uuid` | UUID | `generateUUIDv7()` | **NO** | Unique event ID — loader omits, ClickHouse generates |
 | `_org_id` | String | - | **NO** | Organisation ID for multi-tenancy and RLS |
-| `_raw` | String | - | YES | Original raw data (e.g., tailed log line, DB row). Configurable per-table. |
-| `_json` | JSON | - | YES | Complete Kafka message as JSON type |
+| `_raw` | String | - | YES | Original raw data (tailed log line, DB row). Configurable per-table. |
+| `_json` | JSON | - | YES | Complete Kafka message as native JSON type |
 | `_tags` | JSON | - | YES | Meta info + collector/agent info as JSON |
 
 ### Routing and Multi-Tenancy Fields
@@ -301,113 +218,38 @@ The destination tables have a minimal required schema. All other fields are dyna
 | Database routing | `db_fields` (default: empty) | Sets **database** for insert (shared schema by default) |
 | Table routing | `table_fields` | Sets **table** for insert |
 
-**Key Changes in v2:**
-- `org_id` is now **STORED** as `_org_id` in destination (required for row-level security)
-- Default behavior: All data goes to `common.{table}` regardless of org_id (shared schema)
+**Key behaviour:**
+- `org_id` is **STORED** as `_org_id` in destination (required for row-level security)
+- Default: all data goes to `common.{table}` regardless of org_id (shared schema)
 - Optional per-org routing via `routed_orgs` allowlist or `route_all_by_org = true`
-- Database and table routing fields are **removed before insert** (not in destination schema)
+- Routing fields are **removed before insert** (not in destination schema)
 
 ### Config: Tags Handling
 
 ```toml
 [metadata]
-# Fields to check for tags (first match wins)
-tags_fields = ["tags", "_tags", "meta", "metadata.tags"]
-# Output field name (underscore prefix avoids collision)
+tags_fields = ["tags", "_tags", "meta", "metadata.tags"]  # First match wins
 tags_output = "_tags"
-# Drop tags entirely after routing extraction (saves storage)
-drop_tags = false
+drop_tags = false  # Set true to not store after routing extraction
 ```
 
 ### Config: Per-Table _raw Handling
 
 ```toml
 [metadata]
-# Global default: include _raw in all tables
-include_raw = true
+include_raw = true  # Global default
 
-# Per-table overrides (table name → include_raw)
-# Tables listed here with false will NOT receive _raw
 [metadata.raw_overrides]
-"events" = false      # Drop _raw for the catch-all events table
-"dns" = false          # DNS events don't need original wire format
-"syslog" = true        # Keep _raw for syslog (original RFC 3164/5424 line is valuable)
+"events" = false    # Drop _raw for catch-all events table
+"syslog" = true     # Always keep _raw for syslog
 ```
 
-**Behaviour:**
-- `include_raw = true` (default): all tables get `_raw` unless overridden
-- `include_raw = false`: no tables get `_raw` unless overridden to `true`
-- Per-table overrides take precedence over the global default
-- When `_raw` is excluded, the loader omits the field from the Arrow batch (ClickHouse column stays NULL)
+### Field Notes
 
-### Implementation Requirements
-
-1. **`_timestamp`** (NOT NULLABLE)
-   - DateTime64(3) for millisecond precision
-   - Reads from `timestamp` in source, writes to `_timestamp` in destination
-   - Fallback to `now64(3)` if missing/invalid
-   - Already implemented in `TimestampValidator`
-
-2. **`_timestamp_load`** (NOT NULLABLE)
-   - DateTime64(3) for millisecond precision
-   - ClickHouse DEFAULT `now64(3)` - loader omits field
-   - Note: All rows in a batch get same timestamp (acceptable)
-
-3. **`_timestamp_received`** (NULLABLE)
-   - DateTime64(3) for millisecond precision
-   - Reads from `timestamp_received` in source, writes to `_timestamp_received` in destination
-   - Only present if source includes this field (e.g., set by receiver/loader)
-
-4. **`_uuid`** (NOT NULLABLE, was `event_hash`)
-   - Underscore prefix avoids collision with source data
-   - Auto-generate UUIDv7, ignore any incoming value
-   - Time-ordered (sortable), unique per event
-   - Let ClickHouse generate via DEFAULT `generateUUIDv7()`
-
-5. **`_org_id`** (NOT NULLABLE)
-   - String field extracted from source data (configurable via `org_id_field`)
-   - Required for row-level security (RLS) in shared schema deployments
-   - Injected by Transformer during processing
-   - Used by ClickHouse row policies for data isolation
-   - See `reference/clickhouse_rls.md` for row policy setup
-
-6. **`_json`** (was `logjson`)
-   - Store complete Kafka message as native JSON type
-   - Capture before any transformation
-   - Provides structured path-based access (`_json.user.name`, `_json.action`)
-   - ClickHouse stores each JSON path as a native subcolumn for efficient queries
-
-7. **`_raw`** (was `logoriginal`)
-   - Original raw data as received — the data as it would appear in a tailed log file or a DB row
-   - NOT the same as `_json` — `_raw` is the original wire format, `_json` is the parsed/structured result
-   - Full-text indexed when enabled (text index on this column for free-text search)
-   - **Configurable per-table**: can be dropped to save storage where original format is not needed
-   - Default: included. Set `drop_raw = true` globally or per-table override
-
-8. **`_tags`** (was `tags`)
-   - Config-driven source field list (first match wins)
-   - Optional: `drop_tags = true` to not store after routing extraction
-   - Stored as JSON column (not flattened)
-
-### _uuid: UUIDv7 Generation
-
-UUIDv7 is time-ordered (millisecond precision) with random suffix - ideal for event IDs.
-
-**Recommendation**: Use ClickHouse DEFAULT - simpler, no client dependency.
-
-```sql
-_uuid UUID DEFAULT generateUUIDv7()
-```
-- ClickHouse 24.8+ has native `generateUUIDv7()` (tested with 25.12)
-- Monotonic within timestamp, sortable
-- Loader doesn't need to generate - just omit field
-
-**Variants available in ClickHouse 24.8+ (tested with 25.12):**
-| Function | Monotonicity | Notes |
-|----------|--------------|-------|
-| `generateUUIDv7()` | Thread-monotonic | Guarantees ordering within thread |
-| `generateUUIDv7ThreadMonotonic()` | Same as above | Explicit name |
-| `generateUUIDv7NonMonotonic()` | None | Slightly faster, no ordering guarantee |
+- **`_json`**: Injected by `BufferManager` from raw Kafka bytes — NOT by the Transformer. Stored as native ClickHouse JSON type (GA v25.3). Path-based access: `_json.user.name`.
+- **`_raw`**: Original wire format — NOT the same as `_json`. Full-text indexed when enabled.
+- **`_uuid`**: Let ClickHouse generate via `DEFAULT generateUUIDv7()` — loader omits the field.
+- **`_timestamp_load`**: Let ClickHouse generate via `DEFAULT now64(3)` — loader omits the field.
 
 ---
 
@@ -417,51 +259,31 @@ Routing happens **PRE-flattening** using dot notation for nested field access.
 
 ### Shared Schema (Default)
 
-**Default behavior:** All data goes to `common.{table}` regardless of org_id.
+**Default behaviour:** All data goes to `common.{table}` regardless of org_id.
 
 ```rust
-// Config (from ENV/config cascade)
-db_fields: []                                       // Empty = shared schema (common db)
-table_fields: ["event_category", "tags.event.category"]  // First matching = table
-default_db: "dfe"                                   // Used when db_fields is empty
-default_table: "default"                            // Fallback if no table field found
-org_id_field: Some("org_id")                        // Extract for _org_id field (RLS)
-routed_orgs: []                                     // Empty = all orgs use default_db
-route_all_by_org: false                             // false = shared schema
+db_fields: []                                           // Empty = shared schema (common db)
+table_fields: ["event_category", "tags.event.category"] // First matching = table
+default_db: "dfe"                                       // Used when db_fields is empty
+default_table: "default"                                // Fallback if no table field found
+org_id_field: Some("org_id")                            // Extract for _org_id field (RLS)
 ```
-
-**Example event:**
-```json
-{"org_id": "acme", "event_category": "auth", "action": "login"}
-```
-
-**Result:** `common.events_auth` (shared schema, org_id extracted to `_org_id` field)
 
 ### Per-Org Routing (Optional)
 
-Enable per-org databases via allowlist OR global switch:
-
-**Option 1 - Allowlist:** Only specific orgs get their own database
+**Allowlist mode:** Only specific orgs get their own database
 ```rust
-db_fields: ["org_id"]                               // Field to extract for database name
-routed_orgs: ["acme", "bigcorp"]                    // Only these orgs get org_id.table
-route_all_by_org: false                             // Allowlist mode
-default_db: "common"                                // Everyone else goes here
+db_fields: ["org_id"]
+routed_orgs: ["acme", "bigcorp"]  // Only these get their own db
+default_db: "common"              // Everyone else goes here
 ```
 
-**Option 2 - Route All:** Every org gets its own database
+**Route all mode:** Every org gets its own database
 ```rust
-db_fields: ["org_id"]                               // Field to extract for database name
-routed_orgs: []                                     // Not used when route_all_by_org = true
-route_all_by_org: true                              // All orgs get their own database
-default_db: "common"                                // Fallback if org_id missing
+db_fields: ["org_id"]
+route_all_by_org: true
+default_db: "common"  // Fallback if org_id missing
 ```
-
-**Benefits of Shared Schema:**
-- Simpler infrastructure (one database instead of hundreds)
-- Easier cross-org analytics
-- Row-level security handles data isolation
-- Better resource utilization (shared buffer pools, caches)
 
 ---
 
@@ -469,246 +291,82 @@ default_db: "common"                                // Fallback if org_id missin
 
 ```rust
 struct BufferManager {
-    buffers: HashMap<String, TableBuffer>,  // Key: "db.table"
-    schemas: HashMap<String, TableSchema>,  // Cached from ClickHouse
+    buffers: FxHashMap<String, TableBuffer>,  // Key: "db.table"
+    schemas: SchemaCache,                     // TTL-based, fetched from system.columns
 }
 
 struct TableBuffer {
-    builder: ArrowBatchBuilder,    // Accumulates JSON objects
-    offsets: Vec<KafkaOffset>,     // For at-least-once ack
-    created_at: Instant,           // For time-based flush
+    rows: Vec<Map<String, Value>>,  // Accumulated rows for JSONEachRow insert
+    offsets: Vec<KafkaOffset>,      // For at-least-once commit
+    created_at: Instant,            // Time-based flush trigger
 }
 ```
 
-### Flow
+### Flush Triggers
 
-1. **Parse**: Kafka message → JSON/MsgPack → `serde_json::Value` (SIMD)
-2. **Route**: Extract db.table from event data (pre-flatten)
-3. **Buffer**: Push to per-table `ArrowBatchBuilder` with Kafka offset
-4. **Flush**: When threshold reached, build `RecordBatch` (SIMD), insert to ClickHouse
-5. **Ack**: On success, commit Kafka offsets from batch
+- **Row count**: `max_rows_per_batch` threshold
+- **Byte size**: `max_bytes_per_batch` threshold (estimated from row count × avg size)
+- **Time**: `max_flush_interval` elapsed since first row in buffer
 
-### Benefits
+### FlushBatch
 
-- **Schema uniformity**: Each RecordBatch has consistent schema (same table)
-- **Independent flush**: High-volume tables flush more often
-- **Efficient batching**: Accumulate N messages before Arrow conversion
-- **Memory efficient**: Data stays as JSON until batch build time
-
----
-
-## Work Completed
-
-### Feature Implementation (2025-12-25)
-
-- [x] arrow-json SIMD conversion (`SimdBatchBuilder`, `json_bytes_to_arrow_simd`)
-- [x] Kafka offset commit after successful ClickHouse insert (at-least-once delivery)
-- [x] DLQ routing with db.table topic naming (`DlqProducer`, `DlqRoutingMode`)
-- [x] Fixed sonic-rs JSON parsing (removed wasteful conversion)
-- [x] Added `offsets_committed` metric to Prometheus
-
-### klickhouse Removal (2025-12-25)
-
-- [x] Moved klickhouse fork to separate repo (archived, read-only reference)
-- [x] Removed all klickhouse dependencies from Cargo.toml
-- [x] Rewrote `Inserter` to use Arrow-only (no JSON fallback)
-- [x] Moved `ColumnInfo` and `TableSchema` to `types.rs`
-- [x] Updated `ArrowClickHouseClient` with `query()`, `table_exists()`, `list_tables()`
-- [x] Rewrote integration tests to use Arrow inserts
-- [x] All 13 integration tests passing with Arrow-native inserts
-
-### clickhouse-arrow Integration (2025-12-24)
-
-- [x] Added clickhouse-arrow dependency to Cargo.toml
-- [x] Created `ArrowClickHouseClient` wrapper
-- [x] Updated `Inserter` to support native Arrow inserts
-- [x] Configurable db.table routing implemented
-- [x] All tests passing
-
-### Per-Table Buffer (2025-12-24)
-
-- [x] `BufferManager` with `HashMap<table, TableBuffer>`
-- [x] `ArrowBatchBuilder` in `transform/arrow.rs`
-- [x] `TableBuffer` with offset tracking
-- [x] Orchestrator updated for new API
-- [x] All tests passing
-
-### clickhouse-arrow Fork
-
-Added new ClickHouse types to local fork:
-
-- `Type::Variant(Vec<Type>)` - Discriminated union
-- `Type::Dynamic { max_types: Option<usize> }` - Runtime-typed
-- `Type::Nested(Vec<(String, Type)>)` - Parallel arrays
-- `Value::Variant(u8, Box<Value>)` - Variant value type
-- `Value::Dynamic(String, Box<Value>)` - Dynamic value type
-
-Location: `crates/clickhouse-arrow/`
-
-### Variant/Dynamic/Nested Serialization (2025-12-25)
-
-- [x] Created `serialize/variant.rs` with VariantSerializer
-- [x] Created `serialize/dynamic.rs` with DynamicSerializer
-- [x] Created `serialize/nested.rs` with NestedSerializer
-- [x] Wired up all serializers in serialize.rs and types.rs
-- [x] Integration test against ClickHouse 25.12
-
-### Row-Level Security (RLS) (2025-12-29)
-
-- [x] **_org_id field injection**: Transformer extracts org_id from source and injects as `_org_id`
-- [x] **Shared schema routing**: Default behavior routes all data to `common.{table}`
-- [x] **Optional per-org routing**: Via `routed_orgs` allowlist or `route_all_by_org = true`
-- [x] **ClickHouse RLS documentation**: `reference/clickhouse_rls.md` with row policy examples
-- [x] **Updated Common Header**: Added `_org_id` field to schema (NOT NULLABLE)
-- [x] **Integration tests**: 4 RLS tests verify org_id extraction and injection
-
-### Resilience Features (2025-12-25)
-
-- [x] **Batch Salvage**: Binary-split retry on insert failure
-  - Splits failed batch in half, recursively retries
-  - Isolates single failing rows for DLQ routing
-  - Configurable max depth (default: 20 = 2^20 = 1M rows)
-  - `InsertResult` with `inserted` count and `FailedRow` list
-
-- [x] **Circuit Breaker**: Per-table failure detection
-  - Three states: Closed (normal), Open (failing), HalfOpen (testing)
-  - Configurable thresholds (failure_threshold, success_threshold, open_duration)
-  - Prevents cascading failures on unhealthy tables
-  - `CircuitBreakerStats` for monitoring
-
-- [x] **Schema Cache Enhancement**: Periodic refresh with error invalidation
-  - TTL-based caching with configurable refresh interval
-  - Background refresh task via `start_background_refresh()`
-  - Error-based invalidation for schema mismatch errors
-  - Metrics: hits, misses, refreshes, invalidations
-
-- [x] **On-Demand JSON Field Access**: sonic-rs SIMD optimization
-  - Uses `get_from_slice()` for 4-8x faster routing field extraction
-  - No full DOM parse - navigates directly to field
-  - `extract_field_json()` for top-level, `extract_nested_field_json()` for dot notation
-
-- [x] **Concurrent Insert Semaphore**: Configurable parallel insert limit
-  - `max_concurrent_inserts` in InserterConfig (default: 8, 0 = unlimited)
-  - Prevents overwhelming ClickHouse with too many concurrent connections
-  - Applied to `insert_batches()` and `insert_batches_with_salvage()`
-
----
-
-## Current Sprint: Zero-Copy Pipeline
-
-**Goal:** Eliminate `serde_json::Value` DOM from the hot path. Target: 40-60% CPU reduction.
-
-**Approach:** Benchmark first, then commit. Two candidate approaches (Mison vs arrow-json Decoder)
-both produce Arrow RecordBatch without DOM. See `docs/REVIEW3.md` Section 8 and `TODO.md` Phase 0.
-
-**Key decisions (this sprint):**
-- Arrow as intermediate format is settled (see `docs/WHY-ARROW.md`)
-- Mison structural index (3,428 lines in `src/mison/`) is a real contender, not dead code
-- Existing Mison benchmarks are misleading (compare different things); fair E2E benchmarks needed
-- Architecture decision deferred until benchmarks run on dedicated host
-
-**Review documents:**
-- `docs/REVIEW3.md` -- Full architectural review with copy audit, research, optimization tiers
-- `docs/WHY-ARROW.md` -- Arrow vs non-Arrow bulk insert analysis (settled decision)
-- `TODO.md` -- WBS with Phase 0 (benchmarks) → Phase 4 (production validation)
-
----
-
-## Library Performance Research (2025-12-28)
-
-### Keep (Benchmarked/Optimized)
-
-| Library | Purpose | Status | Notes |
-|---------|---------|--------|-------|
-| `sonic-rs` | JSON parsing | **KEEP** | Extensively benchmarked, fastest SIMD JSON |
-| `rdkafka` | Kafka client | **KEEP** | librdkafka wrapper, most mature |
-| `arrow` + `arrow-json` | Columnar data | **KEEP** | Apache Arrow, SIMD JSON→Arrow |
-| `rustc-hash` (FxHashMap) | Fast hashmap | **KEEP** | 5-10% faster for short keys |
-| `compact_str` | Small strings | **KEEP** | Stack-allocated ≤24 bytes |
-
-### New Libraries Evaluated
-
-| Library | Purpose | Feature Flags | Notes |
-|---------|---------|---------------|-------|
-| `maxminddb` | GeoIP MMDB | `mmap`, `simdutf8`, `unsafe-str-decode` | Enable `mmap` + `simdutf8` for best perf |
-| `moka` | LRU cache | - | TinyLFU policy, concurrent, Caffeine-inspired |
-| `quick_cache` | LRU cache | - | Lower overhead than moka, no TTL support |
-| `ratatui` | TUI dashboard | - | Primary Rust TUI framework (tui-rs fork) |
-
-### maxminddb Performance Flags
-
-```toml
-# Cargo.toml - enable for best performance
-maxminddb = { version = ">=0.24", features = ["mmap", "simdutf8"] }
+```rust
+struct FlushBatch {
+    table: CompactString,              // "db.table" (stack-allocated for ≤24 bytes)
+    batch: Vec<Map<String, Value>>,    // Rows ready for JSONEachRow
+    offsets: Vec<KafkaOffset>,         // Committed to Kafka on success
+}
 ```
 
-- **mmap**: Memory-mapped file access (reduces memory for long-running apps)
-- **simdutf8**: SIMD-accelerated UTF-8 validation during string decoding
-- **unsafe-str-decode**: ~20% faster lookups (mutually exclusive with simdutf8, requires trusted data)
-
-### Reputation Check Options
-
-1. **ipqs_db_reader** - IPQualityScore flat file database (commercial, requires subscription)
-2. **Custom radix trie** - Use `iprange-rs` for fast IP prefix matching with blocklists
-
-### TUI Dashboard Stack
-
-- **ratatui** + **crossterm** - Standard stack for Rust TUIs
-- Consume existing Prometheus metrics endpoint (like vector.dev TUI)
-- Built-in widgets: Gauge, Chart, Sparkline, Table for real-time monitoring
-
 ---
 
-## All Previously Completed
+## Resilience Features
 
-### Core Pipeline
+### Batch Salvage
 
-1. [x] Implement configurable db.table field routing
-2. [x] Wire up clickhouse-arrow for native protocol inserts
-3. [x] Schema introspection on-demand with refresh
-4. [x] Variant/Dynamic/Nested serializers in clickhouse-arrow fork
-5. [x] Remove klickhouse dependency - Arrow-only path
-6. [x] Integration test Arrow inserts work end-to-end
-7. [x] Use arrow-json for SIMD JSON → Arrow conversion
-8. [x] Kafka offset commit on successful insert
-9. [x] DLQ routing with db.table topic naming
-10. [x] Hot path optimisations (4 rounds)
-11. [x] BFloat16/Time/Time64/AggregateFunction types in clickhouse-arrow fork
+Binary-split retry on insert failure — isolates individual bad rows rather than dropping the whole batch:
 
-### Resilience (2025-12-25)
+1. Insert full batch → fails
+2. Split in half, retry each half independently
+3. Recurse until single failing row found
+4. Route single failing rows to DLQ
+5. Configurable max depth (default: 20, supports up to 2^20 = 1M rows)
 
-- [x] Batch Salvage - Binary-split retry on insert failure
-- [x] Circuit Breaker - Per-table failure detection
-- [x] Schema Cache Enhancement - Periodic refresh, error invalidation
-- [x] Concurrent Insert Semaphore - Configurable parallel limit
+### Circuit Breaker
 
-### Common Header v2
+Per-table failure detection (`src/clickhouse/circuit_breaker.rs`):
+- **Closed**: normal operation
+- **Open**: table is failing, inserts skip and go to DLQ immediately
+- **HalfOpen**: probe with one insert to test recovery
+- Configurable: `failure_threshold`, `success_threshold`, `open_duration`
 
-1. [x] Capture `logjson` before transform
-2. [x] Config-driven `_tags` extraction
-3. [x] Add `drop_tags` config option
-4. [x] Remove routing fields from output
-5. [x] Let ClickHouse generate `_uuid`
-6. [x] Let ClickHouse generate `timestamp_load`
-7. [x] Update table DDL template
+### Schema Cache
+
+TTL-based with background refresh (`src/clickhouse/schema.rs`):
+- Fetches from `system.columns` via `HttpClickHouseClient`
+- Background refresh task via `start_background_refresh()`
+- Error-based invalidation on schema mismatch
+
+### Concurrent Insert Semaphore
+
+`max_concurrent_inserts` in `InserterConfig` (default: 8, 0 = unlimited). Prevents overwhelming ClickHouse with too many parallel connections.
 
 ---
 
 ## Test Environment
 
-Located at devex.hyperi.io with:
+Located at `clickhouse.devex.hyperi.io` (3-node replicated cluster, Keeper-managed):
 
-- ClickHouse 26.x: `clickhouse.devex.hyperi.io:8123` (HTTP), `:9000` (native)
-- **3-node replicated cluster** (`default` cluster, Keeper-managed)
+- ClickHouse: `clickhouse.devex.hyperi.io:8123` (HTTP), `:9000` (native)
 - Kafka: `kafka.devex.hyperi.io:9092` with SCRAM-SHA-512
-- See `.env` for credentials (`CLICKHOUSE_CLUSTER=default`)
+- See `.env` for credentials
 
 ### Test Cluster Database Types
 
 | Database | Engine | Notes |
 |----------|--------|-------|
-| `benchmark` | `Atomic` | Standard. Use `ON CLUSTER 'default'` + `MergeTree()`. Tables are independent per node — no data replication. Avoid query-back tests. |
-| `default` | `Replicated` | DDL auto-propagated. Use `ReplicatedMergeTree()` (no args — ZK paths auto-filled). DO NOT specify explicit ZK paths (forbidden). DO NOT use `ON CLUSTER` for CREATE. |
+| `benchmark` | `Atomic` | Use `ON CLUSTER 'default'` + `MergeTree()`. Tables are independent per node — no data replication. Avoid query-back tests. |
+| `default` | `Replicated` | DDL auto-propagated. Use `ReplicatedMergeTree()` (no args — ZK paths auto-filled). DO NOT specify explicit ZK paths (Code 36). DO NOT use `ON CLUSTER` for CREATE. |
 
 ### Test Table Convention
 
@@ -729,26 +387,26 @@ Located at devex.hyperi.io with:
 
 **Wrong (do not use):**
 ```rust
-// ❌ Explicit ZK paths forbidden in Replicated database
+// ❌ Explicit ZK paths forbidden in Replicated database (Code 36)
 "ENGINE = ReplicatedMergeTree('/clickhouse/{{cluster}}/tables/{{database}}/{{table}}', '{{replica}}')"
 // ❌ No ON CLUSTER in Atomic database — only creates on one node
 "CREATE TABLE {} (...) ENGINE = MergeTree()"
 ```
 
-**Why:** Load-balanced cluster with no sticky sessions — INSERT and SELECT may hit different nodes.
-Without ON CLUSTER in Atomic DBs, or without data replication in Replicated DBs, queries return 0.
+**Why:** Load-balanced cluster with no sticky sessions — INSERT and SELECT may hit different nodes. Without ON CLUSTER in Atomic DBs, or without data replication in Replicated DBs, query-back returns 0.
 
 ---
 
 ## Reference Projects
 
-- **klickhouse fork**: Archived — was used for Variant/Dynamic/JSON/Nested type research
-- **ClickHouse source**: `/projects/ClickHouse` - Server source for protocol research
-- **Go loader**: `/projects/clickhouse-loader` - Reference implementation
+- **Go loader**: `/projects/clickhouse-loader` — reference implementation for feature parity
+- **ClickHouse source**: `/projects/ClickHouse` — server source for protocol research
+- **clickhouse-rs fork**: `/projects/clickhouse-rs` — feature branch with native protocol + full type support (Phase 5.5)
+- **klickhouse fork**: Archived — was used for Variant/Dynamic/JSON/Nested type research (no longer used)
 
 ---
 
-## Enrichment Modules (2025-12-28)
+## Enrichment Modules
 
 ### GeoIP Enrichment (`src/enrich/geoip.rs`)
 
@@ -759,14 +417,16 @@ Without ON CLUSTER in Atomic DBs, or without data replication in Replicated DBs,
 - **Schema-aware output**: `to_schema_map()` for selective field output
 - **Feature flags**: `mmap` + `simdutf8` for SIMD UTF-8 validation
 
+```toml
+maxminddb = { version = ">=0.24", features = ["mmap", "simdutf8"] }
+```
+
 ### Reputation Enrichment (`src/enrich/reputation.rs`)
 
 - **Threat types**: VPN, proxy, Tor, relay, datacenter, residential, botnet, spam, scanner, malware, phishing, bruteforce, exploit
-- **Threat sources**: TorProject, FireHOL, AbuseIPDB, AbuseCH, Spamhaus, MaxMind, IPInfo, CrowdSec, GreyNoise, Custom
 - **Dual storage**: O(1) FxHashMap for individual IPs + CIDR prefix matching
 - **LRU cache**: 100K entries with atomic hit/miss counters
-- **Blocklist loading**: Plain text format (IP or CIDR per line)
-- **Common blocklists**: Tor exit nodes, Feodo botnet C2, FireHOL Level1, Spamhaus DROP
+- **Blocklist loading**: Plain text (IP or CIDR per line)
 
 ### Risk Scoring (`src/enrich/risk.rs`)
 
@@ -774,42 +434,7 @@ Without ON CLUSTER in Atomic DBs, or without data replication in Replicated DBs,
 - **Weighted composite**: Configurable weights (default: geo 15%, rep 25%, priv 25%, threat 35%)
 - **Risk levels**: Minimal (0-19), Low (20-39), Medium (40-59), High (60-79), Critical (80-100)
 - **Presets**: UsEnterprise, EuEnterprise, ApacEnterprise, Global, HighSecurity
-- **Risk factors**: Human-readable flags (e.g., "tor_detected", "high_risk_country")
 - **Integer math only**: All u8 scores, no floating point in hot path
-
----
-
-## Key Architectural Insights
-
-### ClickHouse Arrow Protocol Quirk
-
-String columns are returned as Binary type via Arrow protocol:
-
-```rust
-use arrow::array::BinaryArray;
-if let Some(col) = batch.column(0).as_any().downcast_ref::<BinaryArray>() {
-    let value = std::str::from_utf8(col.value(0))?;
-}
-```
-
-### Explicit Arrow Schemas Required
-
-JSON schema inference fails for timestamps — always use explicit schemas:
-
-```rust
-// ❌ BAD - JSON inference creates String type
-let batch = json_batch_to_arrow(&rows)?;
-
-// ✅ GOOD - Explicit schema with TimestampMillisecondArray
-let schema = Arc::new(Schema::new(vec![
-    Field::new("timestamp", DataType::Timestamp(TimeUnit::Millisecond, None), false),
-]));
-let batch = RecordBatch::try_new(schema, columns)?;
-```
-
-### Query Verification
-
-INSERT row count can succeed even if data is malformed. Always query-back to verify.
 
 ---
 
@@ -864,11 +489,13 @@ Start a fresh session after any changes to this file.
 | Parallel cargo jobs = 2 | Prevents CPU starvation on local builds and CI |
 | HyperI casing | Capital H, capital I for brand; HYPERI for legal entity |
 | Registry over git deps | Required for cargo publish to work |
-| clickhouse-arrow CI via workflow dispatch | Private CI without polluting public fork |
 | settings.local.json broad permissions | Prevents Claude Code blocking on approval during AFK CI monitoring sessions |
 | MSRV 1.94 (rust-version = "1.94") | Pin to current stable. Track latest until OSS, then stabilise as the project matures |
 | Never kill cargo processes | Multiple projects share this host — NEVER kill cargo to free locks. Wait for builds to finish. |
-| Test tables: ReplicatedMergeTree ON CLUSTER | ClickHouse test cluster has 3 nodes behind a load balancer. CREATE TABLE without ON CLUSTER creates on one node only; inserts to other nodes fail. Always use ReplicatedMergeTree + ON CLUSTER 'default'. |
 | Edition 2024 | Using Rust edition 2024. `std::env::set_var/remove_var` require `unsafe` blocks. Pattern matching on `&mut T` is implicit in 2024 (remove `ref mut` from `if let Some` on `&mut Option`). |
+| Drop Arrow/clickhouse-arrow | Benchmarks: sonic-rs→Map 6-9x faster than Arrow building; insert paths within noise (network-dominated). Arrow adds complexity with zero insert throughput benefit. |
+| Drop Mison structural index | Benchmarks: zero throughput advantage over sonic-rs. 3,436 lines removed. |
+| JSONEachRow via reqwest | Bypasses `clickhouse::Row` compile-time trait. `Map<String, Value>` serialises naturally. Serde overhead ~3-5% of pipeline time vs 40-75ms network I/O. |
+| Test tables: ON CLUSTER + MergeTree/ReplicatedMergeTree | 3-node load-balanced cluster, no sticky sessions. CREATE without ON CLUSTER creates on one node only — inserts to other nodes cannot be queried back. Use benchmark DB (Atomic + ON CLUSTER + MergeTree) for most tests; default DB (Replicated + ReplicatedMergeTree) only when query-back verification required. |
 
 ---

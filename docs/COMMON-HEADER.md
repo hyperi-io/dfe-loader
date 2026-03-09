@@ -300,7 +300,7 @@ include_raw = true   # Global default: include _raw in all tables
 ```
 
 Per-table overrides take precedence over the global default. When `_raw` is excluded,
-the loader omits the field from the Arrow batch (ClickHouse column stays NULL).
+the loader omits the field from the row map (ClickHouse column stays NULL).
 
 ### `_json`
 

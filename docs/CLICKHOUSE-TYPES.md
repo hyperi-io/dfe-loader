@@ -1,8 +1,8 @@
 # ClickHouse Data Types Reference
 
-**Purpose:** Complete enumeration of ClickHouse data types for implementing full type support in our client library.
+**Purpose:** Complete enumeration of ClickHouse data types for reference during schema design and Phase 5.5 (native protocol migration).
 
-**Last Updated:** 2026-03-02
+**Last Updated:** 2026-03-09
 
 **Sources:**
 
@@ -260,35 +260,39 @@ SELECT data.user, data.score FROM events;
 
 ---
 
-## Library Support Comparison
+## Library Support
 
-### clickhouse-arrow (DFE Fork - current)
+### Current Stack (JSONEachRow, 2026-03-09)
 
-| Type | Supported |
-|------|-----------|
-| Int8-Int256, UInt8-UInt256 | ✅ |
-| Float32, Float64 | ✅ |
-| Decimal32/64/128/256 | ✅ |
-| String, FixedString | ✅ |
-| Date, Date32, DateTime, DateTime64 | ✅ |
-| UUID | ✅ |
-| IPv4, IPv6 | ✅ |
-| Array, Tuple, Map | ✅ |
-| Nullable, LowCardinality | ✅ |
-| Enum8, Enum16 | ✅ |
-| Point, Ring, Polygon, MultiPolygon | ✅ |
-| **Variant** | ✅ DFE Fork |
-| **Dynamic** | ✅ DFE Fork |
-| **Nested** | ✅ DFE Fork |
-| **BFloat16** | ✅ DFE Fork |
-| **Time/Time64** | ✅ DFE Fork |
-| **AggregateFunction** | ✅ DFE Fork |
-| **SimpleAggregateFunction** | ✅ DFE Fork |
-| **JSON** | ⚠️ Via Dynamic |
+dfe-loader sends JSON to ClickHouse via HTTP JSONEachRow. Type coercion happens
+server-side. The loader does not need to know ClickHouse types at insert time.
 
-**Note:** klickhouse and clickhouse-cpp were evaluated during the initial library
-selection (2025-12). klickhouse was removed — we use clickhouse-arrow (DFE fork)
-exclusively. See [DESIGN.md](./DESIGN.md) for the architecture.
+| Client | Purpose | Types |
+|--------|---------|-------|
+| `clickhouse` crate (HTTP) | DDL, schema queries | Used for system.columns queries |
+| `reqwest` (HTTP POST) | Data inserts (JSONEachRow) | All types via server-side coercion |
+
+### Phase 5.5: clickhouse-rs Native Protocol Fork
+
+`/projects/clickhouse-rs` adds capabilities beyond upstream `clickhouse` crate:
+
+| Type | Status |
+|------|--------|
+| All standard types | ✅ Upstream |
+| **JSON** (GA v25.3) | ✅ Fork |
+| **Variant** | ✅ Fork |
+| **Dynamic** | ✅ Fork |
+| **Nested** | ✅ Fork |
+| **BFloat16** | ✅ Fork |
+| **Time/Time64** | ✅ Fork |
+| **AggregateFunction** | ✅ Fork |
+| **SimpleAggregateFunction** | ✅ Fork |
+| Native TCP protocol | ✅ Fork (upstream removed in v0.12+) |
+
+See TODO.md Phase 5.5 for migration plan.
+
+**Note:** clickhouse-arrow (DFE fork) was used in earlier development (2025-12 to 2026-03)
+but dropped in favour of the simpler JSONEachRow approach. See [WHY-ARROW.md](./WHY-ARROW.md).
 
 ---
 
@@ -333,12 +337,15 @@ Timezone stored in column metadata, not per-value. All values in column share ti
 
 ## Implementation Status for dfe-loader
 
-All priority types are implemented in the clickhouse-arrow DFE fork:
+Current (JSONEachRow): all types work via server-side coercion. No client-side type
+serialisation required — ClickHouse parses the JSON and converts as needed.
 
-1. **JSON** — via Dynamic type mapping
-2. **Variant** — full discriminated union support
+Phase 5.5 target (native protocol via `/projects/clickhouse-rs` fork):
+
+1. **JSON** — full native columnar JSON type
+2. **Variant** — discriminated union
 3. **Dynamic** — runtime-typed storage
-4. **Nested** — parallel array serialisation
+4. **Nested** — parallel arrays
 5. **AggregateFunction** — materialized view support
 6. **SimpleAggregateFunction** — simplified aggregate state
 7. **BFloat16** — ML workload support
@@ -346,9 +353,13 @@ All priority types are implemented in the clickhouse-arrow DFE fork:
 
 ---
 
-## Decision: Library Choice (Resolved)
+## Decision: Library Choice
 
-**Chosen:** clickhouse-arrow (DFE fork) — native Arrow inserts via ClickHouse HTTP protocol.
+**Current:** `reqwest` (JSONEachRow inserts) + `clickhouse` crate (DDL/queries).
 
-All missing types (Variant, Dynamic, Nested, BFloat16, Time/Time64, AggregateFunction,
-SimpleAggregateFunction) were implemented in the DFE fork. See `crates/clickhouse-arrow/`.
+**Rationale:** Schema-flexible, simpler code, sufficient throughput at current scale.
+See [WHY-ARROW.md](./WHY-ARROW.md) for full decision history including why Arrow was
+chosen then dropped.
+
+**Planned (Phase 5.5):** Migrate to `/projects/clickhouse-rs` fork for native protocol
+with full type support. See TODO.md Phase 5.5.
