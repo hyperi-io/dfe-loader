@@ -10,44 +10,55 @@
 
 ---
 
-## Active: Completed Migrations
+## Implementation Stages
 
-The Arrow → HTTP/JSONEachRow migration is complete (Phases 0–5). See completed section below.
+The architecture is deliberately staged:
 
-### **CRITICAL: Type Coercion Gap Analysis**
+```
+Stage 1 (CURRENT):  JSONEachRow + upstream clickhouse crate (HTTP) + coercion fixes
+Stage 2 (Phase 5.5): Native protocol via /projects/clickhouse-rs fork (lower CPU)
+```
 
-The old `clickhouse-arrow` fork performed explicit client-side type coercions before
-inserting. The new JSONEachRow path relies entirely on ClickHouse server-side coercion.
+Stage 1 ships first, Stage 2 is a drop-in upgrade — same API, better protocol.
 
-**Gap analysis required:** Identify which coercions the Arrow fork did that ClickHouse
-JSONEachRow does NOT do automatically, and implement them in the Rust transformer layer.
+---
 
-Known areas to audit:
-- [ ] DateTime64 precision handling — does CH parse `"2024-01-15T10:30:00.123Z"` reliably?
-- [ ] Epoch timestamp auto-detection (seconds vs millis vs micros) — was done client-side
-- [ ] LowCardinality string trimming/normalisation — Arrow had explicit handling
-- [ ] Nullable vs non-nullable coercion — Arrow had schema-driven null filling
-- [ ] UUID format normalisation — Arrow used FixedSizeBinary(16), JSON uses string
-- [ ] Int/Float overflow behaviour — Arrow enforced bounds, JSONEachRow may silently truncate
-- [ ] Array(T) inner type coercion — e.g. `Array(DateTime64)` with epoch timestamps
-- [ ] JSON type insertion — does CH accept arbitrary JSON string for a JSON-typed column?
-- [ ] Bool coercion — `"true"` string vs `true` boolean vs `1` integer
+## Active
 
-**Deliverable:** Document which coercions are missing and implement them in
-`src/transform/transformer.rs` or a new `src/clickhouse/coerce.rs` module.
-Add integration tests for each coercion that ClickHouse would otherwise fail silently.
+### Phase 5.6: Type Coercion Completeness (Stage 1 prerequisite)
 
-### Phase 5.5: Migrate to clickhouse-rs Feature Branch
+The old `clickhouse-arrow` fork handled explicit client-side coercions. JSONEachRow
+relies on ClickHouse server-side coercion. Before Stage 1 is production-ready, we
+must verify coverage and fill any gaps in the Rust transformer layer.
 
-Our feature branch at `/projects/clickhouse-rs` adds capabilities not in upstream:
-- Native protocol option (upstream HTTP-only for v0.12+)
-- Full ClickHouse type support (upstream missing: JSON, Variant, Dynamic, Nested, BFloat16, etc.)
+Known areas to audit and test:
+- [ ] DateTime64 — does CH reliably parse `"2024-01-15T10:30:00.123Z"` ISO strings?
+- [ ] Epoch auto-detection — seconds vs millis vs micros was done client-side; confirm/implement
+- [ ] Non-nullable columns — what does CH do when we send `null` for a NOT NULL column?
+- [ ] UUID — confirm CH accepts RFC 4122 string format for UUID columns
+- [ ] Int/Float overflow — CH may silently truncate; add client-side bounds check if needed
+- [ ] Array(DateTime64) — inner type coercion for arrays of timestamps
+- [ ] JSON column — confirm CH accepts JSON string or object for a JSON-typed column
+- [ ] Bool — confirm CH accepts all of: `true`, `1`, `"true"` for Bool columns
+
+**Deliverable:** Integration tests for each case + any fixes in `src/clickhouse/coerce.rs`
+or `src/transform/transformer.rs`. Tests must run against real ClickHouse (testcontainers).
+
+### Phase 5.5: Migrate to clickhouse-rs Feature Branch (Stage 2)
+
+Drop-in upgrade from upstream `clickhouse` crate to our fork at `/projects/clickhouse-rs`.
+Same JSONEachRow insert path; adds native TCP protocol option and full type support.
+
+Fork adds over upstream `clickhouse` crate:
+- Native TCP protocol (upstream HTTP-only as of v0.12+)
+- JSON, Variant, Dynamic, Nested, BFloat16, Time, AggregateFunction types
 
 Tasks:
 - [ ] Review `/projects/clickhouse-rs` branch — document exact patches vs upstream
 - [ ] Publish feature branch to Artifactory (`hyperi-cargo-local`) as a versioned crate
 - [ ] Update `Cargo.toml` to use Artifactory version instead of crates.io upstream
-- [ ] Confirm JSON type (GA v25.3) insert/query works end-to-end via both protocols
+- [ ] Confirm JSON type (GA v25.3) insert/query works end-to-end via HTTP protocol
+- [ ] Confirm native TCP protocol inserts work end-to-end
 - [ ] Confirm full type support: Variant, Dynamic, Nested, BFloat16, Time, AggregateFunction
 
 ### Phase 6: Dependency Audit + Version Bumps
