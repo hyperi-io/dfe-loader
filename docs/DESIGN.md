@@ -329,132 +329,60 @@ buffer:
   flush_bytes: 10485760  # 10MB
   flush_age_secs: 5
 
+clickhouse:
+  url: http://localhost:8123
+  database: dfe
+  username: default
+  password: ""
+
 schema:
-  refresh_interval_secs: 60
-  on_error_refresh: true
+  cache_ttl_secs: 300  # Used for CEL expression dispatch; NOT for insert validation
+  refresh_on_error: true
 
 transform:
   flatten_json: true
   flatten_separator: "."
-  add_load_timestamp: true
 
 enrichment:
   geoip:
     enabled: true
     database: "/data/GeoLite2-City.mmdb"
-    columns: ["src_ip", "dst_ip"]
 ```
 
 ---
 
-## Schema-Aware Transformation
+## Flattening Behaviour
 
-### Why Introspection Matters
+The transformer flattens all nested JSON objects to dot-notation keys by default.
+No schema introspection is required — ClickHouse receives the flattened fields and
+handles type coercion server-side.
 
-Schema introspection tells us **what NOT to flatten**. Without it, we'd incorrectly decompose JSON subtrees that should remain as JSON, Array, or Nested types.
-
-**Example ClickHouse schema:**
-
-```sql
-CREATE TABLE events (
-    user_id Int64,
-    timestamp DateTime64(3),
-    metadata JSON,              -- Keep as JSON blob!
-    tags Array(String),         -- Keep as Array!
-    geo Nested(lat Float64, lon Float64)  -- Keep as Nested!
-)
-```
-
-**Incoming JSON:**
+**Input:**
 
 ```json
 {
   "user_id": 1,
-  "timestamp": "2025-01-01T00:00:00Z",
   "metadata": {"foo": {"bar": {"deep": 1}}},
   "tags": ["auth", "login"],
-  "geo": {"lat": [1.0, 2.0], "lon": [3.0, 4.0]}
+  "source": {"ip": "10.0.0.1", "port": 54321}
 }
 ```
 
-**WITHOUT introspection (wrong):**
+**After flattening:**
 
 ```
 user_id: 1
-timestamp: "2025-01-01T00:00:00Z"
-metadata.foo.bar.deep: 1        ← WRONG! Should be JSON blob
-tags.0: "auth"                  ← WRONG! Should be Array
-tags.1: "login"
-geo.lat.0: 1.0                  ← WRONG! Should be Nested
-geo.lat.1: 2.0
-geo.lon.0: 3.0
-geo.lon.1: 4.0
+metadata.foo.bar.deep: 1
+tags: ["auth", "login"]       ← arrays are NOT flattened (kept as JSON array)
+source.ip: "10.0.0.1"
+source.port: 54321
 ```
 
-**WITH introspection (correct):**
+Arrays are preserved as-is (JSON array value). Only objects are flattened.
+This matches ClickHouse JSONEachRow expectations for `Array(T)` columns.
 
-```
-user_id: 1 (Int64)
-timestamp: 1735689600000 (DateTime64)
-metadata: '{"foo":{"bar":{"deep":1}}}' (JSON - serialized)
-tags: ["auth", "login"] (Array<String>)
-geo.lat: [1.0, 2.0] (Nested - parallel arrays)
-geo.lon: [3.0, 4.0]
-```
-
-### Schema-Driven Transform Rules
-
-```rust
-fn transform_field(name: &str, value: &JsonValue, ch_type: &Type) -> ArrayRef {
-    match ch_type {
-        Type::Json { .. } => {
-            // DON'T flatten - serialize entire subtree as JSON string
-            serialize_as_json_binary(value)
-        }
-        Type::Array(inner) => {
-            // DON'T flatten - build Arrow List with inner type
-            build_list_array(value.as_array(), inner)
-        }
-        Type::Nested(fields) => {
-            // DON'T flatten - build parallel arrays per Nested semantics
-            build_nested_arrays(value.as_object(), fields)
-        }
-        Type::Variant(variants) => {
-            // Determine actual type, serialize accordingly
-            build_variant_value(value, variants)
-        }
-        Type::Dynamic { .. } => {
-            // Runtime type detection, serialize with type tag
-            build_dynamic_value(value)
-        }
-        // Scalar types - extract and coerce
-        Type::Int64 => build_int64_array(value),
-        Type::String => build_string_array(value),
-        // ... etc
-    }
-}
-```
-
-### Flatten Only Unlisted Fields
-
-For fields NOT in schema (extra data), we CAN flatten:
-
-```rust
-fn should_flatten(field: &str, schema: &TableSchema) -> bool {
-    // Only flatten if:
-    // 1. Field is NOT in ClickHouse schema (extra data)
-    // 2. OR field IS in schema but type is String (flatten to dot-notation key)
-
-    match schema.get_type(field) {
-        None => true,  // Not in schema, flatten into extra_data column
-        Some(Type::String) => true,  // String column, can flatten
-        Some(Type::Json { .. }) => false,  // JSON column, keep structure
-        Some(Type::Array(_)) => false,     // Array column, keep structure
-        Some(Type::Nested(_)) => false,    // Nested column, keep structure
-        Some(_) => false,  // Other typed columns, don't flatten
-    }
-}
-```
+**Phase 5.6 note:** For columns typed as `JSON`, `Nested`, or `Variant` in ClickHouse,
+additional client-side handling may be needed. See TODO Phase 5.6 for the gap analysis.
 
 ---
 
@@ -658,4 +586,4 @@ and payload format conventions.
 
 ---
 
-**Last Updated:** 2026-03-02
+**Last Updated:** 2026-03-09
