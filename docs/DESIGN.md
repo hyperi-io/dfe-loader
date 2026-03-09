@@ -1,17 +1,17 @@
 # Design Document: dfe-loader
 
-**Version:** 2.2 (Arrow Architecture + gRPC Transport)
-**Date:** 2026-03-02
+**Version:** 3.0 (JSONEachRow Architecture + gRPC Transport)
+**Date:** 2026-03-09
 
 ---
 
 ## Overview
 
-High-performance data loader from message transports to ClickHouse using Apache Arrow.
+High-performance data loader from message transports to ClickHouse via HTTP JSONEachRow.
 
 ```text
-Transport ──► Parse ──► Route ──► Transform ──► Buffer ──► ClickHouse Native
-(Kafka/gRPC/Memory)   (SIMD)   (db.table)  (vectorized)  (per-table)   (Arrow protocol)
+Transport ──► Parse ──► Route ──► Transform ──► Buffer ──► ClickHouse HTTP
+(Kafka/gRPC/Memory)   (SIMD)   (db.table)   (flatten)  (per-table)   (JSONEachRow)
 ```
 
 ### Transport Selection
@@ -28,62 +28,11 @@ See [GRPC-MESH.md](./GRPC-MESH.md) for the complete gRPC transport design.
 
 ## Design Goals
 
-1. **Maximize throughput**: Vectorized column operations, not row-by-row
-2. **Minimize memory churn**: Chunk lifecycle, Arc-sharing, zero-copy where possible
-3. **At-least-once delivery**: Kafka offset tracking per chunk
-4. **Schema flexibility**: On-demand introspection, periodic refresh
+1. **Schema flexibility**: Accept any JSON structure, unknown fields pass through
+2. **At-least-once delivery**: Kafka offset tracking per batch
+3. **Minimise memory churn**: Batched processing, pre-allocated collections
+4. **Operational simplicity**: HTTP inserts, no native protocol dependency
 5. **Clean architecture**: Immutable data, functional transforms
-
----
-
-## Zero-Copy Analysis
-
-### Where We Achieve Zero-Copy
-
-| Stage | Zero-Copy? | Notes |
-|-------|------------|-------|
-| Transform unchanged columns | ✅ Yes | Arc clone, no data copy |
-| Chunk partition by destination | ✅ Yes | Index-based selection |
-| Chunk ack | ✅ Yes | Drop Arc reference, O(1) |
-| Arrow → CH (simple types) | ✅ Yes | Columnar layout matches |
-
-### Where Copy is Required
-
-| Stage | Why | Optimization |
-|-------|-----|--------------|
-| JSON parse | Text → typed values | arrow-json SIMD |
-| MsgPack parse | Binary → typed values | Direct to Arrow builders |
-| Type coercion | String → Int, etc. | Vectorized column ops |
-| Enrichment | New columns | Build entire column in batch |
-| Complex types | Variant/Dynamic | Minimize through schema design |
-
----
-
-## Core Principle: Column Operations, Not Row-by-Row
-
-**BAD (row-by-row):**
-
-```rust
-for row in batch.iter_rows() {
-    row.set("country", geoip.lookup(row.get("ip")));  // O(n) overhead per row
-}
-```
-
-**GOOD (column operations):**
-
-```rust
-// Get entire IP column at once
-let ips: &StringArray = batch.column("ip").as_string();
-
-// Build entire country column at once
-let mut countries = StringBuilder::with_capacity(ips.len());
-for ip in ips.iter() {
-    countries.append_value(geoip.lookup(ip));
-}
-
-// Create new batch with Arc-shared original + new column
-let new_batch = add_column(batch, "country", countries.finish());
-```
 
 ---
 
@@ -91,38 +40,37 @@ let new_batch = add_column(batch, "country", countries.finish());
 
 ### 1. Per-Table Buffer Architecture
 
-Each destination table (db.table) has its own ArrowBatchBuilder. This ensures schema
-uniformity within each Arrow RecordBatch.
+Each destination table (db.table) has its own row buffer. This ensures batch inserts
+are grouped by table (required for JSONEachRow inserts targeting a specific table).
 
 ```rust
 struct BufferManager {
     // Per-table buffers: key is "db.table"
     buffers: HashMap<String, TableBuffer>,
-    // Cached schemas per table (from ClickHouse introspection)
-    schemas: HashMap<String, TableSchema>,
 }
 
 struct TableBuffer {
-    builder: ArrowBatchBuilder,       // Accumulates JSON objects
+    rows: Vec<Map<String, Value>>,    // Accumulated JSON rows
     offsets: Vec<KafkaOffset>,        // Kafka offsets for at-least-once
     created_at: Instant,              // For time-based flush
+    size_bytes: usize,                // Approximate memory tracking
 }
 ```
 
 **Why per-table?**
 
-- **Schema uniformity**: Arrow RecordBatch requires all rows to have the same schema
-- **Schema introspection**: Each table's schema derived from ClickHouse `system.columns`
-- **Independent flush**: High-volume tables flush more often, low-volume wait for age trigger
-- **Memory efficient**: Data stays as JSON until batch is ready, then converts to Arrow
+- **ClickHouse target:** JSONEachRow inserts are per-table; all rows in a batch go to one table
+- **Independent flush:** High-volume tables flush more often, low-volume wait for age trigger
+- **Schema flexibility:** Each row is a `Map<String, Value>` — no fixed schema required
+- **Memory bounded:** Rows accumulate until flush threshold (rows, bytes, or age)
 
 **Lifecycle:**
 
 1. Kafka message → Parse JSON/MsgPack → Route to db.table
-2. Push to per-table ArrowBatchBuilder (with Kafka offset)
-3. When ready (row count, time): Build Arrow RecordBatch
-4. Insert to ClickHouse via native protocol
-5. Success: Ack Kafka offsets
+2. Push `Map<String, Value>` to per-table buffer (with Kafka offset)
+3. When ready (row count, bytes, or time): Serialise to JSONEachRow NDJSON
+4. Insert to ClickHouse via `reqwest` HTTP POST
+5. Success: Commit Kafka offsets
 6. Failure: Retry batch
 
 ### 2. Dynamic db.table Routing
@@ -179,73 +127,72 @@ With default config:
 - `table_fields = ["event_category", "tags.event_category"]` → finds "auth"
 - Result: `acme.auth`
 
-### 3. Transform Pipeline (Immutable Batches)
+### 3. Transform Pipeline (Per-Row)
 
-Arrow batches are **immutable**. Transforms build **new batches** with column operations:
+Each message is transformed individually before being pushed to the per-table buffer:
 
 ```rust
-fn transform_pipeline(batch: RecordBatch) -> Result<RecordBatch> {
-    // Each transform operates on COLUMNS, not rows
-    // Unchanged columns are Arc-shared (zero-copy)
-
-    let batch = add_destination_column(batch, &router)?;    // New column
-    let batch = flatten_nested_json(batch)?;                 // Column transforms
-    let batch = enrich_geoip_column(batch, "src_ip")?;       // Vectorized lookup
-    let batch = add_load_timestamp_column(batch)?;           // New column
-
-    Ok(batch)
+fn transform_pipeline(value: Value, raw: Option<&[u8]>) -> Result<Map<String, Value>> {
+    let result = transformer.transform_with_raw(value, raw, None)?;
+    Ok(result.data)
 }
 ```
 
-**Column sharing example:**
+The `Transformer` applies:
+1. **Timestamp extraction and validation** — extracts `_timestamp`, validates range
+2. **Common header injection** — injects `_org_id`, `_source`, `_timestamp_received`
+3. **JSON flattening** — nested objects flattened to dot-notation keys
+4. **Field sanitisation** — strip leading `@`, handle numeric prefixes, collapse underscores
+5. **Enrichment** — GeoIP, reputation, risk scoring (each optional)
+6. **CEL computed columns** — evaluate `@computed` expressions from DDL column comments
+
+`_json` is injected by the buffer manager directly from raw Kafka bytes (not by the transformer).
+
+### 3. Schema Cache (Read-Only)
 
 ```rust
-fn add_column(batch: RecordBatch, name: &str, col: ArrayRef) -> RecordBatch {
-    let mut columns = batch.columns().to_vec();  // Vec of Arc, no data copy
-    columns.push(col);                            // Add new column
-    RecordBatch::try_new(new_schema, columns)     // Build new batch
-}
-```
+// SchemaCache stores ColumnInfo per table, fetched from system.columns.
+// Used for: CEL expression evaluation, auto-init DDL, computed column dispatch.
+// NOT used for insert schema validation — JSONEachRow is schema-flexible.
 
-### 3. Schema Registry (On-Demand + Refresh)
-
-```rust
-struct SchemaRegistry {
-    schemas: HashMap<String, TableSchema>,
-    last_refresh: HashMap<String, Instant>,
-    refresh_interval: Duration,
-    client: Arc<ClickHouseClient>,
+struct SchemaCache {
+    entries: DashMap<String, SchemaCacheEntry>,
+    ttl: Duration,
+    client: Arc<HttpClickHouseClient>,
 }
 
-impl SchemaRegistry {
-    async fn get_or_fetch(&mut self, table: &str) -> Result<&TableSchema> {
-        let needs_refresh = self.last_refresh
-            .get(table)
-            .map(|t| t.elapsed() > self.refresh_interval)
-            .unwrap_or(true);
-
-        if needs_refresh {
-            let schema = self.fetch_from_clickhouse(table).await?;
-            self.schemas.insert(table.to_string(), schema);
-            self.last_refresh.insert(table.to_string(), Instant::now());
-        }
-
-        Ok(self.schemas.get(table).unwrap())
+impl SchemaCache {
+    async fn get(&self, table: &str) -> Option<Vec<ColumnInfo>> {
+        // Returns cached columns if fresh, fetches from system.columns if stale
     }
 }
 ```
 
-### 4. ClickHouse Insert (Native Protocol)
+### 4. ClickHouse Insert (HTTP JSONEachRow)
 
-Using clickhouse-arrow fork with Variant/Dynamic/Nested types:
+Two clients in `HttpClickHouseClient`:
 
 ```rust
-async fn insert_arrow(client: &Client, table: &str, batch: RecordBatch) -> Result<()> {
-    // clickhouse-arrow handles Arrow → ClickHouse native serialization
-    // Zero-copy for types with matching layout (Int, Float, String)
-    client.insert_arrow(table, batch).await
+struct HttpClickHouseClient {
+    // Official clickhouse crate — DDL, queries, schema introspection
+    ch_client: clickhouse::Client,
+    // reqwest — data inserts via JSONEachRow
+    http_client: reqwest::Client,
+    insert_url: String,
+}
+
+impl HttpClickHouseClient {
+    // Data insert: serialise rows to NDJSON, POST to /{db}/{table}?format=JSONEachRow
+    async fn insert_json_rows(&self, table: &str, rows: &[Map<String, Value>]) -> Result<usize>;
+
+    // DDL / queries use clickhouse::Client
+    async fn execute_ddl(&self, query: &str) -> Result<()>;
+    async fn fetch_columns(&self, db: &str, table: &str) -> Result<Vec<ColumnInfo>>;
 }
 ```
+
+Unknown fields in the JSON are silently ignored by ClickHouse (default behaviour).
+This means the loader never needs to pre-validate field names against the schema.
 
 ---
 
@@ -291,25 +238,25 @@ async fn insert_arrow(client: &Client, table: &str, batch: RecordBatch) -> Resul
                              ▼
 ┌─────────────────────────────────────────────────────────────────────┐
 │                    Per-Table BufferManager                           │
-│  - HashMap<db.table, ArrowBatchBuilder>                             │
-│  - Each table has its own buffer (schema uniformity)                │
+│  - HashMap<db.table, Vec<Map<String, Value>>>                       │
+│  - Each table has its own row buffer                                │
 │  - Tracks Kafka offsets per buffer                                  │
-│  - Schema from ClickHouse introspection                             │
+│  - Flush trigger: row count, bytes, or age                          │
 └────────────────────────────┬────────────────────────────────────────┘
                              │
-                             ▼ (flush trigger: rows, time per table)
+                             ▼ (flush trigger: rows, bytes, time per table)
 ┌─────────────────────────────────────────────────────────────────────┐
-│                  Arrow RecordBatch Build                             │
-│  - Convert buffered JSON objects to Arrow columnar format           │
-│  - Single RecordBatch per table (uniform schema)                    │
-│  - Efficient: batch all rows together, then build columns           │
+│                  JSONEachRow Serialisation                           │
+│  - Serialise Vec<Map<String, Value>> to NDJSON bytes                │
+│  - One JSON object per line                                         │
+│  - Unknown fields pass through to ClickHouse (silently ignored)     │
 └────────────────────────────┬────────────────────────────────────────┘
                              │
                              ▼
 ┌─────────────────────────────────────────────────────────────────────┐
 │                    ClickHouse Inserter                               │
-│  - Currently: JSON bridge (insert_arrow_via_json)                   │
-│  - Future: clickhouse-arrow native protocol                         │
+│  - reqwest HTTP POST to /{db}/{table}?format=JSONEachRow            │
+│  - HttpClickHouseClient (reqwest + clickhouse crate)                │
 │  - Retry with exponential backoff                                   │
 └────────────────────────────┬────────────────────────────────────────┘
                              │
@@ -323,124 +270,54 @@ async fn insert_arrow(client: &Client, table: &str, batch: RecordBatch) -> Resul
 
 ---
 
-## Type Mappings
+## Type Handling
 
-### ClickHouse → Arrow
+ClickHouse handles most type coercion server-side for JSONEachRow inserts. The loader
+sends JSON strings/numbers/booleans; ClickHouse converts on ingest.
 
-| ClickHouse | Arrow | Notes |
-|------------|-------|-------|
-| Int8-64 | Int8-64 | Direct, zero-copy |
-| UInt8-64 | UInt8-64 | Direct, zero-copy |
-| Float32/64 | Float32/64 | Direct, zero-copy |
-| String | Binary | UTF-8 not guaranteed |
-| FixedString(N) | FixedSizeBinary(N) | Direct |
-| UUID | FixedSizeBinary(16) | Raw bytes |
-| Date/Date32 | Date32 | Direct |
-| DateTime | Int32 | Unix timestamp |
-| DateTime64 | Int64 | With precision |
-| Array(T) | List(T) | Recursive |
-| Map(K,V) | Map(K,V) | Arrow Map type |
-| Tuple(...) | Struct | Named fields |
-| Nullable(T) | T with null bitmap | Arrow native |
-| LowCardinality(T) | Dictionary | Arrow dictionary encoding |
-| Variant | Binary | Serialized |
-| Dynamic | Binary | Serialized |
-| JSON | Binary | Serialized |
-| Nested | Struct of Lists | Parallel arrays |
+| ClickHouse Type | JSON Value Sent | Notes |
+|-----------------|-----------------|-------|
+| Int8-Int256 | number | ClickHouse parses as integer |
+| Float32/64 | number | ClickHouse parses as float |
+| String | string | Pass-through |
+| DateTime64(3) | `"2024-01-15T10:30:00.123Z"` | ISO 8601 string |
+| UUID | string | ClickHouse parses RFC 4122 format |
+| Bool | boolean or number | 0/1 or true/false |
+| Array(T) | JSON array | Elements must match inner type |
+| JSON type | string or object | ClickHouse parses at insert time |
+| LowCardinality(T) | same as T | Dictionary encoding is server-side |
+| Nullable(T) | null or T value | null JSON maps to NULL |
+
+Unknown fields are silently ignored by ClickHouse (default JSONEachRow behaviour).
+This is the key advantage over Arrow: no fixed-schema enforcement on the loader side.
+
+**⚠️ Open item:** A gap analysis is needed to identify which coercions the old
+`clickhouse-arrow` fork performed client-side that ClickHouse does NOT cover
+automatically (e.g. epoch auto-detection, overflow handling, Array inner types).
+See `TODO.md` "CRITICAL: Type Coercion Gap Analysis".
 
 ---
 
 ## Memory Management
 
-### Chunk Lifecycle
+### Row Buffer Lifecycle
 
 ```
-CREATE: Kafka batch → Arrow chunk (allocate)
-BUFFER: Hold in ArrowBuffer (just pointer storage)
-FLUSH:  Partition → insert (may clone for multi-table)
-ACK:    Drop chunk (Arc refcount → 0 → deallocate)
-```
-
-### Arc Sharing (Zero-Copy Column Reuse)
-
-```rust
-// Original batch columns
-let cols = batch.columns();  // Vec<Arc<dyn Array>>
-
-// New batch with extra column - NO COPY of original data
-let mut new_cols = cols.to_vec();  // Clone Arc pointers, not data
-new_cols.push(Arc::new(new_column));
-RecordBatch::try_new(schema, new_cols)
+PARSE:  Kafka bytes → serde_json::Value (sonic-rs SIMD)
+ROUTE:  Extract db.table from Value (pre-flatten)
+TRANSFORM: Value → Map<String, Value> (flatten, inject fields)
+BUFFER: Push Map into per-table Vec<Map>
+FLUSH:  Serialise Vec to NDJSON bytes → HTTP POST
+ACK:    Commit Kafka offsets, clear Vec
 ```
 
 ### Memory Pressure Handling
 
-If memory pressure detected:
+If memory pressure detected (via ScalingPressure metric):
 
-1. Reduce chunk size (smaller Kafka batches)
-2. Flush more aggressively (lower thresholds)
-3. Backpressure to Kafka consumer (pause)
-
----
-
-## Vectorized Operations Examples
-
-### GeoIP Enrichment (Column-wise)
-
-```rust
-fn enrich_geoip_column(batch: RecordBatch, ip_col: &str) -> Result<RecordBatch> {
-    let ips = batch.column_by_name(ip_col)?.as_string();
-
-    // Build ALL new columns at once
-    let mut country = StringBuilder::with_capacity(ips.len());
-    let mut city = StringBuilder::with_capacity(ips.len());
-    let mut lat = Float64Builder::with_capacity(ips.len());
-    let mut lon = Float64Builder::with_capacity(ips.len());
-
-    // Single pass through IP column
-    for ip in ips.iter() {
-        match ip.and_then(|s| geoip.lookup(s)) {
-            Some(geo) => {
-                country.append_value(geo.country);
-                city.append_value(geo.city);
-                lat.append_value(geo.latitude);
-                lon.append_value(geo.longitude);
-            }
-            None => {
-                country.append_null();
-                city.append_null();
-                lat.append_null();
-                lon.append_null();
-            }
-        }
-    }
-
-    // Build new batch with original columns (Arc-shared) + new columns
-    add_columns(batch, vec![
-        ("country", Arc::new(country.finish())),
-        ("city", Arc::new(city.finish())),
-        ("latitude", Arc::new(lat.finish())),
-        ("longitude", Arc::new(lon.finish())),
-    ])
-}
-```
-
-### Type Coercion (Column-wise)
-
-```rust
-fn coerce_to_int64(col: &StringArray) -> Int64Array {
-    let mut builder = Int64Builder::with_capacity(col.len());
-
-    for val in col.iter() {
-        match val.and_then(|s| s.parse::<i64>().ok()) {
-            Some(n) => builder.append_value(n),
-            None => builder.append_null(),
-        }
-    }
-
-    builder.finish()
-}
-```
+1. Flush all buffers immediately (regardless of row count / time threshold)
+2. Reduce max batch size on next cycle
+3. ScalingPressure metric rises → KEDA scales pods up
 
 ---
 
@@ -581,14 +458,12 @@ fn should_flatten(field: &str, schema: &TableSchema) -> bool {
 
 ---
 
-## Future Optimizations
+## Future Optimisations
 
-1. **Arrow Flight**: Direct Arrow IPC to ClickHouse (if supported)
-2. **Dictionary encoding**: For low-cardinality string columns
-3. **Predicate pushdown**: Filter before transform
-4. **SIMD GeoIP**: Vectorized IP lookups
-5. **Memory-mapped Arrow**: For very large batches
-6. **Arrow compute kernels**: Use built-in SIMD operations
+1. **Native protocol via clickhouse-rs fork**: Lower server-side CPU — see TODO Phase 5.5
+2. **Batch JSON serialisation**: Use `sonic-rs` for NDJSON serialisation in insert path
+3. **SIMD GeoIP**: Vectorised IP lookups across a batch
+4. **Workspace crate extraction**: Split `crates/clickhouse`, `crates/buffer` — see TODO Phase 7
 
 ---
 
@@ -771,14 +646,14 @@ transport.inject(Some("test-topic"), payload).await?;
 
 ### Local Performance Deviations
 
-While `hyperi-rustlib` provides the baseline transport pattern, this project MAY deviate locally
-for performance-critical paths:
+While `hyperi-rustlib` provides the baseline transport pattern, this project deviates
+locally for performance-critical paths:
 
 - **sonic-rs for JSON**: SIMD-accelerated JSON parsing (vs serde_json in hyperi-rustlib)
-- **Direct Arrow conversion**: Skip intermediate Value representation where possible
-- **Mison structural indexing**: Schema-guided field extraction without full parse
+- **`get_from_slice` for routing**: Extract `org_id`/`event_category` from raw bytes
+  without building a full DOM tree — avoids parse overhead on the routing hot path
 
-The local implementation MUST remain compatible with the transport abstraction's Message type
+The local implementation remains compatible with the transport abstraction's Message type
 and payload format conventions.
 
 ---
