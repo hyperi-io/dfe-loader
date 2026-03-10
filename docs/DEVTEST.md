@@ -221,76 +221,136 @@ auto_init:
   topic_replication_factor: 1
 ```
 
-## Remote Test Environment (k8s.tyrell.com.au)
+## Kafka Authentication
 
-Pre-configured test environment with ClickHouse 25.12 and Kafka.
+### Design Decision: SASL-SCRAM as Default
+
+SASL-SCRAM-SHA-512 is the standard mechanism for all production Kafka deployments.
+It works identically across every major Kafka platform with no code changes:
+
+| Platform | SASL-SCRAM support | Notes |
+|----------|--------------------|-------|
+| Apache Kafka (self-managed) | Native | Standard since Kafka 0.10.2 |
+| AutoMQ | Native | Drop-in Kafka replacement |
+| AWS MSK | Native | SCRAM via IAM-managed secrets |
+| Confluent Cloud | Native | Standard credential type |
+| Redpanda | Native | Full compatibility |
+| Strimzi (K8s) | Native | KafkaUser + ExternalSecret |
+
+Certificate-based auth (mTLS) and AWS IAM have high variance between platforms
+and require platform-specific implementations — avoid them for cross-platform workloads.
+
+### Transport Security
+
+| Scenario | Protocol | When to use |
+|----------|----------|-------------|
+| External / internet-facing | `SASL_SSL` | Production, external NodePorts, MSK, Confluent Cloud |
+| Internal K8s (pod-to-pod) | `SASL_PLAINTEXT` | Within a trusted K8s namespace |
+| Local dev only | `PLAINTEXT` | No auth, no TLS — never in production |
+
+TLS for the external Kafka listener uses the HyperSec PKI (DevEx) or your cloud
+provider's certificate. The `tls.enabled: true` config uses the system trust store
+by default — no `ca_cert_file` required when the CA is installed system-wide.
+
+### Config Reference
+
+```yaml
+kafka:
+  brokers:
+    - kafka.example.com:9094  # External SASL_SSL bootstrap
+  sasl:
+    enabled: true
+    mechanism: scram_sha_512  # Works for Apache Kafka, AutoMQ, MSK, Confluent Cloud
+    username: dfe-loader
+    password: "${KAFKA_PASSWORD}"
+  tls:
+    enabled: true             # SASL_SSL — required for external listeners
+    # ca_cert_file: /certs/ca.pem  # Only if CA not in system trust store
+```
+
+For internal K8s deployment, omit `tls` or set `enabled: false` and use port 9095
+(`SASL_PLAINTEXT`).
+
+---
+
+## DevEx Test Environment (devex.hyperi.io)
+
+Pre-configured test environment. Full connection reference:
+`/projects/hyperi-infra/docs/DEVEX-KAFKA-CH-CONNECTIONS.md`
 
 ### Connection Details
 
 | Service | Host | Port | Protocol |
 |---------|------|------|----------|
-| ClickHouse Native | k8s.tyrell.com.au | 30900 | TCP |
-| ClickHouse HTTP | k8s.tyrell.com.au | 30123 | HTTP |
-| Kafka | k8s.tyrell.com.au | 30092 | SASL_PLAINTEXT |
+| ClickHouse HTTP | clickhouse.devex.hyperi.io | 8123 | HTTP |
+| ClickHouse Native | clickhouse.devex.hyperi.io | 9000 | TCP |
+| Kafka (external) | kafka.devex.hyperi.io | 32089 | SASL_SSL |
+| Kafka (internal, K8s only) | kafka-kafka-bootstrap.kafka.svc | 9095 | SASL_PLAINTEXT |
+
+The Kafka external listener uses per-broker NodePorts for correct partition-leader routing:
+bootstrap `32089`, brokers `k8s-2:32090`, `k8s-1:32091`, `k8s-3:32092`.
 
 ### Credentials
 
 ```bash
 # ClickHouse
+CLICKHOUSE_HOST=clickhouse.devex.hyperi.io
 CLICKHOUSE_USER=default
-CLICKHOUSE_PASSWORD=TyrellPOC2024
-CLICKHOUSE_DATABASE=benchmark
+CLICKHOUSE_PASSWORD=<see .env>
 
-# Kafka (SCRAM-SHA-512)
-KAFKA_SASL_USER=loader
-KAFKA_SASL_PASSWORD=TyrellPOC2024
+# Kafka — dfe-loader user (topic CRUD, produce, consume)
+KAFKA_BROKERS=kafka.devex.hyperi.io:32089
+KAFKA_SECURITY_PROTOCOL=SASL_SSL
+KAFKA_SASL_MECHANISM=SCRAM-SHA-512
+KAFKA_SASL_USER=dfe-loader
+KAFKA_SASL_PASSWORD=<see .env or OpenBao kv/infrastructure/kafka>
 ```
 
-### Using the k8s Config
+The HyperSec Root CA is installed system-wide on devex VMs — no `ca_cert_file` needed.
+
+### Testing Kafka Connection
 
 ```bash
-# Use the pre-configured k8s config
-./target/release/dfe-loader --config config.k8s.yaml --log-level info --log-format text
+# List topics (SASL_SSL — external listener)
+kcat -b kafka.devex.hyperi.io:32089 \
+  -X security.protocol=SASL_SSL \
+  -X sasl.mechanism=SCRAM-SHA-512 \
+  -X sasl.username=dfe-loader \
+  -X sasl.password=<password> \
+  -L
 
-# Or copy and customize
-cp config.k8s.yaml config.yaml
+# Produce test message
+echo '{"_source":"test","message":"hello"}' | \
+kcat -b kafka.devex.hyperi.io:32089 \
+  -X security.protocol=SASL_SSL \
+  -X sasl.mechanism=SCRAM-SHA-512 \
+  -X sasl.username=dfe-loader \
+  -X sasl.password=<password> \
+  -P -t events_land
+
+# Consume from beginning
+kcat -b kafka.devex.hyperi.io:32089 \
+  -X security.protocol=SASL_SSL \
+  -X sasl.mechanism=SCRAM-SHA-512 \
+  -X sasl.username=dfe-loader \
+  -X sasl.password=<password> \
+  -C -t events_land -o beginning -e
 ```
 
 ### Testing ClickHouse Connection
 
 ```bash
+# Via HTTP
+curl "http://clickhouse.devex.hyperi.io:8123/?user=default&password=<password>" \
+  --data "SELECT version()"
+
 # Via clickhouse-client
 clickhouse-client \
-  --host k8s.tyrell.com.au \
-  --port 30900 \
+  --host clickhouse.devex.hyperi.io \
+  --port 9000 \
   --user default \
-  --password TyrellPOC2024 \
+  --password <password> \
   --query "SELECT version()"
-
-# Via HTTP
-curl "http://k8s.tyrell.com.au:30123/?user=default&password=TyrellPOC2024" \
-  --data "SELECT version()"
-```
-
-### Testing Kafka Connection
-
-```bash
-# List topics (using kcat/kafkacat)
-kcat -b k8s.tyrell.com.au:30092 \
-  -X security.protocol=SASL_PLAINTEXT \
-  -X sasl.mechanism=SCRAM-SHA-512 \
-  -X sasl.username=loader \
-  -X sasl.password=TyrellPOC2024 \
-  -L
-
-# Produce test message
-echo '{"event_category":"test","message":"hello"}' | \
-kcat -b k8s.tyrell.com.au:30092 \
-  -X security.protocol=SASL_PLAINTEXT \
-  -X sasl.mechanism=SCRAM-SHA-512 \
-  -X sasl.username=loader \
-  -X sasl.password=TyrellPOC2024 \
-  -P -t events
 ```
 
 ## CLI Reference

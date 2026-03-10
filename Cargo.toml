@@ -68,12 +68,13 @@ mimalloc = { version = ">=0.1", optional = true }
 maxminddb = { version = ">=0.24", features = ["mmap", "simdutf8"] }
 
 # GeoIP auto-download (HTTP + gzip decompression + tar extraction)
-reqwest = { version = ">=0.12", default-features = false, features = ["rustls-tls", "gzip"] }
+reqwest = { version = ">=0.12", default-features = false, features = ["rustls-tls-native-roots", "gzip"] }
 flate2 = ">=1.0"
 tar = ">=0.4"
 
 # ClickHouse official crate (HTTP/RowBinary for DDL and schema queries)
-clickhouse = { version = ">=0.14", features = ["lz4", "time"] }
+# rustls-tls-native-roots: uses system trust store — trusts HyperI DevEx Root CA on devex machines
+clickhouse = { version = ">=0.14", features = ["lz4", "time", "rustls-tls-native-roots"] }
 time = ">=0.3"
 
 # Utilities
@@ -112,7 +113,7 @@ testcontainers = ">=0.26"
 testcontainers-modules = { version = ">=0.10", features = ["kafka", "clickhouse"] }
 
 # ClickHouse official crate (HTTP/RowBinary) — bakeoff comparison vs JSONEachRow path
-clickhouse = { version = ">=0.14", features = ["lz4", "time"] }
+clickhouse = { version = ">=0.14", features = ["lz4", "time", "rustls-tls-native-roots"] }
 time = ">=0.3"
 
 # Async test utilities
