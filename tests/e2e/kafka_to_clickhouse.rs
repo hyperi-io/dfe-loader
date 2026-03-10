@@ -23,7 +23,7 @@ use serde_json::json;
 
 use dfe_loader::config::{
     BufferConfig, ClickHouseConfig, Config, DlqConfig, KafkaConfig, MetadataConfig, OrgRoute,
-    RoutingConfig, SaslConfig, TimestampDqConfig,
+    RoutingConfig, SaslConfig, TimestampDqConfig, TlsConfig,
 };
 use dfe_loader::pipeline::Orchestrator;
 
@@ -92,13 +92,19 @@ async fn ch_count(
     text.trim().parse().unwrap_or(0)
 }
 
+fn ch_tls_from_env() -> bool {
+    load_dotenv();
+    env::var("CLICKHOUSE_TLS").unwrap_or_default().to_lowercase() == "true"
+}
+
 fn make_reqwest_client() -> (reqwest::Client, String, String, String) {
     load_dotenv();
     let host = env::var("CLICKHOUSE_HOST").expect("CLICKHOUSE_HOST");
     let port = env::var("CLICKHOUSE_HTTP_PORT").unwrap_or_else(|_| "8123".to_string());
     let user = env::var("CLICKHOUSE_USER").unwrap_or_else(|_| "default".to_string());
     let pass = env::var("CLICKHOUSE_PASSWORD").unwrap_or_default();
-    let base_url = format!("http://{}:{}", host, port);
+    let scheme = if ch_tls_from_env() { "https" } else { "http" };
+    let base_url = format!("{}://{}:{}", scheme, host, port);
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
         .build()
@@ -116,12 +122,27 @@ fn make_client_config() -> ClientConfig {
     if let Ok(user) = env::var("KAFKA_SASL_USER") {
         let pass = env::var("KAFKA_SASL_PASSWORD").unwrap_or_default();
         let mech = env::var("KAFKA_SASL_MECHANISM").unwrap_or_else(|_| "SCRAM-SHA-512".to_string());
-        cfg.set("security.protocol", "SASL_PLAINTEXT");
+        let protocol =
+            env::var("KAFKA_SECURITY_PROTOCOL").unwrap_or_else(|_| "SASL_PLAINTEXT".to_string());
+        cfg.set("security.protocol", &protocol);
         cfg.set("sasl.mechanism", &mech);
         cfg.set("sasl.username", &user);
         cfg.set("sasl.password", &pass);
     }
     cfg
+}
+
+/// Returns a TLS config for the pipeline's KafkaConfig when the security
+/// protocol requires SSL. Uses the system trust store — no CA file needed
+/// when the HyperI DevEx Root CA is installed system-wide.
+fn kafka_tls_from_env() -> Option<TlsConfig> {
+    load_dotenv();
+    let protocol = env::var("KAFKA_SECURITY_PROTOCOL").unwrap_or_default();
+    if protocol.contains("SSL") {
+        Some(TlsConfig { enabled: true, ..Default::default() })
+    } else {
+        None
+    }
 }
 
 fn make_producer() -> FutureProducer {
@@ -168,12 +189,16 @@ fn ch_config_from_env() -> ClickHouseConfig {
     let port = env::var("CLICKHOUSE_HTTP_PORT").unwrap_or_else(|_| "8123".to_string());
     ClickHouseConfig {
         hosts: vec![format!("{}:{}", host, port)],
-        database: "default".to_string(),
+        database: env::var("CLICKHOUSE_DATABASE").unwrap_or_else(|_| "default".to_string()),
         username: env::var("CLICKHOUSE_USER").unwrap_or_else(|_| "default".to_string()),
         password: env::var("CLICKHOUSE_PASSWORD").unwrap_or_default(),
-        protocol: "native".to_string(),
+        protocol: "http".to_string(),
         tables: Vec::new(),
-        tls: None,
+        tls: if ch_tls_from_env() {
+            Some(TlsConfig { enabled: true, ..Default::default() })
+        } else {
+            None
+        },
     }
 }
 
@@ -332,6 +357,13 @@ async fn test_kafka_to_clickhouse_bulk_load() {
 
     let (http, base_url, user, pass) = make_reqwest_client();
 
+    ch_execute(
+        &http, &base_url, &user, &pass,
+        "CREATE DATABASE IF NOT EXISTS benchmark ON CLUSTER 'default'",
+    )
+    .await
+    .expect("Failed to create benchmark database");
+
     // Table in the `benchmark` Atomic database — ON CLUSTER ensures it exists on
     // all 3 nodes. MergeTree (no replication); count via clusterAllReplicas.
     ch_execute(
@@ -386,6 +418,7 @@ async fn test_kafka_to_clickhouse_bulk_load() {
             topics: vec![topic.clone()],
             topic_refresh_secs: 0,
             sasl: sasl_config_from_env(),
+            tls: kafka_tls_from_env(),
             ..Default::default()
         },
         clickhouse: ch_config_from_env(),
@@ -428,17 +461,29 @@ async fn test_kafka_to_clickhouse_bulk_load() {
 
     let mut orchestrator = Orchestrator::new(config);
     let shutdown = orchestrator.shutdown_token();
-    let pipeline_handle = tokio::spawn(async move { orchestrator.run().await });
+
+    // Cancel after 20 s from a background task so we keep ownership of
+    // the orchestrator here and can inspect stats after run() returns.
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(20)).await;
+        shutdown.cancel();
+    });
 
     // 1 200 messages through the devex cluster should complete well within 20 s
-    tokio::time::sleep(Duration::from_secs(20)).await;
-    shutdown.cancel();
-
-    match pipeline_handle.await {
-        Ok(Ok(())) => eprintln!("Pipeline shut down cleanly"),
-        Ok(Err(e)) => eprintln!("Pipeline returned error (expected on shutdown): {e}"),
-        Err(e) => eprintln!("Pipeline task panicked: {e}"),
+    match orchestrator.run().await {
+        Ok(()) => eprintln!("Pipeline shut down cleanly"),
+        Err(e) => eprintln!("Pipeline returned error: {e}"),
     }
+
+    let stats = orchestrator.stats().clone();
+    eprintln!(
+        "Pipeline stats — received: {}, processed: {}, inserted: {}, errors: {}, dlq: {}",
+        stats.messages_received,
+        stats.messages_processed,
+        stats.rows_inserted,
+        stats.errors,
+        stats.messages_dlq,
+    );
 
     // Atomic database — no replication sync needed; clusterAllReplicas
     // queries all 3 nodes and sums their local counts.
@@ -498,6 +543,13 @@ async fn test_kafka_to_clickhouse_org_routing() {
     let shared_full = format!("benchmark.{shared_table}");
 
     let (http, base_url, user, pass) = make_reqwest_client();
+
+    ch_execute(
+        &http, &base_url, &user, &pass,
+        "CREATE DATABASE IF NOT EXISTS benchmark ON CLUSTER 'default'",
+    )
+    .await
+    .expect("Failed to create benchmark database");
 
     // Create the per-org database on all 3 cluster nodes
     ch_execute(
@@ -572,6 +624,7 @@ async fn test_kafka_to_clickhouse_org_routing() {
             topics: vec![topic.clone()],
             topic_refresh_secs: 0,
             sasl: sasl_config_from_env(),
+            tls: kafka_tls_from_env(),
             ..Default::default()
         },
         clickhouse: ch_config_from_env(),
@@ -617,16 +670,26 @@ async fn test_kafka_to_clickhouse_org_routing() {
 
     let mut orchestrator = Orchestrator::new(config);
     let shutdown = orchestrator.shutdown_token();
-    let pipeline_handle = tokio::spawn(async move { orchestrator.run().await });
 
-    tokio::time::sleep(Duration::from_secs(15)).await;
-    shutdown.cancel();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(15)).await;
+        shutdown.cancel();
+    });
 
-    match pipeline_handle.await {
-        Ok(Ok(())) => {}
-        Ok(Err(e)) => eprintln!("Pipeline error (expected on shutdown): {e}"),
-        Err(e) => eprintln!("Pipeline task panicked: {e}"),
+    match orchestrator.run().await {
+        Ok(()) => {}
+        Err(e) => eprintln!("Pipeline error: {e}"),
     }
+
+    let stats = orchestrator.stats().clone();
+    eprintln!(
+        "Pipeline stats — received: {}, processed: {}, inserted: {}, errors: {}, dlq: {}",
+        stats.messages_received,
+        stats.messages_processed,
+        stats.rows_inserted,
+        stats.errors,
+        stats.messages_dlq,
+    );
 
     // Atomic DB + MergeTree: query across all nodes to get total count
     let per_org_count = ch_count(
