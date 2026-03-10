@@ -21,8 +21,8 @@
 //! - `half_open_max_requests`: Max requests allowed in half-open state
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::RwLock;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use tracing::{debug, info, warn};

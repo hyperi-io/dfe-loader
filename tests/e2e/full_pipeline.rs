@@ -276,8 +276,14 @@ async fn test_pipeline_multi_table_routing() {
 
     // Insert to both tables via JSONEachRow
     let auth_rows: Vec<serde_json::Map<String, serde_json::Value>> = vec![
-        json!({"id": 1, "event": "login", "value": 1.0}).as_object().unwrap().clone(),
-        json!({"id": 3, "event": "logout", "value": 3.0}).as_object().unwrap().clone(),
+        json!({"id": 1, "event": "login", "value": 1.0})
+            .as_object()
+            .unwrap()
+            .clone(),
+        json!({"id": 3, "event": "logout", "value": 3.0})
+            .as_object()
+            .unwrap()
+            .clone(),
     ];
 
     let result = client.insert_json_rows(&table1, &auth_rows).await;
@@ -285,8 +291,14 @@ async fn test_pipeline_multi_table_routing() {
     assert_eq!(result.unwrap(), 2);
 
     let api_rows: Vec<serde_json::Map<String, serde_json::Value>> = vec![
-        json!({"id": 2, "event": "request", "value": 2.0}).as_object().unwrap().clone(),
-        json!({"id": 4, "event": "response", "value": 4.0}).as_object().unwrap().clone(),
+        json!({"id": 2, "event": "request", "value": 2.0})
+            .as_object()
+            .unwrap()
+            .clone(),
+        json!({"id": 4, "event": "response", "value": 4.0})
+            .as_object()
+            .unwrap()
+            .clone(),
     ];
 
     let result = client.insert_json_rows(&table2, &api_rows).await;

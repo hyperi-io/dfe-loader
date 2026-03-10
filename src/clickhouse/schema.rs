@@ -19,8 +19,8 @@
 //! - Optional background refresh task
 //! - Thread-safe via parking_lot RwLock
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use parking_lot::RwLock;

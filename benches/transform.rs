@@ -11,11 +11,11 @@
 //!
 //! Run with: cargo bench --bench transform
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use serde_json::{json, Map, Value};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use serde_json::{Map, Value, json};
 use std::hint::black_box;
 
-use dfe_loader::transform::{flatten_value_owned, BatchFlattener, TimestampValidator};
+use dfe_loader::transform::{BatchFlattener, TimestampValidator, flatten_value_owned};
 
 /// Sample nested JSON structures of varying depth
 fn shallow_nested() -> Value {

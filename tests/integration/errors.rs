@@ -278,10 +278,7 @@ fn test_error_inconsistent_schema_in_batch() {
     assert_eq!(batches.len(), 1);
 
     let rows = &batches[0].rows;
-    eprintln!(
-        "✓ Inconsistent schemas merged: {} rows",
-        rows.len()
-    );
+    eprintln!("✓ Inconsistent schemas merged: {} rows", rows.len());
 }
 
 #[tokio::test]
@@ -332,9 +329,8 @@ async fn test_error_insert_schema_mismatch() {
     client.execute(&ddl).await.expect("Failed to create table");
 
     // JSONEachRow with type coercion — Float for String column
-    let rows: Vec<serde_json::Map<String, serde_json::Value>> = vec![
-        json!({"id": 1, "name": 1.5}).as_object().unwrap().clone(),
-    ];
+    let rows: Vec<serde_json::Map<String, serde_json::Value>> =
+        vec![json!({"id": 1, "name": 1.5}).as_object().unwrap().clone()];
 
     let result = client.insert_json_rows(&table_name, &rows).await;
     // ClickHouse coerces float to string in JSONEachRow
@@ -369,9 +365,8 @@ async fn test_error_insert_missing_column() {
     client.execute(&ddl).await.expect("Failed to create table");
 
     // Row missing required_field — ClickHouse fills defaults
-    let rows: Vec<serde_json::Map<String, serde_json::Value>> = vec![
-        json!({"id": 1}).as_object().unwrap().clone(),
-    ];
+    let rows: Vec<serde_json::Map<String, serde_json::Value>> =
+        vec![json!({"id": 1}).as_object().unwrap().clone()];
 
     let result = client.insert_json_rows(&table_name, &rows).await;
     match result {
@@ -405,7 +400,10 @@ async fn test_error_insert_extra_column() {
 
     // Row with extra column not in table
     let rows: Vec<serde_json::Map<String, serde_json::Value>> = vec![
-        json!({"id": 1, "extra_column": "extra"}).as_object().unwrap().clone(),
+        json!({"id": 1, "extra_column": "extra"})
+            .as_object()
+            .unwrap()
+            .clone(),
     ];
 
     let result = client.insert_json_rows(&table_name, &rows).await;
@@ -466,7 +464,10 @@ async fn test_error_invalid_clickhouse_host() {
     };
 
     let client = HttpClickHouseClient::new(&ch_config);
-    assert!(client.is_ok(), "Client creation should succeed (lazy connect)");
+    assert!(
+        client.is_ok(),
+        "Client creation should succeed (lazy connect)"
+    );
 
     // Health check should fail
     let result = client.unwrap().health_check().await;

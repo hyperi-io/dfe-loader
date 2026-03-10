@@ -9,10 +9,10 @@
 use std::collections::HashMap;
 
 use rustc_hash::FxHashMap;
-use serde_json::{json, Map};
+use serde_json::{Map, json};
 
-use dfe_loader::clickhouse::types::{ColumnInfo, ParsedType};
 use dfe_loader::clickhouse::TableSchema;
+use dfe_loader::clickhouse::types::{ColumnInfo, ParsedType};
 use dfe_loader::config::{FieldMappingConfig, FieldMappingOverride};
 use dfe_loader::transform::remap_loader::load_builtin;
 use dfe_loader::transform::{
@@ -561,7 +561,9 @@ fn test_cache_mark_pending_skips_already_cached() {
 mod clickhouse_tests {
     use super::*;
 
-    use crate::common::{create_http_test_client, drop_http_test_table, load_dotenv, unique_table_name};
+    use crate::common::{
+        create_http_test_client, drop_http_test_table, load_dotenv, unique_table_name,
+    };
 
     #[tokio::test]
     async fn test_fetch_column_comments_with_renamed() {

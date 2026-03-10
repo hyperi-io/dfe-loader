@@ -8,7 +8,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
 use dfe_loader::clickhouse::circuit_breaker::{CircuitBreaker, CircuitBreakerConfig};
 use dfe_loader::clickhouse::{Inserter, InserterConfig};

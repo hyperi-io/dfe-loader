@@ -19,8 +19,8 @@
 
 use std::collections::HashSet;
 use std::net::IpAddr;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::RwLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use rustc_hash::FxHashMap;
 use tracing::debug;

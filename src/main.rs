@@ -29,9 +29,9 @@ use tokio::signal;
 use tracing::{error, info, warn};
 
 use dfe_loader::config::{Config, ConfigWatcher, SharedConfig, WatcherConfig};
-use dfe_loader::metrics::{run_server, Metrics, ServerState};
+use dfe_loader::metrics::{Metrics, ServerState, run_server};
 use dfe_loader::pipeline::Orchestrator;
-use hyperi_rustlib::cli::{run_app, CliError, CommonArgs, DfeApp, StandardCommand, VersionInfo};
+use hyperi_rustlib::cli::{CliError, CommonArgs, DfeApp, StandardCommand, VersionInfo, run_app};
 
 #[derive(Parser, Debug)]
 #[command(name = "dfe-loader")]

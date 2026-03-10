@@ -10,7 +10,7 @@ pub mod metrics;
 use std::env;
 use std::time::Duration;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use dfe_loader::config::{ClickHouseConfig, KafkaConfig, SaslConfig};
 
@@ -264,6 +264,9 @@ pub async fn drop_http_test_table(
     table_name: &str,
 ) {
     let _ = client
-        .execute(&format!("DROP TABLE IF EXISTS {} ON CLUSTER 'default'", table_name))
+        .execute(&format!(
+            "DROP TABLE IF EXISTS {} ON CLUSTER 'default'",
+            table_name
+        ))
         .await;
 }

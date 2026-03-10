@@ -37,12 +37,12 @@ use tokio::sync::Semaphore;
 use tokio::time::sleep;
 use tracing::{debug, error, info, warn};
 
+use crate::Result;
 use crate::buffer::{FlushBatch, KafkaOffset};
 use crate::clickhouse::circuit_breaker::CircuitBreaker;
 use crate::clickhouse::error::ErrorCategory;
 use crate::clickhouse::{HttpClickHouseClient, SchemaCache};
 use crate::transform::Coercer;
-use crate::Result;
 
 /// Configuration for the inserter
 pub struct InserterConfig {
@@ -177,7 +177,11 @@ impl Inserter {
     /// handle automatically — e.g., epoch ms integers into DateTime64 columns,
     /// UUID normalisation, string "true"/"1" into Bool, and null handling for
     /// non-nullable columns.
-    pub fn with_schema_coercion(mut self, schema_cache: Arc<SchemaCache>, coercer: Arc<Coercer>) -> Self {
+    pub fn with_schema_coercion(
+        mut self,
+        schema_cache: Arc<SchemaCache>,
+        coercer: Arc<Coercer>,
+    ) -> Self {
         self.schema_cache = Some(schema_cache);
         self.coercer = Some(coercer);
         self
@@ -234,11 +238,7 @@ impl Inserter {
     /// - **Transient errors**: Geometric backoff retry up to max_retries
     /// - **Data errors**: Returns immediately (caller should salvage)
     /// - **Fatal errors**: Returns immediately (no retry)
-    pub async fn insert_rows(
-        &self,
-        table: &str,
-        rows: &[Map<String, Value>],
-    ) -> Result<usize> {
+    pub async fn insert_rows(&self, table: &str, rows: &[Map<String, Value>]) -> Result<usize> {
         let mut last_error = None;
 
         for attempt in 0..=self.max_retries {
@@ -371,16 +371,8 @@ impl Inserter {
         let mut inserted = 0;
         let mut failed = Vec::new();
 
-        self.salvage_batch(
-            &table,
-            &rows,
-            &offsets,
-            0,
-            0,
-            &mut inserted,
-            &mut failed,
-        )
-        .await;
+        self.salvage_batch(&table, &rows, &offsets, 0, 0, &mut inserted, &mut failed)
+            .await;
 
         info!(
             table = %table,

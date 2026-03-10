@@ -15,10 +15,10 @@
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::RwLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 
-use maxminddb::{geoip2, MaxMindDbError, Reader};
+use maxminddb::{MaxMindDbError, Reader, geoip2};
 use tracing::{debug, info, warn};
 
 use crate::config::GeoIpConfig;
@@ -407,11 +407,7 @@ impl GeoIpEnricher {
             }
         }
 
-        if found {
-            Some(result)
-        } else {
-            None
-        }
+        if found { Some(result) } else { None }
     }
 }
 

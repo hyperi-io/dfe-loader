@@ -25,7 +25,7 @@
 use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use crossbeam_channel::{bounded, Receiver, Sender, TryRecvError};
+use crossbeam_channel::{Receiver, Sender, TryRecvError, bounded};
 use serde_json::{Map, Value};
 
 use crate::buffer::KafkaOffset;

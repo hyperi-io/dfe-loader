@@ -43,7 +43,7 @@ pub use client_http::{HttpClickHouseClient, SharedHttpClient};
 pub use config::{ClickHouseConfig, Transport};
 pub use error::{ClickHouseError, ErrorCategory};
 pub use types::{
-    default_value_for_category, is_null_string, ColumnInfo, ParsedType, TableSchema, NULL_STRINGS,
+    ColumnInfo, NULL_STRINGS, ParsedType, TableSchema, default_value_for_category, is_null_string,
 };
 
 // Export resilience modules

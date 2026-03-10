@@ -12,7 +12,7 @@ use dfe_loader::buffer::{BufferManager, KafkaOffset};
 use dfe_loader::config::{
     BufferConfig, FieldSanitizationConfig, MetadataConfig, RoutingConfig, TimestampDqConfig,
 };
-use dfe_loader::kafka::{KafkaMessage, MemoryTransportAdapter};
+use dfe_loader::kafka::MemoryTransportAdapter;
 use dfe_loader::payload::{FormatDetector, FormatMode};
 use dfe_loader::routing::{RouteResult, Router};
 use dfe_loader::transform::Transformer;
@@ -407,7 +407,7 @@ async fn test_buffer_accumulates_messages() {
 
     // Process messages through the pipeline
     let messages = adapter.recv(10).await.unwrap();
-    for (i, msg) in messages.iter().enumerate() {
+    for (_i, msg) in messages.iter().enumerate() {
         let value: serde_json::Value = sonic_rs::from_slice(&msg.payload).unwrap();
 
         let route = match router.route_value(&value) {
@@ -419,7 +419,7 @@ async fn test_buffer_accumulates_messages() {
 
         let offset = KafkaOffset::with_shared_topic(msg.topic.clone(), msg.partition, msg.offset);
 
-        buffer_manager.push(&route, result.data, Some(offset), None);
+        buffer_manager.push(&route, result.data, Some(offset));
     }
 
     // Check buffer stats
@@ -474,20 +474,20 @@ async fn test_buffer_flush_on_threshold() {
         };
         let result = transformer.transform(value).unwrap();
         let offset = KafkaOffset::with_shared_topic(msg.topic.clone(), msg.partition, msg.offset);
-        buffer_manager.push(&route, result.data, Some(offset), None);
+        buffer_manager.push(&route, result.data, Some(offset));
     }
 
     // Should have triggered flush condition
     assert!(buffer_manager.should_flush());
 
     // Get ready batches
-    let batches = buffer_manager.get_ready_for_flush().unwrap();
+    let batches = buffer_manager.get_ready_for_flush();
 
     // Should have at least one batch ready
     assert!(!batches.is_empty());
 
     // Total rows should be >= 5 (flush threshold)
-    let total_rows: usize = batches.iter().map(|b| b.batch.num_rows()).sum();
+    let total_rows: usize = batches.iter().map(|b| b.rows.len()).sum();
     assert!(total_rows >= 5);
 }
 
@@ -583,7 +583,7 @@ async fn test_full_message_flow_without_clickhouse() {
 
         // Buffer
         let offset = KafkaOffset::with_shared_topic(msg.topic.clone(), msg.partition, msg.offset);
-        buffer_manager.push(&table, result.data, Some(offset), None);
+        buffer_manager.push(&table, result.data, Some(offset));
     }
 
     // Verify routing
@@ -597,14 +597,14 @@ async fn test_full_message_flow_without_clickhouse() {
     assert_eq!(stats.pending_rows, 3);
 
     // Flush all and verify batches
-    let batches = buffer_manager.flush_all().unwrap();
+    let batches = buffer_manager.flush_all();
 
     // Should have 3 tables: acme.auth, acme.network, globex.file
     assert_eq!(batches.len(), 3);
 
     // Verify each batch has 1 row
     for batch in &batches {
-        assert_eq!(batch.batch.num_rows(), 1);
+        assert_eq!(batch.rows.len(), 1);
         assert!(!batch.offsets.is_empty());
     }
 }
@@ -667,19 +667,19 @@ async fn test_high_volume_message_processing() {
             let result = transformer.transform(value).unwrap();
             let offset =
                 KafkaOffset::with_shared_topic(msg.topic.clone(), msg.partition, msg.offset);
-            buffer_manager.push(&table, result.data, Some(offset), None);
+            buffer_manager.push(&table, result.data, Some(offset));
             total_processed += 1;
         }
 
         // Check for flush
         if buffer_manager.should_flush() {
-            let batches = buffer_manager.get_ready_for_flush().unwrap();
+            let batches = buffer_manager.get_ready_for_flush();
             flush_count += batches.len();
         }
     }
 
     // Final flush
-    let final_batches = buffer_manager.flush_all().unwrap();
+    let final_batches = buffer_manager.flush_all();
     flush_count += final_batches.len();
 
     assert_eq!(total_processed, MESSAGE_COUNT);
