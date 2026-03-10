@@ -4,8 +4,8 @@
 //! Configuration fixture builders
 
 use dfe_loader::config::{
-    BufferConfig, ClickHouseConfig, DlqConfig, KafkaConfig, MetadataConfig, RoutingConfig,
-    TimestampConfig,
+    BufferConfig, ClickHouseConfig, DlqConfig, KafkaConfig, MetadataConfig, OrgRoute,
+    RoutingConfig, TimestampConfig,
 };
 use std::collections::HashMap;
 
@@ -143,9 +143,8 @@ pub struct RoutingConfigBuilder {
     default_db: String,
     default_table: String,
     org_id_field: Option<String>,
-    routed_orgs: Vec<String>,
-    route_all_by_org: bool,
-    category_to_table: HashMap<String, String>,
+    org_routes: Vec<OrgRoute>,
+    source_to_table: HashMap<String, String>,
 }
 
 impl RoutingConfigBuilder {
@@ -156,9 +155,8 @@ impl RoutingConfigBuilder {
             default_db: "common".to_string(),
             default_table: "events".to_string(),
             org_id_field: Some("org_id".to_string()),
-            routed_orgs: vec![],
-            route_all_by_org: false,
-            category_to_table: HashMap::new(),
+            org_routes: vec![],
+            source_to_table: HashMap::new(),
         }
     }
 
@@ -187,19 +185,16 @@ impl RoutingConfigBuilder {
         self
     }
 
-    pub fn routed_orgs(mut self, orgs: Vec<&str>) -> Self {
-        self.routed_orgs = orgs.into_iter().map(|s| s.to_string()).collect();
+    /// Add explicit per-org database routes.
+    /// Each listed org gets its own database; all others go to default_db.
+    pub fn org_routes(mut self, routes: Vec<OrgRoute>) -> Self {
+        self.org_routes = routes;
         self
     }
 
-    pub fn route_all_by_org(mut self, enable: bool) -> Self {
-        self.route_all_by_org = enable;
-        self
-    }
-
-    pub fn category_to_table(mut self, category: &str, table: &str) -> Self {
-        self.category_to_table
-            .insert(category.to_string(), table.to_string());
+    pub fn source_to_table(mut self, source: &str, table: &str) -> Self {
+        self.source_to_table
+            .insert(source.to_string(), table.to_string());
         self
     }
 
@@ -210,9 +205,8 @@ impl RoutingConfigBuilder {
             default_db: self.default_db,
             default_table: self.default_table,
             org_id_field: self.org_id_field,
-            routed_orgs: self.routed_orgs,
-            route_all_by_org: self.route_all_by_org,
-            category_to_table: self.category_to_table,
+            org_routes: self.org_routes,
+            source_to_table: self.source_to_table,
             mapping_file: None,
             topic_suffixes: vec!["_land".to_string(), "_load".to_string()],
             compat_v2_source: false,
@@ -371,7 +365,7 @@ mod tests {
             .table_fields(vec!["event_category"])
             .default_db("shared")
             .default_table("events")
-            .category_to_table("auth", "auth_events")
+            .source_to_table("auth", "auth_events")
             .build();
 
         assert_eq!(config.db_fields, vec!["org_id", "tags.event.org_id"]);
@@ -379,7 +373,7 @@ mod tests {
         assert_eq!(config.default_db, "shared");
         assert_eq!(config.default_table, "events");
         assert_eq!(
-            config.category_to_table.get("auth"),
+            config.source_to_table.get("auth"),
             Some(&"auth_events".to_string())
         );
     }

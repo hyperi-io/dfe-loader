@@ -336,6 +336,14 @@ Located at `clickhouse.devex.hyperi.io` (3-node replicated cluster, Keeper-manag
 - Kafka: `kafka.devex.hyperi.io:9092` with SCRAM-SHA-512
 - See `.env` for credentials
 
+**Infrastructure source:** `/projects/hyperi-infra` — canonical SSoT for the devex cluster.
+- Kafka config: `ansible/playbooks/k8s-services.yml` (Strimzi `KafkaNodePool` + `Kafka` CRs)
+- Devex env: `config/environments/devex.yml`
+- Kafka cluster: Strimzi KRaft, 3 combined controller+broker pods (`kafka-combined-{0,1,2}`)
+- `auto.create.topics.enable: "true"`, `default.replication.factor: 3`, `min.insync.replicas: 2`
+- `admin` user is a Kafka superuser (`superUsers: [CN=admin, admin]`)
+- Broker resource limits: 2 Gi request / 3 Gi limit per pod — raise in infra if OOMing
+
 ### Test Cluster Database Types
 
 | Database | Engine | Notes |

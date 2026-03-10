@@ -56,9 +56,17 @@ async fn test_routing_and_buffer() {
         default_db: "common".to_string(),
         default_table: "events_other".to_string(),
         org_id_field: Some("org_id".to_string()),
-        routed_orgs: vec![],
-        route_all_by_org: true, // E2E test uses old per-org routing
-        category_to_table: [
+        org_routes: vec![
+            dfe_loader::config::OrgRoute {
+                org_id: "acme".to_string(),
+                database: None,
+            },
+            dfe_loader::config::OrgRoute {
+                org_id: "tenant1".to_string(),
+                database: None,
+            },
+        ],
+        source_to_table: [
             ("auth".to_string(), "events_auth".to_string()),
             ("api".to_string(), "events_api".to_string()),
         ]

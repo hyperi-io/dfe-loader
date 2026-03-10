@@ -25,9 +25,8 @@ async fn test_org_id_field_population() {
         default_db: "common".to_string(),
         default_table: "events".to_string(),
         org_id_field: Some("org_id".to_string()),
-        routed_orgs: vec![],
-        route_all_by_org: false,
-        category_to_table: HashMap::new(),
+        org_routes: vec![],
+        source_to_table: HashMap::new(),
         mapping_file: None,
         topic_suffixes: vec!["_land".to_string(), "_load".to_string()],
         compat_v2_source: false,
@@ -84,9 +83,8 @@ async fn test_org_id_custom_field_name() {
         default_db: "common".to_string(),
         default_table: "events".to_string(),
         org_id_field: Some("tenant_id".to_string()), // Custom field name
-        routed_orgs: vec![],
-        route_all_by_org: false,
-        category_to_table: HashMap::new(),
+        org_routes: vec![],
+        source_to_table: HashMap::new(),
         mapping_file: None,
         topic_suffixes: vec!["_land".to_string(), "_load".to_string()],
         compat_v2_source: false,
@@ -131,9 +129,8 @@ async fn test_shared_schema_multiple_orgs() {
         default_db: "common".to_string(),
         default_table: "events".to_string(),
         org_id_field: Some("org_id".to_string()),
-        routed_orgs: vec![],
-        route_all_by_org: false,
-        category_to_table: [("auth".to_string(), "events_auth".to_string())]
+        org_routes: vec![],
+        source_to_table: [("auth".to_string(), "events_auth".to_string())]
             .into_iter()
             .collect(),
         mapping_file: None,

@@ -152,8 +152,8 @@ routing:
   default_db: dfe
   default_table: default
 
-  # Category to table mapping
-  category_to_table:
+  # Source value to table name mapping
+  source_to_table:
     auth: auth_events
     api: api_events
 
@@ -394,7 +394,7 @@ routing:
   default_table: default
 
   # Optional: map values to table names
-  category_to_table:
+  source_to_table:
     auth: auth_events
     api: api_events
     error: error_events

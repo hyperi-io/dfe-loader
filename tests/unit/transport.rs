@@ -167,13 +167,22 @@ async fn test_routing_from_json() {
             .unwrap();
     }
 
-    // Configure router — route_all_by_org enables per-org database routing
+    // Configure router with explicit org_routes for per-org database routing
     let routing_config = RoutingConfig {
         db_fields: vec!["org_id".to_string()],
         table_fields: vec!["event_category".to_string()],
         default_db: "common".to_string(),
         default_table: "events".to_string(),
-        route_all_by_org: true,
+        org_routes: vec![
+            dfe_loader::config::OrgRoute {
+                org_id: "org1".to_string(),
+                database: None,
+            },
+            dfe_loader::config::OrgRoute {
+                org_id: "org2".to_string(),
+                database: None,
+            },
+        ],
         ..Default::default()
     };
     let router = Router::new(&routing_config);
@@ -216,7 +225,7 @@ async fn test_routing_with_nested_fields() {
         .await
         .unwrap();
 
-    // Configure router with nested field paths — use routed_orgs allowlist for per-org routing
+    // Configure router with nested field paths and explicit org_route
     let routing_config = RoutingConfig {
         db_fields: vec!["org_id".to_string(), "tags.event.org_id".to_string()],
         table_fields: vec![
@@ -225,7 +234,10 @@ async fn test_routing_with_nested_fields() {
         ],
         default_db: "common".to_string(),
         default_table: "events".to_string(),
-        routed_orgs: vec!["nested_org".to_string()],
+        org_routes: vec![dfe_loader::config::OrgRoute {
+            org_id: "nested_org".to_string(),
+            database: None,
+        }],
         ..Default::default()
     };
     let router = Router::new(&routing_config);
@@ -535,13 +547,22 @@ async fn test_full_message_flow_without_clickhouse() {
             .unwrap();
     }
 
-    // Setup pipeline components — route_all_by_org enables per-org database routing
+    // Setup pipeline components with explicit org_routes for per-org database routing
     let routing_config = RoutingConfig {
         db_fields: vec!["org_id".to_string()],
         table_fields: vec!["event_category".to_string()],
         default_db: "common".to_string(),
         default_table: "events".to_string(),
-        route_all_by_org: true,
+        org_routes: vec![
+            dfe_loader::config::OrgRoute {
+                org_id: "acme".to_string(),
+                database: None,
+            },
+            dfe_loader::config::OrgRoute {
+                org_id: "globex".to_string(),
+                database: None,
+            },
+        ],
         ..Default::default()
     };
     let router = Router::new(&routing_config);

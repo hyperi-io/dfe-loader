@@ -64,11 +64,32 @@ fn default_transport() -> String {
 pub struct KafkaConfig {
     pub brokers: Vec<String>,
     pub group: String,
+    /// Explicit topic list. Empty = auto-discover all `*_load` / `*_land` topics
+    /// from the broker, with load-over-land fallback applied.
     pub topics: Vec<String>,
     pub topic_regex: Option<String>,
     pub client_id: String,
     pub sasl: Option<SaslConfig>,
     pub tls: Option<TlsConfig>,
+
+    /// Regex patterns for topics to include during auto-discovery.
+    /// Empty = include all discovered topics. Applied after load-over-land fallback.
+    #[serde(default)]
+    pub topic_include: Vec<String>,
+
+    /// Regex patterns for topics to exclude during auto-discovery.
+    /// Applied after include filter.
+    #[serde(default)]
+    pub topic_exclude: Vec<String>,
+
+    /// How often (seconds) to re-check the broker for new/removed topics.
+    /// 0 = disabled. Default: 60.
+    #[serde(default = "default_topic_refresh_secs")]
+    pub topic_refresh_secs: u64,
+}
+
+fn default_topic_refresh_secs() -> u64 {
+    60
 }
 
 impl Default for KafkaConfig {
@@ -76,11 +97,14 @@ impl Default for KafkaConfig {
         Self {
             brokers: vec!["localhost:9092".to_string()],
             group: "clickhouse-loader".to_string(),
-            topics: vec!["default_land".to_string()],
+            topics: vec![], // Empty = auto-discover
             topic_regex: None,
             client_id: "clickhouse-loader".to_string(),
             sasl: None,
             tls: None,
+            topic_include: vec![],
+            topic_exclude: vec![],
+            topic_refresh_secs: default_topic_refresh_secs(),
         }
     }
 }
@@ -419,6 +443,28 @@ pub struct RoutingRule {
     pub db: Option<String>,
 }
 
+/// Explicit per-organisation database routing.
+///
+/// When an org is listed here, messages from that org are routed to the
+/// specified database (or `org_id` if `database` is omitted). Orgs NOT
+/// listed always go to `default_db`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OrgRoute {
+    /// Organisation identifier (matched against org_id_field value)
+    pub org_id: String,
+
+    /// Target database. If omitted, the org_id itself is used as the database name.
+    #[serde(default)]
+    pub database: Option<String>,
+}
+
+impl OrgRoute {
+    /// Return the effective database name for this org route.
+    pub fn effective_database(&self) -> &str {
+        self.database.as_deref().unwrap_or(&self.org_id)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RoutingConfig {
@@ -436,7 +482,8 @@ pub struct RoutingConfig {
     /// Default: ["_source"] — aligned with _source field extraction
     pub table_fields: Vec<String>,
 
-    /// Default database if no db_field matches (or db_fields is empty)
+    /// Default database if no db_field matches (or db_fields is empty), or if the
+    /// org is not listed in org_routes.
     /// Default: "dfe" (shared multi-tenant schema)
     pub default_db: String,
 
@@ -449,19 +496,15 @@ pub struct RoutingConfig {
     /// This field is extracted and stored as _org_id, regardless of routing behaviour
     pub org_id_field: Option<String>,
 
-    /// Organisations that get their own database (allowlist)
-    /// Example: ["acme", "bigcorp"] → routes to acme.*, bigcorp.*
-    /// Empty list = all orgs go to default_db (recommended)
-    pub routed_orgs: Vec<String>,
+    /// Per-organisation database routing. Only orgs explicitly listed here receive
+    /// their own database — all other orgs always go to default_db.
+    /// Example: [{org_id: "acme"}, {org_id: "bigcorp", database: "bigcorp_dfe"}]
+    #[serde(default)]
+    pub org_routes: Vec<OrgRoute>,
 
-    /// Route ALL organisations to their own databases
-    /// If true: org_id always determines database (ignores routed_orgs)
-    /// If false: only routed_orgs get own database, others use default_db
-    /// Default: false (shared schema)
-    pub route_all_by_org: bool,
-
-    /// Legacy: category to table mapping (for backwards compatibility)
-    pub category_to_table: HashMap<String, String>,
+    /// Source value to table name mapping
+    /// Maps extracted source values to destination table names
+    pub source_to_table: HashMap<String, String>,
 
     /// Legacy: mapping file path
     pub mapping_file: Option<String>,
@@ -491,9 +534,8 @@ impl Default for RoutingConfig {
             // Extract org_id for _org_id column (RLS)
             org_id_field: Some("org_id".to_string()),
             // No per-org routing by default (shared schema)
-            routed_orgs: vec![],
-            route_all_by_org: false,
-            category_to_table: HashMap::new(),
+            org_routes: vec![],
+            source_to_table: HashMap::new(),
             mapping_file: None,
             topic_suffixes: vec!["_land".to_string(), "_load".to_string()],
             compat_v2_source: false,
@@ -1605,11 +1647,7 @@ impl Config {
                 "At least one Kafka broker must be configured".into(),
             ));
         }
-        if self.kafka.topics.is_empty() && self.kafka.topic_regex.is_none() {
-            return Err(crate::Error::Config(
-                "Either topics or topic_regex must be configured".into(),
-            ));
-        }
+        // Empty topics list is valid: triggers auto-discovery of *_load/*_land topics.
 
         // ClickHouse validation
         if self.clickhouse.hosts.is_empty() {
@@ -1742,10 +1780,11 @@ mod tests {
 
     #[test]
     fn test_config_validation_no_topics() {
+        // Empty topics list is valid — triggers auto-discovery mode.
         let mut config = Config::default();
         config.kafka.topics = vec![];
         config.kafka.topic_regex = None;
-        assert!(config.validate().is_err());
+        assert!(config.validate().is_ok());
     }
 
     #[test]

@@ -1,17 +1,17 @@
 // SPDX-License-Identifier: FSL-1.1-ALv2
 // Copyright (c) 2026 HYPERI PTY LIMITED
 
-//! Category to table mappings
+//! Source value to table name mappings
 
 use std::collections::HashMap;
 
-/// Maps event categories to ClickHouse table names
-pub struct CategoryMapping {
+/// Maps _source values to ClickHouse table names
+pub struct SourceMapping {
     mappings: HashMap<String, String>,
 }
 
-impl CategoryMapping {
-    /// Create a new category mapping
+impl SourceMapping {
+    /// Create a new source mapping
     pub fn new() -> Self {
         Self {
             mappings: HashMap::new(),
@@ -19,17 +19,17 @@ impl CategoryMapping {
     }
 
     /// Add a mapping
-    pub fn insert(&mut self, category: String, table: String) {
-        self.mappings.insert(category, table);
+    pub fn insert(&mut self, source: String, table: String) {
+        self.mappings.insert(source, table);
     }
 
-    /// Get the table for a category
-    pub fn get(&self, category: &str) -> Option<&String> {
-        self.mappings.get(category)
+    /// Get the table for a source value
+    pub fn get(&self, source: &str) -> Option<&String> {
+        self.mappings.get(source)
     }
 }
 
-impl Default for CategoryMapping {
+impl Default for SourceMapping {
     fn default() -> Self {
         Self::new()
     }

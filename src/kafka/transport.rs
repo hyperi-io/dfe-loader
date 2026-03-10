@@ -22,12 +22,14 @@ use hyperi_rustlib::transport::{
     GrpcConfig as TransportGrpcConfig, GrpcTransport, KafkaConfig as TransportKafkaConfig,
     KafkaToken, KafkaTransport, Transport, TransportError,
 };
+use tracing::info;
 
 use crate::Result;
 use crate::buffer::KafkaOffset;
 use crate::config::KafkaConfig;
 
 use super::KafkaMessage;
+use super::topic_resolver::resolver_from_config;
 
 /// Adapter that wraps hyperi-rustlib KafkaTransport for local use.
 ///
@@ -40,9 +42,23 @@ pub struct TransportAdapter {
 impl TransportAdapter {
     /// Create a new transport adapter from local KafkaConfig.
     ///
-    /// Converts local config to hyperi-rustlib TransportKafkaConfig.
+    /// If `config.topics` is empty, runs topic auto-discovery via `TopicResolver`
+    /// before creating the transport.
     pub async fn new(config: &KafkaConfig) -> Result<Self> {
-        let transport_config = Self::convert_config(config);
+        let mut transport_config = Self::convert_config(config);
+
+        if config.topics.is_empty() {
+            info!("topics not configured — auto-discovering *_load/*_land topics from broker");
+            let resolver = resolver_from_config(config)?;
+            let resolved = resolver.resolve()?;
+            if resolved.is_empty() {
+                return Err(crate::Error::Config(
+                    "Topic auto-discovery found no *_load or *_land topics on the broker".into(),
+                ));
+            }
+            transport_config.topics = resolved;
+        }
+
         let transport = KafkaTransport::new(&transport_config)
             .await
             .map_err(|e| crate::Error::Kafka(format!("Transport error: {e}")))?;

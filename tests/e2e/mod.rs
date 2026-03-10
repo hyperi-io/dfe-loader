@@ -4,5 +4,6 @@
 //! End-to-end tests
 
 mod full_pipeline;
+mod kafka_to_clickhouse;
 mod pipeline;
 mod stress;

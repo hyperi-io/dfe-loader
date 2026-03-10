@@ -14,11 +14,31 @@ kafka:
   brokers:
     - localhost:9092
   group: clickhouse-loader
-  topics:
-    - events
+  # Explicit topic list.
+  # Leave empty (default) to auto-discover all *_load / *_land topics from the broker,
+  # with load-over-land fallback: if {source}_load exists, {source}_land is suppressed.
+  topics: []
+  # topics:
+  #   - events_land    # Explicit list — disables auto-discovery
   # Alternatively, use regex for topic matching:
   # topic_regex: "events-.*"
   client_id: clickhouse-loader
+
+  # Auto-discovery filters (only used when topics is empty)
+  # Include only matching topics (regex, empty = include all)
+  topic_include: []
+  # topic_include:
+  #   - "^prod_"     # Only topics starting with prod_
+  # Exclude matching topics (applied after include filter)
+  topic_exclude: []
+  # topic_exclude:
+  #   - "^test_"     # Exclude test topics
+
+  # How often (seconds) to re-check the broker for new/removed topics.
+  # Only active when topics is empty (auto-discovery mode).
+  # 0 = disabled.
+  topic_refresh_secs: 60
+
   # SASL authentication (optional)
   # sasl:
   #   enabled: true
@@ -84,21 +104,31 @@ routing:
   table_fields:
     - _source
 
-  # Default database if no db_field matches
+  # Default database when db_field value is not found in org_routes (or db_fields is empty)
   default_db: dfe
 
   # Default table if no table_field matches
   default_table: dfe
 
-  # Optional: map extracted table values to different names
-  category_to_table:
+  # Per-organisation database routing.
+  # Only orgs explicitly listed here get their own database — all others go to default_db.
+  # org_id is matched against the value extracted from org_id_field / db_fields.
+  org_routes: []
+  # org_routes:
+  #   - org_id: acme               # Routes to "acme" database (org_id used as db name)
+  #   - org_id: bigcorp            # Routes to "bigcorp" database
+  #   - org_id: contoso
+  #     database: contoso_dfe      # Custom database name (overrides org_id)
+
+  # Optional: map extracted _source values to destination table names
+  source_to_table:
     auth: auth_events
     api: api_events
     admin: admin_events
     errors: error_events
 
   # External mapping file (CSV, YAML, or JSON)
-  # mapping_file: /etc/loader/category-mappings.yaml
+  # mapping_file: /etc/loader/source-mappings.yaml
 
   # Topic suffixes stripped when deriving _source from Kafka topic name
   # Example: topic "auth_land" with suffix "_land" → _source = "auth"

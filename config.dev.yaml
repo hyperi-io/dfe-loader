@@ -35,8 +35,8 @@ routing:
   default_db: common
   # Default table if no table_field matches
   default_table: common
-  # Optional: explicit category to table mapping
-  category_to_table:
+  # Optional: map extracted _source values to destination table names
+  source_to_table:
     auth: auth_events
     api: api_events
   dlq:

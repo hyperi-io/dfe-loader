@@ -115,6 +115,7 @@ fn get_test_config() -> KafkaConfig {
         client_id: "integration-test".to_string(),
         sasl,
         tls: None,
+        ..Default::default()
     }
 }
 
@@ -166,6 +167,7 @@ async fn test_kafka_config_validation() {
         client_id: "test-client".to_string(),
         sasl: None,
         tls: None,
+        ..Default::default()
     };
 
     assert!(!config.brokers.is_empty());
@@ -195,6 +197,7 @@ async fn test_kafka_sasl_config() {
             ..Default::default()
         }),
         tls: None,
+        ..Default::default()
     };
 
     assert!(config.sasl.is_some());
