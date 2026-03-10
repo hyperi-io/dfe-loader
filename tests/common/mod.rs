@@ -247,13 +247,17 @@ pub fn create_http_test_client() -> Option<dfe_loader::clickhouse::HttpClickHous
     // Build an HTTP config from the test environment
     let host = std::env::var("CLICKHOUSE_HOST").unwrap_or_default();
     let http_port = std::env::var("CLICKHOUSE_HTTP_PORT").unwrap_or_else(|_| "8123".to_string());
+    let tls = std::env::var("CLICKHOUSE_TLS")
+        .unwrap_or_default()
+        .to_lowercase()
+        == "true";
     let ch_config = dfe_loader::clickhouse::ClickHouseConfig {
         hosts: vec![format!("{}:{}", host, http_port)],
         transport: dfe_loader::clickhouse::Transport::Http,
         database: config.database.clone(),
         username: config.username.clone(),
         password: config.password.clone(),
-        tls: false,
+        tls,
         ..Default::default()
     };
     dfe_loader::clickhouse::HttpClickHouseClient::new(&ch_config).ok()
