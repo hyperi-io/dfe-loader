@@ -57,52 +57,27 @@ export CARGO_BUILD_JOBS=2
 
 ## Dependency Management
 
-### hyperi-rustlib via Artifactory (MANDATORY)
+### hyperi-rustlib via crates.io
 
-**hyperi-rustlib MUST be consumed via Artifactory, NOT local path.**
+**hyperi-rustlib is published publicly on crates.io. Use crates.io, NOT local path.**
 
 ```toml
-# ✅ CORRECT - Via Artifactory private registry
-hyperi-rustlib = { version = "x.y.z", registry = "hyperi", features = ["transport-kafka"] }
+# ✅ CORRECT - crates.io (default registry, no registry key needed)
+hyperi-rustlib = { version = "1.13.2", features = ["transport-kafka"] }
 
 # ❌ WRONG - Local path (development only, never commit)
 # hyperi-rustlib = { path = "../hyperi-rustlib", features = ["transport-kafka"] }
 ```
 
-### Artifactory Configuration
-
-| Component | Value |
-|-----------|-------|
-| JFrog Domain | `hypersec.jfrog.io` |
-| Registry Name | `hyperi` |
-| Virtual Repo | `hyperi-cargo-virtual` |
-| Local Repo | `hyperi-cargo-local` |
-| Index URL | `sparse+https://hypersec.jfrog.io/artifactory/api/cargo/hyperi-cargo-virtual/index/` |
-
-### Local Setup
-
-1. **Configure registry** in `.cargo/config.toml` (already done in this project):
-   ```toml
-   [registries.hyperi]
-   index = "sparse+https://hypersec.jfrog.io/artifactory/api/cargo/hyperi-cargo-virtual/index/"
-   ```
-
-2. **Set credentials** in `~/.cargo/credentials.toml`:
-   ```toml
-   [registries.hyperi]
-   token = "Bearer <your-artifactory-token>"
-   ```
-
-   Get token: `jf config export hyperi-token | base64 -d | jq -r '.accessToken'`
+No registry configuration or credentials required — standard `cargo fetch` / `cargo build` resolves it.
 
 ### Version Update Workflow
 
 1. Make changes in `/projects/hyperi-rustlib`
-2. Commit and push to hyperi-rustlib repo
-3. CI builds and publishes new version to Artifactory
-4. Update dfe-loader `Cargo.toml` with new version: `hyperi-rustlib = { version = "0.2.0", ... }`
-5. Run `cargo update -p hyperi-rustlib` to pull from Artifactory
-6. Test and commit
+2. Commit, push, and publish to crates.io (`cargo publish`)
+3. Update dfe-loader `Cargo.toml` with new version: `hyperi-rustlib = { version = "x.y.z", ... }`
+4. Run `cargo update -p hyperi-rustlib` to update the lock file
+5. Test and commit
 
 ### Submodule Push Access
 
@@ -488,7 +463,7 @@ Start a fresh session after any changes to this file.
 | JFrog domain stays `hypersec.jfrog.io` | Account-level, not user-facing; repo names updated to `hyperi-*` |
 | Parallel cargo jobs = 2 | Prevents CPU starvation on local builds and CI |
 | HyperI casing | Capital H, capital I for brand; HYPERI for legal entity |
-| Registry over git deps | Required for cargo publish to work |
+| crates.io over git deps | hyperi-rustlib is public on crates.io — no private registry needed |
 | settings.local.json broad permissions | Prevents Claude Code blocking on approval during AFK CI monitoring sessions |
 | MSRV 1.94 (rust-version = "1.94") | Pin to current stable. Track latest until OSS, then stabilise as the project matures |
 | Never kill cargo processes | Multiple projects share this host — NEVER kill cargo to free locks. Wait for builds to finish. |
