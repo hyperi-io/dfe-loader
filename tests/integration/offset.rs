@@ -291,7 +291,7 @@ fn test_buffer_offset_accumulation() {
             partition: 0,
             offset: 100 + i as i64,
         };
-        buffer_manager.push("test.events", data, Some(offset));
+        buffer_manager.push("test.events", data, Some(offset), None);
     }
 
     // Flush and check offsets are included
@@ -332,7 +332,7 @@ fn test_buffer_mixed_offset_tracking() {
             partition: 0,
             offset: i as i64,
         };
-        buffer_manager.push("default.auth", data, Some(offset));
+        buffer_manager.push("default.auth", data, Some(offset), None);
     }
 
     for i in 0..5 {
@@ -345,7 +345,7 @@ fn test_buffer_mixed_offset_tracking() {
             partition: 1,
             offset: 100 + i as i64,
         };
-        buffer_manager.push("default.api", data, Some(offset));
+        buffer_manager.push("default.api", data, Some(offset), None);
     }
 
     // Both tables should have 5 rows but not trigger flush (threshold is 10)

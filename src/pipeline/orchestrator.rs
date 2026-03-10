@@ -15,6 +15,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::Value;
+use tokio::sync::mpsc;
 use tokio::time::interval;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
@@ -332,6 +333,37 @@ impl Orchestrator {
             None
         };
 
+        // Bounded DLQ channel — avoids unbounded tokio::spawn per failed message.
+        // Hot path uses try_send() (non-blocking, drops on full).
+        // Background task drains the channel and forwards to the actual DLQ backend.
+        const DLQ_CHANNEL_CAPACITY: usize = 1_000;
+        let (dlq_tx, mut dlq_rx) = mpsc::channel::<DlqEntry>(DLQ_CHANNEL_CAPACITY);
+        if let Some(ref dlq_arc) = dlq {
+            let dlq_bg = Arc::clone(dlq_arc);
+            let shutdown_bg = self.shutdown.clone();
+            tokio::spawn(async move {
+                loop {
+                    tokio::select! {
+                        biased;
+                        _ = shutdown_bg.cancelled() => {
+                            // Drain remaining entries before exiting
+                            while let Ok(entry) = dlq_rx.try_recv() {
+                                if let Err(e) = dlq_bg.send(entry).await {
+                                    error!(error = %e, "DLQ send failed during shutdown drain");
+                                }
+                            }
+                            break;
+                        }
+                        Some(entry) = dlq_rx.recv() => {
+                            if let Err(e) = dlq_bg.send(entry).await {
+                                error!(error = %e, "DLQ send failed");
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
         let mut router = Router::new(&self.config.routing);
         let mut transformer = Transformer::with_routing(
             &self.config.timestamp_dq,
@@ -585,9 +617,8 @@ impl Orchestrator {
                                             m.record_dlq();
                                         }
 
-                                        // Send to DLQ if available
-                                        if let Some(ref dlq) = dlq {
-                                            let dlq_clone = Arc::clone(dlq);
+                                        // Send to DLQ if available (bounded channel, non-blocking)
+                                        if dlq.is_some() {
                                             let entry = DlqEntry::new(
                                                 "loader",
                                                 e.to_string(),
@@ -599,13 +630,17 @@ impl Orchestrator {
                                                 kafka_msg.offset,
                                             ));
 
-                                            // Fire-and-forget DLQ send (don't block pipeline)
-                                            tokio::spawn(async move {
-                                                if let Err(dlq_err) = dlq_clone.send(entry).await {
-                                                    error!(error = %dlq_err, "Failed to send message to DLQ");
+                                            match dlq_tx.try_send(entry) {
+                                                Ok(()) => {
+                                                    debug!(error = %e, "Message queued for DLQ");
                                                 }
-                                            });
-                                            debug!(error = %e, "Message queued for DLQ");
+                                                Err(mpsc::error::TrySendError::Full(_)) => {
+                                                    warn!(error = %e, "DLQ channel full, message dropped");
+                                                }
+                                                Err(mpsc::error::TrySendError::Closed(_)) => {
+                                                    warn!(error = %e, "DLQ channel closed");
+                                                }
+                                            }
                                         } else {
                                             warn!(error = %e, "Message processing failed, DLQ disabled");
                                         }
@@ -686,12 +721,11 @@ impl Orchestrator {
                                 }
                             }
 
-                            // Check for immediate flush (fast path: skip if nothing ready)
-                            if buffer_manager.should_flush() {
-                                let batches = buffer_manager.get_ready_for_flush();
-                                if !batches.is_empty() {
-                                    self.flush_batches_transport(&inserter, &transport, batches).await;
-                                }
+                            // Single-pass flush check: get_ready_for_flush() returns empty if
+                            // nothing is ready — no separate should_flush() guard needed
+                            let batches = buffer_manager.get_ready_for_flush();
+                            if !batches.is_empty() {
+                                self.flush_batches_transport(&inserter, &transport, batches).await;
                             }
                         }
                         Ok(_) => {
@@ -875,7 +909,10 @@ impl Orchestrator {
         let kafka_offset =
             KafkaOffset::with_shared_topic(msg.topic.clone(), msg.partition, msg.offset);
 
-        buffer_manager.push(&table, data, Some(kafka_offset));
+        // raw = None until Change A (HeaderExtractor) replaces the full flatten path.
+        // Once Change A is live, raw will be Arc<[u8]> from the message payload
+        // and _json injection above will move to client_http.rs zero-copy splice.
+        buffer_manager.push(&table, data, Some(kafka_offset), None);
 
         debug!(table = %table, "Message buffered");
         Ok(table)
@@ -895,15 +932,14 @@ impl Orchestrator {
 
         debug!(batches = batch_count, rows = total_rows, "Flushing batches");
 
-        // Pre-calculate total offset count for efficient allocation
-        let total_offsets: usize = batches.iter().map(|b| b.offsets.len()).sum();
 
-        // Collect offsets for commit after successful insert (takes ownership, avoids cloning)
-        let mut all_offsets: Vec<KafkaOffset> = Vec::with_capacity(total_offsets);
+        // Extract per-batch offsets in parallel with batches — enables independent commit.
+        // A failure in Table A must not block offset commit for Table B (correctness fix).
+        let mut per_batch_offsets: Vec<Vec<KafkaOffset>> = Vec::with_capacity(batches.len());
         let batches_for_insert: Vec<FlushBatch> = batches
             .into_iter()
             .map(|mut b| {
-                all_offsets.append(&mut b.offsets);
+                per_batch_offsets.push(std::mem::take(&mut b.offsets));
                 b
             })
             .collect();
@@ -917,55 +953,40 @@ impl Orchestrator {
             scaling.set_component("insert_latency", latency);
         }
 
-        let mut all_success = true;
-        let mut success_count = 0;
-
-        for result in results {
+        // Commit offsets independently per batch — Table A success/failure is isolated
+        for (result, offsets) in results.into_iter().zip(per_batch_offsets.into_iter()) {
             match result {
                 Ok(count) => {
                     self.stats.rows_inserted += count as u64;
-                    success_count += count;
                     if let Some(ref m) = self.metrics {
                         m.record_flush(count, latency);
                     }
+                    if !offsets.is_empty() {
+                        match transport.commit(&offsets).await {
+                            Ok(()) => {
+                                debug!(
+                                    offsets = offsets.len(),
+                                    rows = count,
+                                    "Kafka offsets committed"
+                                );
+                                if let Some(ref m) = self.metrics {
+                                    m.record_offsets_committed(offsets.len());
+                                }
+                            }
+                            Err(e) => {
+                                error!(error = %e, "Failed to commit Kafka offsets");
+                            }
+                        }
+                    }
                 }
                 Err(e) => {
-                    error!(error = %e, "Batch insert failed");
+                    error!(error = %e, "Batch insert failed — offsets withheld, messages will re-deliver");
                     self.stats.errors += 1;
-                    all_success = false;
                     if let Some(ref m) = self.metrics {
                         m.record_error();
                     }
                 }
             }
-        }
-
-        // Commit Kafka offsets via transport ONLY if all inserts succeeded
-        // This ensures at-least-once delivery - if any insert fails,
-        // the messages will be re-delivered on restart
-        if all_success && !all_offsets.is_empty() {
-            match transport.commit(&all_offsets).await {
-                Ok(()) => {
-                    debug!(
-                        offsets = all_offsets.len(),
-                        rows = success_count,
-                        "Kafka offsets committed after successful insert"
-                    );
-                    if let Some(ref m) = self.metrics {
-                        m.record_offsets_committed(all_offsets.len());
-                    }
-                }
-                Err(e) => {
-                    // Log but don't fail - offsets will be re-committed on next successful batch
-                    // or messages will be re-delivered (at-least-once semantics)
-                    error!(error = %e, "Failed to commit Kafka offsets");
-                }
-            }
-        } else if !all_success {
-            warn!(
-                failed_inserts = batch_count,
-                "Skipping offset commit due to insert failures - messages will be re-delivered"
-            );
         }
 
         self.stats.batches_flushed += batch_count as u64;

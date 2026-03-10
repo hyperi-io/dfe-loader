@@ -181,6 +181,25 @@ opt-level = 3          # Maximum optimization (default for release, explicit for
 inherits = "release"
 debug = true
 
+# =============================================================================
+# clickhouse-rs Fork Swap (Phase 5.5 — Steps B/C only)
+# =============================================================================
+#
+# dfe-loader is the test harness for the HyperI clickhouse-rs fork.
+# Swap mechanism: uncomment [patch] below to activate the fork.
+# Zero change to [dependencies] — the patch overrides the crates.io version.
+#
+# Branch merge order (test each in dfe-loader before merging next):
+#   feature/batching → feature/native-transport → feature/connection-pooling → feature/lc-insert
+#
+# PREREQUISITE: Complete Phase 5.7 and release Step B binary BEFORE using this.
+#
+# [patch.crates-io]
+# clickhouse = { path = "../clickhouse-rs" }
+#
+# To revert: comment out or remove the [patch.crates-io] section above.
+# =============================================================================
+
 [features]
 default = []
 # Alternative allocators (choose one for production)

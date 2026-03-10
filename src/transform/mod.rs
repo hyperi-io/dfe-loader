@@ -13,18 +13,18 @@ pub mod remap_loader;
 pub mod timestamp;
 pub mod transformer;
 
-pub use coerce::Coercer;
-pub use computed::{ComputedColumnCache, parse_computed_directive};
+pub use coerce::{Coercer, CoercionMode};
+pub use computed::{parse_computed_directive, ComputedColumnCache};
 pub use field_mapping::{
-    FieldMappingRule, MappingAction, RuleOrigin, TableFieldMapping, parse_renamed_directive,
+    parse_renamed_directive, FieldMappingRule, MappingAction, RuleOrigin, TableFieldMapping,
 };
-pub use flatten::{BatchFlattenStats, BatchFlattener, flatten, flatten_value, flatten_value_owned};
+pub use flatten::{flatten, flatten_value, flatten_value_owned, BatchFlattenStats, BatchFlattener};
 pub use mapping_builder::{FieldMappingCache, MappingBuilder};
-pub use project::{ProjectedData, Projector, project};
+pub use project::{project, ProjectedData, Projector};
 pub use remap_loader::BuiltinPreset;
 pub use timestamp::{
-    MAX_DATETIME64_MS, MAX_DATETIME64_NANO_MS, MIN_DATETIME64_MS, TimestampResult,
-    TimestampValidator, clamp_timestamp_ms, clamp_timestamp_ms_nano, is_valid_datetime64_ms,
-    validate_timestamp,
+    clamp_timestamp_ms, clamp_timestamp_ms_nano, is_valid_datetime64_ms, validate_timestamp,
+    TimestampResult, TimestampValidator, MAX_DATETIME64_MS, MAX_DATETIME64_NANO_MS,
+    MIN_DATETIME64_MS,
 };
 pub use transformer::{TransformResult, Transformer};

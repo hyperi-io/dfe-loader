@@ -14,19 +14,49 @@ use std::str::FromStr;
 use serde_json::Value;
 use tracing::warn;
 
-use crate::Result;
 use crate::clickhouse::{ParsedType, TableSchema};
 use crate::config::{CoercionConfig, NullHandling};
+use crate::Result;
+
+/// Coercion mode — controls which type coercions are applied.
+///
+/// `Full` applies all coercions (for non-JSONEachRow insert paths).
+/// `Delta` applies only the 4 coercions that ClickHouse JSONEachRow cannot
+/// perform server-side — suitable for the schema-guided hot path.
+///
+/// Delta coercions:
+/// - Epoch ms/μs/ns → DateTime64 ISO string (magnitude detection)
+/// - ISO 8601 T separator → space (default `basic` parser rejects T)
+/// - UUID without hyphens → RFC 4122 format
+/// - IPv4 integer → dotted-decimal string
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum CoercionMode {
+    /// Apply all coercions (default — safe for any insert path)
+    #[default]
+    Full,
+    /// Apply only coercions not handled by ClickHouse JSONEachRow server-side
+    Delta,
+}
 
 /// Coercer registry for type-aware value conversion
 pub struct Coercer {
     config: CoercionConfig,
+    mode: CoercionMode,
 }
 
 impl Coercer {
-    /// Create a new coercer with the given configuration
+    /// Create a new coercer with the given configuration (Full mode by default)
     pub fn new(config: CoercionConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            mode: CoercionMode::Full,
+        }
+    }
+
+    /// Set the coercion mode.
+    pub fn with_mode(mut self, mode: CoercionMode) -> Self {
+        self.mode = mode;
+        self
     }
 
     /// Coerce a JSON object to match the table schema
@@ -77,9 +107,12 @@ impl Coercer {
         Ok(())
     }
 
-    /// Coerce a single value to match the target type
+    /// Coerce a single value to match the target type.
+    ///
+    /// In `Delta` mode only the 4 coercions JSONEachRow cannot do server-side are applied;
+    /// all other types pass through unchanged. This is O(1) per type check.
     pub fn coerce_value(&self, value: &Value, target: &ParsedType) -> Result<Value> {
-        // Handle null values first
+        // Handle null values first (both modes — null handling is always needed)
         if value.is_null() || self.is_null_value(value) {
             return self.handle_null(target);
         }
@@ -92,7 +125,24 @@ impl Coercer {
             .map(|s| s.as_str())
             .unwrap_or_else(|| target.coercer_category());
 
-        // Dispatch to type-specific coercer
+        // Delta mode: pass through all types that JSONEachRow handles server-side.
+        // Only dispatch to specific coercers for the 4 delta cases + Bool + Array(DateTime64).
+        if self.mode == CoercionMode::Delta {
+            return match category {
+                "DateTime64" => self.coerce_datetime64(value, target),
+                "DateTime" => self.coerce_datetime(value),
+                "UUID" => self.coerce_uuid(value),
+                "IPv4" => self.coerce_ipv4(value),
+                // Bool: CH handles 1/0/true/false; delta also handles non-standard strings
+                "Bool" => self.coerce_bool(value),
+                // Array: needed for Array(DateTime64) inner-element coercion
+                "Array" => self.coerce_array(value, target),
+                // Everything else: CH JSONEachRow handles server-side — pass through
+                _ => Ok(value.clone()),
+            };
+        }
+
+        // Full mode: dispatch to type-specific coercer
         match category {
             "String" => self.coerce_string(value, target),
             "Int" => self.coerce_int(value),

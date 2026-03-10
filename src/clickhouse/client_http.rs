@@ -26,6 +26,8 @@ use serde::Deserialize;
 use serde_json::{Map, Value};
 use tracing::debug;
 
+// sonic_rs for SIMD-accelerated JSON serialisation of promoted cols
+
 use super::config::ClickHouseConfig;
 use super::error::ClickHouseError;
 use super::types::{ColumnInfo, ParsedType, TableSchema};
@@ -160,11 +162,11 @@ impl HttpClickHouseClient {
 
         let (db, tbl) = parse_db_table(table, &self.database);
 
-        // Serialise rows as newline-delimited JSON
+        // Serialise rows as NDJSON — sonic_rs for SIMD-accelerated encoding
         let estimated_size = rows.len() * 256;
         let mut body = Vec::with_capacity(estimated_size);
         for row in rows {
-            serde_json::to_writer(&mut body, row)
+            sonic_rs::to_writer(&mut body, row)
                 .map_err(|e| ClickHouseError::Insert(format!("JSON serialisation error: {e}")))?;
             body.push(b'\n');
         }
