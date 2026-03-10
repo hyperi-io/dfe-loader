@@ -121,13 +121,16 @@ pub struct FailedRow {
 
 /// Handles batch inserts to ClickHouse with retry logic.
 ///
-/// Uses `HttpClickHouseClient` for JSONEachRow HTTP inserts.
+/// All fields are `Copy` primitives or `Arc`-wrapped — `Clone` is `O(fields)` with
+/// cheap reference-count increments. Used to move a per-task inserter into `tokio::spawn`
+/// without reconstructing fields manually.
 ///
 /// ## Error Handling Strategy
 ///
 /// - **Transient errors** (overload, network): Geometric backoff retry
 /// - **Data errors** (type mismatch, corrupt): Binary-split salvage → DLQ bad rows
 /// - **Fatal errors** (auth, schema): Fail immediately, no retry
+#[derive(Clone)]
 pub struct Inserter {
     /// HTTP client for JSONEachRow inserts
     http_client: Arc<HttpClickHouseClient>,
@@ -312,6 +315,8 @@ impl Inserter {
         let table = batch.table;
         let mut rows = batch.rows;
         let offsets = batch.offsets;
+        // raw_payloads used by client_http.rs for zero-copy _json splice (Change C)
+        let _raw_payloads = batch.raw_payloads;
         let num_rows = rows.len();
 
         // Apply schema-driven coercion if configured (Phase 5.6).
@@ -501,6 +506,9 @@ impl Inserter {
     /// Insert multiple batches concurrently with salvage.
     ///
     /// Uses semaphore to limit concurrent inserts if configured.
+    /// Each spawn gets a clone of `self` with `semaphore: None` — the permit
+    /// is acquired in the outer scope before spawning, so the inner inserter
+    /// must not try to acquire it again.
     pub async fn insert_batches_with_salvage(
         &self,
         batches: Vec<FlushBatch>,
@@ -508,34 +516,17 @@ impl Inserter {
         let mut handles = Vec::with_capacity(batches.len());
 
         for batch in batches {
-            let http_client = self.http_client.clone();
-            let max_retries = self.max_retries;
-            let base_retry_delay_ms = self.base_retry_delay_ms;
-            let max_retry_delay_ms = self.max_retry_delay_ms;
-            let enable_salvage = self.enable_salvage;
-            let max_salvage_depth = self.max_salvage_depth;
             let table = batch.table.to_string();
             let semaphore = self.semaphore.clone();
-            let schema_cache = self.schema_cache.clone();
-            let coercer = self.coercer.clone();
+            let inserter = Self {
+                semaphore: None,
+                ..self.clone()
+            };
 
             handles.push(tokio::spawn(async move {
                 let _permit = match &semaphore {
                     Some(sem) => Some(sem.acquire().await.expect("Semaphore closed")),
                     None => None,
-                };
-
-                let inserter = Inserter {
-                    http_client,
-                    max_retries,
-                    base_retry_delay_ms,
-                    max_retry_delay_ms,
-                    enable_salvage,
-                    max_salvage_depth,
-                    semaphore: None,
-                    circuit_breaker: None,
-                    schema_cache,
-                    coercer,
                 };
                 let result = inserter.insert_with_salvage(batch).await;
                 (table, result)
@@ -570,33 +561,16 @@ impl Inserter {
         let mut handles = Vec::with_capacity(batches.len());
 
         for batch in batches {
-            let http_client = self.http_client.clone();
-            let max_retries = self.max_retries;
-            let base_retry_delay_ms = self.base_retry_delay_ms;
-            let max_retry_delay_ms = self.max_retry_delay_ms;
-            let enable_salvage = self.enable_salvage;
-            let max_salvage_depth = self.max_salvage_depth;
             let semaphore = self.semaphore.clone();
-            let schema_cache = self.schema_cache.clone();
-            let coercer = self.coercer.clone();
+            let inserter = Self {
+                semaphore: None,
+                ..self.clone()
+            };
 
             handles.push(tokio::spawn(async move {
                 let _permit = match &semaphore {
                     Some(sem) => Some(sem.acquire().await.expect("Semaphore closed")),
                     None => None,
-                };
-
-                let inserter = Inserter {
-                    http_client,
-                    max_retries,
-                    base_retry_delay_ms,
-                    max_retry_delay_ms,
-                    enable_salvage,
-                    max_salvage_depth,
-                    semaphore: None,
-                    circuit_breaker: None,
-                    schema_cache,
-                    coercer,
                 };
                 inserter.insert_batch(batch).await
             }));

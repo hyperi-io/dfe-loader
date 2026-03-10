@@ -25,45 +25,126 @@ Stage 1 ships first, Stage 2 is a drop-in upgrade — same API, better protocol.
 
 ## Active
 
-### Phase 5.6: Type Coercion Completeness (Stage 1 prerequisite)
+### Phase 5.7: Schema-Guided Extraction + Zero-Copy _json
 
-The old `clickhouse-arrow` fork handled explicit client-side coercions. JSONEachRow
-relies on ClickHouse server-side coercion. Before Stage 1 is production-ready, we
-must verify coverage and fill any gaps in the Rust transformer layer.
+Complete architectural overhaul of the hot path for SIMD efficiency and CPU reduction.
 
-Implementation complete — pending local build + test run:
-- [x] `coerce_row(&mut Map<String, Value>)` added to `Coercer` (hot-path method, no Value wrap overhead)
-- [x] `Inserter` wired with optional `schema_cache` + `coercer` fields via `with_schema_coercion()` builder
-- [x] `coerce_batch()` called once in `insert_with_salvage()` before first insert; salvage reuses coerced rows
-- [x] DateTime64 from epoch ms (`i64`) — client-side conversion to ISO string
-- [x] DateTime64 from ISO string — pass-through (CH handles RFC 3339)
-- [x] Bool from string (`"true"/"1"/"yes"/"on"/"t"/"y"`) and inverse
-- [x] Bool from int (`1/0/42/-1`)
-- [x] UUID normalisation — hex no-hyphens → RFC 4122 format
-- [x] IPv4 from integer — u32/u64 to dotted-decimal string
-- [x] Null → non-nullable default (`""` for String, `0` for numeric types)
-- [x] Array(DateTime64) inner coercion for arrays of epoch-ms values
-- [x] JSON column — object pass-through + JSON-string pass-through (CH 25.3+)
-- [x] Integration tests in `tests/integration/datatypes.rs` (9 tests, real ClickHouse)
+**Canonical pipeline:**
+```
+msg bytes → JSON normalise (auto-sense JSON/MsgPack) → Arc<[u8]>
+                │
+                ├─ route (sonic-rs get_from_slice, no full parse)
+                ├─ extract schema cols (get_from_slice per col, O(schema_cols))
+                ├─ delta coerce promoted cols only (4 cases, O(schema_cols × 1 branch))
+                ├─ enrich promoted cols (GeoIP/rep/risk flat injection)
+                └─ buffer (promoted Map + Arc<[u8]> for _json splice)
 
-**Next:** Run `./ci/local-build.sh`, fix any compile/clippy/test failures.
+At flush:
+  sonic_rs::to_string(promoted_map) + splice Arc<[u8]> as "_json" → NDJSON
+```
 
-### Phase 5.5: Migrate to clickhouse-rs Feature Branch (Stage 2)
+Common header fields (`_timestamp`, `_org_id`, `_source`, `_timestamp_received`)
+are ALWAYS extracted to top-level columns — required for DFE operational correctness.
 
-Drop-in upgrade from upstream `clickhouse` crate to our fork at `/projects/clickhouse-rs`.
-Same JSONEachRow insert path; adds native TCP protocol option and full type support.
+Implementation changes:
+- [ ] **B**: `buffer/manager.rs` — `FlushBatch` carries `raw_payloads: Vec<Arc<[u8]>>`,
+      `push()` accepts `raw: Option<Arc<[u8]>>`, single-pass `get_ready_for_flush()`
+- [ ] **I**: `clickhouse/inserter.rs` — `#[derive(Clone)]`, simplify `insert_batches*`
+- [ ] **J**: `pipeline/orchestrator.rs` — remove `should_flush()` double-scan guard
+- [ ] **C**: `clickhouse/client_http.rs` — zero-copy `_json` splice, `_json` collision
+      detect+merge, `sonic_rs::to_string` for promoted map
+- [ ] **D/E**: `transform/coerce.rs` — `CoercionMode` enum (`Full` / `Delta`),
+      Delta dispatch (pass-through for most types, O(1) branch per col)
+- [ ] **F**: `orchestrator.rs` — per-batch offset commit (independent per table)
+- [ ] **G**: `orchestrator.rs` — bounded DLQ channel (`mpsc::channel(1_000)` + background task)
+- [ ] **H**: `orchestrator.rs` — schema resolution off event loop (background tasks + select!)
+- [ ] **A**: `transform/extractor.rs` (new) — `HeaderExtractor` with sonic-rs SIMD extraction;
+      `orchestrator.rs` — wire extractor, `payload.mode` config gate (`json_primary` default)
+
+**Hot-path optimisation review:** After every major change (each sub-item above and after
+Phase 5.5 Step C), perform a CPU-first review of the hot path:
+- Priority: CPU 80%, Memory 20%
+- Profile with `cargo flamegraph` or `perf record` on a representative workload
+- Check for: unnecessary allocations, clone()s, map iterations, bounds checks
+- Document findings in `docs/DESIGN.md` (Future Optimisations section)
+
+**Next:** Run `./ci/local-build.sh`, confirm 520 tests still pass.
+
+### Phase 5.6: Type Coercion Completeness ✓ COMPLETE
+
+- [x] `coerce_row(&mut Map<String, Value>)` added to `Coercer`
+- [x] `Inserter` wired with optional `schema_cache` + `coercer` via `with_schema_coercion()`
+- [x] DateTime64 from epoch ms, ISO string, Bool, UUID, IPv4, Null defaults, Array(DateTime64)
+- [x] Integration tests in `tests/integration/datatypes.rs` (9 tests)
+
+### Phase 5.5: clickhouse-rs Fork — Native Protocol + Batching
+
+dfe-loader is the **test harness** for the HyperI `clickhouse-rs` fork at
+`/projects/clickhouse-rs` (GitHub: `hyperi-io/clickhouse-rs`).
+
+**Fork branches and merge order:**
+```
+feature/batching      → main (independent, merge anytime)
+feature/native-transport → main
+feature/connection-pooling → main (after native-transport)
+feature/lc-insert     → main (after connection-pooling)
+```
+
+| Branch | Commits | Purpose |
+|---|---|---|
+| `feature/batching` | 1 from main | HTTP `TableBatcher<T>`, independent of native |
+| `feature/native-transport` | 4 from main | Native TCP: types, Bool/sparse, INSERT, schema cache |
+| `feature/connection-pooling` | +1 on native | Deadpool pool, cursor drain, connection health |
+| `feature/lc-insert` | +1 on pooling | LowCardinality INSERT encoder + LC(Nullable(T)) fix |
 
 Fork adds over upstream `clickhouse` crate:
-- Native TCP protocol (upstream HTTP-only as of v0.12+)
+- Native TCP protocol (upstream is HTTP-only as of v0.12+)
+- HTTP `TableBatcher<T>` (server-side buffering)
+- Connection pooling (Deadpool)
+- LowCardinality INSERT + LC(Nullable(T)) reader fix
 - JSON, Variant, Dynamic, Nested, BFloat16, Time, AggregateFunction types
 
-Tasks:
-- [ ] Review `/projects/clickhouse-rs` branch — document exact patches vs upstream
-- [ ] Publish feature branch to Artifactory (`hyperi-cargo-local`) as a versioned crate
-- [ ] Update `Cargo.toml` to use Artifactory version instead of crates.io upstream
-- [ ] Confirm JSON type (GA v25.3) insert/query works end-to-end via HTTP protocol
-- [ ] Confirm native TCP protocol inserts work end-to-end
+**Swap mechanism** (zero change to main `[dependencies]`):
+```toml
+# Cargo.toml — add at end to activate fork
+[patch.crates-io]
+clickhouse = { path = "../clickhouse-rs" }
+```
+Remove or comment out the `[patch]` section to revert to upstream.
+
+**WBS Breakdown (sequential — do NOT skip steps):**
+
+**Step A (CURRENT):** Get everything working with upstream `clickhouse` crate (crates.io).
+  Phase 5.7 (schema-guided extraction) must be complete and 520 tests passing.
+  This is prerequisite for Steps B and C.
+
+**Step A.5 (code review):** Before Step B, run a full code review and simplification pass.
+  Phase 5.7 adds HeaderExtractor + many changes. Review for CPU-first hot-path correctness,
+  remove duplication, simplify where possible. Target: zero dead code, clean clippy.
+
+**Step B:** Release binary for internal testing (Kaz).
+  Binary builds from `main` once Phase 5.7 is merged.
+  Kaz validates end-to-end pipeline before any fork changes.
+
+**Step C:** Migrate to clickhouse-rs fork — done LOCK-STEP with dfe-loader.
+  Fork branches are merged in order and tested via `[patch.crates-io]` in
+  dfe-loader. Each branch is a separate dfe-loader test session.
+  The fork and dfe-loader evolve together — NOT independently.
+
+Tasks (Step C only — Steps A/B must be complete first):
+- [ ] Merge fork: feature/batching → main
+- [ ] Test batching in dfe-loader: `[patch.crates-io]` → TableBatcher HTTP path
+- [ ] Merge fork: feature/native-transport → main
+- [ ] Test native TCP in dfe-loader: INSERT + SELECT + schema cache end-to-end
+- [ ] Merge fork: feature/connection-pooling → main
+- [ ] Test pooling in dfe-loader: deadpool, cursor drain, connection health
+- [ ] Merge fork: feature/lc-insert → main
+- [ ] Test LowCardinality INSERT in dfe-loader: LC columns + LC(Nullable(T))
+- [ ] Publish merged fork to crates.io as a pre-release (`0.14.x-hyperi.1`)
+- [ ] Update `Cargo.toml` to use published pre-release (remove `[patch]`)
+- [ ] Confirm JSON type (GA v25.3) insert/query works end-to-end
 - [ ] Confirm full type support: Variant, Dynamic, Nested, BFloat16, Time, AggregateFunction
+- [ ] Once stable, open PR to upstream `clickhouse-rs`
 
 ### Phase 6: Dependency Audit + Version Bumps
 

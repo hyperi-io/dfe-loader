@@ -174,7 +174,7 @@ async fn test_shared_schema_multiple_orgs() {
             // Each should have its own org_id
             assert!(result.data.contains_key("_org_id"));
 
-            buffer.push(&table, result.data, None);
+            buffer.push(&table, result.data, None, None);
         }
     }
 

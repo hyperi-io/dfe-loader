@@ -392,6 +392,7 @@ async fn test_inserter_batch_salvage() {
         table: CompactString::from(&table_name),
         rows,
         offsets: Vec::new(),
+        raw_payloads: Vec::new(),
     };
 
     // Insert with salvage

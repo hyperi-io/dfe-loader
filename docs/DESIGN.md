@@ -1,7 +1,7 @@
 # Design Document: dfe-loader
 
-**Version:** 3.0 (JSONEachRow Architecture + gRPC Transport)
-**Date:** 2026-03-09
+**Version:** 4.0 (Schema-Guided Extraction + Zero-Copy _json)
+**Date:** 2026-03-11
 
 ---
 
@@ -10,8 +10,8 @@
 High-performance data loader from message transports to ClickHouse via HTTP JSONEachRow.
 
 ```text
-Transport ──► Parse ──► Route ──► Transform ──► Buffer ──► ClickHouse HTTP
-(Kafka/gRPC/Memory)   (SIMD)   (db.table)   (flatten)  (per-table)   (JSONEachRow)
+Transport ──► Arc<[u8]> ──► Route ──► Extract ──► Coerce+Enrich ──► Buffer ──► ClickHouse HTTP
+(Kafka/gRPC/Memory)  (zero-copy)  (db.table)  (schema-guided)  (promoted cols)  (per-table)  (JSONEachRow)
 ```
 
 ### Transport Selection
@@ -28,11 +28,11 @@ See [GRPC-MESH.md](./GRPC-MESH.md) for the complete gRPC transport design.
 
 ## Design Goals
 
-1. **Schema flexibility**: Accept any JSON structure, unknown fields pass through
-2. **At-least-once delivery**: Kafka offset tracking per batch
-3. **Minimise memory churn**: Batched processing, pre-allocated collections
-4. **Operational simplicity**: HTTP inserts, no native protocol dependency
-5. **Clean architecture**: Immutable data, functional transforms
+1. **Schema flexibility**: Accept any JSON structure, unknown fields preserved in `_json`
+2. **At-least-once delivery**: Kafka offset tracking per batch, committed independently
+3. **CPU efficiency**: SIMD JSON ops (sonic-rs), zero-copy `_json`, coercion only on promoted cols
+4. **Operational simplicity**: HTTP inserts by default; native protocol via fork (opt-in)
+5. **Clean architecture**: Immutable data, schema-guided promotion, bounded concurrency
 
 ---
 
@@ -50,10 +50,17 @@ struct BufferManager {
 }
 
 struct TableBuffer {
-    rows: Vec<Map<String, Value>>,    // Accumulated JSON rows
+    rows: Vec<Map<String, Value>>,    // Promoted schema cols + enrichment
     offsets: Vec<KafkaOffset>,        // Kafka offsets for at-least-once
+    raw_payloads: Vec<Arc<[u8]>>,     // Raw Kafka bytes — zero-copy for _json splice
     created_at: Instant,              // For time-based flush
-    size_bytes: usize,                // Approximate memory tracking
+}
+
+struct FlushBatch {
+    table: CompactString,             // "db.table" (stack-allocated for ≤24 bytes)
+    rows: Vec<Map<String, Value>>,    // Promoted cols only — NOT the full payload
+    offsets: Vec<KafkaOffset>,        // Committed per-batch independently
+    raw_payloads: Vec<Arc<[u8]>>,     // Parallel to rows — spliced as `_json` at serialise time
 }
 ```
 
@@ -66,12 +73,16 @@ struct TableBuffer {
 
 **Lifecycle:**
 
-1. Kafka message → Parse JSON/MsgPack → Route to db.table
-2. Push `Map<String, Value>` to per-table buffer (with Kafka offset)
-3. When ready (row count, bytes, or time): Serialise to JSONEachRow NDJSON
-4. Insert to ClickHouse via `reqwest` HTTP POST
-5. Success: Commit Kafka offsets
-6. Failure: Retry batch
+1. Kafka message → `Arc<[u8]>` once from raw bytes (zero-copy reference-counted)
+2. Route to `db.table` via sonic-rs `get_from_slice` (SIMD, no full DOM parse)
+3. Extract schema-promoted fields via `sonic_rs::get_from_slice` per column (O(schema_cols))
+4. Coerce promoted fields only (delta coercions, O(schema_cols × 1 branch))
+5. Enrich promoted fields (GeoIP, reputation, risk — inject flat cols)
+6. Push promoted `Map` + `Arc<[u8]>` to per-table buffer (with Kafka offset)
+7. When ready (row count or age): serialise promoted cols as NDJSON, splice raw bytes as `_json`
+8. Insert to ClickHouse via `reqwest` HTTP POST
+9. Success: Commit **this batch's** Kafka offsets (independent of other tables)
+10. Failure: Retry batch
 
 ### 2. Dynamic db.table Routing
 
@@ -127,26 +138,40 @@ With default config:
 - `table_fields = ["event_category", "tags.event_category"]` → finds "auth"
 - Result: `acme.auth`
 
-### 3. Transform Pipeline (Per-Row)
-
-Each message is transformed individually before being pushed to the per-table buffer:
+### 3. Schema-Guided Field Extraction (Per-Row)
 
 ```rust
-fn transform_pipeline(value: Value, raw: Option<&[u8]>) -> Result<Map<String, Value>> {
-    let result = transformer.transform_with_raw(value, raw, None)?;
-    Ok(result.data)
+// Hot path: one Arc creation, zero full parses
+let raw: Arc<[u8]> = Arc::from(msg.payload.as_slice());
+
+// Route: SIMD field access, no DOM
+let table = router.route_from_bytes(&raw)?;
+
+// Extract: one sonic-rs get_from_slice per schema column
+let schema = schema_cache.get(&table);
+let mut promoted = extractor.extract(&raw, schema.as_deref())?;
+// promoted contains only: header fields + schema-matched cols
+// ~10-30 entries vs potentially 200+ in source payload
+
+// Coerce: delta coercions only on promoted cols (O(schema_cols × 1 branch))
+if let (Some(coercer), Some(schema)) = (&coercer, &schema) {
+    coercer.coerce_row(&mut promoted, schema)?;
 }
+
+// Enrich: inject flat cols from GeoIP/rep/risk
+enrich(&mut promoted, &enrichment);
+
+// Buffer: promoted map + raw Arc for _json splice at flush time
+buffer_manager.push(&table, promoted, offset, Some(raw));
 ```
 
-The `Transformer` applies:
-1. **Timestamp extraction and validation** — extracts `_timestamp`, validates range
-2. **Common header injection** — injects `_org_id`, `_source`, `_timestamp_received`
-3. **JSON flattening** — nested objects flattened to dot-notation keys
-4. **Field sanitisation** — strip leading `@`, handle numeric prefixes, collapse underscores
-5. **Enrichment** — GeoIP, reputation, risk scoring (each optional)
-6. **CEL computed columns** — evaluate `@computed` expressions from DDL column comments
+**`_json` is NEVER inserted into the promoted Map.** It is spliced at serialisation time
+as a zero-copy append — no heap allocation until the final HTTP POST body is assembled.
 
-`_json` is injected by the buffer manager directly from raw Kafka bytes (not by the transformer).
+The extractor extracts:
+1. **Header fields always** — `_timestamp`, `_org_id`, `_source`, `_timestamp_received`
+2. **Schema-promoted fields** — one `sonic_rs::get_from_slice` per column in `system.columns`
+3. **Nothing else** — all other source fields remain accessible only via `_json`
 
 ### 3. Schema Cache (Read-Only)
 
@@ -168,7 +193,44 @@ impl SchemaCache {
 }
 ```
 
-### 4. ClickHouse Insert (HTTP JSONEachRow)
+### 4. _json Column: The Catch-All
+
+Every row written to ClickHouse includes a `_json` column containing the complete,
+unmodified Kafka message payload as a native ClickHouse JSON type.
+
+**This is the zero-copy path:**
+
+```
+Kafka bytes → Arc<[u8]> → spliced into NDJSON body at flush time
+                          (no allocation, no parse, no re-encode)
+```
+
+**`_json` semantics:**
+- Contains the full original source payload — nothing stripped, nothing modified
+- Field access via ClickHouse path syntax: `_json.user.name`, `_json.tags[0]`
+- All unknown/unpromoted fields are accessible via `_json`
+- This allows ad-hoc querying of any source field without schema changes
+
+**When `_json` is sufficient:** For exploratory queries or low-frequency analytics,
+`_json` path access works. ClickHouse reads only the sub-column path needed.
+
+**When dedicated columns are required:**
+> For efficient, high-frequency queries on a field, that field MUST have a
+> dedicated typed column. `_json` provides access but at higher CPU cost
+> (JSON sub-column extraction vs native column read). To add a field as a
+> dedicated column: add it to the ClickHouse DDL — the loader will
+> automatically promote and coerce it on the next schema cache refresh.
+
+**`_json` key collision:** If the source payload already contains a top-level
+`_json` key (rare), the loader deep-merges existing `_json` contents into the
+source top-level before serialising the merged result as `_json`. This preserves
+all data — no field is silently dropped.
+
+**Common header fields are always promoted** regardless of payload mode:
+`_timestamp`, `_org_id`, `_source`, `_timestamp_received`. These are required
+for DFE operational correctness (routing, tenancy, TTL, audit).
+
+### 5. ClickHouse Insert (HTTP JSONEachRow)
 
 Two clients in `HttpClickHouseClient`:
 
@@ -182,8 +244,13 @@ struct HttpClickHouseClient {
 }
 
 impl HttpClickHouseClient {
-    // Data insert: serialise rows to NDJSON, POST to /{db}/{table}?format=JSONEachRow
-    async fn insert_json_rows(&self, table: &str, rows: &[Map<String, Value>]) -> Result<usize>;
+    // Data insert: serialise promoted cols to NDJSON, splice _json from raw bytes
+    async fn insert_json_rows(
+        &self,
+        table: &str,
+        rows: &[Map<String, Value>],
+        raw_payloads: &[Arc<[u8]>],
+    ) -> Result<usize>;
 
     // DDL / queries use clickhouse::Client
     async fn execute_ddl(&self, query: &str) -> Result<()>;
@@ -191,8 +258,13 @@ impl HttpClickHouseClient {
 }
 ```
 
-Unknown fields in the JSON are silently ignored by ClickHouse (default behaviour).
-This means the loader never needs to pre-validate field names against the schema.
+NDJSON body assembly (zero-copy fast path, ~99% of messages):
+```
+{<promoted_cols_json_without_closing_brace>,"_json":<raw_arc_bytes>}\n
+```
+
+The `_json` value is the original payload bytes spliced directly — no re-encoding.
+ClickHouse receives valid JSON on the wire because the source payload IS valid JSON.
 
 ---
 
@@ -200,71 +272,105 @@ This means the loader never needs to pre-validate field names against the schema
 
 ```text
 ┌─────────────────────────────────────────────────────────────────────┐
-│                         Kafka Consumer                               │
-│  - Stream of messages (bytes)                                       │
+│                         Transport Consumer                           │
+│  - Kafka / gRPC / Memory                                            │
 │  - Track partition/offset per message                               │
 └────────────────────────────┬────────────────────────────────────────┘
-                             │
+                             │ msg.payload (Vec<u8>), format: JSON or MsgPack
                              ▼
 ┌─────────────────────────────────────────────────────────────────────┐
-│                      JSON/MsgPack Parser                            │
-│  - sonic-rs for JSON (SIMD)                                         │
-│  - rmp-serde for MessagePack                                        │
-│  - Output: serde_json::Value per message                            │
-└────────────────────────────┬────────────────────────────────────────┘
-                             │
-                             ▼
+│         JSON Normalisation (single-byte format auto-detect)          │
+│  Cost: one byte read, one branch — O(1), sub-nanosecond             │
+│                                                                     │
+│  if payload[0] == b'{' | b'['  (0x7b or 0x5b)  → JSON             │
+│    Arc<[u8]> from raw bytes — ZERO COPY                             │
+│                                                                     │
+│  if payload[0] in 0x80..=0x9f | 0xde | 0xdf  → MsgPack            │
+│    rmp-serde decode → serde_json encode → Arc<[u8]>                │
+│                                                                     │
+│  Reliability: JSON object/array starts are always < 0x80;           │
+│  MsgPack map/array starts are always >= 0x80 → ranges are           │
+│  mutually exclusive for top-level objects (structured event data).  │
+│  Edge case: MsgPack bare primitives (int, nil, str) as top-level   │
+│  are misdetected as JSON — not applicable to event pipelines.       │
+│                                                                     │
+│  JSON and MsgPack messages can be mixed on the same Kafka topic     │
+│  Arc bytes are ALWAYS valid JSON after this step                    │
+└───────────────────────────┬─────────────────────────────────────────┘
+                            │ Arc<[u8]> (JSON bytes)
+                            ▼
 ┌─────────────────────────────────────────────────────────────────────┐
-│                     Router (PRE-flattening)                          │
-│  - Extract db from first matching field in priority list            │
-│    Default: ["org_id"], fallback: "common"                          │
-│  - Extract table from first matching field in priority list         │
-│    Default: ["event_category", "tags.event_category"], fb: "common" │
-│  - Dot notation for nested access (tags.event_category)             │
+│                     Router (sonic-rs SIMD)                           │
+│  - get_from_slice on raw bytes — no full DOM parse                  │
+│  - Extract db and table fields (dot notation for nested)            │
 │  - Route to DLQ if configured                                       │
 └────────────────────────────┬────────────────────────────────────────┘
-                             │
+                             │ (table name, Arc<[u8]>)
                              ▼
 ┌─────────────────────────────────────────────────────────────────────┐
-│                     Transform Pipeline                               │
-│  1. Flatten: Nested JSON → flat columns                             │
-│  2. Timestamp: Validate/correct timestamps                          │
-│  3. Coerce: Type conversion (future: schema-aware)                  │
-│  4. Enrich: GeoIP, risk score (future)                              │
+│                  HeaderExtractor (sonic-rs SIMD)                     │
+│  ALWAYS extracts (common header — required for DFE):                │
+│    _timestamp, _org_id, _source, _timestamp_received                │
 │                                                                     │
-│  Output: JSON Map per message                                       │
+│  CONDITIONALLY extracts (schema-guided):                            │
+│    For each column in schema: get_from_slice(raw, col_name)         │
+│    Only fields with a matching ClickHouse column are promoted       │
+│    All other source fields remain in _json (untouched)              │
+│                                                                     │
+│  Output: Map<String, Value> with ~10-30 entries                     │
+│  (vs 200+ if we flattened the full payload)                         │
 └────────────────────────────┬────────────────────────────────────────┘
-                             │
+                             │ (promoted Map, Arc<[u8]>)
+                             ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│                   Delta Coercion (promoted cols only)                │
+│  Runs ONLY on the promoted Map — O(schema_cols × 1 branch)          │
+│  Handles 4 cases JSONEachRow cannot do server-side:                 │
+│    - Epoch ms/μs/ns → DateTime64 ISO string (magnitude detection)  │
+│    - ISO 8601 T separator → space (default parser incompatibility)  │
+│    - UUID without hyphens → RFC 4122 format                         │
+│    - IPv4 integer → dotted-decimal string                           │
+└────────────────────────────┬────────────────────────────────────────┘
+                             │ (coerced promoted Map, Arc<[u8]>)
+                             ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│           Enrichment Pipeline (GeoIP / Reputation / Risk)            │
+│  - Injects flat columns into promoted Map                           │
+│  - Only runs on promoted cols (not on _json)                        │
+└────────────────────────────┬────────────────────────────────────────┘
+                             │ (enriched promoted Map, Arc<[u8]>)
                              ▼
 ┌─────────────────────────────────────────────────────────────────────┐
 │                    Per-Table BufferManager                           │
-│  - HashMap<db.table, Vec<Map<String, Value>>>                       │
-│  - Each table has its own row buffer                                │
+│  - HashMap<db.table, TableBuffer>                                   │
+│  - TableBuffer stores BOTH promoted Map AND raw Arc<[u8]>           │
 │  - Tracks Kafka offsets per buffer                                  │
-│  - Flush trigger: row count, bytes, or age                          │
+│  - Flush trigger: row count or age                                  │
 └────────────────────────────┬────────────────────────────────────────┘
-                             │
-                             ▼ (flush trigger: rows, bytes, time per table)
+                             │ FlushBatch { rows, raw_payloads, offsets }
+                             ▼ (flush trigger: rows or time per table)
 ┌─────────────────────────────────────────────────────────────────────┐
-│                  JSONEachRow Serialisation                           │
-│  - Serialise Vec<Map<String, Value>> to NDJSON bytes                │
-│  - One JSON object per line                                         │
-│  - Unknown fields pass through to ClickHouse (silently ignored)     │
+│                  NDJSON Body Assembly (zero-copy)                    │
+│  For each (promoted_map, raw_bytes) pair:                           │
+│    {<promoted_cols>,"_json":<raw_bytes>}\n                          │
+│  Fast path (~99%): raw bytes spliced directly (no alloc)            │
+│  Slow path (source has _json key): parse + deep-merge + re-encode  │
 └────────────────────────────┬────────────────────────────────────────┘
-                             │
+                             │ NDJSON bytes
                              ▼
 ┌─────────────────────────────────────────────────────────────────────┐
 │                    ClickHouse Inserter                               │
 │  - reqwest HTTP POST to /{db}/{table}?format=JSONEachRow            │
-│  - HttpClickHouseClient (reqwest + clickhouse crate)                │
-│  - Retry with exponential backoff                                   │
+│  - Retry with exponential backoff + batch salvage                   │
+│  - Circuit breaker per table                                        │
 └────────────────────────────┬────────────────────────────────────────┘
                              │
                              ▼
 ┌─────────────────────────────────────────────────────────────────────┐
-│                       Offset Ack                                     │
-│  - On success: Commit Kafka offsets from batch                      │
-│  - On failure: Retry batch, backpressure                            │
+│                  Per-Batch Offset Commit                             │
+│  - Each table's offsets committed independently                     │
+│  - Table A success/failure does NOT affect Table B offsets          │
+│  - Failed rows: batch salvage → DLQ (bounded channel, try_send)     │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -291,10 +397,18 @@ sends JSON strings/numbers/booleans; ClickHouse converts on ingest.
 Unknown fields are silently ignored by ClickHouse (default JSONEachRow behaviour).
 This is the key advantage over Arrow: no fixed-schema enforcement on the loader side.
 
-**⚠️ Open item:** A gap analysis is needed to identify which coercions the old
-`clickhouse-arrow` fork performed client-side that ClickHouse does NOT cover
-automatically (e.g. epoch auto-detection, overflow handling, Array inner types).
-See `TODO.md` "CRITICAL: Type Coercion Gap Analysis".
+The loader performs **delta coercions** client-side — only the 4 cases that
+ClickHouse JSONEachRow cannot handle server-side:
+
+| Delta coercion | Why needed |
+|---|---|
+| Epoch ms/μs/ns → DateTime64 ISO string | CH takes integer at face value at column precision |
+| ISO 8601 `T` separator → space | Default `basic` parser rejects T |
+| UUID without hyphens → RFC 4122 | CH UUID rejects bare hex |
+| IPv4 integer → dotted-decimal | CH IPv4 rejects integers |
+
+All other conversions (String↔numeric, 1/0→Bool, null→DEFAULT) are handled
+server-side by ClickHouse. See `src/transform/coerce.rs` `CoercionMode::Delta`.
 
 ---
 
@@ -303,12 +417,17 @@ See `TODO.md` "CRITICAL: Type Coercion Gap Analysis".
 ### Row Buffer Lifecycle
 
 ```
-PARSE:  Kafka bytes → serde_json::Value (sonic-rs SIMD)
-ROUTE:  Extract db.table from Value (pre-flatten)
-TRANSFORM: Value → Map<String, Value> (flatten, inject fields)
-BUFFER: Push Map into per-table Vec<Map>
-FLUSH:  Serialise Vec to NDJSON bytes → HTTP POST
-ACK:    Commit Kafka offsets, clear Vec
+RECEIVE: Kafka bytes → 1-byte format detect → Arc<[u8]> JSON bytes
+         JSON: zero-copy Arc; MsgPack: decode→encode, one allocation
+         (JSON/MsgPack mix on same topic is fully supported)
+ROUTE:   get_from_slice on Arc bytes (SIMD, no full parse)
+EXTRACT: get_from_slice per schema col → promoted Map (~10-30 entries)
+COERCE:  delta coercions on promoted Map only (O(schema_cols))
+ENRICH:  GeoIP/rep/risk → flat cols in promoted Map
+BUFFER:  Push (promoted Map, Arc<[u8]>) to per-table buffer
+FLUSH:   Serialise promoted Map → NDJSON, splice raw Arc bytes as _json
+POST:    HTTP POST NDJSON body → ClickHouse
+ACK:     Commit this table's Kafka offsets (independent per table)
 ```
 
 ### Memory Pressure Handling
@@ -386,12 +505,41 @@ additional client-side handling may be needed. See TODO Phase 5.6 for the gap an
 
 ---
 
+## clickhouse-rs Fork (Phase 5.5)
+
+The project uses the upstream `clickhouse` crate (HTTP only) by default.
+A HyperI fork at `/projects/clickhouse-rs` adds:
+
+- Native TCP protocol (lower CPU, higher throughput for bulk inserts)
+- HTTP `TableBatcher<T>` (server-side buffering)
+- Connection pooling via Deadpool
+- `LowCardinality` INSERT encoder + LC(Nullable(T)) reader fix
+- JSON, Variant, Dynamic, Nested, BFloat16, Time, AggregateFunction types
+
+**dfe-loader is the test harness for this fork.** Once the fork branches are
+merged and published, dfe-loader validates native protocol + batching end-to-end.
+
+### Swap Mechanism (`[patch.crates-io]`)
+
+To test the fork locally, add to the bottom of `Cargo.toml`:
+
+```toml
+[patch.crates-io]
+clickhouse = { path = "../clickhouse-rs" }
+```
+
+To revert to upstream: remove or comment out the `[patch]` section.
+Zero changes to the main `[dependencies]` declaration required.
+
+The fork will also be published to crates.io (as a versioned pre-release)
+so CI can test it without local path dependencies.
+
+See TODO Phase 5.5 for the merge order and task list.
+
 ## Future Optimisations
 
-1. **Native protocol via clickhouse-rs fork**: Lower server-side CPU — see TODO Phase 5.5
-2. **Batch JSON serialisation**: Use `sonic-rs` for NDJSON serialisation in insert path
-3. **SIMD GeoIP**: Vectorised IP lookups across a batch
-4. **Workspace crate extraction**: Split `crates/clickhouse`, `crates/buffer` — see TODO Phase 7
+1. **SIMD GeoIP**: Vectorised IP lookups across a batch
+2. **Workspace crate extraction**: Split `crates/clickhouse`, `crates/buffer` — see TODO Phase 7
 
 ---
 

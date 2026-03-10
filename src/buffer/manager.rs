@@ -62,21 +62,29 @@ impl KafkaOffset {
 ///
 /// Uses `CompactString` for table names (stack-allocated for ≤24 bytes).
 /// Typical "db.table" names fit in ~20 bytes, avoiding heap allocation.
+///
+/// `raw_payloads` is parallel to `rows`: each entry is the original Kafka message
+/// bytes (always JSON after format normalisation). Spliced as `_json` at serialisation
+/// time — zero-copy for the fast path (no `_json` key collision in source).
 pub struct FlushBatch {
     /// Destination table name (db.table) - stack-allocated for short names
     pub table: CompactString,
-    /// Rows ready for JSONEachRow insert
+    /// Promoted schema columns + common header fields (NOT the full payload)
     pub rows: Vec<Map<String, Value>>,
     /// Kafka offsets for acknowledgment after successful insert
     pub offsets: Vec<KafkaOffset>,
+    /// Raw payload bytes (JSON) parallel to rows — spliced as `_json` at flush time
+    pub raw_payloads: Vec<Arc<[u8]>>,
 }
 
-/// Per-table buffer tracking pending rows and Kafka offsets
+/// Per-table buffer tracking pending rows, raw payloads, and Kafka offsets
 struct TableBuffer {
-    /// Accumulated rows for this table
+    /// Promoted schema columns + common header fields
     rows: Vec<Map<String, Value>>,
     /// Kafka offsets for messages in this buffer
     offsets: Vec<KafkaOffset>,
+    /// Raw JSON bytes parallel to rows — zero-copy Arc for _json splice
+    raw_payloads: Vec<Arc<[u8]>>,
     /// Created timestamp
     created_at: Instant,
     /// Target batch size
@@ -88,15 +96,24 @@ impl TableBuffer {
         Self {
             rows: Vec::with_capacity(batch_size),
             offsets: Vec::new(),
+            raw_payloads: Vec::with_capacity(batch_size),
             created_at: Instant::now(),
             batch_size,
         }
     }
 
-    fn push(&mut self, data: Map<String, Value>, offset: Option<KafkaOffset>) {
+    fn push(
+        &mut self,
+        data: Map<String, Value>,
+        offset: Option<KafkaOffset>,
+        raw: Option<Arc<[u8]>>,
+    ) {
         self.rows.push(data);
         if let Some(off) = offset {
             self.offsets.push(off);
+        }
+        if let Some(r) = raw {
+            self.raw_payloads.push(r);
         }
     }
 
@@ -104,16 +121,18 @@ impl TableBuffer {
         self.rows.len() >= flush_rows || self.created_at.elapsed().as_secs() >= flush_age_secs
     }
 
-    fn build(&mut self) -> Option<(Vec<Map<String, Value>>, Vec<KafkaOffset>)> {
+    fn build(&mut self) -> Option<(Vec<Map<String, Value>>, Vec<KafkaOffset>, Vec<Arc<[u8]>>)> {
         if self.rows.is_empty() {
             return None;
         }
 
         let rows = std::mem::take(&mut self.rows);
         let offsets = std::mem::take(&mut self.offsets);
+        let raw_payloads = std::mem::take(&mut self.raw_payloads);
         self.rows = Vec::with_capacity(self.batch_size);
+        self.raw_payloads = Vec::with_capacity(self.batch_size);
         self.created_at = Instant::now();
-        Some((rows, offsets))
+        Some((rows, offsets, raw_payloads))
     }
 
     fn len(&self) -> usize {
@@ -170,22 +189,28 @@ impl BufferManager {
         self.flush_age_secs = config.flush_age_secs;
     }
 
-    /// Push a JSON row to the appropriate table buffer.
+    /// Push a promoted row to the appropriate table buffer.
     ///
-    /// The `_json` field (raw payload) should already be injected into `data`
-    /// by the caller before pushing. This simplifies the buffer — it just
-    /// accumulates rows without special-casing any fields.
+    /// `data` contains only schema-promoted columns and common header fields.
+    /// `raw` is the original JSON bytes (Arc shared from message receipt) —
+    /// carried alongside the promoted row and spliced as `_json` at flush time.
     #[inline]
-    pub fn push(&mut self, table: &str, data: Map<String, Value>, offset: Option<KafkaOffset>) {
+    pub fn push(
+        &mut self,
+        table: &str,
+        data: Map<String, Value>,
+        offset: Option<KafkaOffset>,
+        raw: Option<Arc<[u8]>>,
+    ) {
         // Fast path: table already exists (common case after first message)
         if let Some(buffer) = self.buffers.get_mut(table) {
-            buffer.push(data, offset);
+            buffer.push(data, offset, raw);
             return;
         }
 
         // Slow path: new table — allocate key and create buffer
         let mut buffer = TableBuffer::new(self.batch_size);
-        buffer.push(data, offset);
+        buffer.push(data, offset, raw);
         self.buffers.insert(table.to_string(), buffer);
     }
 
@@ -198,27 +223,22 @@ impl BufferManager {
 
     /// Get batches ready for flush.
     ///
-    /// Returns `FlushBatch` for each table that's ready.
+    /// Single-pass over buffers — no count pre-pass, no `should_flush()` guard needed.
+    /// Returns an empty Vec when nothing is ready (caller should check `!batches.is_empty()`).
     pub fn get_ready_for_flush(&mut self) -> Vec<FlushBatch> {
         let flush_rows = self.flush_rows;
         let flush_age_secs = self.flush_age_secs;
-
-        let ready_count = self
-            .buffers
-            .values()
-            .filter(|buf| buf.is_ready(flush_rows, flush_age_secs))
-            .count();
-
-        let mut flush_batches = Vec::with_capacity(ready_count);
+        let mut flush_batches = Vec::new();
 
         for (table, buffer) in self.buffers.iter_mut() {
             if buffer.is_ready(flush_rows, flush_age_secs) {
-                if let Some((rows, offsets)) = buffer.build() {
+                if let Some((rows, offsets, raw_payloads)) = buffer.build() {
                     debug!(table = %table, rows = rows.len(), "Flushing buffer");
                     flush_batches.push(FlushBatch {
                         table: CompactString::from(table.as_str()),
                         rows,
                         offsets,
+                        raw_payloads,
                     });
                 }
             }
@@ -232,11 +252,12 @@ impl BufferManager {
         let mut flush_batches = Vec::with_capacity(self.buffers.len());
 
         for (table, buffer) in self.buffers.iter_mut() {
-            if let Some((rows, offsets)) = buffer.build() {
+            if let Some((rows, offsets, raw_payloads)) = buffer.build() {
                 flush_batches.push(FlushBatch {
                     table: CompactString::from(table.as_str()),
                     rows,
                     offsets,
+                    raw_payloads,
                 });
             }
         }
@@ -318,8 +339,8 @@ mod tests {
         let data1 = json!({"id": 1, "name": "foo"}).as_object().unwrap().clone();
         let data2 = json!({"id": 2, "name": "bar"}).as_object().unwrap().clone();
 
-        manager.push("db.table_a", data1, None);
-        manager.push("db.table_b", data2, None);
+        manager.push("db.table_a", data1, None, None);
+        manager.push("db.table_b", data2, None, None);
 
         assert_eq!(manager.pending_rows(), 2);
         assert_eq!(manager.stats().table_count, 2);
@@ -331,10 +352,8 @@ mod tests {
 
         for i in 0..6 {
             let data = json!({"id": i}).as_object().unwrap().clone();
-            manager.push("db.events", data, None);
+            manager.push("db.events", data, None, None);
         }
-
-        assert!(manager.should_flush());
 
         let batches = manager.get_ready_for_flush();
         assert_eq!(batches.len(), 1);
@@ -348,22 +367,19 @@ mod tests {
 
         for i in 0..3 {
             let data = json!({"id": i}).as_object().unwrap().clone();
-            manager.push("db.table_a", data, None);
+            manager.push("db.table_a", data, None, None);
         }
         for i in 0..2 {
             let data = json!({"id": i}).as_object().unwrap().clone();
-            manager.push("db.table_b", data, None);
+            manager.push("db.table_b", data, None, None);
         }
 
-        assert!(!manager.should_flush());
         assert_eq!(manager.pending_rows(), 5);
 
         for i in 3..6 {
             let data = json!({"id": i}).as_object().unwrap().clone();
-            manager.push("db.table_a", data, None);
+            manager.push("db.table_a", data, None, None);
         }
-
-        assert!(manager.should_flush());
 
         let batches = manager.get_ready_for_flush();
         assert_eq!(batches.len(), 1);
@@ -380,11 +396,11 @@ mod tests {
 
         for i in 0..3 {
             let data = json!({"id": i}).as_object().unwrap().clone();
-            manager.push("db.table_a", data, None);
+            manager.push("db.table_a", data, None, None);
         }
         for i in 0..2 {
             let data = json!({"id": i}).as_object().unwrap().clone();
-            manager.push("db.table_b", data, None);
+            manager.push("db.table_b", data, None, None);
         }
 
         let batches = manager.flush_all();
@@ -404,12 +420,12 @@ mod tests {
         let data1 = json!({"id": 1}).as_object().unwrap().clone();
         let data2 = json!({"id": 2}).as_object().unwrap().clone();
 
-        manager.push("db.events", data1, Some(offset1));
-        manager.push("db.events", data2, Some(offset2));
+        manager.push("db.events", data1, Some(offset1), None);
+        manager.push("db.events", data2, Some(offset2), None);
 
         for i in 3..7 {
             let data = json!({"id": i}).as_object().unwrap().clone();
-            manager.push("db.events", data, None);
+            manager.push("db.events", data, None, None);
         }
 
         let batches = manager.get_ready_for_flush();
@@ -427,7 +443,7 @@ mod tests {
         assert_eq!(manager.flush_rows, 5);
 
         let data = json!({"id": 1}).as_object().unwrap().clone();
-        manager.push("db.events", data, None);
+        manager.push("db.events", data, None, None);
         assert_eq!(manager.pending_rows(), 1);
 
         let new_config = BufferConfig {

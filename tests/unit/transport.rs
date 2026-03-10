@@ -431,7 +431,7 @@ async fn test_buffer_accumulates_messages() {
 
         let offset = KafkaOffset::with_shared_topic(msg.topic.clone(), msg.partition, msg.offset);
 
-        buffer_manager.push(&route, result.data, Some(offset));
+        buffer_manager.push(&route, result.data, Some(offset), None);
     }
 
     // Check buffer stats
@@ -486,7 +486,7 @@ async fn test_buffer_flush_on_threshold() {
         };
         let result = transformer.transform(value).unwrap();
         let offset = KafkaOffset::with_shared_topic(msg.topic.clone(), msg.partition, msg.offset);
-        buffer_manager.push(&route, result.data, Some(offset));
+        buffer_manager.push(&route, result.data, Some(offset), None);
     }
 
     // Should have triggered flush condition
@@ -604,7 +604,7 @@ async fn test_full_message_flow_without_clickhouse() {
 
         // Buffer
         let offset = KafkaOffset::with_shared_topic(msg.topic.clone(), msg.partition, msg.offset);
-        buffer_manager.push(&table, result.data, Some(offset));
+        buffer_manager.push(&table, result.data, Some(offset), None);
     }
 
     // Verify routing
@@ -688,7 +688,7 @@ async fn test_high_volume_message_processing() {
             let result = transformer.transform(value).unwrap();
             let offset =
                 KafkaOffset::with_shared_topic(msg.topic.clone(), msg.partition, msg.offset);
-            buffer_manager.push(&table, result.data, Some(offset));
+            buffer_manager.push(&table, result.data, Some(offset), None);
             total_processed += 1;
         }
 

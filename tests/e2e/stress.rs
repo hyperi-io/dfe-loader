@@ -318,7 +318,7 @@ fn test_stress_buffer_high_volume() {
             offset: i as i64,
         };
 
-        buffer_manager.push("test.events", data, Some(offset));
+        buffer_manager.push("test.events", data, Some(offset), None);
 
         if i > 0 && i % 1000 == 0 {
             let batches = buffer_manager.get_ready_for_flush();
@@ -373,7 +373,7 @@ fn test_stress_buffer_multi_table() {
             offset: i as i64,
         };
 
-        buffer_manager.push(&destination, data, Some(offset));
+        buffer_manager.push(&destination, data, Some(offset), None);
     }
 
     let batches = buffer_manager.flush_all();
@@ -415,7 +415,7 @@ fn test_stress_offset_tracking() {
             partition: (i % partition_count),
             offset: (i / partition_count) as i64,
         };
-        buffer_manager.push("test.events", data, Some(offset));
+        buffer_manager.push("test.events", data, Some(offset), None);
     }
 
     let batches = buffer_manager.flush_all();
@@ -463,7 +463,7 @@ fn test_stress_large_payloads() {
             offset: i as i64,
         };
 
-        buffer_manager.push("test.large", data, Some(offset));
+        buffer_manager.push("test.large", data, Some(offset), None);
 
         let batches = buffer_manager.get_ready_for_flush();
         if !batches.is_empty() {
@@ -509,7 +509,7 @@ fn test_stress_rapid_flush_cycles() {
                 partition: 0,
                 offset: (cycle * 10 + i) as i64,
             };
-            buffer_manager.push("test.rapid", data, Some(offset));
+            buffer_manager.push("test.rapid", data, Some(offset), None);
         }
 
         let batches = buffer_manager.get_ready_for_flush();
