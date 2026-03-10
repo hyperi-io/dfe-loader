@@ -1,7 +1,7 @@
-# Example category_to_table mapping file
+# Example source_to_table mapping file
 #
-# This file maps event_category values to ClickHouse destination tables.
-# Can be used instead of (or in addition to) the inline category_to_table
+# This file maps _source values to ClickHouse destination table names.
+# Can be used instead of (or in addition to) the inline source_to_table
 # in the main config file.
 #
 # Mappings in this file TAKE PRECEDENCE over config file mappings.
@@ -21,7 +21,7 @@ network: network_events
 
 # Format 2: Structured (use either format, not both)
 # mappings:
-#   - category: auth
+#   - source: auth
 #     table: auth_events
-#   - category: api
+#   - source: api
 #     table: api_events

@@ -32,9 +32,10 @@ pub use loader::{
     AutoDownloadConfig, BufferConfig, ClickHouseConfig, CoercionConfig, ComputedColumnsConfig,
     Config, DlqConfig, EnrichmentConfig, FieldMappingConfig, FieldMappingOverride,
     FieldSanitizationConfig, GeoIpConfig, GeoIpProvider, GrpcConfig, HotReloadConfig, KafkaConfig,
-    LoggingConfig, MemoryConfig, MetadataConfig, MetricsConfig, NullHandling, PayloadConfig,
-    ReputationEnrichmentConfig, RiskScoringConfig, RoutingConfig, RoutingRule, SaslConfig,
-    SaslMechanism, ScalingConfig, SchemaConfig, TableCaptureConfig, TimestampDqConfig, TlsConfig,
+    LoggingConfig, MemoryConfig, MetadataConfig, MetricsConfig, NullHandling, OrgRoute,
+    PayloadConfig, ReputationEnrichmentConfig, RiskScoringConfig, RoutingConfig, RoutingRule,
+    SaslConfig, SaslMechanism, ScalingConfig, SchemaConfig, TableCaptureConfig, TimestampDqConfig,
+    TlsConfig,
 };
 pub use shared::SharedConfig;
 pub use watcher::{ConfigWatcher, WatcherConfig};

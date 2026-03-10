@@ -195,6 +195,7 @@ pub fn get_kafka_config() -> KafkaConfig {
         client_id: "integration-test".to_string(),
         sasl,
         tls: None,
+        ..Default::default()
     }
 }
 

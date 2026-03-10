@@ -79,6 +79,7 @@ mod testcontainers_impl {
                 client_id: "test-client".to_string(),
                 sasl: None,
                 tls: None,
+                ..Default::default()
             })
         }
     }

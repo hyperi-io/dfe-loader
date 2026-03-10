@@ -318,6 +318,7 @@ mod tests {
             client_id: "test-client".to_string(),
             sasl: None,
             tls: None,
+            ..Default::default()
         };
 
         // This will fail without a real broker, but validates config parsing
