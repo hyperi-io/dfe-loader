@@ -94,7 +94,10 @@ async fn ch_count(
 
 fn ch_tls_from_env() -> bool {
     load_dotenv();
-    env::var("CLICKHOUSE_TLS").unwrap_or_default().to_lowercase() == "true"
+    env::var("CLICKHOUSE_TLS")
+        .unwrap_or_default()
+        .to_lowercase()
+        == "true"
 }
 
 fn make_reqwest_client() -> (reqwest::Client, String, String, String) {
@@ -139,7 +142,10 @@ fn kafka_tls_from_env() -> Option<TlsConfig> {
     load_dotenv();
     let protocol = env::var("KAFKA_SECURITY_PROTOCOL").unwrap_or_default();
     if protocol.contains("SSL") {
-        Some(TlsConfig { enabled: true, ..Default::default() })
+        Some(TlsConfig {
+            enabled: true,
+            ..Default::default()
+        })
     } else {
         None
     }
@@ -195,7 +201,10 @@ fn ch_config_from_env() -> ClickHouseConfig {
         protocol: "http".to_string(),
         tables: Vec::new(),
         tls: if ch_tls_from_env() {
-            Some(TlsConfig { enabled: true, ..Default::default() })
+            Some(TlsConfig {
+                enabled: true,
+                ..Default::default()
+            })
         } else {
             None
         },
@@ -358,7 +367,10 @@ async fn test_kafka_to_clickhouse_bulk_load() {
     let (http, base_url, user, pass) = make_reqwest_client();
 
     ch_execute(
-        &http, &base_url, &user, &pass,
+        &http,
+        &base_url,
+        &user,
+        &pass,
         "CREATE DATABASE IF NOT EXISTS benchmark ON CLUSTER 'default'",
     )
     .await
@@ -492,9 +504,7 @@ async fn test_kafka_to_clickhouse_bulk_load() {
         &base_url,
         &user,
         &pass,
-        &format!(
-            "SELECT count() FROM clusterAllReplicas('default', 'benchmark', '{table_name}')"
-        ),
+        &format!("SELECT count() FROM clusterAllReplicas('default', 'benchmark', '{table_name}')"),
     )
     .await;
 
@@ -545,7 +555,10 @@ async fn test_kafka_to_clickhouse_org_routing() {
     let (http, base_url, user, pass) = make_reqwest_client();
 
     ch_execute(
-        &http, &base_url, &user, &pass,
+        &http,
+        &base_url,
+        &user,
+        &pass,
         "CREATE DATABASE IF NOT EXISTS benchmark ON CLUSTER 'default'",
     )
     .await
