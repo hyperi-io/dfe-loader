@@ -6,7 +6,7 @@
 //! Tests routing, transformation, buffer, and timestamp logic with generated inputs
 
 use proptest::prelude::*;
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 use std::collections::HashMap;
 
 use dfe_loader::buffer::BufferManager;

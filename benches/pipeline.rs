@@ -11,7 +11,7 @@
 //!
 //! Run with: cargo bench --bench pipeline
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use serde_json::{Map, Value};
 use std::hint::black_box;
 
@@ -20,7 +20,7 @@ use dfe_loader::payload::parse::{
     extract_nested_field_json_cow, parse_payload,
 };
 use dfe_loader::routing::Router;
-use dfe_loader::transform::{flatten_value_owned, Transformer};
+use dfe_loader::transform::{Transformer, flatten_value_owned};
 
 // Sample payloads of varying sizes
 const SMALL_PAYLOAD: &[u8] = br#"{"org_id":"acme","event_category":"auth","user_id":123}"#;

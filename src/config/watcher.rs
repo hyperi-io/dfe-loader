@@ -38,8 +38,8 @@ use std::time::Duration;
 use hyperi_rustlib::config::reloader::{ConfigReloader, ReloaderConfig};
 use tokio::task::JoinHandle;
 
-use super::shared::SharedConfig;
 use super::Config;
+use super::shared::SharedConfig;
 use crate::Result;
 
 /// Configuration for the watcher

@@ -13,7 +13,7 @@ pub use testcontainers_impl::*;
 
 #[cfg(feature = "testcontainers")]
 mod testcontainers_impl {
-    use testcontainers::{core::WaitFor, runners::AsyncRunner, ContainerAsync, Image, ImageExt};
+    use testcontainers::{ContainerAsync, runners::AsyncRunner};
     use testcontainers_modules::clickhouse::ClickHouse as ClickHouseImage;
     use testcontainers_modules::kafka::Kafka as KafkaImage;
 
@@ -107,7 +107,9 @@ mod testcontainers_impl {
 
     impl TestInfrastructure {
         pub async fn new(_need_clickhouse: bool, _need_kafka: bool) -> Self {
-            panic!("Testcontainers feature not enabled. Run with: cargo test --features testcontainers");
+            panic!(
+                "Testcontainers feature not enabled. Run with: cargo test --features testcontainers"
+            );
         }
     }
 }

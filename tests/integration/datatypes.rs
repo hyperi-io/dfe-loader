@@ -73,9 +73,18 @@ async fn test_float_types() {
     client.execute(&ddl).await.expect("Failed to create table");
 
     let rows: Vec<serde_json::Map<String, serde_json::Value>> = vec![
-        json!({"f32_col": 0.0, "f64_col": 0.0}).as_object().unwrap().clone(),
-        json!({"f32_col": 3.14159, "f64_col": 3.141592653589793}).as_object().unwrap().clone(),
-        json!({"f32_col": -1.5e10, "f64_col": -1.5e100}).as_object().unwrap().clone(),
+        json!({"f32_col": 0.0, "f64_col": 0.0})
+            .as_object()
+            .unwrap()
+            .clone(),
+        json!({"f32_col": 3.14159, "f64_col": 3.141592653589793})
+            .as_object()
+            .unwrap()
+            .clone(),
+        json!({"f32_col": -1.5e10, "f64_col": -1.5e100})
+            .as_object()
+            .unwrap()
+            .clone(),
     ];
 
     let result = client.insert_json_rows(&table_name, &rows).await;
@@ -106,9 +115,18 @@ async fn test_string_types() {
     client.execute(&ddl).await.expect("Failed to create table");
 
     let rows: Vec<serde_json::Map<String, serde_json::Value>> = vec![
-        json!({"str_col": "hello", "fixed_col": "0123456789"}).as_object().unwrap().clone(),
-        json!({"str_col": "world", "fixed_col": "abc"}).as_object().unwrap().clone(),
-        json!({"str_col": "test string with unicode: 日本語", "fixed_col": "short"}).as_object().unwrap().clone(),
+        json!({"str_col": "hello", "fixed_col": "0123456789"})
+            .as_object()
+            .unwrap()
+            .clone(),
+        json!({"str_col": "world", "fixed_col": "abc"})
+            .as_object()
+            .unwrap()
+            .clone(),
+        json!({"str_col": "test string with unicode: 日本語", "fixed_col": "short"})
+            .as_object()
+            .unwrap()
+            .clone(),
     ];
 
     let result = client.insert_json_rows(&table_name, &rows).await;
@@ -146,9 +164,18 @@ async fn test_datetime_types() {
     let today = now.format("%Y-%m-%d").to_string();
 
     let rows: Vec<serde_json::Map<String, serde_json::Value>> = vec![
-        json!({"dt64_ms": now_ms, "date_col": &today}).as_object().unwrap().clone(),
-        json!({"dt64_ms": &now_str, "date_col": &today}).as_object().unwrap().clone(),
-        json!({"dt64_ms": now_ms, "date_col": &today}).as_object().unwrap().clone(),
+        json!({"dt64_ms": now_ms, "date_col": &today})
+            .as_object()
+            .unwrap()
+            .clone(),
+        json!({"dt64_ms": &now_str, "date_col": &today})
+            .as_object()
+            .unwrap()
+            .clone(),
+        json!({"dt64_ms": now_ms, "date_col": &today})
+            .as_object()
+            .unwrap()
+            .clone(),
     ];
 
     let result = client.insert_json_rows(&table_name, &rows).await;
@@ -214,11 +241,26 @@ async fn test_nullable_types() {
     client.execute(&ddl).await.expect("Failed to create table");
 
     let rows: Vec<serde_json::Map<String, serde_json::Value>> = vec![
-        json!({"id": 1, "nullable_str": "a", "nullable_int": 1, "nullable_float": null}).as_object().unwrap().clone(),
-        json!({"id": 2, "nullable_str": null, "nullable_int": 2, "nullable_float": 2.0}).as_object().unwrap().clone(),
-        json!({"id": 3, "nullable_str": "c", "nullable_int": null, "nullable_float": 3.0}).as_object().unwrap().clone(),
-        json!({"id": 4, "nullable_str": null, "nullable_int": 4, "nullable_float": null}).as_object().unwrap().clone(),
-        json!({"id": 5, "nullable_str": "e", "nullable_int": null, "nullable_float": 5.0}).as_object().unwrap().clone(),
+        json!({"id": 1, "nullable_str": "a", "nullable_int": 1, "nullable_float": null})
+            .as_object()
+            .unwrap()
+            .clone(),
+        json!({"id": 2, "nullable_str": null, "nullable_int": 2, "nullable_float": 2.0})
+            .as_object()
+            .unwrap()
+            .clone(),
+        json!({"id": 3, "nullable_str": "c", "nullable_int": null, "nullable_float": 3.0})
+            .as_object()
+            .unwrap()
+            .clone(),
+        json!({"id": 4, "nullable_str": null, "nullable_int": 4, "nullable_float": null})
+            .as_object()
+            .unwrap()
+            .clone(),
+        json!({"id": 5, "nullable_str": "e", "nullable_int": null, "nullable_float": 5.0})
+            .as_object()
+            .unwrap()
+            .clone(),
     ];
 
     let result = client.insert_json_rows(&table_name, &rows).await;
@@ -248,15 +290,26 @@ async fn test_low_cardinality_type() {
     );
     client.execute(&ddl).await.expect("Failed to create table");
 
-    let categories = ["auth", "api", "web", "auth", "api", "auth", "web", "api", "auth", "web"];
+    let categories = [
+        "auth", "api", "web", "auth", "api", "auth", "web", "api", "auth", "web",
+    ];
     let rows: Vec<serde_json::Map<String, serde_json::Value>> = categories
         .iter()
         .enumerate()
-        .map(|(i, cat)| json!({"id": i as u64, "category": cat}).as_object().unwrap().clone())
+        .map(|(i, cat)| {
+            json!({"id": i as u64, "category": cat})
+                .as_object()
+                .unwrap()
+                .clone()
+        })
         .collect();
 
     let result = client.insert_json_rows(&table_name, &rows).await;
-    assert!(result.is_ok(), "LowCardinality insert failed: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "LowCardinality insert failed: {:?}",
+        result.err()
+    );
     assert_eq!(result.unwrap(), 10);
 
     eprintln!("✓ LowCardinality type insert succeeded");
@@ -371,21 +424,26 @@ async fn test_coerce_datetime64_from_epoch_ms() {
     );
     client.execute(&ddl).await.expect("Failed to create table");
 
-    let schema = client.fetch_table_schema(&table_name).await.expect("Schema fetch failed");
+    let schema = client
+        .fetch_table_schema(&table_name)
+        .await
+        .expect("Schema fetch failed");
     let coercer = default_coercer();
 
     // Epoch ms integer — coercer converts to "YYYY-MM-DD HH:MM:SS.mmm" string
     let epoch_ms: i64 = 1735084800000; // 2024-12-25 00:00:00.000 UTC
     let mut row = json!({"ts": epoch_ms}).as_object().unwrap().clone();
-    coercer.coerce_row(&mut row, &schema).expect("Coercion failed");
+    coercer
+        .coerce_row(&mut row, &schema)
+        .expect("Coercion failed");
 
     let result = client.insert_json_rows(&table_name, &[row]).await;
-    assert!(result.is_ok(), "Insert failed after coercion: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "Insert failed after coercion: {:?}",
+        result.err()
+    );
     assert_eq!(result.unwrap(), 1);
-
-    // Verify value was stored correctly
-    let count = client.query_count(&table_name, None).await.expect("Count failed");
-    assert_eq!(count, 1);
 
     eprintln!("✓ DateTime64 from epoch ms coercion succeeded");
     drop_http_test_table(&client, &table_name).await;
@@ -409,18 +467,28 @@ async fn test_coerce_datetime64_from_iso_string() {
     );
     client.execute(&ddl).await.expect("Failed to create table");
 
-    let schema = client.fetch_table_schema(&table_name).await.expect("Schema fetch failed");
+    let schema = client
+        .fetch_table_schema(&table_name)
+        .await
+        .expect("Schema fetch failed");
     let coercer = default_coercer();
 
     // ISO8601 string with Z suffix — coercer normalises to CH-accepted format
-    let mut row = json!({"ts": "2024-12-25T10:30:00.123Z"}).as_object().unwrap().clone();
-    coercer.coerce_row(&mut row, &schema).expect("Coercion failed");
+    let mut row = json!({"ts": "2024-12-25T10:30:00.123Z"})
+        .as_object()
+        .unwrap()
+        .clone();
+    coercer
+        .coerce_row(&mut row, &schema)
+        .expect("Coercion failed");
 
     let result = client.insert_json_rows(&table_name, &[row]).await;
-    assert!(result.is_ok(), "Insert failed after coercion: {:?}", result.err());
-
-    let count = client.query_count(&table_name, None).await.expect("Count failed");
-    assert_eq!(count, 1);
+    assert!(
+        result.is_ok(),
+        "Insert failed after coercion: {:?}",
+        result.err()
+    );
+    assert_eq!(result.unwrap(), 1);
 
     eprintln!("✓ DateTime64 from ISO string coercion succeeded");
     drop_http_test_table(&client, &table_name).await;
@@ -444,7 +512,10 @@ async fn test_coerce_bool_from_string() {
     );
     client.execute(&ddl).await.expect("Failed to create table");
 
-    let schema = client.fetch_table_schema(&table_name).await.expect("Schema fetch failed");
+    let schema = client
+        .fetch_table_schema(&table_name)
+        .await
+        .expect("Schema fetch failed");
     let coercer = default_coercer();
 
     // String representations of bool — coercer converts to JSON bool
@@ -454,20 +525,28 @@ async fn test_coerce_bool_from_string() {
     let mut rows = Vec::new();
     for s in &string_trues {
         let mut row = json!({"b": s}).as_object().unwrap().clone();
-        coercer.coerce_row(&mut row, &schema).expect("Coercion failed");
+        coercer
+            .coerce_row(&mut row, &schema)
+            .expect("Coercion failed");
         // After coercion, "b" must be a JSON bool
         assert_eq!(row["b"], json!(true), "Expected true for input {:?}", s);
         rows.push(row);
     }
     for s in &string_falses {
         let mut row = json!({"b": s}).as_object().unwrap().clone();
-        coercer.coerce_row(&mut row, &schema).expect("Coercion failed");
+        coercer
+            .coerce_row(&mut row, &schema)
+            .expect("Coercion failed");
         assert_eq!(row["b"], json!(false), "Expected false for input {:?}", s);
         rows.push(row);
     }
 
     let result = client.insert_json_rows(&table_name, &rows).await;
-    assert!(result.is_ok(), "Insert failed after coercion: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "Insert failed after coercion: {:?}",
+        result.err()
+    );
     assert_eq!(result.unwrap(), string_trues.len() + string_falses.len());
 
     eprintln!("✓ Bool from string coercion succeeded");
@@ -492,14 +571,19 @@ async fn test_coerce_bool_from_int() {
     );
     client.execute(&ddl).await.expect("Failed to create table");
 
-    let schema = client.fetch_table_schema(&table_name).await.expect("Schema fetch failed");
+    let schema = client
+        .fetch_table_schema(&table_name)
+        .await
+        .expect("Schema fetch failed");
     let coercer = default_coercer();
 
     let cases = [(1i64, true), (0i64, false), (42i64, true), (-1i64, true)];
     let mut rows = Vec::new();
     for (int_val, expected_bool) in &cases {
         let mut row = json!({"b": int_val}).as_object().unwrap().clone();
-        coercer.coerce_row(&mut row, &schema).expect("Coercion failed");
+        coercer
+            .coerce_row(&mut row, &schema)
+            .expect("Coercion failed");
         assert_eq!(
             row["b"],
             json!(expected_bool),
@@ -511,7 +595,11 @@ async fn test_coerce_bool_from_int() {
     }
 
     let result = client.insert_json_rows(&table_name, &rows).await;
-    assert!(result.is_ok(), "Insert failed after coercion: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "Insert failed after coercion: {:?}",
+        result.err()
+    );
     assert_eq!(result.unwrap(), cases.len());
 
     eprintln!("✓ Bool from int coercion succeeded");
@@ -536,16 +624,28 @@ async fn test_coerce_uuid_normalisation() {
     );
     client.execute(&ddl).await.expect("Failed to create table");
 
-    let schema = client.fetch_table_schema(&table_name).await.expect("Schema fetch failed");
+    let schema = client
+        .fetch_table_schema(&table_name)
+        .await
+        .expect("Schema fetch failed");
     let coercer = default_coercer();
 
     // Hex without hyphens — coercer normalises to RFC 4122 format
-    let mut row = json!({"id": "550e8400e29b41d4a716446655440000"}).as_object().unwrap().clone();
-    coercer.coerce_row(&mut row, &schema).expect("Coercion failed");
+    let mut row = json!({"id": "550e8400e29b41d4a716446655440000"})
+        .as_object()
+        .unwrap()
+        .clone();
+    coercer
+        .coerce_row(&mut row, &schema)
+        .expect("Coercion failed");
     assert_eq!(row["id"], json!("550e8400-e29b-41d4-a716-446655440000"));
 
     let result = client.insert_json_rows(&table_name, &[row]).await;
-    assert!(result.is_ok(), "Insert failed after UUID coercion: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "Insert failed after UUID coercion: {:?}",
+        result.err()
+    );
     assert_eq!(result.unwrap(), 1);
 
     eprintln!("✓ UUID normalisation coercion succeeded");
@@ -570,16 +670,29 @@ async fn test_coerce_ipv4_from_integer() {
     );
     client.execute(&ddl).await.expect("Failed to create table");
 
-    let schema = client.fetch_table_schema(&table_name).await.expect("Schema fetch failed");
+    let schema = client
+        .fetch_table_schema(&table_name)
+        .await
+        .expect("Schema fetch failed");
     let coercer = default_coercer();
 
     // Integer representation of 192.168.1.1 = 3232235777
     let mut row = json!({"ip": 3232235777u64}).as_object().unwrap().clone();
-    coercer.coerce_row(&mut row, &schema).expect("Coercion failed");
-    assert_eq!(row["ip"], json!("192.168.1.1"), "Expected dotted-decimal IPv4");
+    coercer
+        .coerce_row(&mut row, &schema)
+        .expect("Coercion failed");
+    assert_eq!(
+        row["ip"],
+        json!("192.168.1.1"),
+        "Expected dotted-decimal IPv4"
+    );
 
     let result = client.insert_json_rows(&table_name, &[row]).await;
-    assert!(result.is_ok(), "Insert failed after IPv4 coercion: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "Insert failed after IPv4 coercion: {:?}",
+        result.err()
+    );
     assert_eq!(result.unwrap(), 1);
 
     eprintln!("✓ IPv4 from integer coercion succeeded");
@@ -605,17 +718,33 @@ async fn test_coerce_null_non_nullable_defaults_to_empty() {
     );
     client.execute(&ddl).await.expect("Failed to create table");
 
-    let schema = client.fetch_table_schema(&table_name).await.expect("Schema fetch failed");
+    let schema = client
+        .fetch_table_schema(&table_name)
+        .await
+        .expect("Schema fetch failed");
     let coercer = default_coercer();
 
     // Null for non-nullable columns — coercer substitutes type defaults
-    let mut row = json!({"name": null, "score": null}).as_object().unwrap().clone();
-    coercer.coerce_row(&mut row, &schema).expect("Coercion failed");
-    assert_eq!(row["name"], json!(""), "Expected empty string default for String");
+    let mut row = json!({"name": null, "score": null})
+        .as_object()
+        .unwrap()
+        .clone();
+    coercer
+        .coerce_row(&mut row, &schema)
+        .expect("Coercion failed");
+    assert_eq!(
+        row["name"],
+        json!(""),
+        "Expected empty string default for String"
+    );
     assert_eq!(row["score"], json!(0), "Expected 0 default for UInt64");
 
     let result = client.insert_json_rows(&table_name, &[row]).await;
-    assert!(result.is_ok(), "Insert failed after null coercion: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "Insert failed after null coercion: {:?}",
+        result.err()
+    );
     assert_eq!(result.unwrap(), 1);
 
     eprintln!("✓ Null → non-nullable default coercion succeeded");
@@ -640,13 +769,21 @@ async fn test_coerce_array_datetime64_from_epoch_ms() {
     );
     client.execute(&ddl).await.expect("Failed to create table");
 
-    let schema = client.fetch_table_schema(&table_name).await.expect("Schema fetch failed");
+    let schema = client
+        .fetch_table_schema(&table_name)
+        .await
+        .expect("Schema fetch failed");
     let coercer = default_coercer();
 
     // Array of epoch ms integers — coercer applies inner DateTime64 coercion
     let epoch_values = json!([1735084800000i64, 1735085000000i64, 1735085200000i64]);
-    let mut row = json!({"timestamps": epoch_values}).as_object().unwrap().clone();
-    coercer.coerce_row(&mut row, &schema).expect("Coercion failed");
+    let mut row = json!({"timestamps": epoch_values})
+        .as_object()
+        .unwrap()
+        .clone();
+    coercer
+        .coerce_row(&mut row, &schema)
+        .expect("Coercion failed");
 
     // After coercion, all elements should be strings (CH datetime format)
     let arr = row["timestamps"].as_array().expect("Expected array");
@@ -660,7 +797,11 @@ async fn test_coerce_array_datetime64_from_epoch_ms() {
     }
 
     let result = client.insert_json_rows(&table_name, &[row]).await;
-    assert!(result.is_ok(), "Insert failed after array DateTime64 coercion: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "Insert failed after array DateTime64 coercion: {:?}",
+        result.err()
+    );
     assert_eq!(result.unwrap(), 1);
 
     eprintln!("✓ Array(DateTime64) from epoch ms coercion succeeded");
@@ -689,20 +830,36 @@ async fn test_coerce_json_column_accepts_string_and_object() {
         return;
     }
 
-    let schema = client.fetch_table_schema(&table_name).await.expect("Schema fetch failed");
+    let schema = client
+        .fetch_table_schema(&table_name)
+        .await
+        .expect("Schema fetch failed");
     let coercer = default_coercer();
 
     // JSON object value — passes through as-is (already valid JSON)
-    let mut row1 = json!({"data": {"key": "value", "num": 42}}).as_object().unwrap().clone();
-    coercer.coerce_row(&mut row1, &schema).expect("Coercion failed for object");
+    let mut row1 = json!({"data": {"key": "value", "num": 42}})
+        .as_object()
+        .unwrap()
+        .clone();
+    coercer
+        .coerce_row(&mut row1, &schema)
+        .expect("Coercion failed for object");
 
     // JSON string value — coercer validates it is parseable JSON
-    let mut row2 =
-        json!({"data": "{\"key\": \"from_string\", \"num\": 99}"}).as_object().unwrap().clone();
-    coercer.coerce_row(&mut row2, &schema).expect("Coercion failed for string");
+    let mut row2 = json!({"data": "{\"key\": \"from_string\", \"num\": 99}"})
+        .as_object()
+        .unwrap()
+        .clone();
+    coercer
+        .coerce_row(&mut row2, &schema)
+        .expect("Coercion failed for string");
 
     let result = client.insert_json_rows(&table_name, &[row1, row2]).await;
-    assert!(result.is_ok(), "Insert failed after JSON coercion: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "Insert failed after JSON coercion: {:?}",
+        result.err()
+    );
     assert_eq!(result.unwrap(), 2);
 
     eprintln!("✓ JSON column coercion (object + string) succeeded");

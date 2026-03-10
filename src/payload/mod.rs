@@ -10,6 +10,6 @@ pub mod parse;
 
 // Re-export from hyperi-rustlib with local type alias for backward compatibility
 pub use hyperi_rustlib::transport::{
-    detect_format, DetectedFormat as PayloadFormat, FormatDetector, FormatMode,
+    DetectedFormat as PayloadFormat, FormatDetector, FormatMode, detect_format,
 };
 pub use parse::parse_payload;

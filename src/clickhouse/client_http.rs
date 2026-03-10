@@ -242,12 +242,10 @@ impl HttpClickHouseClient {
             db, tbl
         );
 
-        let rows: Vec<SystemColumn> = self
-            .ch_client
-            .query(&sql)
-            .fetch_all()
-            .await
-            .map_err(|e| ClickHouseError::Schema(format!("Failed to fetch schema for {table}: {e}")))?;
+        let rows: Vec<SystemColumn> =
+            self.ch_client.query(&sql).fetch_all().await.map_err(|e| {
+                ClickHouseError::Schema(format!("Failed to fetch schema for {table}: {e}"))
+            })?;
 
         if rows.is_empty() {
             return Err(ClickHouseError::Schema(format!(
@@ -290,12 +288,10 @@ impl HttpClickHouseClient {
             db, tbl
         );
 
-        let rows: Vec<SingleString> = self
-            .ch_client
-            .query(&sql)
-            .fetch_all()
-            .await
-            .map_err(|e| ClickHouseError::Schema(format!("Failed to fetch table comment: {e}")))?;
+        let rows: Vec<SingleString> =
+            self.ch_client.query(&sql).fetch_all().await.map_err(|e| {
+                ClickHouseError::Schema(format!("Failed to fetch table comment: {e}"))
+            })?;
 
         Ok(rows.into_iter().next().map(|r| r.value).unwrap_or_default())
     }
@@ -303,10 +299,7 @@ impl HttpClickHouseClient {
     /// Fetch column comments for a table.
     ///
     /// Returns a map of column_name -> comment for columns with non-empty comments.
-    pub async fn fetch_column_comments(
-        &self,
-        table: &str,
-    ) -> Result<FxHashMap<String, String>> {
+    pub async fn fetch_column_comments(&self, table: &str) -> Result<FxHashMap<String, String>> {
         let (db, tbl) = parse_db_table(table, &self.database);
         let sql = format!(
             "SELECT name, comment FROM system.columns \
@@ -323,12 +316,9 @@ impl HttpClickHouseClient {
             comment: String,
         }
 
-        let rows: Vec<NameComment> = self
-            .ch_client
-            .query(&sql)
-            .fetch_all()
-            .await
-            .map_err(|e| ClickHouseError::Schema(format!("Failed to fetch column comments: {e}")))?;
+        let rows: Vec<NameComment> = self.ch_client.query(&sql).fetch_all().await.map_err(|e| {
+            ClickHouseError::Schema(format!("Failed to fetch column comments: {e}"))
+        })?;
 
         let mut comments = FxHashMap::default();
         for row in rows {

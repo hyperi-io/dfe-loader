@@ -36,7 +36,7 @@ use std::env;
 use std::sync::Arc;
 use std::time::Instant;
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, SamplingMode};
+use criterion::{BenchmarkId, Criterion, SamplingMode, criterion_group, criterion_main};
 use serde::Serialize;
 use serde_json::{Map, Value};
 
@@ -223,21 +223,14 @@ async fn insert_jsoneachrow(
 }
 
 /// RowBinary insert via the official clickhouse crate (comparison path).
-async fn insert_rowbinary_http(
-    env: &BenchEnv,
-    table: &str,
-    rows: &[BenchRow],
-) -> usize {
+async fn insert_rowbinary_http(env: &BenchEnv, table: &str, rows: &[BenchRow]) -> usize {
     let client = clickhouse::Client::default()
         .with_url(&env.http_url())
         .with_user(&env.user)
         .with_password(&env.password)
         .with_database(&env.database);
 
-    let mut insert = client
-        .insert::<BenchRow>(table)
-        .await
-        .expect("insert init");
+    let mut insert = client.insert::<BenchRow>(table).await.expect("insert init");
 
     for row in rows {
         insert.write(row).await.expect("write row");
@@ -356,54 +349,42 @@ fn bench_parse_only(c: &mut Criterion) {
         let raw_events: Vec<Vec<u8>> = (0..size).map(make_raw_event).collect();
 
         // sonic-rs parse → Map<String, Value> (production parse path)
-        group.bench_with_input(
-            BenchmarkId::new("simd_to_map", size),
-            &size,
-            |b, _| {
-                b.iter(|| {
-                    let rows: Vec<Map<String, Value>> = raw_events
-                        .iter()
-                        .map(|bytes| {
-                            sonic_rs::from_slice::<serde_json::Value>(bytes)
-                                .expect("parse")
-                                .as_object()
-                                .expect("object")
-                                .clone()
-                        })
-                        .collect();
-                    std::hint::black_box(rows)
-                });
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("simd_to_map", size), &size, |b, _| {
+            b.iter(|| {
+                let rows: Vec<Map<String, Value>> = raw_events
+                    .iter()
+                    .map(|bytes| {
+                        sonic_rs::from_slice::<serde_json::Value>(bytes)
+                            .expect("parse")
+                            .as_object()
+                            .expect("object")
+                            .clone()
+                    })
+                    .collect();
+                std::hint::black_box(rows)
+            });
+        });
 
         // struct construction (RowBinary parse path)
-        group.bench_with_input(
-            BenchmarkId::new("simd_to_rows", size),
-            &size,
-            |b, _| {
-                b.iter(|| {
-                    let rows: Vec<BenchRow> = (0..size).map(make_bench_row).collect();
-                    std::hint::black_box(rows)
-                });
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("simd_to_rows", size), &size, |b, _| {
+            b.iter(|| {
+                let rows: Vec<BenchRow> = (0..size).map(make_bench_row).collect();
+                std::hint::black_box(rows)
+            });
+        });
 
         // NDJSON serialization cost (JSONEachRow wire format)
-        group.bench_with_input(
-            BenchmarkId::new("map_to_ndjson", size),
-            &size,
-            |b, _| {
-                let rows: Vec<Map<String, Value>> = (0..size).map(make_json_row).collect();
-                b.iter(|| {
-                    let mut buf = Vec::with_capacity(size * 256);
-                    for row in &rows {
-                        serde_json::to_writer(&mut buf, row).expect("serialize");
-                        buf.push(b'\n');
-                    }
-                    std::hint::black_box(buf)
-                });
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("map_to_ndjson", size), &size, |b, _| {
+            let rows: Vec<Map<String, Value>> = (0..size).map(make_json_row).collect();
+            b.iter(|| {
+                let mut buf = Vec::with_capacity(size * 256);
+                for row in &rows {
+                    serde_json::to_writer(&mut buf, row).expect("serialize");
+                    buf.push(b'\n');
+                }
+                std::hint::black_box(buf)
+            });
+        });
     }
 
     group.finish();

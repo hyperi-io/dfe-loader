@@ -23,9 +23,9 @@ use hyperi_rustlib::transport::{
     KafkaToken, KafkaTransport, Transport, TransportError,
 };
 
+use crate::Result;
 use crate::buffer::KafkaOffset;
 use crate::config::KafkaConfig;
-use crate::Result;
 
 use super::KafkaMessage;
 
@@ -271,8 +271,8 @@ mod memory_adapter {
     use hyperi_rustlib::transport::{MemoryConfig, MemoryTransport, Transport};
     use std::sync::Arc;
 
-    use crate::buffer::KafkaOffset;
     use crate::Result;
+    use crate::buffer::KafkaOffset;
 
     use super::super::KafkaMessage;
 

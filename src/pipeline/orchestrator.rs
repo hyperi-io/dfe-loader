@@ -21,9 +21,10 @@ use tracing::{debug, error, info, warn};
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use hyperi_rustlib::dlq::{Dlq, DlqEntry, DlqSource};
 use hyperi_rustlib::ScalingPressure;
+use hyperi_rustlib::dlq::{Dlq, DlqEntry, DlqSource};
 
+use crate::Result;
 use crate::buffer::{BufferManager, FlushBatch, KafkaOffset};
 use crate::clickhouse::{HttpClickHouseClient, Inserter, InserterConfig};
 use crate::config::{Config, MetadataConfig, SharedConfig, TableCaptureConfig};
@@ -37,7 +38,6 @@ use crate::routing::{RouteResult, Router};
 use crate::schema::TableTags;
 use crate::transform::Transformer;
 use crate::transform::{ComputedColumnCache, FieldMappingCache, MappingBuilder};
-use crate::Result;
 
 /// Pipeline statistics
 #[derive(Debug, Default, Clone)]
@@ -751,10 +751,7 @@ impl Orchestrator {
         let table_capture = capture_overrides.get_or_default(&table);
         if common_header && self.config.metadata.capture_json && !table_capture.disable_json {
             if let Ok(json_str) = std::str::from_utf8(&msg.payload) {
-                data.insert(
-                    "_json".to_string(),
-                    Value::String(json_str.to_string()),
-                );
+                data.insert("_json".to_string(), Value::String(json_str.to_string()));
             }
         }
 
@@ -802,11 +799,8 @@ impl Orchestrator {
         }
 
         // Step 5: Push to per-table buffer
-        let kafka_offset = KafkaOffset::with_shared_topic(
-            msg.topic.clone(),
-            msg.partition,
-            msg.offset,
-        );
+        let kafka_offset =
+            KafkaOffset::with_shared_topic(msg.topic.clone(), msg.partition, msg.offset);
 
         buffer_manager.push(&table, data, Some(kafka_offset));
 
@@ -826,11 +820,7 @@ impl Orchestrator {
         let batch_count = batches.len();
         let total_rows: usize = batches.iter().map(|b| b.rows.len()).sum();
 
-        debug!(
-            batches = batch_count,
-            rows = total_rows,
-            "Flushing batches"
-        );
+        debug!(batches = batch_count, rows = total_rows, "Flushing batches");
 
         // Pre-calculate total offset count for efficient allocation
         let total_offsets: usize = batches.iter().map(|b| b.offsets.len()).sum();

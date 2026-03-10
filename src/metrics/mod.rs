@@ -7,4 +7,4 @@ pub mod prometheus;
 pub mod server;
 
 pub use self::prometheus::Metrics;
-pub use self::server::{run_server, HealthStatus, ServerState};
+pub use self::server::{HealthStatus, ServerState, run_server};

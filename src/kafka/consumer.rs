@@ -24,8 +24,8 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
-use crate::config::{KafkaConfig, SaslMechanism};
 use crate::Result;
+use crate::config::{KafkaConfig, SaslMechanism};
 
 /// Kafka message with metadata
 ///

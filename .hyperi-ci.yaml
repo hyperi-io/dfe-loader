@@ -24,7 +24,7 @@ quality:
       - "default"                    # Default features
       - "default,jemalloc"           # With jemalloc allocator
       - "default,mimalloc"           # With mimalloc allocator
-      - "default,http"               # With HTTP transport
+      - "default,testcontainers"     # With testcontainers integration tests
 
 # Testing
 test:

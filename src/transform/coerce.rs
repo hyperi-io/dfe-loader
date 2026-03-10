@@ -14,9 +14,9 @@ use std::str::FromStr;
 use serde_json::Value;
 use tracing::warn;
 
+use crate::Result;
 use crate::clickhouse::{ParsedType, TableSchema};
 use crate::config::{CoercionConfig, NullHandling};
-use crate::Result;
 
 /// Coercer registry for type-aware value conversion
 pub struct Coercer {
@@ -308,6 +308,15 @@ impl Coercer {
 
         match value {
             Value::String(s) => {
+                // Normalise ISO 8601 format to ClickHouse-accepted "YYYY-MM-DD HH:MM:SS.mmm".
+                // Must run before the `.` early-return — "2024-12-25T10:30:00.123Z" contains
+                // a dot, so without this check it would pass through unchanged and be rejected.
+                if s.contains('T') {
+                    let normalized = s.replace('T', " ");
+                    let dt = normalized.split('+').next().unwrap_or(&normalized);
+                    let dt = dt.split('Z').next().unwrap_or(dt);
+                    return Ok(Value::String(dt.to_string()));
+                }
                 if s.contains('.') {
                     return Ok(value.clone());
                 }
@@ -418,11 +427,15 @@ impl Coercer {
         }
     }
 
-    /// Coerce to JSON (pass-through, validate if string)
+    /// Coerce to JSON
+    ///
+    /// Strings are parsed into their actual JSON value — ClickHouse JSON type
+    /// requires a real object, not a string containing JSON.
     fn coerce_json(&self, value: &Value) -> Result<Value> {
         if let Value::String(s) = value {
-            let _: Value = serde_json::from_str(s)
+            let parsed: Value = serde_json::from_str(s)
                 .map_err(|e| crate::Error::Coercion(format!("Invalid JSON: {}", e)))?;
+            return Ok(parsed);
         }
         Ok(value.clone())
     }

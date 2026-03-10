@@ -14,10 +14,10 @@
 //! For full document processing (flattening, transformation), use `parse_payload`
 //! which does a full DOM parse.
 
-use sonic_rs::{get_from_slice, JsonValueTrait, LazyValue};
+use sonic_rs::{JsonValueTrait, LazyValue, get_from_slice};
 
-use crate::payload::{detect_format, PayloadFormat};
 use crate::Result;
+use crate::payload::{PayloadFormat, detect_format};
 
 /// Parse a payload into a serde_json::Value.
 ///

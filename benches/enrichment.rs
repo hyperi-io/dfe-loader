@@ -5,7 +5,7 @@
 //!
 //! Measures CPU cost per operation for GeoIP, Reputation, and Risk scoring.
 
-use criterion::{criterion_group, criterion_main, Criterion, Throughput};
+use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use dfe_loader::enrich::geoip::{GeoIpEnricher, GeoIpResult};
 use dfe_loader::enrich::reputation::{ReputationEnricher, ThreatSource, ThreatType};
 use dfe_loader::enrich::risk::{RiskInput, RiskPreset, RiskScorer};
