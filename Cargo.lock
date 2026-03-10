@@ -1820,9 +1820,9 @@ dependencies = [
 
 [[package]]
 name = "hyperi-rustlib"
-version = "1.13.0"
-source = "sparse+https://hypersec.jfrog.io/artifactory/api/cargo/hyperi-cargo-virtual/index/"
-checksum = "b38f8b76c164d7edbf66ce89282c864e90611a7bada14a6a6d48e60758d1bff7"
+version = "1.13.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3d2ac99f3ce1bb5b683a6b6819817943ede4e4a6091b5a061dabb70f20e8f022"
 dependencies = [
  "async-trait",
  "base64 0.22.1",

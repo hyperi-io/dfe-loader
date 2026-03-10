@@ -22,27 +22,3 @@ rustflags = ["-C", "target-cpu=native"]
 
 # Limit parallel jobs to reduce CPU/memory usage (prevents killing other processes)
 jobs = 2
-
-# =============================================================================
-# HyperI Private Cargo Registry (Artifactory)
-# =============================================================================
-#
-# The 'hyperi' registry hosts internal crates like hyperi-rustlib.
-# Authentication is handled via ~/.cargo/credentials.toml
-#
-# To set up credentials:
-#   1. Get token: jf config export hyperi-token | base64 -d | jq -r '.accessToken'
-#   2. Add to ~/.cargo/credentials.toml:
-#      [registries.hyperi]
-#      token = "Bearer <your-token>"
-#
-# Or use cargo-login (if available):
-#   cargo login --registry hyperi
-
-[registries.hyperi]
-index = "sparse+https://hypersec.jfrog.io/artifactory/api/cargo/hyperi-cargo-virtual/index/"
-credential-provider = "cargo:token"
-
-# Uncomment to make hyperi the default for publishing
-# [registry]
-# default = "hyperi"
