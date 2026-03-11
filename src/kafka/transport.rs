@@ -78,32 +78,34 @@ impl TransportAdapter {
 
         // SASL configuration
         if let Some(ref sasl) = config.sasl
-            && sasl.enabled {
-                // Set mechanism
-                transport_config.sasl_mechanism =
-                    sasl.mechanism().as_rdkafka_mechanism().map(String::from);
-                transport_config.sasl_username = Some(sasl.username.clone());
-                transport_config.sasl_password = Some(sasl.password.clone());
+            && sasl.enabled
+        {
+            // Set mechanism
+            transport_config.sasl_mechanism =
+                sasl.mechanism().as_rdkafka_mechanism().map(String::from);
+            transport_config.sasl_username = Some(sasl.username.clone());
+            transport_config.sasl_password = Some(sasl.password.clone());
 
-                // Set security protocol based on TLS
-                if config.tls.as_ref().is_some_and(|t| t.enabled) {
-                    transport_config.security_protocol = "sasl_ssl".to_string();
-                } else {
-                    transport_config.security_protocol = "sasl_plaintext".to_string();
-                }
+            // Set security protocol based on TLS
+            if config.tls.as_ref().is_some_and(|t| t.enabled) {
+                transport_config.security_protocol = "sasl_ssl".to_string();
+            } else {
+                transport_config.security_protocol = "sasl_plaintext".to_string();
             }
+        }
 
         // TLS configuration
         if let Some(ref tls) = config.tls
-            && tls.enabled {
-                if transport_config.security_protocol == "plaintext" {
-                    transport_config.security_protocol = "ssl".to_string();
-                }
-                transport_config.ssl_ca_location = tls.ca_cert_file.clone();
-                transport_config.ssl_certificate_location = tls.cert_file.clone();
-                transport_config.ssl_key_location = tls.key_file.clone();
-                transport_config.ssl_skip_verify = tls.skip_verify;
+            && tls.enabled
+        {
+            if transport_config.security_protocol == "plaintext" {
+                transport_config.security_protocol = "ssl".to_string();
             }
+            transport_config.ssl_ca_location = tls.ca_cert_file.clone();
+            transport_config.ssl_certificate_location = tls.cert_file.clone();
+            transport_config.ssl_key_location = tls.key_file.clone();
+            transport_config.ssl_skip_verify = tls.skip_verify;
+        }
 
         transport_config
     }

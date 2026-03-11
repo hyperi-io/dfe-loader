@@ -262,9 +262,10 @@ impl Transformer {
             // Step 4: Extract collector timestamp if present
             // Use remove() to take ownership instead of get().cloned() to avoid allocation
             if self.extract_collector_timestamp
-                && let Some(ts) = data.remove(&self.collector_timestamp_path) {
-                    data.insert(TIMESTAMP_COLLECTOR_FIELD.into(), ts);
-                }
+                && let Some(ts) = data.remove(&self.collector_timestamp_path)
+            {
+                data.insert(TIMESTAMP_COLLECTOR_FIELD.into(), ts);
+            }
 
             // Step 4b: Extract timestamp_received if present (nullable)
             // This is when the receiver/loader received the event
@@ -299,9 +300,10 @@ impl Transformer {
 
             // Step 7b: Inject _source (destination table identifier)
             if self.capture_source
-                && let Some(src) = source {
-                    data.insert(self.source_output.clone(), Value::String(src.to_string()));
-                }
+                && let Some(src) = source
+            {
+                data.insert(self.source_output.clone(), Value::String(src.to_string()));
+            }
 
             // Step 8: Remove routing fields (they're only used for db.table routing)
             if self.remove_routing_fields {

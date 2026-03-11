@@ -205,9 +205,10 @@ impl Router {
 
         // Extract from db_fields and look up in org_routes
         if let Some(org_id) = self.extract_first_match(payload, &self.db_fields)
-            && let Some(db) = self.org_routes.get(&org_id) {
-                return db.clone();
-            }
+            && let Some(db) = self.org_routes.get(&org_id)
+        {
+            return db.clone();
+        }
 
         // Fall back to default database
         self.default_db.clone()
@@ -281,9 +282,10 @@ impl Router {
 
         // Extract from db_fields and look up in org_routes
         if let Some(org_id_cow) = self.extract_first_match_cow(payload, &self.db_fields)
-            && let Some(db) = self.org_routes.get(org_id_cow.as_ref()) {
-                return Cow::Owned(db.clone());
-            }
+            && let Some(db) = self.org_routes.get(org_id_cow.as_ref())
+        {
+            return Cow::Owned(db.clone());
+        }
 
         // Fall back to default database
         Cow::Borrowed(&self.default_db)
@@ -425,9 +427,10 @@ impl Router {
 
         // Extract from db_fields and look up in org_routes
         if let Some(org_id) = self.extract_first_match_from_value(value, &self.db_fields)
-            && let Some(db) = self.org_routes.get(org_id) {
-                return Cow::Borrowed(db.as_str());
-            }
+            && let Some(db) = self.org_routes.get(org_id)
+        {
+            return Cow::Borrowed(db.as_str());
+        }
 
         // Fall back to default database
         Cow::Borrowed(&self.default_db)
@@ -461,9 +464,10 @@ impl Router {
     ) -> Option<&'a str> {
         for field in fields {
             if let Some(val) = self.get_nested_field(value, field)
-                && let Some(s) = val.as_str() {
-                    return Some(s);
-                }
+                && let Some(s) = val.as_str()
+            {
+                return Some(s);
+            }
         }
         None
     }

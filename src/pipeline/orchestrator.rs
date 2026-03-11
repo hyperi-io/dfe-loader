@@ -978,10 +978,13 @@ impl Orchestrator {
             let mut d = transform_result.data;
 
             let table_capture = capture_overrides.get_or_default(&table);
-            if common_header && self.config.metadata.capture_json && !table_capture.disable_json
-                && let Ok(json_str) = std::str::from_utf8(&msg.payload) {
-                    d.insert("_json".to_string(), Value::String(json_str.to_string()));
-                }
+            if common_header
+                && self.config.metadata.capture_json
+                && !table_capture.disable_json
+                && let Ok(json_str) = std::str::from_utf8(&msg.payload)
+            {
+                d.insert("_json".to_string(), Value::String(json_str.to_string()));
+            }
             if common_header && table_capture.disable_raw {
                 d.remove(transformer.raw_output());
             }
@@ -991,9 +994,10 @@ impl Orchestrator {
 
         // Step 4.7: Apply per-table field mapping (rename/copy source fields)
         if let Some(fm_cache) = field_mapping_cache
-            && let Some(mapping) = fm_cache.get(&table) {
-                mapping.apply(&mut data);
-            }
+            && let Some(mapping) = fm_cache.get(&table)
+        {
+            mapping.apply(&mut data);
+        }
 
         // Step 4.8: Apply computed columns (CEL expressions producing column values)
         if let Some(computed) = computed_column_cache.get(&table) {
@@ -1002,24 +1006,25 @@ impl Orchestrator {
 
         // Step 4.9: IP enrichment (GeoIP + reputation + risk scoring)
         if enrichment.is_active()
-            && let Some(ip) = extract_enrich_ip(&data, &enrichment.ip_fields) {
-                let geo_result = enrichment.geoip.as_ref().and_then(|g| g.lookup(&ip));
-                let rep_result = enrichment.reputation.as_ref().and_then(|r| r.lookup(&ip));
+            && let Some(ip) = extract_enrich_ip(&data, &enrichment.ip_fields)
+        {
+            let geo_result = enrichment.geoip.as_ref().and_then(|g| g.lookup(&ip));
+            let rep_result = enrichment.reputation.as_ref().and_then(|r| r.lookup(&ip));
 
-                if let Some(ref geo) = geo_result {
-                    inject_geo(&mut data, geo);
-                }
-                if let Some(ref rep) = rep_result {
-                    inject_reputation(&mut data, rep);
-                }
-                if let Some(ref scorer) = enrichment.risk
-                    && (geo_result.is_some() || rep_result.is_some()) {
-                        let input =
-                            RiskInput::from_enrichment(geo_result.as_ref(), rep_result.as_ref());
-                        let output = scorer.score(&input);
-                        inject_risk(&mut data, &output);
-                    }
+            if let Some(ref geo) = geo_result {
+                inject_geo(&mut data, geo);
             }
+            if let Some(ref rep) = rep_result {
+                inject_reputation(&mut data, rep);
+            }
+            if let Some(ref scorer) = enrichment.risk
+                && (geo_result.is_some() || rep_result.is_some())
+            {
+                let input = RiskInput::from_enrichment(geo_result.as_ref(), rep_result.as_ref());
+                let output = scorer.score(&input);
+                inject_risk(&mut data, &output);
+            }
+        }
 
         // Step 5: Push to per-table buffer.
         // raw_payload is Some for json_primary path — _json is spliced at serialisation.
@@ -1175,9 +1180,10 @@ fn extract_enrich_ip(
 ) -> Option<String> {
     for field in ip_fields {
         if let Some(Value::String(s)) = data.get(field.as_str())
-            && !s.is_empty() {
-                return Some(s.clone());
-            }
+            && !s.is_empty()
+        {
+            return Some(s.clone());
+        }
     }
     None
 }

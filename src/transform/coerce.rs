@@ -248,9 +248,10 @@ impl Coercer {
 
         // Handle FixedString length
         if let Some(size) = target.fixed_size
-            && s.len() > size {
-                return Ok(Value::String(s[..size].to_string()));
-            }
+            && s.len() > size
+        {
+            return Ok(Value::String(s[..size].to_string()));
+        }
 
         Ok(Value::String(s))
     }
@@ -542,9 +543,10 @@ impl Coercer {
                     return Ok(n);
                 }
                 if let Ok(f) = s.parse::<f64>()
-                    && f.fract() == 0.0 {
-                        return Ok(f as i64);
-                    }
+                    && f.fract() == 0.0
+                {
+                    return Ok(f as i64);
+                }
                 Err(crate::Error::Coercion(format!(
                     "Cannot parse '{}' as integer",
                     s
@@ -588,9 +590,11 @@ impl Coercer {
                     return Ok(n);
                 }
                 if let Ok(f) = s.parse::<f64>()
-                    && f >= 0.0 && f.fract() == 0.0 {
-                        return Ok(f as u64);
-                    }
+                    && f >= 0.0
+                    && f.fract() == 0.0
+                {
+                    return Ok(f as u64);
+                }
                 Err(crate::Error::Coercion(format!(
                     "Cannot parse '{}' as unsigned integer",
                     s

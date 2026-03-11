@@ -89,12 +89,13 @@ impl TimestampValidator {
             None => {
                 // Check for known bad formats
                 if self.correct_known_bad
-                    && let Some(corrected) = self.correct_known_bad_format(ts) {
-                        return TimestampResult::Corrected(
-                            corrected,
-                            format!("Corrected from: {}", ts),
-                        );
-                    }
+                    && let Some(corrected) = self.correct_known_bad_format(ts)
+                {
+                    return TimestampResult::Corrected(
+                        corrected,
+                        format!("Corrected from: {}", ts),
+                    );
+                }
                 TimestampResult::Invalid(format!("Failed to parse: {}", ts))
             }
         }

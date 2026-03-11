@@ -141,10 +141,9 @@ impl HeaderExtractor {
             };
 
             // Apply column default when all source fields were absent.
-            if !found
-                && let Some(ref default) = directives.default {
-                    map.insert(name.clone(), default.clone());
-                }
+            if !found && let Some(ref default) = directives.default {
+                map.insert(name.clone(), default.clone());
+            }
         }
 
         debug!(table = %table, fields = map.len(), "Extracted promoted fields");
