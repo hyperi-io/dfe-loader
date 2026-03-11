@@ -86,7 +86,7 @@
     [
       "@semantic-release/exec",
       {
-        "prepareCmd": "./ci/scripts/core/update-version.sh ${nextRelease.version}"
+        "prepareCmd": "echo ${nextRelease.version} > VERSION && python3 -c \"import re, pathlib; f=pathlib.Path('Cargo.toml'); f.write_text(re.sub(r'^(version\\s*=\\s*)\\\"[^\\\"]+\\\"', r'\\g<1>\\\"${nextRelease.version}\\\"', f.read_text(), count=1, flags=re.MULTILINE))\""
       }
     ],
     [
@@ -95,8 +95,6 @@
         "assets": [
           "CHANGELOG.md",
           "VERSION",
-          "pyproject.toml",
-          "package.json",
           "Cargo.toml"
         ],
         "message": "chore: version ${nextRelease.version} [skip ci]\n\n${nextRelease.notes}"
