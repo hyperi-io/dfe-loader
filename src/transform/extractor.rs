@@ -6,9 +6,13 @@
 //! Parses the raw payload **once** with `sonic_rs::from_slice`, then performs
 //! O(1) hash lookups for each schema column.
 //!
-//! Benchmarks show that `get_from_slice × N` (one SIMD scan per column) is
-//! 3–4× slower than a single full parse for N≥15 columns. The full-parse
-//! approach amortises the SIMD structural indexing cost across all columns.
+//! Benchmarks (`benches/simdjson_spike.rs`, batch=10K) confirm the full-parse
+//! approach outperforms `get_from_slice × N` in all realistic cases:
+//! - 2.7× faster at N=30 flat payload (196 ms → 72 ms)
+//! - 4.2× faster at N=15 nested payload (each miss still scans the full doc)
+//! - Tied at N=15 flat payload with high field hit-rate
+//! Misses are free with the DOM approach (O(1) hash lookup returns None)
+//! but cost a full document scan with `get_from_slice`.
 //!
 //! ## What this does NOT do
 //!
@@ -84,7 +88,7 @@ impl HeaderExtractor {
         let mut map = Map::with_capacity(schema.columns.len());
 
         // Parse once — all schema column lookups are O(1) hash operations on this map.
-        // Single full parse is 3–4× faster than get_from_slice × N for N≥15 columns.
+        // Misses are free here; with get_from_slice each miss still scans the full document.
         let parsed_value: Value = match sonic_rs::from_slice(raw) {
             Ok(v) => v,
             Err(e) => {

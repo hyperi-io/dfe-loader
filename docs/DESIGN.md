@@ -571,15 +571,28 @@ All mison code was deleted in Phase 0 (commit `2a7a635`).
 **Bench:** `benches/simdjson_spike.rs` — flat30 and nested payloads, 15/30 schema columns,
 batch sizes 100/1K/10K.
 
-**Results (batch=10K, median):**
+**Results (batch=10K, measured):**
 
-| Approach | flat/30col | nested/15col | Notes |
-|---|---|---|---|
-| `sonic_selective` — `get_from_slice × N` | 198 ms | 180 ms | Was original impl |
-| `sonic_dom` — `from_slice × 1 + .get() × N` | **72 ms** | **43 ms** | **Current impl** |
-| `simd_dom+clone` — simd-json + mandatory clone | 49 ms | 41 ms | Requires `Vec<u8>` clone |
-| sonic routing parse | 49.7 ms | 37.3 ms | |
-| simd routing+clone | 39.8 ms | 36.8 ms | |
+Extraction benchmarks:
+
+| Approach | flat/30col (col=30) | flat/15col (col=15) | nested/15col | Notes |
+|---|---|---|---|---|
+| `sonic_selective` — `get_from_slice × N` | 196 ms | 59.7 ms | 179 ms | Was original impl |
+| `sonic_dom` — `from_slice × 1 + .get() × N` | **71.7 ms** | **58.1 ms** | **42.8 ms** | **Current impl** |
+| `simd_dom+clone` — simd-json + mandatory clone | 48.2 ms | 41.8 ms | 37.6 ms | Requires `Vec<u8>` clone |
+
+Routing benchmarks (full DOM parse, batch=10K):
+
+| Approach | flat30 | nested |
+|---|---|---|
+| `sonic_full_parse` | 50.1 ms | 37.9 ms |
+| `simd_full_parse+clone` | 38.5 ms | 37.1 ms |
+
+Key observations:
+- At 30 schema columns: `sonic_dom` is **2.7× faster** than `sonic_selective`
+- At 15 schema columns with nested payload: **4.2× faster** (get_from_slice scans whole doc per miss)
+- At 15 schema columns with flat payload: essentially tied (59.7 ms vs 58.1 ms)
+- Routing: simd-json 23% faster for flat30, ~2% for nested (within noise)
 
 **Rejection reasons:**
 
@@ -588,15 +601,16 @@ batch sizes 100/1K/10K.
    `raw.to_vec()` — a full memcpy per message. This is architecturally incompatible.
 
 2. **Net gain too small**: After implementing `sonic_dom` (single full parse, same dependency),
-   simd-json is only ~25–30% faster for flat payloads and ~5% for nested. Extraction is <10%
+   simd-json is only ~28–33% faster for flat extraction and ~12% for nested. Extraction is <10%
    of total pipeline time (dominated by 40–75 ms network I/O per batch). Net pipeline
-   improvement: ~2.5–3% — below the 5% mison rejection threshold.
+   improvement: ~2–3% — below the 5% mison rejection threshold.
 
 3. **No lazy field access**: sonic-rs `get_from_slice` navigates to a field without building
    any DOM. simd-json has no equivalent — it always builds a full tape first.
 
 **Action taken:** `HeaderExtractor` switched from `get_from_slice × N` to `sonic_rs::from_slice`
-+ O(1) hash lookups — 3–4× extraction speedup, zero new dependencies (commit `7d17a8d`).
++ O(1) hash lookups — 2.7–4.2× extraction speedup (payload/schema dependent), zero new
+dependencies (commit `7d17a8d`).
 
 ---
 
