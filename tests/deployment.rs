@@ -24,8 +24,8 @@ fn test_generated_dockerfile_matches_existing() {
 
     // Verify key contract points are present
     assert!(
-        generated.contains("FROM debian:bookworm-slim"),
-        "Should use bookworm-slim base"
+        generated.contains("FROM ubuntu:24.04"),
+        "Should use ubuntu:24.04 base"
     );
     assert!(
         generated.contains("COPY dfe-loader /usr/local/bin/dfe-loader"),

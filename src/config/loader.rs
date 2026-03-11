@@ -1592,8 +1592,8 @@ fn apply_env_overrides(config: &mut Config) {
 /// Supports arbitrary nesting: DFE_LOADER_KAFKA__SASL__USERNAME → kafka.sasl.username
 /// Lists require bracket syntax: DFE_LOADER_KAFKA__BROKERS=[a, b, c]
 fn apply_figment_env(config: &mut Config) -> Result<()> {
-    use figment::providers::{Env, Serialized};
     use figment::Figment;
+    use figment::providers::{Env, Serialized};
 
     let figment = Figment::from(Serialized::defaults(&*config))
         .merge(Env::prefixed(&format!("{ENV_PREFIX}_")).split("__"));
