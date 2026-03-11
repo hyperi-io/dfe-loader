@@ -1,3 +1,31 @@
+# [1.14.0](https://github.com/hyperi-io/dfe-loader/compare/v1.13.6...v1.14.0) (2026-03-11)
+
+
+### Bug Fixes
+
+* add ColumnMetaCache — unified column directive framework [skip ci] ([85a3b2a](https://github.com/hyperi-io/dfe-loader/commit/85a3b2a9e0ab3e7882e63cfa8267623b4afc3d8b))
+* add HeaderExtractor for schema-guided SIMD field promotion [skip ci] ([97a4635](https://github.com/hyperi-io/dfe-loader/commit/97a46356f7559c4fdbafa5f06607e1dbd988c6ec))
+* add rustls-tls to clickhouse crate, read CLICKHOUSE_TLS in test helpers [skip ci] ([6a7f57f](https://github.com/hyperi-io/dfe-loader/commit/6a7f57f6446e9636097a5c0343e4c31ca35b80e5))
+* apply rustfmt to let-chain collapsible_if patterns ([253950c](https://github.com/hyperi-io/dfe-loader/commit/253950c354413b1ef7eed674d00014b506c807ef))
+* change H — schema resolution off event loop [skip ci] ([d85e6bb](https://github.com/hyperi-io/dfe-loader/commit/d85e6bb18b3747b362c3135fcc868192d44f14d2))
+* implement json_primary pipeline — Change A complete [skip ci] ([964adab](https://github.com/hyperi-io/dfe-loader/commit/964adab287064ff71a3774040bcd9eccd830214e))
+* migrate rustlib to crates.io, fix coercer bugs ([e01acb8](https://github.com/hyperi-io/dfe-loader/commit/e01acb82a4600dd717ec952a5101df67ce7971ca))
+* phase 5.7 changes B–J — raw_payloads, CoercionMode, per-batch commits [skip ci] ([ee40ae4](https://github.com/hyperi-io/dfe-loader/commit/ee40ae4d2eda656b9352d1b295abc40da97735be))
+* rename category_to_table → source_to_table, add E2E Kafka test ([c14c0ff](https://github.com/hyperi-io/dfe-loader/commit/c14c0ff6165b6e6a12bfd63ebdd7c035a583c618))
+* resolve clippy warnings and update quinn-proto ([15ae2f2](https://github.com/hyperi-io/dfe-loader/commit/15ae2f287bdf436473b734bfdbd01d4a3042ec27))
+* wire Coercer into Inserter, add Phase 5.6 coercion tests [skip ci] ([36ad20c](https://github.com/hyperi-io/dfe-loader/commit/36ad20c8b3342af984967608636a79facee7eb77))
+* wire json_primary mode gate into orchestrator [skip ci] ([d8de2d5](https://github.com/hyperi-io/dfe-loader/commit/d8de2d5fe51147eecd7a30c6146da595c5532288))
+
+
+### Features
+
+* add OCSF remap preset, default topic to default_land [skip ci] ([5075fc0](https://github.com/hyperi-io/dfe-loader/commit/5075fc0d23204ce6acb667dcde6df16bfb667f6a))
+
+
+### Performance Improvements
+
+* simdjson spike + sonic_dom extractor (3-4x extraction speedup) [skip ci] ([7d17a8d](https://github.com/hyperi-io/dfe-loader/commit/7d17a8d86a280ecfd329195cc5f4e9b467e101cc))
+
 ## [1.13.6](https://github.com/hyperi-io/dfe-loader/compare/v1.13.5...v1.13.6) (2026-03-06)
 
 
