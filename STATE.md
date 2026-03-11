@@ -477,7 +477,8 @@ Start a fresh session after any changes to this file.
 | Never kill cargo processes | Multiple projects share this host — NEVER kill cargo to free locks. Wait for builds to finish. |
 | Edition 2024 | Using Rust edition 2024. `std::env::set_var/remove_var` require `unsafe` blocks. Pattern matching on `&mut T` is implicit in 2024 (remove `ref mut` from `if let Some` on `&mut Option`). |
 | Drop Arrow/clickhouse-arrow | Benchmarks: sonic-rs→Map 6-9x faster than Arrow building; insert paths within noise (network-dominated). Arrow adds complexity with zero insert throughput benefit. |
-| Drop Mison structural index | Benchmarks: zero throughput advantage over sonic-rs. 3,436 lines removed. |
+| Drop Mison structural index | Benchmarks: 4–7% throughput improvement — insufficient to justify maintaining a separate codebase (mison required a custom fork + Rust bindings). 3,436 lines removed (commit `2a7a635`). Full rationale: `docs/DESIGN.md` § Parser Selection History. |
+| Drop simd-json (0.17) | Benchmarks: <3% net pipeline gain after switching to `sonic_dom` (single full parse). Fatal incompatibility: simd-json requires `&mut [u8]`, but payloads are `Arc<[u8]>` — mandatory `Vec<u8>` clone per message destroys zero-copy `_json` model. Full results: `docs/DESIGN.md` § Parser Selection History, `benches/simdjson_spike.rs`. |
 | JSONEachRow via reqwest | Bypasses `clickhouse::Row` compile-time trait. `Map<String, Value>` serialises naturally. Serde overhead ~3-5% of pipeline time vs 40-75ms network I/O. |
 | Test tables: ON CLUSTER + MergeTree/ReplicatedMergeTree | 3-node load-balanced cluster, no sticky sessions. CREATE without ON CLUSTER creates on one node only — inserts to other nodes cannot be queried back. Use benchmark DB (Atomic + ON CLUSTER + MergeTree) for most tests; default DB (Replicated + ReplicatedMergeTree) only when query-back verification required. |
 
