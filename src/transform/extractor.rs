@@ -3,9 +3,12 @@
 
 //! Schema-guided SIMD field extractor for the `json_primary` pipeline mode.
 //!
-//! Extracts only the columns present in the destination table schema from raw
-//! JSON bytes, using `sonic_rs::get_from_slice` for one SIMD scan per column
-//! rather than a full DOM parse.
+//! Parses the raw payload **once** with `sonic_rs::from_slice`, then performs
+//! O(1) hash lookups for each schema column.
+//!
+//! Benchmarks show that `get_from_slice × N` (one SIMD scan per column) is
+//! 3–4× slower than a single full parse for N≥15 columns. The full-parse
+//! approach amortises the SIMD structural indexing cost across all columns.
 //!
 //! ## What this does NOT do
 //!
@@ -26,7 +29,6 @@
 
 use chrono::Utc;
 use serde_json::{Map, Value};
-use sonic_rs::{from_str as sonic_from_str, get_from_slice};
 use tracing::debug;
 
 use crate::transform::transformer::fmt_ts;
@@ -65,8 +67,9 @@ impl HeaderExtractor {
 
     /// Extract promoted fields from raw JSON bytes using schema column guidance.
     ///
-    /// Returns a `Map<String, Value>` of promoted fields only.
-    /// `_json` is NOT included — it is spliced at serialisation time.
+    /// Parses the payload once with `sonic_rs::from_slice`, then performs O(1)
+    /// hash lookups per schema column. Returns only promoted fields — `_json` is
+    /// NOT included (spliced zero-copy at serialisation time).
     ///
     /// Column directives are read from `col_meta` with full config cascade:
     /// per-table config > global config > DDL `@directive` annotations.
@@ -79,6 +82,19 @@ impl HeaderExtractor {
     ) -> Map<String, Value> {
         let now = Utc::now();
         let mut map = Map::with_capacity(schema.columns.len());
+
+        // Parse once — all schema column lookups are O(1) hash operations on this map.
+        // Single full parse is 3–4× faster than get_from_slice × N for N≥15 columns.
+        let parsed_value: Value = match sonic_rs::from_slice(raw) {
+            Ok(v) => v,
+            Err(e) => {
+                debug!(table = %table, error = %e, "Payload parse failed, skipping extraction");
+                return map;
+            }
+        };
+        let Some(parsed) = parsed_value.as_object() else {
+            return map;
+        };
 
         for col in &schema.columns {
             let name = &col.name;
@@ -104,25 +120,19 @@ impl HeaderExtractor {
             // Determine source field path(s) for extraction.
             // Priority: @renamed directive > per-column defaults > column name.
             let found = if !directives.renamed.is_empty() {
-                extract_first(raw, &directives.renamed, name, &mut map)
+                lookup_first(parsed, &directives.renamed, name, &mut map)
             } else {
                 match name.as_str() {
-                    "_org_id" => extract_first(
-                        raw,
-                        std::slice::from_ref(&self.org_id_field),
-                        name,
-                        &mut map,
-                    ),
+                    "_org_id" => lookup_one(parsed, &self.org_id_field, name, &mut map),
                     "_source" if self.capture_source && self.metadata_enabled => {
-                        extract_first(raw, &self.source_fields, name, &mut map)
+                        lookup_first(parsed, &self.source_fields, name, &mut map)
                     }
                     _ if name.starts_with('_') => {
-                        // _foo → try source field "foo" first (common convention),
-                        // then "_foo" as a literal fallback.
-                        let stripped = name[1..].to_string();
-                        extract_first(raw, &[stripped, name.clone()], name, &mut map)
+                        // _foo → try "foo" (stripped) first, then "_foo" as literal fallback.
+                        lookup_one(parsed, &name[1..], name, &mut map)
+                            || lookup_one(parsed, name, name, &mut map)
                     }
-                    _ => extract_first(raw, &[name.clone()], name, &mut map),
+                    _ => lookup_one(parsed, name, name, &mut map),
                 }
             };
 
@@ -139,19 +149,34 @@ impl HeaderExtractor {
     }
 }
 
-/// Try source fields in order — insert the first found value into `map`.
-///
-/// Returns `true` if any source field was found and inserted.
+/// Look up a single source field in the pre-parsed object and insert into `map`.
 #[inline]
-fn extract_first(raw: &[u8], sources: &[String], dest: &str, map: &mut Map<String, Value>) -> bool {
+fn lookup_one(
+    parsed: &serde_json::Map<String, Value>,
+    source: &str,
+    dest: &str,
+    map: &mut Map<String, Value>,
+) -> bool {
+    if let Some(v) = parsed.get(source) {
+        map.insert(dest.to_string(), v.clone());
+        true
+    } else {
+        false
+    }
+}
+
+/// Try source field names in order from the pre-parsed object. First match wins.
+#[inline]
+fn lookup_first(
+    parsed: &serde_json::Map<String, Value>,
+    sources: &[String],
+    dest: &str,
+    map: &mut Map<String, Value>,
+) -> bool {
     for source in sources {
-        if let Ok(lazy) = get_from_slice(raw, &[source.as_str()]) {
-            // as_raw_str() returns the raw JSON text of the value (e.g. `"hello"`, `42`, `true`).
-            // sonic_rs::from_str re-parses this into a typed Value (4-8x faster than serde_json).
-            if let Ok(v) = sonic_from_str::<Value>(lazy.as_raw_str()) {
-                map.insert(dest.to_string(), v);
-                return true;
-            }
+        if let Some(v) = parsed.get(source.as_str()) {
+            map.insert(dest.to_string(), v.clone());
+            return true;
         }
     }
     false

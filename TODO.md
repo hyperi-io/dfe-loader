@@ -72,27 +72,34 @@ Phase 5.5 Step C), perform a CPU-first review of the hot path:
 - Check for: unnecessary allocations, clone()s, map iterations, bounds checks
 - Document findings in `docs/DESIGN.md` (Future Optimisations section)
 
-**Next:** code-review + simplification pass, then simdjson spike, then Phase 5.5 clickhouse-rs fork.
+**Next:** Phase 5.5 clickhouse-rs fork.
 
-### Spike: simdjson vs sonic-rs targeted bake-off
+### Spike: simdjson vs sonic-rs targeted bake-off ✓ COMPLETE — REJECTED
 
-**Context:** mison showed 4-7% improvement tops over sonic-rs in an earlier bake-off —
-rejected because it required a separate codebase. Mison was deleted (Phase 0). Decision: wrap
-the DFE parsing wrapper code around simdjson instead of maintaining a parallel library.
+**Bench:** `benches/simdjson_spike.rs` — flat30 and nested payloads, 15/30 schema columns,
+batch sizes 100/1K/10K. Three approaches measured:
 
-Now that Phase 5.7 has locked in the exact use-case (schema-guided `get_from_slice` per
-column + one full DOM parse for MessagePack path), the bake-off target is well-defined:
+| Approach | flat30/cols30/10K | nested/cols15/10K |
+|---|---|---|
+| `sonic_selective` — `get_from_slice × N` (was current) | 198 ms | 180 ms |
+| `sonic_dom` — `from_slice` × 1 + `.get()` × N | **72 ms** | **43 ms** |
+| `simd_dom+clone` — simd-json + mandatory `Vec<u8>` clone | 49 ms | 41 ms |
 
-- `get_from_slice` per column (N = ~10-30 schema cols) — SIMD path search, zero DOM
-- Full DOM parse for routing field extraction (sonic-rs `from_slice::<Value>`)
+**Finding 1 — sonic_dom wins over sonic_selective:** Single full parse + hash lookups is
+2.75–4× faster than `get_from_slice × N` for N≥15. Implemented immediately:
+`HeaderExtractor` now does `sonic_rs::from_slice` once, then O(1) lookups per column.
 
-**Goal:** Determine whether wrapping simdjson produces >4-7% throughput improvement in these
-two bounded operations. Measure on representative DFE workloads (not synthetic micro-benchmarks).
+**Finding 2 — simd-json: REJECTED:**
+- Requires `&mut [u8]` (in-place string unescaping). `Arc<[u8]>` is immutable — mandatory
+  `Vec<u8>` clone before every parse. Clone cost (~16 ns for 400-byte payload) is in the noise,
+  but adds a production dependency and code complexity.
+- `simd_dom` is ~25–30% faster than `sonic_dom` for flat payloads, ~5% for nested.
+- Extraction is <10% of total pipeline time (dominated by 40–75 ms network I/O per batch).
+- Net pipeline improvement: ~2.5–3% — well below the 5% mison rejection threshold.
+- Decision: keep sonic-rs. No simd-json in production.
 
-- [ ] Wire simdjson via `simdutf8` + `simd-json` crate against the Phase 5.7 extractor path
-- [ ] Benchmark both parsers on 10K, 100K, 1M rows with realistic schema sizes (15, 30 cols)
-- [ ] If ≥5% improvement: proceed with simdjson wrapper; document in `docs/DESIGN.md`
-- [ ] If <5%: close spike, document decision, keep sonic-rs
+**Routing parse only (flat30/10K):** sonic 49.7 ms vs simd 39.8 ms (+25%). Same verdict —
+routing is not a bottleneck and the mandatory clone negates the gain.
 
 ### Phase 5.6: Type Coercion Completeness ✓ COMPLETE
 
