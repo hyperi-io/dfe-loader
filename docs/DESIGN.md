@@ -543,6 +543,63 @@ See TODO Phase 5.5 for the merge order and task list.
 
 ---
 
+## Parser Selection History
+
+All JSON parser decisions are recorded here as permanent rationale — each choice was the
+result of a targeted bake-off against the specific DFE use-case, not general benchmarks.
+
+### Why sonic-rs (retained)
+
+sonic-rs is the production JSON parser for all DFE hot-path operations:
+- `from_slice::<Value>` — full DOM parse for routing and schema-guided extraction
+- `get_from_slice` — zero-copy lazy field access for routing-only paths
+
+Bench: `benches/bakeoff.rs`, `benches/simdjson_spike.rs`
+
+### Mison — evaluated, rejected (2025-Q4, Phase 0)
+
+**Result:** 4–7% throughput improvement over sonic-rs in targeted benchmarks.
+
+**Rejection reason:** Improvement was insufficient to justify maintaining a separate codebase
+(mison required a fork with custom Rust bindings). The cost/benefit was negative.
+All mison code was deleted in Phase 0 (commit `2a7a635`).
+
+**Bench:** separate bake-off repo (not retained — results documented here only).
+
+### simd-json (0.17) — evaluated, rejected (2026-03-11, post-Phase 5.7)
+
+**Bench:** `benches/simdjson_spike.rs` — flat30 and nested payloads, 15/30 schema columns,
+batch sizes 100/1K/10K.
+
+**Results (batch=10K, median):**
+
+| Approach | flat/30col | nested/15col | Notes |
+|---|---|---|---|
+| `sonic_selective` — `get_from_slice × N` | 198 ms | 180 ms | Was original impl |
+| `sonic_dom` — `from_slice × 1 + .get() × N` | **72 ms** | **43 ms** | **Current impl** |
+| `simd_dom+clone` — simd-json + mandatory clone | 49 ms | 41 ms | Requires `Vec<u8>` clone |
+| sonic routing parse | 49.7 ms | 37.3 ms | |
+| simd routing+clone | 39.8 ms | 36.8 ms | |
+
+**Rejection reasons:**
+
+1. **Mandatory clone**: simd-json requires `&mut [u8]` (in-place string unescaping). The DFE
+   pipeline holds payloads as `Arc<[u8]>` for zero-copy `_json` splice. Every parse would need
+   `raw.to_vec()` — a full memcpy per message. This is architecturally incompatible.
+
+2. **Net gain too small**: After implementing `sonic_dom` (single full parse, same dependency),
+   simd-json is only ~25–30% faster for flat payloads and ~5% for nested. Extraction is <10%
+   of total pipeline time (dominated by 40–75 ms network I/O per batch). Net pipeline
+   improvement: ~2.5–3% — below the 5% mison rejection threshold.
+
+3. **No lazy field access**: sonic-rs `get_from_slice` navigates to a field without building
+   any DOM. simd-json has no equivalent — it always builds a full tape first.
+
+**Action taken:** `HeaderExtractor` switched from `get_from_slice × N` to `sonic_rs::from_slice`
++ O(1) hash lookups — 3–4× extraction speedup, zero new dependencies (commit `7d17a8d`).
+
+---
+
 ## Transport Abstraction (hyperi-rustlib)
 
 The transport layer is implemented in `hyperi-rustlib` as a shared library for all HyperI Rust projects.
