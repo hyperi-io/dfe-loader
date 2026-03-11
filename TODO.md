@@ -25,7 +25,7 @@ Stage 1 ships first, Stage 2 is a drop-in upgrade — same API, better protocol.
 
 ## Active
 
-### Phase 5.7: Schema-Guided Extraction + Zero-Copy _json
+### Phase 5.7: Schema-Guided Extraction + Zero-Copy _json ✓ COMPLETE
 
 Complete architectural overhaul of the hot path for SIMD efficiency and CPU reduction.
 
@@ -50,14 +50,17 @@ Implementation changes:
 - [x] **B**: `buffer/manager.rs` — `FlushBatch` carries `raw_payloads: Vec<Arc<[u8]>>`,
       `push()` accepts `raw: Option<Arc<[u8]>>`, single-pass `get_ready_for_flush()`
 - [x] **I**: `clickhouse/inserter.rs` — `#[derive(Clone)]`, simplify `insert_batches*`
-- [ ] **J**: `pipeline/orchestrator.rs` — remove `should_flush()` double-scan guard
+- [x] **J**: `pipeline/orchestrator.rs` — single-pass `get_ready_for_flush()`, no `should_flush()` guard
 - [x] **C**: `clickhouse/client_http.rs` — zero-copy `_json` splice via `write_row_with_json`;
       strips trailing `}` from promoted map, appends `,"_json":<raw bytes>}`; no re-parse
 - [x] **D/E**: `transform/coerce.rs` — `CoercionMode` enum (`Full` / `Delta`),
       Delta dispatch (pass-through for most types, O(1) branch per col)
-- [ ] **F**: `orchestrator.rs` — per-batch offset commit (independent per table)
-- [ ] **G**: `orchestrator.rs` — bounded DLQ channel (`mpsc::channel(1_000)` + background task)
-- [ ] **H**: `orchestrator.rs` — schema resolution off event loop (background tasks + select!)
+- [x] **F**: `orchestrator.rs` — per-batch offset commit; `per_batch_offsets` extracted before
+      insert, Table A failure does not block Table B commit
+- [x] **G**: `orchestrator.rs` — bounded DLQ channel `mpsc::channel(1_000)` + background drain
+      task; `try_send` in hot path drops on `Full` with a warn (never blocks)
+- [x] **H**: `orchestrator.rs` — schema resolution via `resolve_tx` background task; results
+      arrive in `schema_result_rx` select! arm; event loop never blocks on ClickHouse
 - [x] **A**: `transform/extractor.rs` — `HeaderExtractor` with sonic-rs SIMD extraction
       (`get_from_slice` per schema col); `orchestrator.rs` — `json_primary` mode gate,
       `ColumnMetaCache` wired into mapping builder + computed cols + extractor
@@ -69,8 +72,7 @@ Phase 5.5 Step C), perform a CPU-first review of the hot path:
 - Check for: unnecessary allocations, clone()s, map iterations, bounds checks
 - Document findings in `docs/DESIGN.md` (Future Optimisations section)
 
-**Next:** F/G/H orchestrator hardening (per-batch offsets, bounded DLQ, async schema), then
-code-review + simplification pass before Phase 5.5 clickhouse-rs fork.
+**Next:** code-review + simplification pass, then simdjson spike, then Phase 5.5 clickhouse-rs fork.
 
 ### Spike: simdjson vs sonic-rs targeted bake-off
 
