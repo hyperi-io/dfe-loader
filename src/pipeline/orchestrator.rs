@@ -40,8 +40,8 @@ use crate::payload::{FormatDetector, FormatMode, PayloadFormat};
 use crate::routing::{RouteResult, Router};
 use crate::schema::TableTags;
 use crate::column_meta::{ColumnMetaCache, parse_directives};
+use crate::transform::{ComputedColumnCache, FieldMappingCache, HeaderExtractor, MappingBuilder};
 use crate::transform::Transformer;
-use crate::transform::{ComputedColumnCache, FieldMappingCache, MappingBuilder};
 
 /// Pipeline statistics
 #[derive(Debug, Default, Clone)]
@@ -448,6 +448,13 @@ impl Orchestrator {
             &self.config.routing,
         );
 
+        // Pipeline mode gate: json_primary (default) or legacy_flatten.
+        // json_primary uses HeaderExtractor + zero-copy _json splice; legacy_flatten
+        // uses the existing full-flatten Transformer path (unchanged).
+        let json_primary_mode = self.config.payload.pipeline_mode != "legacy_flatten";
+
+        let extractor = HeaderExtractor::new(&self.config.metadata, &self.config.routing);
+
         // Determine format mode from config
         let format_mode =
             FormatMode::parse(&self.config.payload.format).unwrap_or(FormatMode::Auto);
@@ -580,6 +587,9 @@ impl Orchestrator {
                         // Rebuild capture overrides
                         capture_overrides = CaptureOverrides::new(&new_config.metadata);
 
+                        // Rebuild extractor and mode gate on config change
+                        // (col_meta_cache and schema_cache are Arc, not rebuilt)
+
                         // Update flush interval if changed
                         if new_config.buffer.flush_age_secs != self.config.buffer.flush_age_secs {
                             flush_interval = interval(Duration::from_secs(
@@ -709,9 +719,13 @@ impl Orchestrator {
                                 // No intermediate copies - payload bytes go straight to parser
                                 match self.process_message(
                                     &kafka_msg,
+                                    json_primary_mode,
                                     &format_detector,
                                     &router,
                                     &transformer,
+                                    &extractor,
+                                    &schema_cache,
+                                    &col_meta_cache,
                                     &enrichment,
                                     &mut buffer_manager,
                                     &mut capture_overrides,
@@ -860,15 +874,25 @@ impl Orchestrator {
         Ok(())
     }
 
-    /// Process a single message through the pipeline
-    /// Returns the table name on success for metrics tracking
+    /// Process a single message through the pipeline.
+    ///
+    /// Returns the table name on success for metrics tracking.
+    ///
+    /// Two code paths:
+    /// - `json_primary`: schema-guided SIMD extraction (HeaderExtractor) + zero-copy `_json`.
+    ///   When schema is not yet resolved, silently falls back to the legacy path.
+    /// - `legacy_flatten`: existing full-flatten + Transformer path (unchanged).
     #[allow(clippy::too_many_arguments)]
     fn process_message(
         &self,
         msg: &KafkaMessage,
+        json_primary_mode: bool,
         format_detector: &FormatDetector,
         router: &Router,
         transformer: &Transformer,
+        extractor: &HeaderExtractor,
+        schema_cache: &SharedSchemaCache,
+        col_meta_cache: &ColumnMetaCache,
         enrichment: &EnrichmentPipeline,
         buffer_manager: &mut BufferManager,
         capture_overrides: &mut CaptureOverrides,
@@ -883,7 +907,7 @@ impl Orchestrator {
             }
         };
 
-        // Step 2: Parse payload to JSON Value
+        // Step 2: Parse payload to JSON Value (needed for routing in both modes)
         let value: Value = match format {
             PayloadFormat::Json => sonic_rs::from_slice(&msg.payload)
                 .map_err(|e| crate::Error::Json(format!("JSON parse error: {}", e)))?,
@@ -895,7 +919,6 @@ impl Orchestrator {
         };
 
         // Step 3: Route to table (db.table)
-        // Use route_value() to avoid re-parsing the JSON we just parsed
         let route_result = router.route_value(&value);
         let table = match route_result {
             RouteResult::Table(t) => t,
@@ -905,73 +928,84 @@ impl Orchestrator {
             }
         };
 
-        let common_header = self.config.metadata.enabled;
-
-        // Step 3.5: Extract org_id for _org_id field (Common Header v2 - RLS)
-        // Clone the str to avoid borrowing value (which we need to move into transform)
-        let org_id_owned = if common_header {
-            router
-                .extract_org_id_from_value(&value)
-                .map(|s| s.to_string())
-        } else {
-            None
-        };
-
-        // Step 3.6: Extract _source value (Common Header v2)
-        // Priority: 1) message data field, 2) Kafka topic (strip suffix), 3) default
-        let source_owned = if common_header && self.config.metadata.capture_source {
-            Some(
-                router
-                    .extract_source_from_value(&value)
-                    .map(|s| s.to_string())
-                    .unwrap_or_else(|| router.derive_source_from_topic(&msg.topic)),
-            )
-        } else {
-            None
-        };
-
-        // Step 4: Transform (flatten, timestamp validation, _raw rename, routing field removal)
-        let transform_result = transformer.transform_with_raw(
-            value,
-            org_id_owned.as_deref(),
-            source_owned.as_deref(),
-        )?;
-
-        // Step 4.5: Apply per-table capture overrides
-        // Mark table for async DDL tag resolution if first time seen
+        // Mark table for async schema/DDL resolution (both paths).
         capture_overrides.mark_pending(&table);
-        let mut data = transform_result.data;
+        if let Some(fm_cache) = field_mapping_cache.as_mut() {
+            fm_cache.mark_pending(&table);
+        }
+        computed_column_cache.mark_pending(&table);
 
-        // Inject _json: the original Kafka payload as a JSON string value.
-        // ClickHouse will parse this into native JSON type via JSONEachRow.
-        let table_capture = capture_overrides.get_or_default(&table);
-        if common_header && self.config.metadata.capture_json && !table_capture.disable_json {
-            if let Ok(json_str) = std::str::from_utf8(&msg.payload) {
-                data.insert("_json".to_string(), Value::String(json_str.to_string()));
+        // Step 4: Build the promoted field map and optionally keep raw bytes for zero-copy _json.
+        //
+        // json_primary path (when schema is known and payload is JSON):
+        //   HeaderExtractor does one SIMD scan per schema column. Raw bytes are kept as
+        //   Arc<[u8]> for zero-copy _json splice at serialisation time.
+        //
+        // Legacy fallback (schema not yet resolved, MessagePack input, or legacy_flatten mode):
+        //   Full flatten + Transformer path. _json is injected inline as a UTF-8 string copy.
+        let use_json_primary = json_primary_mode
+            && format == PayloadFormat::Json
+            && schema_cache.get(&table).is_some();
+
+        let (mut data, raw_payload) = if use_json_primary {
+            let schema = schema_cache.get(&table).expect("checked above");
+            let promoted = extractor.extract(&msg.payload, &table, &schema, col_meta_cache);
+            let raw: Arc<[u8]> = Arc::from(msg.payload.as_slice());
+            (promoted, Some(raw))
+        } else {
+            // Legacy flatten path: full DOM → flatten → transform → inline _json
+            let common_header = self.config.metadata.enabled;
+
+            let org_id_owned = if common_header {
+                router.extract_org_id_from_value(&value).map(|s| s.to_string())
+            } else {
+                None
+            };
+
+            let source_owned = if common_header && self.config.metadata.capture_source {
+                Some(
+                    router
+                        .extract_source_from_value(&value)
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| router.derive_source_from_topic(&msg.topic)),
+                )
+            } else {
+                None
+            };
+
+            let transform_result = transformer.transform_with_raw(
+                value,
+                org_id_owned.as_deref(),
+                source_owned.as_deref(),
+            )?;
+            let mut d = transform_result.data;
+
+            let table_capture = capture_overrides.get_or_default(&table);
+            if common_header && self.config.metadata.capture_json && !table_capture.disable_json {
+                if let Ok(json_str) = std::str::from_utf8(&msg.payload) {
+                    d.insert("_json".to_string(), Value::String(json_str.to_string()));
+                }
             }
-        }
+            if common_header && table_capture.disable_raw {
+                d.remove(transformer.raw_output());
+            }
 
-        // Remove _raw if disabled for this table (config list or DDL tags)
-        if common_header && table_capture.disable_raw {
-            data.remove(transformer.raw_output());
-        }
+            (d, None)
+        };
 
         // Step 4.7: Apply per-table field mapping (rename/copy source fields)
         if let Some(fm_cache) = field_mapping_cache {
-            fm_cache.mark_pending(&table);
             if let Some(mapping) = fm_cache.get(&table) {
                 mapping.apply(&mut data);
             }
         }
 
         // Step 4.8: Apply computed columns (CEL expressions producing column values)
-        computed_column_cache.mark_pending(&table);
         if let Some(computed) = computed_column_cache.get(&table) {
             computed.evaluate(&mut data);
         }
 
         // Step 4.9: IP enrichment (GeoIP + reputation + risk scoring)
-        // Only runs if an enricher is active and we can find an IP in the data.
         if enrichment.is_active() {
             if let Some(ip) = extract_enrich_ip(&data, &enrichment.ip_fields) {
                 let geo_result = enrichment.geoip.as_ref().and_then(|g| g.lookup(&ip));
@@ -994,14 +1028,13 @@ impl Orchestrator {
             }
         }
 
-        // Step 5: Push to per-table buffer
+        // Step 5: Push to per-table buffer.
+        // raw_payload is Some for json_primary path — _json is spliced at serialisation.
+        // raw_payload is None for legacy path — _json already injected inline above.
         let kafka_offset =
             KafkaOffset::with_shared_topic(msg.topic.clone(), msg.partition, msg.offset);
 
-        // raw = None until Change A (HeaderExtractor) replaces the full flatten path.
-        // Once Change A is live, raw will be Arc<[u8]> from the message payload
-        // and _json injection above will move to client_http.rs zero-copy splice.
-        buffer_manager.push(&table, data, Some(kafka_offset), None);
+        buffer_manager.push(&table, data, Some(kafka_offset), raw_payload);
 
         debug!(table = %table, "Message buffered");
         Ok(table)
