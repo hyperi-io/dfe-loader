@@ -144,7 +144,7 @@ fn bench_map_batch_builder(c: &mut Criterion) {
         let mut map = Map::new();
         map.insert("id".to_string(), json!(i));
         map.insert("name".to_string(), json!(format!("user_{}", i)));
-        map.insert("active".to_string(), json!(i % 2 == 0));
+        map.insert("active".to_string(), json!(i.is_multiple_of(2)));
         map.insert("score".to_string(), json!(i as f64 * 1.5));
         map.insert("timestamp".to_string(), json!("2025-12-24T12:00:00Z"));
         map

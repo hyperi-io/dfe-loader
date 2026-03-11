@@ -361,8 +361,8 @@ impl GeoIpEnricher {
         let mut found = false;
 
         // City database lookup
-        if let Some(ref reader) = self.city_reader {
-            if let Ok(lookup_result) = reader.lookup(*addr) {
+        if let Some(ref reader) = self.city_reader
+            && let Ok(lookup_result) = reader.lookup(*addr) {
                 // Decode the result into a City struct
                 if let Ok(Some(city)) = lookup_result.decode::<geoip2::City>() {
                     found = true;
@@ -394,18 +394,15 @@ impl GeoIpEnricher {
                     }
                 }
             }
-        }
 
         // ASN database lookup
-        if let Some(ref reader) = self.asn_reader {
-            if let Ok(lookup_result) = reader.lookup(*addr) {
-                if let Ok(Some(asn)) = lookup_result.decode::<geoip2::Asn>() {
+        if let Some(ref reader) = self.asn_reader
+            && let Ok(lookup_result) = reader.lookup(*addr)
+                && let Ok(Some(asn)) = lookup_result.decode::<geoip2::Asn>() {
                     found = true;
                     result.asn = asn.autonomous_system_number;
                     result.asn_org = asn.autonomous_system_organization.map(|s| s.to_string());
                 }
-            }
-        }
 
         if found { Some(result) } else { None }
     }

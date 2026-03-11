@@ -35,7 +35,7 @@
 
 use std::hint::black_box;
 
-use criterion::{Criterion, SamplingMode, Throughput, criterion_group, criterion_main};
+use criterion::{criterion_group, criterion_main, Criterion, SamplingMode, Throughput};
 use serde_json::{Map, Value};
 
 use dfe_loader::routing::{RouteResult, Router};
@@ -156,7 +156,8 @@ fn bench_nested(c: &mut Criterion) {
 }
 
 fn bench_single_message(c: &mut Criterion) {
-    let events: &[(&str, fn() -> Vec<u8>)] = &[
+    type EventEntry = (&'static str, fn() -> Vec<u8>);
+    let events: &[EventEntry] = &[
         ("flat_10", flat_10_event),
         ("flat_30", flat_30_event),
         ("nested_2level", nested_2level_event),

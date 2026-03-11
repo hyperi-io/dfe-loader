@@ -88,14 +88,13 @@ impl TimestampValidator {
             Some(dt) => self.check_bounds_with_now(dt, now),
             None => {
                 // Check for known bad formats
-                if self.correct_known_bad {
-                    if let Some(corrected) = self.correct_known_bad_format(ts) {
+                if self.correct_known_bad
+                    && let Some(corrected) = self.correct_known_bad_format(ts) {
                         return TimestampResult::Corrected(
                             corrected,
                             format!("Corrected from: {}", ts),
                         );
                     }
-                }
                 TimestampResult::Invalid(format!("Failed to parse: {}", ts))
             }
         }

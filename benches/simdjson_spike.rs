@@ -46,7 +46,7 @@
 
 use std::hint::black_box;
 
-use criterion::{criterion_group, criterion_main, Criterion, SamplingMode, Throughput};
+use criterion::{Criterion, SamplingMode, Throughput, criterion_group, criterion_main};
 use serde_json::Value;
 
 // =============================================================================

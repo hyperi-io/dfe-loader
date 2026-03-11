@@ -138,7 +138,7 @@ impl BenchEnv {
 
     fn ch_client(&self) -> clickhouse::Client {
         clickhouse::Client::default()
-            .with_url(&self.http_url())
+            .with_url(self.http_url())
             .with_user(&self.user)
             .with_password(&self.password)
             .with_database(&self.database)
@@ -225,7 +225,7 @@ async fn insert_jsoneachrow(
 /// RowBinary insert via the official clickhouse crate (comparison path).
 async fn insert_rowbinary_http(env: &BenchEnv, table: &str, rows: &[BenchRow]) -> usize {
     let client = clickhouse::Client::default()
-        .with_url(&env.http_url())
+        .with_url(env.http_url())
         .with_user(&env.user)
         .with_password(&env.password)
         .with_database(&env.database);

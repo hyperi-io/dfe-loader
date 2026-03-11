@@ -198,7 +198,7 @@ impl Inserter {
     /// Fetches schema from cache (or live from ClickHouse on cache miss), then
     /// applies the coercer to every row. On schema fetch failure, rows are sent
     /// as-is and ClickHouse's server-side coercion handles them.
-    async fn coerce_batch(&self, table: &str, rows: &mut Vec<Map<String, Value>>) {
+    async fn coerce_batch(&self, table: &str, rows: &mut [Map<String, Value>]) {
         let (coercer, cache) = match (&self.coercer, &self.schema_cache) {
             (Some(c), Some(sc)) => (c, sc),
             _ => return, // Coercion not configured — pass through

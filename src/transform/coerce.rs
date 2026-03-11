@@ -14,9 +14,9 @@ use std::str::FromStr;
 use serde_json::Value;
 use tracing::warn;
 
+use crate::Result;
 use crate::clickhouse::{ParsedType, TableSchema};
 use crate::config::{CoercionConfig, NullHandling};
-use crate::Result;
 
 /// Coercion mode — controls which type coercions are applied.
 ///
@@ -75,11 +75,10 @@ impl Coercer {
             // Delta mode: skip columns that JSONEachRow handles server-side.
             // Only coerce if no custom type_mapping overrides the category.
             if self.mode == CoercionMode::Delta
-                && self
+                && !self
                     .config
                     .type_mappings
-                    .get(&col.parsed_type.base)
-                    .is_none()
+                    .contains_key(&col.parsed_type.base)
             {
                 let category = col.parsed_type.coercer_category();
                 if !matches!(
@@ -248,11 +247,10 @@ impl Coercer {
         };
 
         // Handle FixedString length
-        if let Some(size) = target.fixed_size {
-            if s.len() > size {
+        if let Some(size) = target.fixed_size
+            && s.len() > size {
                 return Ok(Value::String(s[..size].to_string()));
             }
-        }
 
         Ok(Value::String(s))
     }
@@ -543,11 +541,10 @@ impl Coercer {
                 if let Ok(n) = s.parse::<i64>() {
                     return Ok(n);
                 }
-                if let Ok(f) = s.parse::<f64>() {
-                    if f.fract() == 0.0 {
+                if let Ok(f) = s.parse::<f64>()
+                    && f.fract() == 0.0 {
                         return Ok(f as i64);
                     }
-                }
                 Err(crate::Error::Coercion(format!(
                     "Cannot parse '{}' as integer",
                     s
@@ -590,11 +587,10 @@ impl Coercer {
                 if let Ok(n) = s.parse::<u64>() {
                     return Ok(n);
                 }
-                if let Ok(f) = s.parse::<f64>() {
-                    if f >= 0.0 && f.fract() == 0.0 {
+                if let Ok(f) = s.parse::<f64>()
+                    && f >= 0.0 && f.fract() == 0.0 {
                         return Ok(f as u64);
                     }
-                }
                 Err(crate::Error::Coercion(format!(
                     "Cannot parse '{}' as unsigned integer",
                     s

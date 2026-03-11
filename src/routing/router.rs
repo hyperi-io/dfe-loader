@@ -204,11 +204,10 @@ impl Router {
         }
 
         // Extract from db_fields and look up in org_routes
-        if let Some(org_id) = self.extract_first_match(payload, &self.db_fields) {
-            if let Some(db) = self.org_routes.get(&org_id) {
+        if let Some(org_id) = self.extract_first_match(payload, &self.db_fields)
+            && let Some(db) = self.org_routes.get(&org_id) {
                 return db.clone();
             }
-        }
 
         // Fall back to default database
         self.default_db.clone()
@@ -281,24 +280,13 @@ impl Router {
         }
 
         // Extract from db_fields and look up in org_routes
-        if let Some(org_id_cow) = self.extract_first_match_cow(payload, &self.db_fields) {
-            if let Some(db) = self.org_routes.get(org_id_cow.as_ref()) {
+        if let Some(org_id_cow) = self.extract_first_match_cow(payload, &self.db_fields)
+            && let Some(db) = self.org_routes.get(org_id_cow.as_ref()) {
                 return Cow::Owned(db.clone());
             }
-        }
 
         // Fall back to default database
         Cow::Borrowed(&self.default_db)
-    }
-
-    /// Extract a single field with zero-copy (helper for org_id_field)
-    #[inline]
-    fn extract_single_field_cow<'a>(&self, payload: &'a [u8], field: &str) -> Option<Cow<'a, str>> {
-        if field.contains('.') {
-            extract_nested_field_json_cow(payload, field)
-        } else {
-            extract_field_json_cow(payload, field)
-        }
     }
 
     /// Zero-copy extract table from raw payload.
@@ -436,11 +424,10 @@ impl Router {
         }
 
         // Extract from db_fields and look up in org_routes
-        if let Some(org_id) = self.extract_first_match_from_value(value, &self.db_fields) {
-            if let Some(db) = self.org_routes.get(org_id) {
+        if let Some(org_id) = self.extract_first_match_from_value(value, &self.db_fields)
+            && let Some(db) = self.org_routes.get(org_id) {
                 return Cow::Borrowed(db.as_str());
             }
-        }
 
         // Fall back to default database
         Cow::Borrowed(&self.default_db)
@@ -473,11 +460,10 @@ impl Router {
         fields: &[String],
     ) -> Option<&'a str> {
         for field in fields {
-            if let Some(val) = self.get_nested_field(value, field) {
-                if let Some(s) = val.as_str() {
+            if let Some(val) = self.get_nested_field(value, field)
+                && let Some(s) = val.as_str() {
                     return Some(s);
                 }
-            }
         }
         None
     }

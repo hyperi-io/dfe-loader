@@ -11,8 +11,8 @@
 //! - 2.7× faster at N=30 flat payload (196 ms → 72 ms)
 //! - 4.2× faster at N=15 nested payload (each miss still scans the full doc)
 //! - Tied at N=15 flat payload with high field hit-rate
-//! Misses are free with the DOM approach (O(1) hash lookup returns None)
-//! but cost a full document scan with `get_from_slice`.
+//!   Misses are free with the DOM approach (O(1) hash lookup returns None)
+//!   but cost a full document scan with `get_from_slice`.
 //!
 //! ## What this does NOT do
 //!
@@ -141,11 +141,10 @@ impl HeaderExtractor {
             };
 
             // Apply column default when all source fields were absent.
-            if !found {
-                if let Some(ref default) = directives.default {
+            if !found
+                && let Some(ref default) = directives.default {
                     map.insert(name.clone(), default.clone());
                 }
-            }
         }
 
         debug!(table = %table, fields = map.len(), "Extracted promoted fields");
@@ -406,8 +405,10 @@ mod tests {
         let schema = make_schema(&["_source"]);
 
         // Disable capture_source so it falls through to the general _ handling
-        let mut metadata = MetadataConfig::default();
-        metadata.capture_source = false;
+        let metadata = MetadataConfig {
+            capture_source: false,
+            ..Default::default()
+        };
         let extractor2 = HeaderExtractor::new(&metadata, &RoutingConfig::default());
         let col_meta = empty_col_meta();
 
