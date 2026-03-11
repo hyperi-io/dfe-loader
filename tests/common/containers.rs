@@ -8,8 +8,6 @@
 //! Provides Docker-based ClickHouse and Kafka containers for tests.
 //! Only available with `--features testcontainers`.
 
-#[cfg(feature = "testcontainers")]
-pub use testcontainers_impl::*;
 
 #[cfg(feature = "testcontainers")]
 mod testcontainers_impl {

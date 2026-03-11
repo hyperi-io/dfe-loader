@@ -25,6 +25,8 @@ use tracing::debug;
 
 use crate::config::BufferConfig;
 
+type BufferBuildResult = (Vec<Map<String, Value>>, Vec<KafkaOffset>, Vec<Arc<[u8]>>);
+
 /// Kafka offset metadata for at-least-once delivery.
 ///
 /// Uses `Arc<str>` for topic to avoid cloning the topic string for every message.
@@ -121,7 +123,7 @@ impl TableBuffer {
         self.rows.len() >= flush_rows || self.created_at.elapsed().as_secs() >= flush_age_secs
     }
 
-    fn build(&mut self) -> Option<(Vec<Map<String, Value>>, Vec<KafkaOffset>, Vec<Arc<[u8]>>)> {
+    fn build(&mut self) -> Option<BufferBuildResult> {
         if self.rows.is_empty() {
             return None;
         }
@@ -231,8 +233,8 @@ impl BufferManager {
         let mut flush_batches = Vec::new();
 
         for (table, buffer) in self.buffers.iter_mut() {
-            if buffer.is_ready(flush_rows, flush_age_secs) {
-                if let Some((rows, offsets, raw_payloads)) = buffer.build() {
+            if buffer.is_ready(flush_rows, flush_age_secs)
+                && let Some((rows, offsets, raw_payloads)) = buffer.build() {
                     debug!(table = %table, rows = rows.len(), "Flushing buffer");
                     flush_batches.push(FlushBatch {
                         table: CompactString::from(table.as_str()),
@@ -241,7 +243,6 @@ impl BufferManager {
                         raw_payloads,
                     });
                 }
-            }
         }
 
         flush_batches

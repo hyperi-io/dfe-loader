@@ -381,8 +381,8 @@ async fn download_tar_gz(
         let path = entry.path()?;
 
         // MaxMind tar contains: GeoLite2-City_20241231/GeoLite2-City.mmdb
-        if let Some(filename) = path.file_name() {
-            if filename == target_filename {
+        if let Some(filename) = path.file_name()
+            && filename == target_filename {
                 let tmp = dest.with_extension("mmdb.tmp");
                 let mut outfile = fs::File::create(&tmp)?;
                 io::copy(&mut entry, &mut outfile)?;
@@ -397,7 +397,6 @@ async fn download_tar_gz(
                 found = true;
                 break;
             }
-        }
     }
 
     if !found {

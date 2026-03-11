@@ -77,8 +77,8 @@ impl TransportAdapter {
         };
 
         // SASL configuration
-        if let Some(ref sasl) = config.sasl {
-            if sasl.enabled {
+        if let Some(ref sasl) = config.sasl
+            && sasl.enabled {
                 // Set mechanism
                 transport_config.sasl_mechanism =
                     sasl.mechanism().as_rdkafka_mechanism().map(String::from);
@@ -92,11 +92,10 @@ impl TransportAdapter {
                     transport_config.security_protocol = "sasl_plaintext".to_string();
                 }
             }
-        }
 
         // TLS configuration
-        if let Some(ref tls) = config.tls {
-            if tls.enabled {
+        if let Some(ref tls) = config.tls
+            && tls.enabled {
                 if transport_config.security_protocol == "plaintext" {
                     transport_config.security_protocol = "ssl".to_string();
                 }
@@ -105,7 +104,6 @@ impl TransportAdapter {
                 transport_config.ssl_key_location = tls.key_file.clone();
                 transport_config.ssl_skip_verify = tls.skip_verify;
             }
-        }
 
         transport_config
     }
@@ -212,7 +210,6 @@ impl GrpcTransportAdapter {
             recv_timeout_ms: config.recv_timeout_ms,
             max_message_size: config.max_message_size,
             compression: config.compression,
-            ..Default::default()
         };
 
         let transport = GrpcTransport::new(&transport_config)

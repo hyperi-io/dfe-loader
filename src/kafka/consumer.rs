@@ -137,8 +137,8 @@ impl Consumer {
         }
 
         // TLS configuration
-        if let Some(ref tls) = config.tls {
-            if tls.enabled {
+        if let Some(ref tls) = config.tls
+            && tls.enabled {
                 // Update security protocol if SASL is also enabled
                 if config.sasl.as_ref().is_some_and(|s| s.enabled) {
                     client_config.set("security.protocol", "SASL_SSL");
@@ -158,7 +158,6 @@ impl Consumer {
 
                 info!("TLS enabled");
             }
-        }
 
         let consumer: StreamConsumer = client_config.create()?;
 

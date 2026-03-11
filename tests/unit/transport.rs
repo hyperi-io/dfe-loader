@@ -404,7 +404,6 @@ async fn test_buffer_accumulates_messages() {
         flush_rows: 100, // High threshold so we don't flush
         flush_bytes: 1_000_000,
         flush_age_secs: 3600,
-        ..Default::default()
     };
     let mut buffer_manager = BufferManager::new(&buffer_config);
 
@@ -419,7 +418,7 @@ async fn test_buffer_accumulates_messages() {
 
     // Process messages through the pipeline
     let messages = adapter.recv(10).await.unwrap();
-    for (_i, msg) in messages.iter().enumerate() {
+    for msg in messages.iter() {
         let value: serde_json::Value = sonic_rs::from_slice(&msg.payload).unwrap();
 
         let route = match router.route_value(&value) {
@@ -463,7 +462,6 @@ async fn test_buffer_flush_on_threshold() {
         flush_rows: 5, // Low threshold
         flush_bytes: 1_000_000,
         flush_age_secs: 3600,
-        ..Default::default()
     };
     let mut buffer_manager = BufferManager::new(&buffer_config);
 
@@ -578,7 +576,6 @@ async fn test_full_message_flow_without_clickhouse() {
         flush_rows: 1000,
         flush_bytes: 1_000_000,
         flush_age_secs: 3600,
-        ..Default::default()
     };
     let mut buffer_manager = BufferManager::new(&buffer_config);
 
@@ -665,7 +662,6 @@ async fn test_high_volume_message_processing() {
         flush_rows: 100,
         flush_bytes: 1_000_000,
         flush_age_secs: 3600,
-        ..Default::default()
     };
     let mut buffer_manager = BufferManager::new(&buffer_config);
 

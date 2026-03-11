@@ -649,14 +649,13 @@ impl Orchestrator {
 
                 _ = flush_interval.tick() => {
                     // Update memory scaling pressure (periodic, low cost)
-                    if let Some(ref scaling) = self.scaling {
-                        if let Some((used, limit)) = read_process_memory() {
+                    if let Some(ref scaling) = self.scaling
+                        && let Some((used, limit)) = read_process_memory() {
                             scaling.set_memory(used, limit);
                             if limit > 0 {
                                 scaling.set_component("memory", used as f64 / limit as f64);
                             }
                         }
-                    }
 
                     // Check for buffers ready to flush
                     let batches = buffer_manager.get_ready_for_flush();
@@ -686,12 +685,11 @@ impl Orchestrator {
                     col_meta_cache.apply_ddl(table, result.column_directives);
 
                     // Apply field mapping (needs schema; uses ColumnMetaCache for rename rules)
-                    if let Some(ref mut fm) = field_mapping_cache {
-                        if let Some(ref schema) = result.schema {
+                    if let Some(ref mut fm) = field_mapping_cache
+                        && let Some(ref schema) = result.schema {
                             fm.build_and_cache(table, schema, &col_meta_cache);
                             debug!(table = %table, "Applied field mapping from background resolver");
                         }
-                    }
 
                     // Apply computed columns (uses ColumnMetaCache for CEL expressions)
                     computed_column_cache.build_and_cache(table, &col_meta_cache);
@@ -799,27 +797,24 @@ impl Orchestrator {
                             {
                                 let mut seen = FxHashSet::default();
                                 for table in capture_overrides.take_pending() {
-                                    if seen.insert(table.clone()) {
-                                        if resolve_tx.try_send(table).is_err() {
+                                    if seen.insert(table.clone())
+                                        && resolve_tx.try_send(table).is_err() {
                                             debug!("Schema resolve channel full, will retry next tick");
                                         }
-                                    }
                                 }
                                 if let Some(ref mut fm) = field_mapping_cache {
                                     for table in fm.take_pending() {
-                                        if seen.insert(table.clone()) {
-                                            if resolve_tx.try_send(table).is_err() {
+                                        if seen.insert(table.clone())
+                                            && resolve_tx.try_send(table).is_err() {
                                                 debug!("Schema resolve channel full, will retry next tick");
                                             }
-                                        }
                                     }
                                 }
                                 for table in computed_column_cache.take_pending() {
-                                    if seen.insert(table.clone()) {
-                                        if resolve_tx.try_send(table).is_err() {
+                                    if seen.insert(table.clone())
+                                        && resolve_tx.try_send(table).is_err() {
                                             debug!("Schema resolve channel full, will retry next tick");
                                         }
-                                    }
                                 }
                             }
 
@@ -983,11 +978,10 @@ impl Orchestrator {
             let mut d = transform_result.data;
 
             let table_capture = capture_overrides.get_or_default(&table);
-            if common_header && self.config.metadata.capture_json && !table_capture.disable_json {
-                if let Ok(json_str) = std::str::from_utf8(&msg.payload) {
+            if common_header && self.config.metadata.capture_json && !table_capture.disable_json
+                && let Ok(json_str) = std::str::from_utf8(&msg.payload) {
                     d.insert("_json".to_string(), Value::String(json_str.to_string()));
                 }
-            }
             if common_header && table_capture.disable_raw {
                 d.remove(transformer.raw_output());
             }
@@ -996,11 +990,10 @@ impl Orchestrator {
         };
 
         // Step 4.7: Apply per-table field mapping (rename/copy source fields)
-        if let Some(fm_cache) = field_mapping_cache {
-            if let Some(mapping) = fm_cache.get(&table) {
+        if let Some(fm_cache) = field_mapping_cache
+            && let Some(mapping) = fm_cache.get(&table) {
                 mapping.apply(&mut data);
             }
-        }
 
         // Step 4.8: Apply computed columns (CEL expressions producing column values)
         if let Some(computed) = computed_column_cache.get(&table) {
@@ -1008,8 +1001,8 @@ impl Orchestrator {
         }
 
         // Step 4.9: IP enrichment (GeoIP + reputation + risk scoring)
-        if enrichment.is_active() {
-            if let Some(ip) = extract_enrich_ip(&data, &enrichment.ip_fields) {
+        if enrichment.is_active()
+            && let Some(ip) = extract_enrich_ip(&data, &enrichment.ip_fields) {
                 let geo_result = enrichment.geoip.as_ref().and_then(|g| g.lookup(&ip));
                 let rep_result = enrichment.reputation.as_ref().and_then(|r| r.lookup(&ip));
 
@@ -1019,16 +1012,14 @@ impl Orchestrator {
                 if let Some(ref rep) = rep_result {
                     inject_reputation(&mut data, rep);
                 }
-                if let Some(ref scorer) = enrichment.risk {
-                    if geo_result.is_some() || rep_result.is_some() {
+                if let Some(ref scorer) = enrichment.risk
+                    && (geo_result.is_some() || rep_result.is_some()) {
                         let input =
                             RiskInput::from_enrichment(geo_result.as_ref(), rep_result.as_ref());
                         let output = scorer.score(&input);
                         inject_risk(&mut data, &output);
                     }
-                }
             }
-        }
 
         // Step 5: Push to per-table buffer.
         // raw_payload is Some for json_primary path — _json is spliced at serialisation.
@@ -1183,11 +1174,10 @@ fn extract_enrich_ip(
     ip_fields: &[String],
 ) -> Option<String> {
     for field in ip_fields {
-        if let Some(Value::String(s)) = data.get(field.as_str()) {
-            if !s.is_empty() {
+        if let Some(Value::String(s)) = data.get(field.as_str())
+            && !s.is_empty() {
                 return Some(s.clone());
             }
-        }
     }
     None
 }

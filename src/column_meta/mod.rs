@@ -123,22 +123,20 @@ impl ColumnMetaCache {
     #[must_use]
     pub fn get(&self, table: &str, col: &str) -> ColumnDirectives {
         // Per-table config wins unconditionally
-        if let Some(table_cols) = self.config.tables.get(table) {
-            if let Some(entry) = table_cols.get(col) {
+        if let Some(table_cols) = self.config.tables.get(table)
+            && let Some(entry) = table_cols.get(col) {
                 return entry_to_directives(entry);
             }
-        }
         // Global config
         if let Some(entry) = self.config.global.get(col) {
             return entry_to_directives(entry);
         }
         // DDL layer (lowest)
         let ddl = self.ddl.read();
-        if let Some(table_ddl) = ddl.get(table) {
-            if let Some(d) = table_ddl.get(col) {
+        if let Some(table_ddl) = ddl.get(table)
+            && let Some(d) = table_ddl.get(col) {
                 return d.clone();
             }
-        }
         ColumnDirectives::default()
     }
 
