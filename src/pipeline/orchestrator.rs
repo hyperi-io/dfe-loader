@@ -27,7 +27,7 @@ use hyperi_rustlib::dlq::{Dlq, DlqEntry, DlqSource};
 
 use crate::Result;
 use crate::buffer::{BufferManager, FlushBatch, KafkaOffset};
-use crate::clickhouse::{HttpClickHouseClient, Inserter, InserterConfig};
+use crate::clickhouse::{HttpClickHouseClient, Inserter, InserterConfig, SchemaCache, SharedSchemaCache};
 use crate::config::{Config, MetadataConfig, SharedConfig, TableCaptureConfig};
 use crate::enrich::geoip::GeoIpEnricher;
 use crate::enrich::reputation::{ReputationEnricher, ThreatSource, ThreatType};
@@ -244,6 +244,21 @@ impl CaptureOverrides {
     }
 }
 
+/// Result of async per-table schema resolution.
+///
+/// Fetched off the event loop by a background resolver task.
+/// Applied to all three per-table caches when received via `result_rx`.
+struct TableResolutionResult {
+    /// Destination table (db.table)
+    table: String,
+    /// Table-level COMMENT string (for DDL capture tags)
+    comment: String,
+    /// Full schema from system.columns (for field mapping + SharedSchemaCache)
+    schema: Option<crate::clickhouse::TableSchema>,
+    /// Per-column comments (for field mapping + computed columns)
+    column_comments: FxHashMap<String, String>,
+}
+
 /// Orchestrates the Kafka → ClickHouse pipeline
 pub struct Orchestrator {
     config: Config,
@@ -358,6 +373,55 @@ impl Orchestrator {
                             if let Err(e) = dlq_bg.send(entry).await {
                                 error!(error = %e, "DLQ send failed");
                             }
+                        }
+                    }
+                }
+            });
+        }
+
+        // Schema cache — shared with background resolver and (after Change A) HeaderExtractor.
+        // Background resolver populates it; orchestrator reads it in process_message.
+        let schema_cache: SharedSchemaCache = Arc::new(SchemaCache::new(
+            self.config.schema.cache_ttl_secs,
+        ));
+
+        // Background schema resolver — moves all schema fetching off the event loop.
+        //
+        // Channel pair:
+        //   resolve_tx  → send table names that need resolution (from take_pending())
+        //   result_rx   → receive TableResolutionResult back (applied in select!)
+        //
+        // Capacity 256: enough to buffer a burst of new tables without backpressure on hot path.
+        const SCHEMA_RESOLVE_CAPACITY: usize = 256;
+        let (resolve_tx, mut resolve_rx) = mpsc::channel::<String>(SCHEMA_RESOLVE_CAPACITY);
+        let (schema_result_tx, mut schema_result_rx) =
+            mpsc::channel::<TableResolutionResult>(SCHEMA_RESOLVE_CAPACITY);
+        {
+            let resolver_client = Arc::clone(&http_client);
+            let result_tx = schema_result_tx;
+            let shutdown_resolver = self.shutdown.clone();
+            tokio::spawn(async move {
+                loop {
+                    tokio::select! {
+                        biased;
+                        _ = shutdown_resolver.cancelled() => break,
+                        Some(table) = resolve_rx.recv() => {
+                            let client = Arc::clone(&resolver_client);
+                            let tx = result_tx.clone();
+                            // Each table resolved concurrently — never blocks the resolver loop.
+                            tokio::spawn(async move {
+                                let (comment_res, schema_res, comments_res) = tokio::join!(
+                                    client.fetch_table_comment(&table),
+                                    client.fetch_table_schema(&table),
+                                    client.fetch_column_comments(&table),
+                                );
+                                let _ = tx.send(TableResolutionResult {
+                                    table,
+                                    comment: comment_res.unwrap_or_default(),
+                                    schema: schema_res.ok(),
+                                    column_comments: comments_res.unwrap_or_default(),
+                                }).await;
+                            });
                         }
                     }
                 }
@@ -580,6 +644,39 @@ impl Orchestrator {
                     }
                 }
 
+                // Apply schema resolution results from background resolver.
+                //
+                // Receives TableResolutionResult and applies to all three per-table caches:
+                //   - CaptureOverrides: DDL comment tags (_json/_raw disable)
+                //   - FieldMappingCache: rename/copy rules from schema + column comments
+                //   - ComputedColumnCache: CEL expressions from column comments
+                //   - SchemaCache: full schema for HeaderExtractor (Change A)
+                Some(result) = schema_result_rx.recv() => {
+                    let table = &result.table;
+
+                    // Apply DDL capture tags (only if comment is non-empty)
+                    if !result.comment.is_empty() {
+                        capture_overrides.update_from_comment(table, &result.comment);
+                        debug!(table = %table, "Applied DDL capture tags from background resolver");
+                    }
+
+                    // Apply field mapping (needs schema; comments may be empty)
+                    if let Some(ref mut fm) = field_mapping_cache {
+                        if let Some(ref schema) = result.schema {
+                            fm.build_and_cache(table, schema, &result.column_comments);
+                            debug!(table = %table, "Applied field mapping from background resolver");
+                        }
+                    }
+
+                    // Apply computed columns (comment-driven; empty = no CEL expressions)
+                    computed_column_cache.build_and_cache(table, &result.column_comments);
+
+                    // Populate SchemaCache for HeaderExtractor (Change A)
+                    if let Some(schema) = result.schema {
+                        schema_cache.insert(table.clone(), schema);
+                    }
+                }
+
                 // Receive batch of messages from transport
                 // Zero-copy: payload is moved (not copied), topic is Arc<str> clone (refcount only)
                 messages = transport.recv(RECV_BATCH_SIZE) => {
@@ -664,58 +761,34 @@ impl Orchestrator {
                                 scaling.set_component("errors", self.stats.errors as f64);
                             }
 
-                            // Resolve pending DDL capture tags for newly seen tables
-                            // This is async but runs once per new table, not per message
-                            let pending = capture_overrides.take_pending();
-                            for table in pending {
-                                match http_client.fetch_table_comment(&table).await {
-                                    Ok(comment) if !comment.is_empty() => {
-                                        capture_overrides.update_from_comment(&table, &comment);
-                                        debug!(table = %table, "Resolved DDL capture tags");
-                                    }
-                                    Ok(_) => {} // No comment, config defaults apply
-                                    Err(e) => {
-                                        debug!(table = %table, error = %e, "Failed to fetch table comment for capture tags");
-                                    }
-                                }
-                            }
-
-                            // Resolve pending field mapping for newly seen tables
-                            if let Some(ref mut fm_cache) = field_mapping_cache {
-                                let fm_pending = fm_cache.take_pending();
-                                for table in fm_pending {
-                                    // Fetch schema and column comments for this table
-                                    let schema_result = http_client.fetch_table_schema(&table).await;
-                                    let comments_result = http_client.fetch_column_comments(&table).await;
-
-                                    match (schema_result, comments_result) {
-                                        (Ok(schema), Ok(comments)) => {
-                                            fm_cache.build_and_cache(&table, &schema, &comments);
-                                            debug!(table = %table, "Resolved field mapping");
-                                        }
-                                        (Ok(schema), Err(e)) => {
-                                            debug!(table = %table, error = %e, "Column comments unavailable, using base rules only");
-                                            fm_cache.build_and_cache_no_comments(&table, &schema);
-                                        }
-                                        (Err(e), _) => {
-                                            debug!(table = %table, error = %e, "Schema unavailable for field mapping");
-                                        }
-                                    }
-                                }
-                            }
-
-                            // Resolve pending computed columns for newly seen tables
+                            // Dispatch pending schema resolution tasks off the event loop.
+                            //
+                            // Collect tables needing resolution from all three caches,
+                            // deduplicate (a new table appears in all three), then send
+                            // each unique table to the background resolver via resolve_tx.
+                            // Results arrive in schema_result_rx (handled in select! arm below).
                             {
-                                let cc_pending = computed_column_cache.take_pending();
-                                for table in cc_pending {
-                                    let comments_result = http_client.fetch_column_comments(&table).await;
-                                    match comments_result {
-                                        Ok(comments) => {
-                                            computed_column_cache.build_and_cache(&table, &comments);
+                                let mut seen = FxHashSet::default();
+                                for table in capture_overrides.take_pending() {
+                                    if seen.insert(table.clone()) {
+                                        if resolve_tx.try_send(table).is_err() {
+                                            debug!("Schema resolve channel full, will retry next tick");
                                         }
-                                        Err(e) => {
-                                            debug!(table = %table, error = %e, "Column comments unavailable for computed columns");
-                                            computed_column_cache.build_and_cache_no_comments(&table);
+                                    }
+                                }
+                                if let Some(ref mut fm) = field_mapping_cache {
+                                    for table in fm.take_pending() {
+                                        if seen.insert(table.clone()) {
+                                            if resolve_tx.try_send(table).is_err() {
+                                                debug!("Schema resolve channel full, will retry next tick");
+                                            }
+                                        }
+                                    }
+                                }
+                                for table in computed_column_cache.take_pending() {
+                                    if seen.insert(table.clone()) {
+                                        if resolve_tx.try_send(table).is_err() {
+                                            debug!("Schema resolve channel full, will retry next tick");
                                         }
                                     }
                                 }
