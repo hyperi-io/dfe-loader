@@ -80,6 +80,7 @@ time = ">=0.3"
 # Utilities
 uuid = { version = ">=1.10", features = ["v4", "v7"] }
 rustc-hash = ">=2.0"  # FxHashMap - faster hashing for internal maps
+memchr = ">=2.0"     # SIMD byte scanning for directive parser
 compact_str = ">=0.8"  # Stack-allocated strings for short keys (≤23 bytes)
 chrono = { version = ">=0.4", features = ["serde"] }
 chrono-tz = ">=0.9"

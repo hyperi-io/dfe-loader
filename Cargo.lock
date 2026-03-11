@@ -1097,6 +1097,7 @@ dependencies = [
  "hyperi-rustlib",
  "indexmap 2.13.0",
  "maxminddb",
+ "memchr",
  "mimalloc",
  "mockall",
  "parking_lot",
