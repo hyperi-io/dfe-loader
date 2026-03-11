@@ -1,1 +1,1 @@
-../../../ai/standards/languages/SQL-CLICKHOUSE.md
+../../../hyperi-ai/standards/languages/SQL-CLICKHOUSE.md

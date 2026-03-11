@@ -77,29 +77,32 @@ Phase 5.5 Step C), perform a CPU-first review of the hot path:
 ### Spike: simdjson vs sonic-rs targeted bake-off ✓ COMPLETE — REJECTED
 
 **Bench:** `benches/simdjson_spike.rs` — flat30 and nested payloads, 15/30 schema columns,
-batch sizes 100/1K/10K. Three approaches measured:
+batch sizes 100/1K/10K. Three approaches measured (actual numbers, batch=10K):
 
-| Approach | flat30/cols30/10K | nested/cols15/10K |
-|---|---|---|
-| `sonic_selective` — `get_from_slice × N` (was current) | 198 ms | 180 ms |
-| `sonic_dom` — `from_slice` × 1 + `.get()` × N | **72 ms** | **43 ms** |
-| `simd_dom+clone` — simd-json + mandatory `Vec<u8>` clone | 49 ms | 41 ms |
+| Approach | flat30/col30 | flat30/col15 | nested/col15 |
+|---|---|---|---|
+| `sonic_selective` — `get_from_slice × N` (was current) | 196 ms | 59.7 ms | 179 ms |
+| `sonic_dom` — `from_slice` × 1 + `.get()` × N | **71.7 ms** | **58.1 ms** | **42.8 ms** |
+| `simd_dom+clone` — simd-json + mandatory `Vec<u8>` clone | 48.2 ms | 41.8 ms | 37.6 ms |
 
-**Finding 1 — sonic_dom wins over sonic_selective:** Single full parse + hash lookups is
-2.75–4× faster than `get_from_slice × N` for N≥15. Implemented immediately:
-`HeaderExtractor` now does `sonic_rs::from_slice` once, then O(1) lookups per column.
+**Finding 1 — sonic_dom wins over sonic_selective:**
+- 2.7× faster at N=30 flat payload
+- 4.2× faster at N=15 nested (each miss still scans full doc with get_from_slice)
+- Tied at N=15 flat payload with high hit-rate (58 vs 60 ms)
+- Implemented immediately: `HeaderExtractor` now does `sonic_rs::from_slice` once + O(1) lookups.
 
 **Finding 2 — simd-json: REJECTED:**
 - Requires `&mut [u8]` (in-place string unescaping). `Arc<[u8]>` is immutable — mandatory
-  `Vec<u8>` clone before every parse. Clone cost (~16 ns for 400-byte payload) is in the noise,
-  but adds a production dependency and code complexity.
-- `simd_dom` is ~25–30% faster than `sonic_dom` for flat payloads, ~5% for nested.
+  `Vec<u8>` clone before every parse. Architecturally incompatible with zero-copy `_json`.
+- `simd_dom` is ~28–33% faster than `sonic_dom` for flat extraction, ~12% for nested.
 - Extraction is <10% of total pipeline time (dominated by 40–75 ms network I/O per batch).
-- Net pipeline improvement: ~2.5–3% — well below the 5% mison rejection threshold.
+- Net pipeline improvement: ~2–3% — well below the 5% mison rejection threshold.
 - Decision: keep sonic-rs. No simd-json in production.
 
-**Routing parse only (flat30/10K):** sonic 49.7 ms vs simd 39.8 ms (+25%). Same verdict —
+**Routing parse only (flat30/10K):** sonic 50.1 ms vs simd 38.5 ms (+23%). Same verdict —
 routing is not a bottleneck and the mandatory clone negates the gain.
+
+Full rationale permanently pinned in `docs/DESIGN.md` § Parser Selection History and `STATE.md`.
 
 ### Phase 5.6: Type Coercion Completeness ✓ COMPLETE
 
@@ -149,9 +152,14 @@ Remove or comment out the `[patch]` section to revert to upstream.
   Phase 5.7 (schema-guided extraction) must be complete and 520 tests passing.
   This is prerequisite for Steps B and C.
 
-**Step A.5 (code review):** Before Step B, run a full code review and simplification pass.
-  Phase 5.7 adds HeaderExtractor + many changes. Review for CPU-first hot-path correctness,
-  remove duplication, simplify where possible. Target: zero dead code, clean clippy.
+**Step A.5 (code review) ✓ COMPLETE:** Full simplification pass run (2026-03-11).
+  - `fmt_ts` made `pub(crate)`, shared between transformer + extractor (no duplication)
+  - `HeaderExtractor` switched from `get_from_slice×N` to `from_slice`+O(1) lookups (2.7–4.2×)
+  - `coerce_row` dead code removed; Delta mode early-skip added (avoids clone for pass-through types)
+  - `calc_backoff` free-function extracted (deduplicates identical logic in InserterConfig/Inserter)
+  - `pending_bytes` in `BufferStats::stats()` was always 0 — fixed to populate inline
+  - Orchestrator double schema-cache lookup collapsed to single
+  - `hyperi-ai` submodule updated to v2.7.0, re-attached with `--force --agent claude`
 
 **Step B:** Release binary for internal testing (Kaz).
   Binary builds from `main` once Phase 5.7 is merged.
@@ -434,4 +442,4 @@ Direct `rdkafka` dependency in `Cargo.toml` can be dropped after removal.
 
 ---
 
-**Last Updated:** 2026-03-09
+**Last Updated:** 2026-03-11
