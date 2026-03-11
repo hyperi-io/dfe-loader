@@ -47,19 +47,20 @@ Common header fields (`_timestamp`, `_org_id`, `_source`, `_timestamp_received`)
 are ALWAYS extracted to top-level columns — required for DFE operational correctness.
 
 Implementation changes:
-- [ ] **B**: `buffer/manager.rs` — `FlushBatch` carries `raw_payloads: Vec<Arc<[u8]>>`,
+- [x] **B**: `buffer/manager.rs` — `FlushBatch` carries `raw_payloads: Vec<Arc<[u8]>>`,
       `push()` accepts `raw: Option<Arc<[u8]>>`, single-pass `get_ready_for_flush()`
-- [ ] **I**: `clickhouse/inserter.rs` — `#[derive(Clone)]`, simplify `insert_batches*`
+- [x] **I**: `clickhouse/inserter.rs` — `#[derive(Clone)]`, simplify `insert_batches*`
 - [ ] **J**: `pipeline/orchestrator.rs` — remove `should_flush()` double-scan guard
-- [ ] **C**: `clickhouse/client_http.rs` — zero-copy `_json` splice, `_json` collision
-      detect+merge, `sonic_rs::to_string` for promoted map
-- [ ] **D/E**: `transform/coerce.rs` — `CoercionMode` enum (`Full` / `Delta`),
+- [x] **C**: `clickhouse/client_http.rs` — zero-copy `_json` splice via `write_row_with_json`;
+      strips trailing `}` from promoted map, appends `,"_json":<raw bytes>}`; no re-parse
+- [x] **D/E**: `transform/coerce.rs` — `CoercionMode` enum (`Full` / `Delta`),
       Delta dispatch (pass-through for most types, O(1) branch per col)
 - [ ] **F**: `orchestrator.rs` — per-batch offset commit (independent per table)
 - [ ] **G**: `orchestrator.rs` — bounded DLQ channel (`mpsc::channel(1_000)` + background task)
 - [ ] **H**: `orchestrator.rs` — schema resolution off event loop (background tasks + select!)
-- [ ] **A**: `transform/extractor.rs` (new) — `HeaderExtractor` with sonic-rs SIMD extraction;
-      `orchestrator.rs` — wire extractor, `payload.mode` config gate (`json_primary` default)
+- [x] **A**: `transform/extractor.rs` — `HeaderExtractor` with sonic-rs SIMD extraction
+      (`get_from_slice` per schema col); `orchestrator.rs` — `json_primary` mode gate,
+      `ColumnMetaCache` wired into mapping builder + computed cols + extractor
 
 **Hot-path optimisation review:** After every major change (each sub-item above and after
 Phase 5.5 Step C), perform a CPU-first review of the hot path:
@@ -68,7 +69,28 @@ Phase 5.5 Step C), perform a CPU-first review of the hot path:
 - Check for: unnecessary allocations, clone()s, map iterations, bounds checks
 - Document findings in `docs/DESIGN.md` (Future Optimisations section)
 
-**Next:** Run `./ci/local-build.sh`, confirm 520 tests still pass.
+**Next:** F/G/H orchestrator hardening (per-batch offsets, bounded DLQ, async schema), then
+code-review + simplification pass before Phase 5.5 clickhouse-rs fork.
+
+### Spike: simdjson vs sonic-rs targeted bake-off
+
+**Context:** mison showed 4-7% improvement tops over sonic-rs in an earlier bake-off —
+rejected because it required a separate codebase. Mison was deleted (Phase 0). Decision: wrap
+the DFE parsing wrapper code around simdjson instead of maintaining a parallel library.
+
+Now that Phase 5.7 has locked in the exact use-case (schema-guided `get_from_slice` per
+column + one full DOM parse for MessagePack path), the bake-off target is well-defined:
+
+- `get_from_slice` per column (N = ~10-30 schema cols) — SIMD path search, zero DOM
+- Full DOM parse for routing field extraction (sonic-rs `from_slice::<Value>`)
+
+**Goal:** Determine whether wrapping simdjson produces >4-7% throughput improvement in these
+two bounded operations. Measure on representative DFE workloads (not synthetic micro-benchmarks).
+
+- [ ] Wire simdjson via `simdutf8` + `simd-json` crate against the Phase 5.7 extractor path
+- [ ] Benchmark both parsers on 10K, 100K, 1M rows with realistic schema sizes (15, 30 cols)
+- [ ] If ≥5% improvement: proceed with simdjson wrapper; document in `docs/DESIGN.md`
+- [ ] If <5%: close spike, document decision, keep sonic-rs
 
 ### Phase 5.6: Type Coercion Completeness ✓ COMPLETE
 
