@@ -147,50 +147,37 @@ impl ComputedColumnCache {
         std::mem::take(&mut self.pending_tables)
     }
 
-    /// Build and cache computed columns for a table after column comments are fetched.
+    /// Build and cache computed columns for a table.
     ///
-    /// Merges expressions from column comments with config overrides:
-    /// 1. Parse `@computed:` directives from column comments (lowest precedence)
-    /// 2. Overlay config global expressions
-    /// 3. Overlay config per-table overrides (highest precedence)
-    pub fn build_and_cache(&mut self, table: &str, column_comments: &FxHashMap<String, String>) {
-        // Collect expressions with precedence: column comment → config global → config override
-        let mut expressions: FxHashMap<String, (String, ComputedOrigin)> = FxHashMap::default();
+    /// Merges expressions with precedence (highest wins for same destination):
+    /// 1. `self.config.overrides."table"` — per-table config (highest)
+    /// 2. `self.config.columns` — global config
+    /// 3. `col_meta.computed_for_table(table)` — DDL `@computed:` annotations (lowest)
+    pub fn build_and_cache(&mut self, table: &str, col_meta: &crate::column_meta::ColumnMetaCache) {
+        // Collect expressions with precedence: DDL first, then config overrides.
+        let mut exprs: FxHashMap<String, String> =
+            col_meta.computed_for_table(table).into_iter().collect();
 
-        // Layer 1: Column comments (lowest precedence)
-        for (column_name, comment) in column_comments {
-            if let Some(expr) = parse_computed_directive(comment) {
-                expressions.insert(column_name.clone(), (expr, ComputedOrigin::ColumnComment));
-            }
+        // Global config overrides DDL
+        for (col, expr) in &self.config.columns {
+            exprs.insert(col.clone(), expr.clone());
         }
 
-        // Layer 2: Config global expressions
-        for (column_name, expr) in &self.config.columns {
-            expressions.insert(
-                column_name.clone(),
-                (expr.clone(), ComputedOrigin::ConfigGlobal),
-            );
-        }
-
-        // Layer 3: Config per-table overrides (highest precedence)
+        // Per-table config overrides global config
         if let Some(table_overrides) = self.config.overrides.get(table) {
-            for (column_name, expr) in table_overrides {
-                expressions.insert(
-                    column_name.clone(),
-                    (expr.clone(), ComputedOrigin::ConfigOverride),
-                );
+            for (col, expr) in table_overrides {
+                exprs.insert(col.clone(), expr.clone());
             }
         }
 
-        // Compile all expressions
-        let mut columns = Vec::with_capacity(expressions.len());
-        for (destination, (expr, origin)) in &expressions {
+        let mut columns = Vec::with_capacity(exprs.len());
+        for (destination, expr) in &exprs {
             match hyperi_rustlib::expression::compile(expr) {
                 Ok(program) => {
                     columns.push(CompiledColumn {
                         destination: destination.clone(),
                         program,
-                        _origin: *origin,
+                        _origin: ComputedOrigin::ColumnComment,
                     });
                 }
                 Err(e) => {
@@ -211,13 +198,6 @@ impl ComputedColumnCache {
 
         self.tables
             .insert(table.to_string(), TableComputedColumns { columns });
-    }
-
-    /// Build and cache computed columns for a table without column comments.
-    /// Used when column comment fetch fails or returns empty.
-    pub fn build_and_cache_no_comments(&mut self, table: &str) {
-        let empty_comments = FxHashMap::default();
-        self.build_and_cache(table, &empty_comments);
     }
 }
 
@@ -319,6 +299,7 @@ fn cel_to_json(value: &cel_interpreter::Value) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::column_meta::{ColumnDirectives, ColumnDirectivesConfig, ColumnMetaCache};
 
     // ========================================================================
     // parse_computed_directive tests
@@ -453,13 +434,18 @@ mod tests {
         let config = ComputedColumnsConfig::default();
         let mut cache = ComputedColumnCache::new(config);
 
-        let mut comments = FxHashMap::default();
-        comments.insert(
+        let col_meta = ColumnMetaCache::new(ColumnDirectivesConfig::default());
+        let mut ddl = FxHashMap::default();
+        ddl.insert(
             "risk_label".to_string(),
-            r#"@computed: risk_score > 80 ? "high" : "low""#.to_string(),
+            ColumnDirectives {
+                computed: Some(r#"risk_score > 80 ? "high" : "low""#.to_string()),
+                ..Default::default()
+            },
         );
+        col_meta.apply_ddl("common.events", ddl);
 
-        cache.build_and_cache("common.events", &comments);
+        cache.build_and_cache("common.events", &col_meta);
 
         let tc = cache.get("common.events").unwrap();
         assert_eq!(tc.len(), 1);
@@ -476,13 +462,18 @@ mod tests {
 
         let mut cache = ComputedColumnCache::new(config);
 
-        let mut comments = FxHashMap::default();
-        comments.insert(
+        let col_meta = ColumnMetaCache::new(ColumnDirectivesConfig::default());
+        let mut ddl = FxHashMap::default();
+        ddl.insert(
             "risk_label".to_string(),
-            r#"@computed: risk_score > 80 ? "high" : "low""#.to_string(),
+            ColumnDirectives {
+                computed: Some(r#"risk_score > 80 ? "high" : "low""#.to_string()),
+                ..Default::default()
+            },
         );
+        col_meta.apply_ddl("common.events", ddl);
 
-        cache.build_and_cache("common.events", &comments);
+        cache.build_and_cache("common.events", &col_meta);
 
         // Should have exactly 1 column (config overwrites comment for same destination)
         let tc = cache.get("common.events").unwrap();
@@ -507,15 +498,15 @@ mod tests {
             .insert("common.alerts".to_string(), table_overrides);
 
         let mut cache = ComputedColumnCache::new(config);
-        let comments = FxHashMap::default();
+        let col_meta = ColumnMetaCache::new(ColumnDirectivesConfig::default());
 
         // Table with override
-        cache.build_and_cache("common.alerts", &comments);
+        cache.build_and_cache("common.alerts", &col_meta);
         let tc = cache.get("common.alerts").unwrap();
         assert_eq!(tc.len(), 1);
 
         // Table without override gets global
-        cache.build_and_cache("common.events", &comments);
+        cache.build_and_cache("common.events", &col_meta);
         let tc2 = cache.get("common.events").unwrap();
         assert_eq!(tc2.len(), 1);
     }
@@ -532,7 +523,10 @@ mod tests {
             .insert("working".to_string(), r#"status == "active""#.to_string());
 
         let mut cache = ComputedColumnCache::new(config);
-        cache.build_and_cache_no_comments("common.events");
+        cache.build_and_cache(
+            "common.events",
+            &ColumnMetaCache::new(ColumnDirectivesConfig::default()),
+        );
 
         let tc = cache.get("common.events").unwrap();
         // Only the valid expression should compile
@@ -547,7 +541,10 @@ mod tests {
             .insert("is_high".to_string(), "score > 80".to_string());
 
         let mut cache = ComputedColumnCache::new(config);
-        cache.build_and_cache_no_comments("common.events");
+        cache.build_and_cache(
+            "common.events",
+            &ColumnMetaCache::new(ColumnDirectivesConfig::default()),
+        );
 
         let tc = cache.get("common.events").unwrap();
 
@@ -567,7 +564,10 @@ mod tests {
             .insert("status".to_string(), r#""computed_value""#.to_string());
 
         let mut cache = ComputedColumnCache::new(config);
-        cache.build_and_cache_no_comments("common.events");
+        cache.build_and_cache(
+            "common.events",
+            &ColumnMetaCache::new(ColumnDirectivesConfig::default()),
+        );
 
         let tc = cache.get("common.events").unwrap();
 
@@ -589,7 +589,10 @@ mod tests {
         );
 
         let mut cache = ComputedColumnCache::new(config);
-        cache.build_and_cache_no_comments("common.events");
+        cache.build_and_cache(
+            "common.events",
+            &ColumnMetaCache::new(ColumnDirectivesConfig::default()),
+        );
 
         let tc = cache.get("common.events").unwrap();
 
@@ -611,7 +614,10 @@ mod tests {
         );
 
         let mut cache = ComputedColumnCache::new(config);
-        cache.build_and_cache_no_comments("common.events");
+        cache.build_and_cache(
+            "common.events",
+            &ColumnMetaCache::new(ColumnDirectivesConfig::default()),
+        );
 
         let tc = cache.get("common.events").unwrap();
 

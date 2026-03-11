@@ -44,6 +44,8 @@ pub struct Config {
     pub schema: SchemaConfig,
     pub field_mapping: FieldMappingConfig,
     pub computed_columns: ComputedColumnsConfig,
+    /// Unified per-column directive config (config wins over DDL COMMENT annotations).
+    pub column_directives: crate::column_meta::ColumnDirectivesConfig,
     pub geoip: GeoIpConfig,
     pub enrichment: EnrichmentConfig,
     pub hot_reload: HotReloadConfig,
@@ -1579,8 +1581,8 @@ fn apply_env_overrides(config: &mut Config) {
 /// Supports arbitrary nesting: DFE_LOADER_KAFKA__SASL__USERNAME → kafka.sasl.username
 /// Lists require bracket syntax: DFE_LOADER_KAFKA__BROKERS=[a, b, c]
 fn apply_figment_env(config: &mut Config) -> Result<()> {
-    use figment::Figment;
     use figment::providers::{Env, Serialized};
+    use figment::Figment;
 
     let figment = Figment::from(Serialized::defaults(&*config))
         .merge(Env::prefixed(&format!("{ENV_PREFIX}_")).split("__"));

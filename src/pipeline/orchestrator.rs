@@ -39,6 +39,7 @@ use crate::metrics::Metrics;
 use crate::payload::{FormatDetector, FormatMode, PayloadFormat};
 use crate::routing::{RouteResult, Router};
 use crate::schema::TableTags;
+use crate::column_meta::{ColumnMetaCache, parse_directives};
 use crate::transform::Transformer;
 use crate::transform::{ComputedColumnCache, FieldMappingCache, MappingBuilder};
 
@@ -247,7 +248,7 @@ impl CaptureOverrides {
 /// Result of async per-table schema resolution.
 ///
 /// Fetched off the event loop by a background resolver task.
-/// Applied to all three per-table caches when received via `result_rx`.
+/// Applied to all per-table caches when received via `result_rx`.
 struct TableResolutionResult {
     /// Destination table (db.table)
     table: String,
@@ -255,8 +256,8 @@ struct TableResolutionResult {
     comment: String,
     /// Full schema from system.columns (for field mapping + SharedSchemaCache)
     schema: Option<crate::clickhouse::TableSchema>,
-    /// Per-column comments (for field mapping + computed columns)
-    column_comments: FxHashMap<String, String>,
+    /// Parsed per-column directives (skip/default/renamed/computed/coerce)
+    column_directives: FxHashMap<String, crate::column_meta::ColumnDirectives>,
 }
 
 /// Orchestrates the Kafka → ClickHouse pipeline
@@ -385,6 +386,12 @@ impl Orchestrator {
             self.config.schema.cache_ttl_secs,
         ));
 
+        // Column directive cache — unified framework for skip/default/renamed/computed/coerce.
+        // Config layer is fixed at construction; DDL layer populated by background resolver.
+        let col_meta_cache = Arc::new(ColumnMetaCache::new(
+            self.config.column_directives.clone(),
+        ));
+
         // Background schema resolver — moves all schema fetching off the event loop.
         //
         // Channel pair:
@@ -415,11 +422,16 @@ impl Orchestrator {
                                     client.fetch_table_schema(&table),
                                     client.fetch_column_comments(&table),
                                 );
+                                let column_directives = comments_res
+                                    .unwrap_or_default()
+                                    .into_iter()
+                                    .map(|(col, comment)| (col, parse_directives(&comment)))
+                                    .collect();
                                 let _ = tx.send(TableResolutionResult {
                                     table,
                                     comment: comment_res.unwrap_or_default(),
                                     schema: schema_res.ok(),
-                                    column_comments: comments_res.unwrap_or_default(),
+                                    column_directives,
                                 }).await;
                             });
                         }
@@ -660,16 +672,20 @@ impl Orchestrator {
                         debug!(table = %table, "Applied DDL capture tags from background resolver");
                     }
 
-                    // Apply field mapping (needs schema; comments may be empty)
+                    // Populate ColumnMetaCache DDL layer — must happen before field mapping
+                    // and computed column caches, which read from it.
+                    col_meta_cache.apply_ddl(table, result.column_directives);
+
+                    // Apply field mapping (needs schema; uses ColumnMetaCache for rename rules)
                     if let Some(ref mut fm) = field_mapping_cache {
                         if let Some(ref schema) = result.schema {
-                            fm.build_and_cache(table, schema, &result.column_comments);
+                            fm.build_and_cache(table, schema, &col_meta_cache);
                             debug!(table = %table, "Applied field mapping from background resolver");
                         }
                     }
 
-                    // Apply computed columns (comment-driven; empty = no CEL expressions)
-                    computed_column_cache.build_and_cache(table, &result.column_comments);
+                    // Apply computed columns (uses ColumnMetaCache for CEL expressions)
+                    computed_column_cache.build_and_cache(table, &col_meta_cache);
 
                     // Populate SchemaCache for HeaderExtractor (Change A)
                     if let Some(schema) = result.schema {

@@ -16,9 +16,7 @@ use tracing::debug;
 use crate::clickhouse::TableSchema;
 use crate::config::FieldMappingConfig;
 
-use super::field_mapping::{
-    parse_renamed_directive, FieldMappingRule, MappingAction, RuleOrigin, TableFieldMapping,
-};
+use super::field_mapping::{FieldMappingRule, MappingAction, RuleOrigin, TableFieldMapping};
 use super::remap_loader::{load_builtin, load_file, BuiltinPreset};
 
 /// Builds per-table field mappings from all configured sources.
@@ -92,45 +90,44 @@ impl MappingBuilder {
 
     /// Build mapping for a specific table.
     ///
-    /// Merges all sources with precedence, filters against destination schema,
-    /// and returns a pre-computed `TableFieldMapping` for O(1) hot-path lookups.
+    /// Merges all sources with precedence, filters against destination schema.
     ///
-    /// - `schema`: `TableSchema` from ClickHouse (provides column names for filtering)
-    /// - `column_comments`: column name → comment map (provides `@renamed` directives)
+    /// Precedence (highest wins):
+    /// 1. `ColumnMetaCache::renamed_for_table` — from DDL comments + config cascade
+    /// 2. Base rules from built-in presets and external remap files
     pub fn build_for_table(
         &self,
         schema: &TableSchema,
-        column_comments: &FxHashMap<String, String>,
+        col_meta: &crate::column_meta::ColumnMetaCache,
     ) -> TableFieldMapping {
+        let table = format!("{}.{}", schema.database, schema.table);
+
         // Build set of valid destination columns for filtering
         let schema_columns: FxHashSet<&str> =
             schema.columns.iter().map(|c| c.name.as_str()).collect();
 
-        // Merge rules: start with base (builtins + files), then override from comments
         // Key: destination field name → rule
         let mut merged: FxHashMap<String, FieldMappingRule> = FxHashMap::default();
 
-        // Insert base rules (lowest precedence)
+        // Base rules from presets/files (lowest precedence)
         for rule in &self.base_rules {
             merged.insert(rule.destination.clone(), rule.clone());
         }
 
-        // Parse @renamed directives from column comments (highest precedence)
-        for (column_name, comment) in column_comments {
-            if let Some(source_fields) = parse_renamed_directive(comment) {
-                merged.insert(
-                    column_name.clone(),
-                    FieldMappingRule {
-                        source_fields,
-                        destination: column_name.clone(),
-                        action: self.default_action,
-                        origin: RuleOrigin::ColumnComment,
-                    },
-                );
-            }
+        // ColumnMetaCache renamed directives (highest precedence, config wins over DDL)
+        for (col, source_fields) in col_meta.renamed_for_table(&table) {
+            merged.insert(
+                col.clone(),
+                FieldMappingRule {
+                    source_fields,
+                    destination: col,
+                    action: self.default_action,
+                    origin: RuleOrigin::ColumnComment,
+                },
+            );
         }
 
-        // Apply per-field action overrides from config
+        // Apply per-field action overrides from field_mapping config
         for (dest, action) in &self.overrides {
             if let Some(rule) = merged.get_mut(dest) {
                 rule.action = *action;
@@ -144,7 +141,7 @@ impl MappingBuilder {
             .collect();
 
         debug!(
-            table = %format!("{}.{}", schema.database, schema.table),
+            table = %table,
             rules = filtered.len(),
             "Built field mapping for table"
         );
@@ -205,22 +202,14 @@ impl FieldMappingCache {
         std::mem::take(&mut self.pending_tables)
     }
 
-    /// Build and cache mapping for a table after column comments are fetched.
+    /// Build and cache mapping for a table using the unified `ColumnMetaCache`.
     pub fn build_and_cache(
         &mut self,
         table: &str,
         schema: &TableSchema,
-        column_comments: &FxHashMap<String, String>,
+        col_meta: &crate::column_meta::ColumnMetaCache,
     ) {
-        let mapping = self.builder.build_for_table(schema, column_comments);
-        self.mappings.insert(table.to_string(), mapping);
-    }
-
-    /// Build and cache mapping for a table without column comments.
-    /// Used when column comment fetch fails or returns empty.
-    pub fn build_and_cache_no_comments(&mut self, table: &str, schema: &TableSchema) {
-        let empty_comments = FxHashMap::default();
-        let mapping = self.builder.build_for_table(schema, &empty_comments);
+        let mapping = self.builder.build_for_table(schema, col_meta);
         self.mappings.insert(table.to_string(), mapping);
     }
 
@@ -281,15 +270,16 @@ mod tests {
 
         // Schema only has source.ip, not destination.ip
         let schema = make_schema(&["source.ip", "other_field"]);
-        let comments = FxHashMap::default();
+        let col_meta = crate::column_meta::ColumnMetaCache::new(Default::default());
 
-        let mapping = builder.build_for_table(&schema, &comments);
+        let mapping = builder.build_for_table(&schema, &col_meta);
         assert_eq!(mapping.len(), 1);
         assert_eq!(mapping.rules()[0].destination, "source.ip");
     }
 
     #[test]
     fn test_comment_overrides_file_rule() {
+        use crate::column_meta::{ColumnDirectivesConfig, ColumnDirectivesEntry, ColumnMetaCache};
         let builder = MappingBuilder {
             base_rules: vec![FieldMappingRule {
                 source_fields: vec!["src_ip".to_string()],
@@ -302,16 +292,25 @@ mod tests {
         };
 
         let schema = make_schema(&["source.ip"]);
-        let mut comments = FxHashMap::default();
-        // Column comment overrides with different sources
-        comments.insert(
-            "source.ip".to_string(),
-            "@renamed: first(custom_src/custom_source)".to_string(),
-        );
 
-        let mapping = builder.build_for_table(&schema, &comments);
+        // Provide renamed directive via ColumnMetaCache config
+        let mut config = ColumnDirectivesConfig::default();
+        let mut table_cols = FxHashMap::default();
+        table_cols.insert(
+            "source.ip".to_string(),
+            ColumnDirectivesEntry {
+                renamed: Some("first(custom_src/custom_source)".to_string()),
+                ..Default::default()
+            },
+        );
+        config
+            .tables
+            .insert("test_db.test_table".to_string(), table_cols);
+        let col_meta = ColumnMetaCache::new(config);
+
+        let mapping = builder.build_for_table(&schema, &col_meta);
         assert_eq!(mapping.len(), 1);
-        // Should use comment sources, not file sources
+        // Should use col_meta sources, not file sources
         assert_eq!(
             mapping.rules()[0].source_fields,
             vec!["custom_src", "custom_source"]
@@ -336,9 +335,9 @@ mod tests {
         };
 
         let schema = make_schema(&["source.ip"]);
-        let comments = FxHashMap::default();
+        let col_meta = crate::column_meta::ColumnMetaCache::new(Default::default());
 
-        let mapping = builder.build_for_table(&schema, &comments);
+        let mapping = builder.build_for_table(&schema, &col_meta);
         assert_eq!(mapping.rules()[0].action, MappingAction::Copy);
     }
 
@@ -356,9 +355,9 @@ mod tests {
         };
 
         let schema = make_schema(&[]);
-        let comments = FxHashMap::default();
+        let col_meta = crate::column_meta::ColumnMetaCache::new(Default::default());
 
-        let mapping = builder.build_for_table(&schema, &comments);
+        let mapping = builder.build_for_table(&schema, &col_meta);
         assert!(mapping.is_empty());
     }
 
@@ -399,10 +398,10 @@ mod tests {
 
         let mut cache = FieldMappingCache::new(builder);
         let schema = make_schema(&["source.ip"]);
-        let comments = FxHashMap::default();
+        let col_meta = crate::column_meta::ColumnMetaCache::new(Default::default());
 
         assert!(cache.get("common.events").is_none());
-        cache.build_and_cache("common.events", &schema, &comments);
+        cache.build_and_cache("common.events", &schema, &col_meta);
         assert!(cache.get("common.events").is_some());
         assert_eq!(cache.get("common.events").unwrap().len(), 1);
     }
@@ -417,7 +416,8 @@ mod tests {
 
         let mut cache = FieldMappingCache::new(builder);
         let schema = make_schema(&[]);
-        cache.build_and_cache_no_comments("common.events", &schema);
+        let col_meta = crate::column_meta::ColumnMetaCache::new(Default::default());
+        cache.build_and_cache("common.events", &schema, &col_meta);
         assert!(cache.get("common.events").is_some());
 
         cache.invalidate("common.events");
