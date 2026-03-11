@@ -26,7 +26,7 @@
 
 use chrono::Utc;
 use serde_json::{Map, Value};
-use sonic_rs::{get_from_slice, JsonValueTrait};
+use sonic_rs::get_from_slice;
 use tracing::debug;
 
 use crate::clickhouse::TableSchema;
@@ -300,9 +300,7 @@ mod tests {
 
     #[test]
     fn test_renamed_directive_first_match() {
-        use crate::column_meta::{
-            ColumnDirectives, ColumnDirectivesConfig, ColumnDirectivesEntry, ColumnMetaCache,
-        };
+        use crate::column_meta::{ColumnDirectivesConfig, ColumnDirectivesEntry, ColumnMetaCache};
         use rustc_hash::FxHashMap;
 
         let extractor = default_extractor();
@@ -369,7 +367,7 @@ mod tests {
 
     #[test]
     fn test_underscore_column_tries_stripped_name_first() {
-        let extractor = default_extractor();
+        let _extractor = default_extractor();
         // _source column: try "source" (stripped) before "_source"
         let raw = br#"{"source": "auth"}"#;
         let schema = make_schema(&["_source"]);

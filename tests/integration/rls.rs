@@ -244,7 +244,7 @@ async fn test_org_id_insert_to_clickhouse() {
     ];
 
     let inserted = client
-        .insert_json_rows(&full_name, &rows)
+        .insert_json_rows(&full_name, &rows, &[])
         .await
         .expect("Failed to insert rows");
 

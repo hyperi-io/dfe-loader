@@ -67,7 +67,7 @@ async fn test_inserter_basic_insert() {
     let rows = make_test_rows(3);
 
     // Insert using insert_rows
-    let result = inserter.insert_rows(&table_name, &rows).await;
+    let result = inserter.insert_rows(&table_name, &rows, &[]).await;
     assert!(result.is_ok(), "Insert failed: {:?}", result.err());
     assert_eq!(result.unwrap(), 3);
 
@@ -105,7 +105,7 @@ async fn test_inserter_large_batch() {
     let rows = make_test_rows(row_count);
 
     let start = std::time::Instant::now();
-    let result = inserter.insert_rows(&table_name, &rows).await;
+    let result = inserter.insert_rows(&table_name, &rows, &[]).await;
     let elapsed = start.elapsed();
 
     assert!(
@@ -249,7 +249,7 @@ async fn test_circuit_breaker_with_inserter() {
         .collect();
 
     // Insert should succeed
-    let result = inserter.insert_rows(&table_name, &rows).await;
+    let result = inserter.insert_rows(&table_name, &rows, &[]).await;
     assert!(result.is_ok());
 
     // Check circuit breaker stats
@@ -314,7 +314,7 @@ async fn test_concurrent_inserts() {
                 })
                 .collect();
 
-            inserter.insert_rows(&table, &rows).await
+            inserter.insert_rows(&table, &rows, &[]).await
         });
         handles.push(handle);
     }

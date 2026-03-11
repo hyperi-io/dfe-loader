@@ -26,8 +26,6 @@ use serde::Deserialize;
 use serde_json::{Map, Value};
 use tracing::debug;
 
-// sonic_rs for SIMD-accelerated JSON serialisation of promoted cols
-
 use super::config::ClickHouseConfig;
 use super::error::ClickHouseError;
 use super::types::{ColumnInfo, ParsedType, TableSchema};
@@ -143,10 +141,16 @@ impl HttpClickHouseClient {
     /// Each row is a `Map<String, Value>` serialised as a JSON line.
     /// ClickHouse handles type coercion from JSON values to column types.
     ///
+    /// When `raw_payloads` is non-empty (parallel to `rows`), each raw payload
+    /// is spliced as `_json` at serialisation time — zero-copy for the fast path
+    /// (raw bytes appended directly). When empty, rows are serialised as-is
+    /// (legacy flatten path).
+    ///
     /// # Arguments
     ///
     /// * `table` - Table name (may include "db.table" format)
-    /// * `rows` - Rows to insert (each is a JSON object)
+    /// * `rows` - Promoted schema columns (each is a JSON object)
+    /// * `raw_payloads` - Original Kafka bytes parallel to `rows`, or empty slice
     ///
     /// # Errors
     ///
@@ -155,6 +159,7 @@ impl HttpClickHouseClient {
         &self,
         table: &str,
         rows: &[Map<String, Value>],
+        raw_payloads: &[Arc<[u8]>],
     ) -> Result<usize> {
         if rows.is_empty() {
             return Ok(0);
@@ -162,13 +167,22 @@ impl HttpClickHouseClient {
 
         let (db, tbl) = parse_db_table(table, &self.database);
 
-        // Serialise rows as NDJSON — sonic_rs for SIMD-accelerated encoding
+        // Serialise rows as NDJSON — sonic_rs for SIMD-accelerated encoding.
+        // json_primary path: splice `_json` from raw_payloads (zero-copy fast path).
+        // Legacy path: serialise promoted map directly (raw_payloads is empty).
         let estimated_size = rows.len() * 256;
         let mut body = Vec::with_capacity(estimated_size);
-        for row in rows {
-            sonic_rs::to_writer(&mut body, row)
-                .map_err(|e| ClickHouseError::Insert(format!("JSON serialisation error: {e}")))?;
-            body.push(b'\n');
+        if raw_payloads.is_empty() {
+            for row in rows {
+                sonic_rs::to_writer(&mut body, row).map_err(|e| {
+                    ClickHouseError::Insert(format!("JSON serialisation error: {e}"))
+                })?;
+                body.push(b'\n');
+            }
+        } else {
+            for (row, raw) in rows.iter().zip(raw_payloads.iter()) {
+                write_row_with_json(&mut body, row, raw)?;
+            }
         }
 
         let url = format!(
@@ -392,6 +406,35 @@ impl HttpClickHouseClient {
     pub fn database(&self) -> &str {
         &self.database
     }
+}
+
+/// Serialise one promoted-column row extended with a `_json` field.
+///
+/// Splices the raw payload bytes directly as the `_json` value — zero-copy for
+/// the fast path. No parsing of `raw` is required: ClickHouse receives the raw
+/// JSON bytes verbatim and ingests them into the native JSON column.
+///
+/// Handles the empty-map edge case: `{}` + splice → `{"_json": raw}`.
+/// Non-empty maps: strip trailing `}`, append `,"_json": raw}`.
+fn write_row_with_json(body: &mut Vec<u8>, row: &Map<String, Value>, raw: &[u8]) -> Result<()> {
+    if row.is_empty() {
+        body.extend_from_slice(b"{\"_json\":");
+        body.extend_from_slice(raw);
+        body.push(b'}');
+    } else {
+        sonic_rs::to_writer(&mut *body, row)
+            .map_err(|e| ClickHouseError::Insert(format!("JSON serialisation error: {e}")))?;
+        // sonic_rs always closes a JSON object with '}'. Replace it with ','
+        // to continue the object, then append _json.
+        let last = body.len() - 1;
+        debug_assert_eq!(body[last], b'}', "sonic_rs must produce a closing brace");
+        body[last] = b',';
+        body.extend_from_slice(b"\"_json\":");
+        body.extend_from_slice(raw);
+        body.push(b'}');
+    }
+    body.push(b'\n');
+    Ok(())
 }
 
 /// Parse "db.table" format, falling back to default database.

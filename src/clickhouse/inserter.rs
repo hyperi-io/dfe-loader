@@ -241,11 +241,23 @@ impl Inserter {
     /// - **Transient errors**: Geometric backoff retry up to max_retries
     /// - **Data errors**: Returns immediately (caller should salvage)
     /// - **Fatal errors**: Returns immediately (no retry)
-    pub async fn insert_rows(&self, table: &str, rows: &[Map<String, Value>]) -> Result<usize> {
+    ///
+    /// `raw_payloads` is parallel to `rows` — passed to the HTTP client for
+    /// zero-copy `_json` splice. Pass an empty slice for the legacy flatten path.
+    pub async fn insert_rows(
+        &self,
+        table: &str,
+        rows: &[Map<String, Value>],
+        raw_payloads: &[Arc<[u8]>],
+    ) -> Result<usize> {
         let mut last_error = None;
 
         for attempt in 0..=self.max_retries {
-            match self.http_client.insert_json_rows(table, rows).await {
+            match self
+                .http_client
+                .insert_json_rows(table, rows, raw_payloads)
+                .await
+            {
                 Ok(count) => {
                     debug!(table = %table, rows = count, "JSONEachRow insert successful");
                     return Ok(count);
@@ -315,15 +327,16 @@ impl Inserter {
         let table = batch.table;
         let mut rows = batch.rows;
         let offsets = batch.offsets;
-        // raw_payloads used by client_http.rs for zero-copy _json splice (Change C)
-        let _raw_payloads = batch.raw_payloads;
+        let raw_payloads = batch.raw_payloads;
         let num_rows = rows.len();
 
         // Apply schema-driven coercion if configured (Phase 5.6).
         // Done once here — salvage sub-batches reuse already-coerced rows.
         self.coerce_batch(&table, &mut rows).await;
 
-        match self.insert_rows(&table, &rows).await {
+        // Pass raw_payloads for zero-copy _json splice (json_primary path).
+        // Salvage sub-batches use &[] — the salvage path is error recovery only.
+        match self.insert_rows(&table, &rows, &raw_payloads).await {
             Ok(count) => {
                 return InsertResult::success(count);
             }
@@ -426,7 +439,7 @@ impl Inserter {
 
             // Base case: single row
             if num_rows == 1 {
-                match self.http_client.insert_json_rows(table, rows).await {
+                match self.http_client.insert_json_rows(table, rows, &[]).await {
                     Ok(_) => {
                         *inserted += 1;
                     }
@@ -442,7 +455,7 @@ impl Inserter {
             }
 
             // Try the whole slice first (might succeed now, e.g., transient error)
-            match self.http_client.insert_json_rows(table, rows).await {
+            match self.http_client.insert_json_rows(table, rows, &[]).await {
                 Ok(count) => {
                     *inserted += count;
                     return;
@@ -500,7 +513,8 @@ impl Inserter {
 
     /// Insert a `FlushBatch` — simple version without salvage.
     pub async fn insert_batch(&self, batch: FlushBatch) -> Result<usize> {
-        self.insert_rows(&batch.table, &batch.rows).await
+        self.insert_rows(&batch.table, &batch.rows, &batch.raw_payloads)
+            .await
     }
 
     /// Insert multiple batches concurrently with salvage.

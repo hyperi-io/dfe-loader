@@ -27,7 +27,10 @@ use hyperi_rustlib::dlq::{Dlq, DlqEntry, DlqSource};
 
 use crate::Result;
 use crate::buffer::{BufferManager, FlushBatch, KafkaOffset};
-use crate::clickhouse::{HttpClickHouseClient, Inserter, InserterConfig, SchemaCache, SharedSchemaCache};
+use crate::clickhouse::{
+    HttpClickHouseClient, Inserter, InserterConfig, SchemaCache, SharedSchemaCache,
+};
+use crate::column_meta::{ColumnMetaCache, parse_directives};
 use crate::config::{Config, MetadataConfig, SharedConfig, TableCaptureConfig};
 use crate::enrich::geoip::GeoIpEnricher;
 use crate::enrich::reputation::{ReputationEnricher, ThreatSource, ThreatType};
@@ -39,9 +42,8 @@ use crate::metrics::Metrics;
 use crate::payload::{FormatDetector, FormatMode, PayloadFormat};
 use crate::routing::{RouteResult, Router};
 use crate::schema::TableTags;
-use crate::column_meta::{ColumnMetaCache, parse_directives};
-use crate::transform::{ComputedColumnCache, FieldMappingCache, HeaderExtractor, MappingBuilder};
 use crate::transform::Transformer;
+use crate::transform::{ComputedColumnCache, FieldMappingCache, HeaderExtractor, MappingBuilder};
 
 /// Pipeline statistics
 #[derive(Debug, Default, Clone)]
@@ -382,15 +384,12 @@ impl Orchestrator {
 
         // Schema cache — shared with background resolver and (after Change A) HeaderExtractor.
         // Background resolver populates it; orchestrator reads it in process_message.
-        let schema_cache: SharedSchemaCache = Arc::new(SchemaCache::new(
-            self.config.schema.cache_ttl_secs,
-        ));
+        let schema_cache: SharedSchemaCache =
+            Arc::new(SchemaCache::new(self.config.schema.cache_ttl_secs));
 
         // Column directive cache — unified framework for skip/default/renamed/computed/coerce.
         // Config layer is fixed at construction; DDL layer populated by background resolver.
-        let col_meta_cache = Arc::new(ColumnMetaCache::new(
-            self.config.column_directives.clone(),
-        ));
+        let col_meta_cache = Arc::new(ColumnMetaCache::new(self.config.column_directives.clone()));
 
         // Background schema resolver — moves all schema fetching off the event loop.
         //
@@ -957,7 +956,9 @@ impl Orchestrator {
             let common_header = self.config.metadata.enabled;
 
             let org_id_owned = if common_header {
-                router.extract_org_id_from_value(&value).map(|s| s.to_string())
+                router
+                    .extract_org_id_from_value(&value)
+                    .map(|s| s.to_string())
             } else {
                 None
             };
@@ -1053,7 +1054,6 @@ impl Orchestrator {
         let total_rows: usize = batches.iter().map(|b| b.rows.len()).sum();
 
         debug!(batches = batch_count, rows = total_rows, "Flushing batches");
-
 
         // Extract per-batch offsets in parallel with batches — enables independent commit.
         // A failure in Table A must not block offset commit for Table B (correctness fix).

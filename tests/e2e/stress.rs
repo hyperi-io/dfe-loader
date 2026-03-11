@@ -93,7 +93,7 @@ async fn test_stress_10k_single_batch() {
     let rows = make_stress_rows(row_count, &["id", "event", "value"]);
 
     let start = Instant::now();
-    let result = client.insert_json_rows(&table_name, &rows).await;
+    let result = client.insert_json_rows(&table_name, &rows, &[]).await;
     let elapsed = start.elapsed();
 
     assert!(result.is_ok(), "10k insert failed: {:?}", result.err());
@@ -137,7 +137,7 @@ async fn test_stress_50k_single_batch() {
     let rows = make_stress_rows(row_count, &["id", "category", "value"]);
 
     let start = Instant::now();
-    let result = client.insert_json_rows(&table_name, &rows).await;
+    let result = client.insert_json_rows(&table_name, &rows, &[]).await;
     let elapsed = start.elapsed();
 
     assert!(result.is_ok(), "50k insert failed: {:?}", result.err());
@@ -197,7 +197,7 @@ async fn test_stress_multiple_batches() {
             })
             .collect();
 
-        let result = client.insert_json_rows(&table_name, &rows).await;
+        let result = client.insert_json_rows(&table_name, &rows, &[]).await;
         assert!(result.is_ok(), "Batch {} insert failed", batch_id);
         total_inserted += result.unwrap();
     }
@@ -263,7 +263,7 @@ async fn test_stress_concurrent_inserts() {
                 })
                 .collect();
 
-            client.insert_json_rows(&table_name, &rows).await
+            client.insert_json_rows(&table_name, &rows, &[]).await
         });
 
         handles.push(handle);
