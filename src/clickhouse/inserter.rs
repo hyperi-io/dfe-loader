@@ -79,11 +79,14 @@ impl InserterConfig {
     /// Delay = min(base * 2^attempt, max_delay)
     #[must_use]
     pub fn backoff_delay(&self, attempt: u32) -> Duration {
-        let delay_ms = self
-            .base_retry_delay_ms
-            .saturating_mul(1 << attempt.min(16));
-        Duration::from_millis(delay_ms.min(self.max_retry_delay_ms))
+        calc_backoff(self.base_retry_delay_ms, attempt, self.max_retry_delay_ms)
     }
+}
+
+/// Geometric backoff: `min(base_ms * 2^attempt, max_ms)`.
+fn calc_backoff(base_ms: u64, attempt: u32, max_ms: u64) -> Duration {
+    let delay_ms = base_ms.saturating_mul(1 << attempt.min(16));
+    Duration::from_millis(delay_ms.min(max_ms))
 }
 
 /// Result of a batch insert with salvage
@@ -224,10 +227,7 @@ impl Inserter {
 
     /// Calculate backoff delay for a given attempt.
     fn backoff_delay(&self, attempt: u32) -> Duration {
-        let delay_ms = self
-            .base_retry_delay_ms
-            .saturating_mul(1 << attempt.min(16));
-        Duration::from_millis(delay_ms.min(self.max_retry_delay_ms))
+        calc_backoff(self.base_retry_delay_ms, attempt, self.max_retry_delay_ms)
     }
 
     /// Set the circuit breaker for per-table failure detection

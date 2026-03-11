@@ -14,9 +14,9 @@ use std::str::FromStr;
 use serde_json::Value;
 use tracing::warn;
 
-use crate::Result;
 use crate::clickhouse::{ParsedType, TableSchema};
 use crate::config::{CoercionConfig, NullHandling};
+use crate::Result;
 
 /// Coercion mode — controls which type coercions are applied.
 ///
@@ -59,22 +59,11 @@ impl Coercer {
         self
     }
 
-    /// Coerce a JSON object to match the table schema
-    ///
-    /// Returns the coerced object with values converted to match ClickHouse types.
-    /// Fields not in the schema are passed through unchanged.
-    pub fn coerce_record(&self, record: &mut Value, schema: &TableSchema) -> Result<()> {
-        let obj = match record.as_object_mut() {
-            Some(o) => o,
-            None => return Ok(()), // Not an object, nothing to coerce
-        };
-        self.coerce_row(obj, schema)
-    }
-
     /// Coerce a JSON row map to match the table schema.
     ///
-    /// Preferred over `coerce_record` in hot paths — avoids wrapping/unwrapping `Value`.
     /// Fields not in the schema are passed through unchanged.
+    /// In `Delta` mode, only columns whose types require client-side coercion are
+    /// touched — others are skipped entirely (no clone, no hashmap lookup).
     pub fn coerce_row(
         &self,
         row: &mut serde_json::Map<String, Value>,
@@ -82,6 +71,24 @@ impl Coercer {
     ) -> Result<()> {
         for col in &schema.columns {
             let field_name = col.name.as_str();
+
+            // Delta mode: skip columns that JSONEachRow handles server-side.
+            // Only coerce if no custom type_mapping overrides the category.
+            if self.mode == CoercionMode::Delta
+                && self
+                    .config
+                    .type_mappings
+                    .get(&col.parsed_type.base)
+                    .is_none()
+            {
+                let category = col.parsed_type.coercer_category();
+                if !matches!(
+                    category,
+                    "DateTime64" | "DateTime" | "UUID" | "IPv4" | "Bool" | "Array"
+                ) {
+                    continue;
+                }
+            }
 
             if let Some(value) = row.get_mut(field_name) {
                 match self.coerce_value(value, &col.parsed_type) {

@@ -26,8 +26,10 @@
 
 use chrono::Utc;
 use serde_json::{Map, Value};
-use sonic_rs::get_from_slice;
+use sonic_rs::{from_str as sonic_from_str, get_from_slice};
 use tracing::debug;
+
+use crate::transform::transformer::fmt_ts;
 
 use crate::clickhouse::TableSchema;
 use crate::column_meta::ColumnMetaCache;
@@ -89,10 +91,7 @@ impl HeaderExtractor {
             // _timestamp_received: always the current ingest time, not from source.
             if name == "_timestamp_received" {
                 if self.metadata_enabled {
-                    map.insert(
-                        name.clone(),
-                        Value::String(now.format("%Y-%m-%d %H:%M:%S%.3f").to_string()),
-                    );
+                    map.insert(name.clone(), Value::String(fmt_ts(&now)));
                 }
                 continue;
             }
@@ -108,7 +107,12 @@ impl HeaderExtractor {
                 extract_first(raw, &directives.renamed, name, &mut map)
             } else {
                 match name.as_str() {
-                    "_org_id" => extract_first(raw, &[self.org_id_field.clone()], name, &mut map),
+                    "_org_id" => extract_first(
+                        raw,
+                        std::slice::from_ref(&self.org_id_field),
+                        name,
+                        &mut map,
+                    ),
                     "_source" if self.capture_source && self.metadata_enabled => {
                         extract_first(raw, &self.source_fields, name, &mut map)
                     }
@@ -143,8 +147,8 @@ fn extract_first(raw: &[u8], sources: &[String], dest: &str, map: &mut Map<Strin
     for source in sources {
         if let Ok(lazy) = get_from_slice(raw, &[source.as_str()]) {
             // as_raw_str() returns the raw JSON text of the value (e.g. `"hello"`, `42`, `true`).
-            // serde_json::from_str re-parses this into a typed Value.
-            if let Ok(v) = serde_json::from_str::<Value>(lazy.as_raw_str()) {
+            // sonic_rs::from_str re-parses this into a typed Value (4-8x faster than serde_json).
+            if let Ok(v) = sonic_from_str::<Value>(lazy.as_raw_str()) {
                 map.insert(dest.to_string(), v);
                 return true;
             }
