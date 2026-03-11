@@ -1592,8 +1592,8 @@ fn apply_env_overrides(config: &mut Config) {
 /// Supports arbitrary nesting: DFE_LOADER_KAFKA__SASL__USERNAME → kafka.sasl.username
 /// Lists require bracket syntax: DFE_LOADER_KAFKA__BROKERS=[a, b, c]
 fn apply_figment_env(config: &mut Config) -> Result<()> {
-    use figment::Figment;
     use figment::providers::{Env, Serialized};
+    use figment::Figment;
 
     let figment = Figment::from(Serialized::defaults(&*config))
         .merge(Env::prefixed(&format!("{ENV_PREFIX}_")).split("__"));
@@ -1697,13 +1697,13 @@ impl Config {
     /// (Dockerfile, Helm chart, Compose fragment).
     pub fn deployment_contract() -> hyperi_rustlib::deployment::DeploymentContract {
         use hyperi_rustlib::deployment::{
-            DeploymentContract, HealthContract, KedaContract, SecretEnvContract,
-            SecretGroupContract,
+            DeploymentContract, HealthContract, ImageProfile, KedaContract, NativeDepsContract,
+            SecretEnvContract, SecretGroupContract,
         };
 
         DeploymentContract {
             app_name: "dfe-loader".into(),
-            base_image: "debian:bookworm-slim".into(),
+            base_image: "ubuntu:24.04".into(),
             binary_name: "dfe-loader".into(),
             description: "High-performance Kafka to ClickHouse data loader".into(),
             metrics_port: 9090,
@@ -1767,6 +1767,24 @@ impl Config {
             })),
             depends_on: vec!["kafka".into(), "clickhouse".into()],
             keda: Some(KedaContract::default()),
+            native_deps: NativeDepsContract::for_rustlib_features(
+                &[
+                    "transport-kafka",
+                    "transport-grpc",
+                    "dlq-kafka",
+                    "config",
+                    "config-reload",
+                    "deployment",
+                    "version-check",
+                    "scaling",
+                    "cli",
+                    "top",
+                    "logger",
+                    "expression",
+                ],
+                "ubuntu:24.04",
+            ),
+            image_profile: ImageProfile::Production,
         }
     }
 }

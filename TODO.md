@@ -185,6 +185,20 @@ Tasks (Step C only — Steps A/B must be complete first):
 - [ ] Confirm full type support: Variant, Dynamic, Nested, BFloat16, Time, AggregateFunction
 - [ ] Once stable, open PR to upstream `clickhouse-rs`
 
+### Consume hyperi-rustlib v1.16.0 (Dynamic Linking) ✓ COMPLETE
+
+rustlib v1.14.0+ switches rdkafka to dynamic-linking against system librdkafka
+(was compiling C++ from source — 30min build eliminated). v1.15.0 added
+`NativeDepsContract` for auto-generating Dockerfile native deps. v1.16.0 added
+`ImageProfile` (production vs development container profiles).
+
+- [x] Bump hyperi-rustlib from `1.13.2` to `>=1.16.0`
+- [x] Switch rdkafka from `cmake-build` to `dynamic-linking` features
+- [x] `cargo update` + 387 lib tests pass
+- [x] Add `native_deps` + `image_profile` to deployment contract
+- [x] Regenerate Dockerfile from contract (+ Ubuntu 24.04 UID fix + GeoIP COPY)
+- [ ] Test container image starts and connects to Kafka (deferred to CI)
+
 ### Phase 6: Dependency Audit + Version Bumps
 
 - [ ] Web search ALL external crate versions for latest

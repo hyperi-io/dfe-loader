@@ -1844,9 +1844,9 @@ dependencies = [
 
 [[package]]
 name = "hyperi-rustlib"
-version = "1.13.2"
+version = "1.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3d2ac99f3ce1bb5b683a6b6819817943ede4e4a6091b5a061dabb70f20e8f022"
+checksum = "4dbad789b139f5e7398091c8e14a739ab51e5a364421122ea657c85b763714ab"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -3671,7 +3671,6 @@ version = "4.10.0+2.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e234cf318915c1059d4921ef7f75616b5219b10b46e9f3a511a15eb4b56a3f77"
 dependencies = [
- "cmake",
  "libc",
  "libz-sys",
  "num_enum",
@@ -4951,9 +4950,9 @@ checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 
 [[package]]
 name = "tokio"
-version = "1.49.0"
+version = "1.50.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "72a2903cd7736441aac9df9d7688bd0ce48edccaadf181c3b90be801e81d3d86"
+checksum = "27ad5e34374e03cfffefc301becb44e9dc3c17584f414349ebe29ed26661822d"
 dependencies = [
  "bytes",
  "libc",
