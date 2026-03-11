@@ -157,7 +157,7 @@ async fn test_full_pipeline_e2e() {
         json!({"id": 3, "action": "logout", "user_id": 100, "user_name": "alice", "value": 0.0, "category": &table_name}).as_object().unwrap().clone(),
     ];
 
-    let result = client.insert_json_rows(&table_name, &rows).await;
+    let result = client.insert_json_rows(&table_name, &rows, &[]).await;
     assert!(result.is_ok(), "Insert failed: {:?}", result.err());
     let inserted = result.unwrap();
     assert_eq!(inserted, 3);
@@ -284,7 +284,7 @@ async fn test_pipeline_multi_table_routing() {
             .clone(),
     ];
 
-    let result = client.insert_json_rows(&table1, &auth_rows).await;
+    let result = client.insert_json_rows(&table1, &auth_rows, &[]).await;
     assert!(result.is_ok(), "Insert to table1 failed");
     assert_eq!(result.unwrap(), 2);
 
@@ -299,7 +299,7 @@ async fn test_pipeline_multi_table_routing() {
             .clone(),
     ];
 
-    let result = client.insert_json_rows(&table2, &api_rows).await;
+    let result = client.insert_json_rows(&table2, &api_rows, &[]).await;
     assert!(result.is_ok(), "Insert to table2 failed");
     assert_eq!(result.unwrap(), 2);
 
@@ -397,7 +397,7 @@ async fn test_pipeline_with_flattening() {
         .clone(),
     ];
 
-    let result = client.insert_json_rows(&table_name, &rows).await;
+    let result = client.insert_json_rows(&table_name, &rows, &[]).await;
     assert!(result.is_ok());
 
     eprintln!("✓ Flattened data inserted successfully");

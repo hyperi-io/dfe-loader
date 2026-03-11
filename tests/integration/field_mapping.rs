@@ -8,11 +8,11 @@
 
 use std::collections::HashMap;
 
-use rustc_hash::FxHashMap;
 use serde_json::{Map, json};
 
 use dfe_loader::clickhouse::TableSchema;
 use dfe_loader::clickhouse::types::{ColumnInfo, ParsedType};
+use dfe_loader::column_meta::{ColumnDirectivesConfig, ColumnMetaCache};
 use dfe_loader::config::{FieldMappingConfig, FieldMappingOverride};
 use dfe_loader::transform::remap_loader::load_builtin;
 use dfe_loader::transform::{
@@ -251,7 +251,10 @@ fn test_builder_schema_filters_to_matching_columns() {
 
     // ECS preset has 40+ rules, but schema only has these two destinations
     let schema = make_schema(&["source.ip", "destination.ip"]);
-    let mapping = builder.build_for_table(&schema, &FxHashMap::default());
+    let mapping = builder.build_for_table(
+        &schema,
+        &ColumnMetaCache::new(ColumnDirectivesConfig::default()),
+    );
 
     assert_eq!(
         mapping.len(),
@@ -271,7 +274,10 @@ fn test_builder_empty_schema_produces_empty_mapping() {
     let builder = MappingBuilder::from_config(&config).unwrap();
 
     let schema = make_schema(&[]);
-    let mapping = builder.build_for_table(&schema, &FxHashMap::default());
+    let mapping = builder.build_for_table(
+        &schema,
+        &ColumnMetaCache::new(ColumnDirectivesConfig::default()),
+    );
 
     assert!(mapping.is_empty());
     assert_eq!(mapping.len(), 0);
@@ -285,25 +291,39 @@ fn test_builder_no_preset_no_rules() {
     assert_eq!(builder.base_rule_count(), 0);
 
     let schema = make_schema(&["source.ip"]);
-    let mapping = builder.build_for_table(&schema, &FxHashMap::default());
+    let mapping = builder.build_for_table(
+        &schema,
+        &ColumnMetaCache::new(ColumnDirectivesConfig::default()),
+    );
     assert!(mapping.is_empty());
 }
 
 #[test]
 fn test_builder_column_comment_overrides_builtin() {
+    use dfe_loader::column_meta::ColumnDirectivesEntry;
+    use rustc_hash::FxHashMap;
+
     let config = ecs_config();
     let builder = MappingBuilder::from_config(&config).unwrap();
 
     let schema = make_schema(&["source.ip"]);
 
     // Column comment provides a different source field for source.ip
-    let mut comments = FxHashMap::default();
-    comments.insert(
+    let mut config = ColumnDirectivesConfig::default();
+    let mut table_cols = FxHashMap::default();
+    table_cols.insert(
         "source.ip".to_string(),
-        "@renamed: custom_source_field".to_string(),
+        ColumnDirectivesEntry {
+            renamed: Some("custom_source_field".to_string()),
+            ..Default::default()
+        },
     );
+    config
+        .tables
+        .insert("test_db.test_table".to_string(), table_cols);
+    let col_meta = ColumnMetaCache::new(config);
 
-    let mapping = builder.build_for_table(&schema, &comments);
+    let mapping = builder.build_for_table(&schema, &col_meta);
     assert_eq!(mapping.len(), 1);
 
     let rule = &mapping.rules()[0];
@@ -318,18 +338,29 @@ fn test_builder_column_comment_overrides_builtin() {
 
 #[test]
 fn test_builder_column_comment_first_directive() {
+    use dfe_loader::column_meta::ColumnDirectivesEntry;
+    use rustc_hash::FxHashMap;
+
     let config = FieldMappingConfig::default();
     let builder = MappingBuilder::from_config(&config).unwrap();
 
     let schema = make_schema(&["source.ip"]);
 
-    let mut comments = FxHashMap::default();
-    comments.insert(
+    let mut config = ColumnDirectivesConfig::default();
+    let mut table_cols = FxHashMap::default();
+    table_cols.insert(
         "source.ip".to_string(),
-        "@renamed: first(src_ip/srcip/source_address)".to_string(),
+        ColumnDirectivesEntry {
+            renamed: Some("first(src_ip/srcip/source_address)".to_string()),
+            ..Default::default()
+        },
     );
+    config
+        .tables
+        .insert("test_db.test_table".to_string(), table_cols);
+    let col_meta = ColumnMetaCache::new(config);
 
-    let mapping = builder.build_for_table(&schema, &comments);
+    let mapping = builder.build_for_table(&schema, &col_meta);
     assert_eq!(mapping.len(), 1);
 
     let rule = &mapping.rules()[0];
@@ -355,7 +386,10 @@ fn test_builder_config_override_action() {
 
     let builder = MappingBuilder::from_config(&config).unwrap();
     let schema = make_schema(&["source.ip"]);
-    let mapping = builder.build_for_table(&schema, &FxHashMap::default());
+    let mapping = builder.build_for_table(
+        &schema,
+        &ColumnMetaCache::new(ColumnDirectivesConfig::default()),
+    );
 
     assert_eq!(mapping.len(), 1);
     let rule = &mapping.rules()[0];
@@ -369,7 +403,10 @@ fn test_builder_unrelated_columns_ignored() {
 
     // Schema has columns that are not destinations in any ECS rule
     let schema = make_schema(&["custom_field_1", "custom_field_2", "my_data"]);
-    let mapping = builder.build_for_table(&schema, &FxHashMap::default());
+    let mapping = builder.build_for_table(
+        &schema,
+        &ColumnMetaCache::new(ColumnDirectivesConfig::default()),
+    );
 
     assert!(mapping.is_empty(), "no ECS rule targets these columns");
 }
@@ -500,7 +537,11 @@ fn test_cache_build_and_get() {
     let mut cache = FieldMappingCache::new(builder);
 
     let schema = make_schema(&["source.ip", "destination.ip"]);
-    cache.build_and_cache("test.events", &schema, &FxHashMap::default());
+    cache.build_and_cache(
+        "test.events",
+        &schema,
+        &ColumnMetaCache::new(ColumnDirectivesConfig::default()),
+    );
 
     let mapping = cache.get("test.events");
     assert!(mapping.is_some());
@@ -514,7 +555,11 @@ fn test_cache_build_no_comments() {
     let mut cache = FieldMappingCache::new(builder);
 
     let schema = make_schema(&["source.ip"]);
-    cache.build_and_cache_no_comments("test.events", &schema);
+    cache.build_and_cache(
+        "test.events",
+        &schema,
+        &ColumnMetaCache::new(ColumnDirectivesConfig::default()),
+    );
 
     let mapping = cache.get("test.events");
     assert!(mapping.is_some());
@@ -528,7 +573,11 @@ fn test_cache_invalidate() {
     let mut cache = FieldMappingCache::new(builder);
 
     let schema = make_schema(&["source.ip"]);
-    cache.build_and_cache_no_comments("test.events", &schema);
+    cache.build_and_cache(
+        "test.events",
+        &schema,
+        &ColumnMetaCache::new(ColumnDirectivesConfig::default()),
+    );
     assert!(cache.get("test.events").is_some());
 
     cache.invalidate("test.events");
@@ -542,7 +591,11 @@ fn test_cache_mark_pending_skips_already_cached() {
     let mut cache = FieldMappingCache::new(builder);
 
     let schema = make_schema(&["source.ip"]);
-    cache.build_and_cache_no_comments("test.events", &schema);
+    cache.build_and_cache(
+        "test.events",
+        &schema,
+        &ColumnMetaCache::new(ColumnDirectivesConfig::default()),
+    );
 
     // Marking a cached table should not add to pending
     cache.mark_pending("test.events");
@@ -609,7 +662,10 @@ mod clickhouse_tests {
         // user_name has no comment, should not appear
         assert!(!comments.contains_key("user_name"));
 
-        // Build mapping from these comments
+        // Build mapping from these comments — convert raw comment strings to ColumnMetaCache
+        use dfe_loader::column_meta::parse_directives;
+        use rustc_hash::FxHashMap as RxHashMap;
+
         let config = FieldMappingConfig::default();
         let builder = MappingBuilder::from_config(&config).unwrap();
 
@@ -618,7 +674,16 @@ mod clickhouse_tests {
             .await
             .expect("fetch_table_schema failed");
 
-        let mapping = builder.build_for_table(&schema, &comments);
+        // Convert FxHashMap<String, String> column comments into ColumnMetaCache
+        // by parsing each comment string into ColumnDirectives via the DDL layer.
+        let col_meta = ColumnMetaCache::new(ColumnDirectivesConfig::default());
+        let ddl: RxHashMap<String, _> = comments
+            .iter()
+            .map(|(col, comment)| (col.clone(), parse_directives(comment)))
+            .collect();
+        col_meta.apply_ddl(&full_name, ddl);
+
+        let mapping = builder.build_for_table(&schema, &col_meta);
 
         // source_ip and dest_ip have @renamed directives
         assert_eq!(mapping.len(), 2);
@@ -661,7 +726,10 @@ fn test_e2e_ecs_preset_with_schema_filter() {
         "destination.port",
     ]);
 
-    let mapping = builder.build_for_table(&schema, &FxHashMap::default());
+    let mapping = builder.build_for_table(
+        &schema,
+        &ColumnMetaCache::new(ColumnDirectivesConfig::default()),
+    );
 
     // Only rules matching these columns should be present
     assert!(mapping.len() >= 4, "should have at least 4 matching rules");
@@ -707,7 +775,10 @@ fn test_e2e_cim_preset_with_schema_filter() {
     let builder = MappingBuilder::from_config(&config).unwrap();
 
     let schema = make_schema(&["source.ip", "destination.ip", "event.action"]);
-    let mapping = builder.build_for_table(&schema, &FxHashMap::default());
+    let mapping = builder.build_for_table(
+        &schema,
+        &ColumnMetaCache::new(ColumnDirectivesConfig::default()),
+    );
 
     assert_eq!(mapping.len(), 3);
 
@@ -742,19 +813,30 @@ fn test_e2e_disabled_config_no_rules() {
 
 #[test]
 fn test_e2e_comment_plus_builtin_merged() {
+    use dfe_loader::column_meta::ColumnDirectivesEntry;
+    use rustc_hash::FxHashMap;
+
     let config = ecs_config();
     let builder = MappingBuilder::from_config(&config).unwrap();
 
     let schema = make_schema(&["source.ip", "custom_field"]);
 
     // Column comment adds a rule for custom_field (not in ECS preset)
-    let mut comments = FxHashMap::default();
-    comments.insert(
+    let mut col_config = ColumnDirectivesConfig::default();
+    let mut table_cols = FxHashMap::default();
+    table_cols.insert(
         "custom_field".to_string(),
-        "@renamed: raw_custom".to_string(),
+        ColumnDirectivesEntry {
+            renamed: Some("raw_custom".to_string()),
+            ..Default::default()
+        },
     );
+    col_config
+        .tables
+        .insert("test_db.test_table".to_string(), table_cols);
+    let col_meta = ColumnMetaCache::new(col_config);
 
-    let mapping = builder.build_for_table(&schema, &comments);
+    let mapping = builder.build_for_table(&schema, &col_meta);
 
     // Should have ECS rule for source.ip + comment rule for custom_field
     assert_eq!(mapping.len(), 2);

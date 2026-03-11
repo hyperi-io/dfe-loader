@@ -45,7 +45,7 @@ async fn test_integer_types() {
         json!({"i8_col": 127, "i16_col": 32767, "i32_col": 2147483647, "i64_col": 9223372036854775807_i64, "u8_col": 255, "u16_col": 65535, "u32_col": 4294967295_u64, "u64_col": 18446744073709551615_u64}).as_object().unwrap().clone(),
     ];
 
-    let result = client.insert_json_rows(&table_name, &rows).await;
+    let result = client.insert_json_rows(&table_name, &rows, &[]).await;
     assert!(result.is_ok(), "Integer insert failed: {:?}", result.err());
     assert_eq!(result.unwrap(), 3);
 
@@ -87,7 +87,7 @@ async fn test_float_types() {
             .clone(),
     ];
 
-    let result = client.insert_json_rows(&table_name, &rows).await;
+    let result = client.insert_json_rows(&table_name, &rows, &[]).await;
     assert!(result.is_ok(), "Float insert failed: {:?}", result.err());
     assert_eq!(result.unwrap(), 3);
 
@@ -129,7 +129,7 @@ async fn test_string_types() {
             .clone(),
     ];
 
-    let result = client.insert_json_rows(&table_name, &rows).await;
+    let result = client.insert_json_rows(&table_name, &rows, &[]).await;
     assert!(result.is_ok(), "String insert failed: {:?}", result.err());
     assert_eq!(result.unwrap(), 3);
 
@@ -178,7 +178,7 @@ async fn test_datetime_types() {
             .clone(),
     ];
 
-    let result = client.insert_json_rows(&table_name, &rows).await;
+    let result = client.insert_json_rows(&table_name, &rows, &[]).await;
     assert!(result.is_ok(), "DateTime insert failed: {:?}", result.err());
     assert_eq!(result.unwrap(), 3);
 
@@ -211,7 +211,7 @@ async fn test_boolean_type() {
         json!({"bool_col": false}).as_object().unwrap().clone(),
     ];
 
-    let result = client.insert_json_rows(&table_name, &rows).await;
+    let result = client.insert_json_rows(&table_name, &rows, &[]).await;
     assert!(result.is_ok(), "Boolean insert failed: {:?}", result.err());
     assert_eq!(result.unwrap(), 4);
 
@@ -263,7 +263,7 @@ async fn test_nullable_types() {
             .clone(),
     ];
 
-    let result = client.insert_json_rows(&table_name, &rows).await;
+    let result = client.insert_json_rows(&table_name, &rows, &[]).await;
     assert!(result.is_ok(), "Nullable insert failed: {:?}", result.err());
     assert_eq!(result.unwrap(), 5);
 
@@ -304,7 +304,7 @@ async fn test_low_cardinality_type() {
         })
         .collect();
 
-    let result = client.insert_json_rows(&table_name, &rows).await;
+    let result = client.insert_json_rows(&table_name, &rows, &[]).await;
     assert!(
         result.is_ok(),
         "LowCardinality insert failed: {:?}",
@@ -373,7 +373,7 @@ async fn test_realistic_event_table() {
         .collect();
 
     let start = std::time::Instant::now();
-    let result = client.insert_json_rows(&table_name, &rows).await;
+    let result = client.insert_json_rows(&table_name, &rows, &[]).await;
     let elapsed = start.elapsed();
 
     assert!(result.is_ok(), "Event insert failed: {:?}", result.err());
@@ -437,7 +437,7 @@ async fn test_coerce_datetime64_from_epoch_ms() {
         .coerce_row(&mut row, &schema)
         .expect("Coercion failed");
 
-    let result = client.insert_json_rows(&table_name, &[row]).await;
+    let result = client.insert_json_rows(&table_name, &[row], &[]).await;
     assert!(
         result.is_ok(),
         "Insert failed after coercion: {:?}",
@@ -482,7 +482,7 @@ async fn test_coerce_datetime64_from_iso_string() {
         .coerce_row(&mut row, &schema)
         .expect("Coercion failed");
 
-    let result = client.insert_json_rows(&table_name, &[row]).await;
+    let result = client.insert_json_rows(&table_name, &[row], &[]).await;
     assert!(
         result.is_ok(),
         "Insert failed after coercion: {:?}",
@@ -541,7 +541,7 @@ async fn test_coerce_bool_from_string() {
         rows.push(row);
     }
 
-    let result = client.insert_json_rows(&table_name, &rows).await;
+    let result = client.insert_json_rows(&table_name, &rows, &[]).await;
     assert!(
         result.is_ok(),
         "Insert failed after coercion: {:?}",
@@ -594,7 +594,7 @@ async fn test_coerce_bool_from_int() {
         rows.push(row);
     }
 
-    let result = client.insert_json_rows(&table_name, &rows).await;
+    let result = client.insert_json_rows(&table_name, &rows, &[]).await;
     assert!(
         result.is_ok(),
         "Insert failed after coercion: {:?}",
@@ -640,7 +640,7 @@ async fn test_coerce_uuid_normalisation() {
         .expect("Coercion failed");
     assert_eq!(row["id"], json!("550e8400-e29b-41d4-a716-446655440000"));
 
-    let result = client.insert_json_rows(&table_name, &[row]).await;
+    let result = client.insert_json_rows(&table_name, &[row], &[]).await;
     assert!(
         result.is_ok(),
         "Insert failed after UUID coercion: {:?}",
@@ -687,7 +687,7 @@ async fn test_coerce_ipv4_from_integer() {
         "Expected dotted-decimal IPv4"
     );
 
-    let result = client.insert_json_rows(&table_name, &[row]).await;
+    let result = client.insert_json_rows(&table_name, &[row], &[]).await;
     assert!(
         result.is_ok(),
         "Insert failed after IPv4 coercion: {:?}",
@@ -739,7 +739,7 @@ async fn test_coerce_null_non_nullable_defaults_to_empty() {
     );
     assert_eq!(row["score"], json!(0), "Expected 0 default for UInt64");
 
-    let result = client.insert_json_rows(&table_name, &[row]).await;
+    let result = client.insert_json_rows(&table_name, &[row], &[]).await;
     assert!(
         result.is_ok(),
         "Insert failed after null coercion: {:?}",
@@ -796,7 +796,7 @@ async fn test_coerce_array_datetime64_from_epoch_ms() {
         );
     }
 
-    let result = client.insert_json_rows(&table_name, &[row]).await;
+    let result = client.insert_json_rows(&table_name, &[row], &[]).await;
     assert!(
         result.is_ok(),
         "Insert failed after array DateTime64 coercion: {:?}",
@@ -854,7 +854,9 @@ async fn test_coerce_json_column_accepts_string_and_object() {
         .coerce_row(&mut row2, &schema)
         .expect("Coercion failed for string");
 
-    let result = client.insert_json_rows(&table_name, &[row1, row2]).await;
+    let result = client
+        .insert_json_rows(&table_name, &[row1, row2], &[])
+        .await;
     assert!(
         result.is_ok(),
         "Insert failed after JSON coercion: {:?}",

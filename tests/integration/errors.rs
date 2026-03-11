@@ -297,7 +297,7 @@ async fn test_error_insert_nonexistent_table() {
     ];
 
     let result = client
-        .insert_json_rows("nonexistent_table_12345", &rows)
+        .insert_json_rows("nonexistent_table_12345", &rows, &[])
         .await;
     assert!(result.is_err());
     eprintln!("✓ Non-existent table error: {:?}", result.err().unwrap());
@@ -329,7 +329,7 @@ async fn test_error_insert_schema_mismatch() {
     let rows: Vec<serde_json::Map<String, serde_json::Value>> =
         vec![json!({"id": 1, "name": 1.5}).as_object().unwrap().clone()];
 
-    let result = client.insert_json_rows(&table_name, &rows).await;
+    let result = client.insert_json_rows(&table_name, &rows, &[]).await;
     // ClickHouse coerces float to string in JSONEachRow
     match result {
         Ok(n) => eprintln!("Insert succeeded with coercion: {} rows", n),
@@ -365,7 +365,7 @@ async fn test_error_insert_missing_column() {
     let rows: Vec<serde_json::Map<String, serde_json::Value>> =
         vec![json!({"id": 1}).as_object().unwrap().clone()];
 
-    let result = client.insert_json_rows(&table_name, &rows).await;
+    let result = client.insert_json_rows(&table_name, &rows, &[]).await;
     match result {
         Ok(n) => eprintln!("Insert succeeded with default fill: {} rows", n),
         Err(e) => eprintln!("✓ Missing column error: {}", e),
@@ -403,7 +403,7 @@ async fn test_error_insert_extra_column() {
             .clone(),
     ];
 
-    let result = client.insert_json_rows(&table_name, &rows).await;
+    let result = client.insert_json_rows(&table_name, &rows, &[]).await;
     match result {
         Ok(n) => eprintln!("Insert succeeded (extra column ignored): {} rows", n),
         Err(e) => eprintln!("✓ Extra column error: {}", e),
@@ -436,7 +436,7 @@ async fn test_error_empty_batch_insert() {
     // Empty row list
     let rows: Vec<serde_json::Map<String, serde_json::Value>> = vec![];
 
-    let result = client.insert_json_rows(&table_name, &rows).await;
+    let result = client.insert_json_rows(&table_name, &rows, &[]).await;
     match result {
         Ok(n) => {
             assert_eq!(n, 0);

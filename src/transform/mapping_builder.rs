@@ -17,7 +17,7 @@ use crate::clickhouse::TableSchema;
 use crate::config::FieldMappingConfig;
 
 use super::field_mapping::{FieldMappingRule, MappingAction, RuleOrigin, TableFieldMapping};
-use super::remap_loader::{load_builtin, load_file, BuiltinPreset};
+use super::remap_loader::{BuiltinPreset, load_builtin, load_file};
 
 /// Builds per-table field mappings from all configured sources.
 ///

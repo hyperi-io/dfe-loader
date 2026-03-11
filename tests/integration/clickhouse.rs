@@ -93,7 +93,7 @@ async fn test_clickhouse_insert_json() {
     ];
 
     let start = std::time::Instant::now();
-    let result = client.insert_json_rows(&table_name, &rows).await;
+    let result = client.insert_json_rows(&table_name, &rows, &[]).await;
     let elapsed = start.elapsed();
     assert!(result.is_ok(), "Insert failed: {:?}", result.err());
     assert_eq!(result.unwrap(), 2);
@@ -116,7 +116,7 @@ async fn test_clickhouse_insert_json() {
         .collect();
 
     let start = std::time::Instant::now();
-    let result = client.insert_json_rows(&table_name, &large_rows).await;
+    let result = client.insert_json_rows(&table_name, &large_rows, &[]).await;
     let elapsed = start.elapsed();
     assert!(result.is_ok(), "Batch insert failed: {:?}", result.err());
     let count = result.unwrap();
@@ -145,7 +145,7 @@ async fn test_clickhouse_insert_json() {
         .collect();
 
     let start = std::time::Instant::now();
-    let result = client.insert_json_rows(&table_name, &xl_rows).await;
+    let result = client.insert_json_rows(&table_name, &xl_rows, &[]).await;
     let elapsed = start.elapsed();
     assert!(
         result.is_ok(),

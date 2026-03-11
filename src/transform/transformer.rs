@@ -9,10 +9,10 @@
 use chrono::{DateTime, Utc};
 use serde_json::{Map, Value};
 
+use crate::Result;
 use crate::config::{FieldSanitizationConfig, MetadataConfig, RoutingConfig, TimestampDqConfig};
 use crate::transform::flatten::flatten_value_owned;
 use crate::transform::timestamp::{TimestampResult, TimestampValidator};
-use crate::Result;
 
 /// Static field names (avoids allocation per message)
 /// Input field names - what we read from source data

@@ -14,9 +14,9 @@ use std::str::FromStr;
 use serde_json::Value;
 use tracing::warn;
 
+use crate::Result;
 use crate::clickhouse::{ParsedType, TableSchema};
 use crate::config::{CoercionConfig, NullHandling};
-use crate::Result;
 
 /// Coercion mode — controls which type coercions are applied.
 ///

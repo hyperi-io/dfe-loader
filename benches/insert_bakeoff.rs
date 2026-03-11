@@ -216,7 +216,7 @@ async fn insert_jsoneachrow(
 ) -> usize {
     let full_table = format!("{}.{}", db, table);
     client
-        .insert_json_rows(&full_table, rows)
+        .insert_json_rows(&full_table, rows, &[])
         .await
         .expect("jsoneachrow insert");
     rows.len()
