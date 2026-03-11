@@ -412,6 +412,16 @@ pub struct PayloadConfig {
     pub format: String,
     /// Mismatch threshold before auto-reset (auto mode only)
     pub mismatch_threshold: u8,
+    /// Pipeline processing mode.
+    ///
+    /// - `"json_primary"` (default): Schema-guided SIMD extraction + zero-copy `_json` splice.
+    ///   Only schema-matching columns are extracted; everything else is captured via `_json`.
+    ///   Requires schema resolution before per-column extraction works; messages arriving
+    ///   before schema is resolved fall back to the legacy path.
+    ///
+    /// - `"legacy_flatten"`: Existing full-flatten + transform path. All fields are promoted
+    ///   to the top level; `_json` is injected as a UTF-8 string copy of the raw payload.
+    pub pipeline_mode: String,
 }
 
 impl Default for PayloadConfig {
@@ -419,6 +429,7 @@ impl Default for PayloadConfig {
         Self {
             format: "auto".to_string(),
             mismatch_threshold: 10,
+            pipeline_mode: "json_primary".to_string(),
         }
     }
 }
