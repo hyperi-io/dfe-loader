@@ -942,12 +942,13 @@ impl Orchestrator {
         //
         // Legacy fallback (schema not yet resolved, MessagePack input, or legacy_flatten mode):
         //   Full flatten + Transformer path. _json is injected inline as a UTF-8 string copy.
-        let use_json_primary = json_primary_mode
-            && format == PayloadFormat::Json
-            && schema_cache.get(&table).is_some();
+        let json_primary_schema = if json_primary_mode && format == PayloadFormat::Json {
+            schema_cache.get(&table)
+        } else {
+            None
+        };
 
-        let (mut data, raw_payload) = if use_json_primary {
-            let schema = schema_cache.get(&table).expect("checked above");
+        let (mut data, raw_payload) = if let Some(schema) = json_primary_schema {
             let promoted = extractor.extract(&msg.payload, &table, &schema, col_meta_cache);
             let raw: Arc<[u8]> = Arc::from(msg.payload.as_slice());
             (promoted, Some(raw))

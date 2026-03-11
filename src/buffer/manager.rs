@@ -273,8 +273,10 @@ impl BufferManager {
         };
 
         for buffer in self.buffers.values() {
-            stats.pending_rows += buffer.len();
+            let rows = buffer.len();
+            stats.pending_rows += rows;
             stats.pending_chunks += if buffer.is_empty() { 0 } else { 1 };
+            stats.pending_bytes += rows * 200;
         }
 
         stats

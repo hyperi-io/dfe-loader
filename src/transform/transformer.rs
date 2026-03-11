@@ -9,10 +9,10 @@
 use chrono::{DateTime, Utc};
 use serde_json::{Map, Value};
 
-use crate::Result;
 use crate::config::{FieldSanitizationConfig, MetadataConfig, RoutingConfig, TimestampDqConfig};
 use crate::transform::flatten::flatten_value_owned;
 use crate::transform::timestamp::{TimestampResult, TimestampValidator};
+use crate::Result;
 
 /// Static field names (avoids allocation per message)
 /// Input field names - what we read from source data
@@ -27,7 +27,7 @@ static TIMESTAMP_COLLECTOR_FIELD: &str = "_timestamp_collector";
 /// Uses space separator and no timezone suffix — ClickHouse's JSONEachRow parser
 /// doesn't support RFC3339 'Z' or '+00:00' suffixes in datetime strings.
 #[inline]
-fn fmt_ts(dt: &DateTime<Utc>) -> String {
+pub(crate) fn fmt_ts(dt: &DateTime<Utc>) -> String {
     dt.format("%Y-%m-%d %H:%M:%S%.3f").to_string()
 }
 
