@@ -98,12 +98,12 @@ impl ParsedType {
 
         // Check for Map
         if let Some(inner) = Self::extract_wrapper(&type_str, "Map")
-            && let Some((key, value)) = Self::split_type_args(&inner) {
-                result.base = "Map".to_string();
-                result.map_types =
-                    Some((Box::new(Self::parse(&key)), Box::new(Self::parse(&value))));
-                return result;
-            }
+            && let Some((key, value)) = Self::split_type_args(&inner)
+        {
+            result.base = "Map".to_string();
+            result.map_types = Some((Box::new(Self::parse(&key)), Box::new(Self::parse(&value))));
+            return result;
+        }
 
         // Check for DateTime64(precision, 'timezone')
         if type_str.starts_with("DateTime64") {
@@ -161,9 +161,10 @@ impl ParsedType {
     fn unwrap_wrapper(type_str: &str, wrapper: &str) -> (String, bool) {
         let prefix = format!("{wrapper}(");
         if let Some(rest) = type_str.strip_prefix(&prefix)
-            && let Some(inner) = rest.strip_suffix(')') {
-                return (inner.to_string(), true);
-            }
+            && let Some(inner) = rest.strip_suffix(')')
+        {
+            return (inner.to_string(), true);
+        }
         (type_str.to_string(), false)
     }
 

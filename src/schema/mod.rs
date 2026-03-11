@@ -104,9 +104,10 @@ impl TableTags {
         for part in comment.split(" | ") {
             let part = part.trim();
             if let Some(stripped) = part.strip_prefix('@')
-                && let Some((key, value)) = stripped.split_once(':') {
-                    tags.insert(key.trim().to_string(), value.trim().to_string());
-                }
+                && let Some((key, value)) = stripped.split_once(':')
+            {
+                tags.insert(key.trim().to_string(), value.trim().to_string());
+            }
         }
 
         Self { tags }

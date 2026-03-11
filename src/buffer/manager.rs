@@ -234,15 +234,16 @@ impl BufferManager {
 
         for (table, buffer) in self.buffers.iter_mut() {
             if buffer.is_ready(flush_rows, flush_age_secs)
-                && let Some((rows, offsets, raw_payloads)) = buffer.build() {
-                    debug!(table = %table, rows = rows.len(), "Flushing buffer");
-                    flush_batches.push(FlushBatch {
-                        table: CompactString::from(table.as_str()),
-                        rows,
-                        offsets,
-                        raw_payloads,
-                    });
-                }
+                && let Some((rows, offsets, raw_payloads)) = buffer.build()
+            {
+                debug!(table = %table, rows = rows.len(), "Flushing buffer");
+                flush_batches.push(FlushBatch {
+                    table: CompactString::from(table.as_str()),
+                    rows,
+                    offsets,
+                    raw_payloads,
+                });
+            }
         }
 
         flush_batches

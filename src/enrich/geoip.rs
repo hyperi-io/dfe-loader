@@ -362,47 +362,49 @@ impl GeoIpEnricher {
 
         // City database lookup
         if let Some(ref reader) = self.city_reader
-            && let Ok(lookup_result) = reader.lookup(*addr) {
-                // Decode the result into a City struct
-                if let Ok(Some(city)) = lookup_result.decode::<geoip2::City>() {
-                    found = true;
+            && let Ok(lookup_result) = reader.lookup(*addr)
+        {
+            // Decode the result into a City struct
+            if let Ok(Some(city)) = lookup_result.decode::<geoip2::City>() {
+                found = true;
 
-                    // Continent data
-                    result.continent_code = city.continent.code.map(|s| s.to_string());
-                    result.continent_name = city.continent.names.english.map(|s| s.to_string());
+                // Continent data
+                result.continent_code = city.continent.code.map(|s| s.to_string());
+                result.continent_name = city.continent.names.english.map(|s| s.to_string());
 
-                    // Country data - new API has flat access
-                    result.country_code = city.country.iso_code.map(|s| s.to_string());
-                    result.country_name = city.country.names.english.map(|s| s.to_string());
+                // Country data - new API has flat access
+                result.country_code = city.country.iso_code.map(|s| s.to_string());
+                result.country_name = city.country.names.english.map(|s| s.to_string());
 
-                    // City data
-                    result.city = city.city.names.english.map(|s| s.to_string());
+                // City data
+                result.city = city.city.names.english.map(|s| s.to_string());
 
-                    // Location data
-                    result.latitude = city.location.latitude;
-                    result.longitude = city.location.longitude;
-                    result.timezone = city.location.time_zone.map(|s| s.to_string());
-                    result.accuracy_radius = city.location.accuracy_radius;
+                // Location data
+                result.latitude = city.location.latitude;
+                result.longitude = city.location.longitude;
+                result.timezone = city.location.time_zone.map(|s| s.to_string());
+                result.accuracy_radius = city.location.accuracy_radius;
 
-                    // Postal data
-                    result.postal_code = city.postal.code.map(|s| s.to_string());
+                // Postal data
+                result.postal_code = city.postal.code.map(|s| s.to_string());
 
-                    // Subdivision data (first subdivision = state/province)
-                    if let Some(first) = city.subdivisions.first() {
-                        result.subdivision_code = first.iso_code.map(|s| s.to_string());
-                        result.subdivision = first.names.english.map(|s| s.to_string());
-                    }
+                // Subdivision data (first subdivision = state/province)
+                if let Some(first) = city.subdivisions.first() {
+                    result.subdivision_code = first.iso_code.map(|s| s.to_string());
+                    result.subdivision = first.names.english.map(|s| s.to_string());
                 }
             }
+        }
 
         // ASN database lookup
         if let Some(ref reader) = self.asn_reader
             && let Ok(lookup_result) = reader.lookup(*addr)
-                && let Ok(Some(asn)) = lookup_result.decode::<geoip2::Asn>() {
-                    found = true;
-                    result.asn = asn.autonomous_system_number;
-                    result.asn_org = asn.autonomous_system_organization.map(|s| s.to_string());
-                }
+            && let Ok(Some(asn)) = lookup_result.decode::<geoip2::Asn>()
+        {
+            found = true;
+            result.asn = asn.autonomous_system_number;
+            result.asn_org = asn.autonomous_system_organization.map(|s| s.to_string());
+        }
 
         if found { Some(result) } else { None }
     }

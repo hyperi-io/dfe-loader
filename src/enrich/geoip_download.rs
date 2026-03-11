@@ -382,21 +382,22 @@ async fn download_tar_gz(
 
         // MaxMind tar contains: GeoLite2-City_20241231/GeoLite2-City.mmdb
         if let Some(filename) = path.file_name()
-            && filename == target_filename {
-                let tmp = dest.with_extension("mmdb.tmp");
-                let mut outfile = fs::File::create(&tmp)?;
-                io::copy(&mut entry, &mut outfile)?;
-                fs::rename(&tmp, dest)?;
+            && filename == target_filename
+        {
+            let tmp = dest.with_extension("mmdb.tmp");
+            let mut outfile = fs::File::create(&tmp)?;
+            io::copy(&mut entry, &mut outfile)?;
+            fs::rename(&tmp, dest)?;
 
-                let size = fs::metadata(dest).map(|m| m.len()).unwrap_or(0);
-                info!(
-                    dest = %dest.display(),
-                    size_mb = size / (1024 * 1024),
-                    "GeoIP database extracted from tar"
-                );
-                found = true;
-                break;
-            }
+            let size = fs::metadata(dest).map(|m| m.len()).unwrap_or(0);
+            info!(
+                dest = %dest.display(),
+                size_mb = size / (1024 * 1024),
+                "GeoIP database extracted from tar"
+            );
+            found = true;
+            break;
+        }
     }
 
     if !found {

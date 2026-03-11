@@ -134,13 +134,14 @@ impl CircuitBreaker {
             CircuitState::Open => {
                 // Check if we should transition to half-open
                 if let Some(opened_at) = circuit.opened_at
-                    && opened_at.elapsed() >= self.config.open_duration {
-                        info!(table = %table, "Circuit transitioning to half-open");
-                        circuit.state = CircuitState::HalfOpen;
-                        circuit.half_open_requests = 0;
-                        circuit.success_count = 0;
-                        return self.allow_half_open_request(circuit, table);
-                    }
+                    && opened_at.elapsed() >= self.config.open_duration
+                {
+                    info!(table = %table, "Circuit transitioning to half-open");
+                    circuit.state = CircuitState::HalfOpen;
+                    circuit.half_open_requests = 0;
+                    circuit.success_count = 0;
+                    return self.allow_half_open_request(circuit, table);
+                }
                 debug!(table = %table, "Circuit open, rejecting request");
                 self.total_rejections.fetch_add(1, Ordering::Relaxed);
                 false

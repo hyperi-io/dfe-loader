@@ -138,26 +138,27 @@ impl Consumer {
 
         // TLS configuration
         if let Some(ref tls) = config.tls
-            && tls.enabled {
-                // Update security protocol if SASL is also enabled
-                if config.sasl.as_ref().is_some_and(|s| s.enabled) {
-                    client_config.set("security.protocol", "SASL_SSL");
-                } else {
-                    client_config.set("security.protocol", "SSL");
-                }
-
-                if let Some(ref ca) = tls.ca_cert_file {
-                    client_config.set("ssl.ca.location", ca);
-                }
-                if let Some(ref cert) = tls.cert_file {
-                    client_config.set("ssl.certificate.location", cert);
-                }
-                if let Some(ref key) = tls.key_file {
-                    client_config.set("ssl.key.location", key);
-                }
-
-                info!("TLS enabled");
+            && tls.enabled
+        {
+            // Update security protocol if SASL is also enabled
+            if config.sasl.as_ref().is_some_and(|s| s.enabled) {
+                client_config.set("security.protocol", "SASL_SSL");
+            } else {
+                client_config.set("security.protocol", "SSL");
             }
+
+            if let Some(ref ca) = tls.ca_cert_file {
+                client_config.set("ssl.ca.location", ca);
+            }
+            if let Some(ref cert) = tls.cert_file {
+                client_config.set("ssl.certificate.location", cert);
+            }
+            if let Some(ref key) = tls.key_file {
+                client_config.set("ssl.key.location", key);
+            }
+
+            info!("TLS enabled");
+        }
 
         let consumer: StreamConsumer = client_config.create()?;
 
