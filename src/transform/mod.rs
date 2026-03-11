@@ -5,6 +5,7 @@
 
 pub mod coerce;
 pub mod computed;
+pub mod extractor;
 pub mod field_mapping;
 pub mod flatten;
 pub mod mapping_builder;
@@ -15,6 +16,7 @@ pub mod transformer;
 
 pub use coerce::{Coercer, CoercionMode};
 pub use computed::{parse_computed_directive, ComputedColumnCache};
+pub use extractor::HeaderExtractor;
 pub use field_mapping::{
     parse_renamed_directive, FieldMappingRule, MappingAction, RuleOrigin, TableFieldMapping,
 };
