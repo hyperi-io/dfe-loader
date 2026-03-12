@@ -1,13 +1,9 @@
-# Cargo build configuration for dfe-loader
+# Project:   dfe-loader
+# File:      .cargo/config.toml
+# Purpose:   Cargo build configuration with per-target CPU optimisations
 #
-# Target platforms: Linux x86_64 and aarch64 only
-# SIMD optimizations enabled for sonic-rs and arrow
-
-# =============================================================================
-# Per-target CPU optimizations
-# =============================================================================
-# x86_64: AVX2 + SSE4.2 (available on all modern Intel/AMD since ~2013)
-# aarch64: NEON (baseline for all ARM64)
+# License:   FSL-1.1-ALv2
+# Copyright: (c) 2026 HYPERI PTY LIMITED
 
 [target.x86_64-unknown-linux-gnu]
 rustflags = ["-C", "target-cpu=x86-64-v3"]  # AVX2, BMI1/2, FMA (Haswell+)
