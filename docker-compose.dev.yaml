@@ -1,12 +1,16 @@
-# Development docker-compose for local testing
-# Use when .env is not configured for external systems (k8s.tyrell.com.au)
+# Project:   dfe-loader
+# File:      docker-compose.dev.yaml
+# Purpose:   Local dev dependencies (ClickHouse + Kafka)
+#
+# License:   FSL-1.1-ALv2
+# Copyright: (c) 2026 HYPERI PTY LIMITED
 #
 # Usage:
-#   docker-compose -f docker-compose.dev.yaml up -d
+#   docker compose -f docker-compose.dev.yaml up -d
 #   cargo run -- --config config.dev.yaml
 #
 # Stop:
-#   docker-compose -f docker-compose.dev.yaml down -v
+#   docker compose -f docker-compose.dev.yaml down -v
 
 services:
   # ClickHouse for testing inserts
