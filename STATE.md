@@ -1,10 +1,6 @@
-## CI UNAVAILABLE — Commit with [skip ci]
+## CI
 
-The CI system is being completely rewritten. Until migration instructions are provided:
-
-- **All commits MUST include `[skip ci]` in the commit message**
-- Do not trigger CI runs or rely on CI for validation
-- Run `./ci/local-build.sh` for local validation if it exists
+CI is live via `hyperi-ci`. Run `hyperi-ci check` (or `make check`) locally before pushing.
 
 ---
 
@@ -19,7 +15,7 @@ The CI system is being completely rewritten. Until migration instructions are pr
 
 ## CI Workflow Rule
 
-**Always run `./ci/local-build.sh` and confirm it passes locally before pushing to CI.**
+**Always run `hyperi-ci check` and confirm it passes locally before pushing.**
 
 Do not push to CI to discover compile or test failures — fix them locally first.
 
@@ -78,18 +74,6 @@ No registry configuration or credentials required — standard `cargo fetch` / `
 3. Update dfe-loader `Cargo.toml` with new version: `hyperi-rustlib = { version = "x.y.z", ... }`
 4. Run `cargo update -p hyperi-rustlib` to update the lock file
 5. Test and commit
-
-### Submodule Push Access
-
-By default, CI/AI submodules are read-only (`no-push`). To enable push access:
-
-```bash
-# Enable push for ci submodule (run once per clone)
-cd ci && git remote set-url --push origin https://github.com/hyperi-io/ci.git
-
-# Enable push for ai submodule
-cd ai && git remote set-url --push origin https://github.com/hyperi-io/ai.git
-```
 
 ---
 
@@ -457,7 +441,7 @@ Start a fresh session after any changes to this file.
 **CI fix workflow (no approval needed):**
 1. Claude monitors `gh run list` / `gh run view --log-failed`
 2. Finds root cause in logs
-3. If CI bug → fixes in `/projects/ci`, commits, pushes, then `git submodule update --remote ci` in dfe-loader
+3. If CI bug → fixes in `/projects/hyperi-ci`, commits, pushes
 4. If dfe-loader bug → fixes here, commits, pushes
 5. New CI run triggers automatically; Semantic Release → Publish follows on success
 
