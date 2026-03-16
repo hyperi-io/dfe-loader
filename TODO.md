@@ -15,7 +15,7 @@
 The architecture is deliberately staged:
 
 ```
-Stage 1 (CURRENT):  JSONEachRow + upstream clickhouse crate (HTTP) + coercion fixes
+Stage 1 (COMPLETE): JSONEachRow + upstream clickhouse crate (HTTP) + coercion fixes
 Stage 2 (Phase 5.5): Native protocol via /projects/clickhouse-rs fork (lower CPU)
 ```
 
@@ -76,33 +76,9 @@ Phase 5.5 Step C), perform a CPU-first review of the hot path:
 
 ### Spike: simdjson vs sonic-rs targeted bake-off ✓ COMPLETE — REJECTED
 
-**Bench:** `benches/simdjson_spike.rs` — flat30 and nested payloads, 15/30 schema columns,
-batch sizes 100/1K/10K. Three approaches measured (actual numbers, batch=10K):
-
-| Approach | flat30/col30 | flat30/col15 | nested/col15 |
-|---|---|---|---|
-| `sonic_selective` — `get_from_slice × N` (was current) | 196 ms | 59.7 ms | 179 ms |
-| `sonic_dom` — `from_slice` × 1 + `.get()` × N | **71.7 ms** | **58.1 ms** | **42.8 ms** |
-| `simd_dom+clone` — simd-json + mandatory `Vec<u8>` clone | 48.2 ms | 41.8 ms | 37.6 ms |
-
-**Finding 1 — sonic_dom wins over sonic_selective:**
-- 2.7× faster at N=30 flat payload
-- 4.2× faster at N=15 nested (each miss still scans full doc with get_from_slice)
-- Tied at N=15 flat payload with high hit-rate (58 vs 60 ms)
-- Implemented immediately: `HeaderExtractor` now does `sonic_rs::from_slice` once + O(1) lookups.
-
-**Finding 2 — simd-json: REJECTED:**
-- Requires `&mut [u8]` (in-place string unescaping). `Arc<[u8]>` is immutable — mandatory
-  `Vec<u8>` clone before every parse. Architecturally incompatible with zero-copy `_json`.
-- `simd_dom` is ~28–33% faster than `sonic_dom` for flat extraction, ~12% for nested.
-- Extraction is <10% of total pipeline time (dominated by 40–75 ms network I/O per batch).
-- Net pipeline improvement: ~2–3% — well below the 5% mison rejection threshold.
-- Decision: keep sonic-rs. No simd-json in production.
-
-**Routing parse only (flat30/10K):** sonic 50.1 ms vs simd 38.5 ms (+23%). Same verdict —
-routing is not a bottleneck and the mandatory clone negates the gain.
-
-Full rationale permanently pinned in `docs/DESIGN.md` § Parser Selection History and `STATE.md`.
+sonic_dom (single full parse + O(1) lookups) beats sonic_selective (get_from_slice×N) by 2.7–4.2×.
+simd-json rejected: requires `&mut [u8]` incompatible with `Arc<[u8]>` zero-copy `_json` model.
+Net pipeline improvement only ~2–3%. Bench file removed; full rationale in `docs/DESIGN.md`.
 
 ### Phase 5.6: Type Coercion Completeness ✓ COMPLETE
 
@@ -148,9 +124,8 @@ Remove or comment out the `[patch]` section to revert to upstream.
 
 **WBS Breakdown (sequential — do NOT skip steps):**
 
-**Step A (CURRENT):** Get everything working with upstream `clickhouse` crate (crates.io).
-  Phase 5.7 (schema-guided extraction) must be complete and 520 tests passing.
-  This is prerequisite for Steps B and C.
+**Step A ✓ COMPLETE:** Upstream `clickhouse` crate (crates.io), 564 tests passing.
+  Phase 5.7 (schema-guided extraction) complete. Dead code cleanup done (v1.14.4 GA released).
 
 **Step A.5 (code review) ✓ COMPLETE:** Full simplification pass run (2026-03-11).
   - `fmt_ts` made `pub(crate)`, shared between transformer + extractor (no duplication)
@@ -161,11 +136,10 @@ Remove or comment out the `[patch]` section to revert to upstream.
   - Orchestrator double schema-cache lookup collapsed to single
   - `hyperi-ai` submodule updated to v2.7.0, re-attached with `--force --agent claude`
 
-**Step B:** Release binary for internal testing (Kaz).
-  Binary builds from `main` once Phase 5.7 is merged.
-  Kaz validates end-to-end pipeline before any fork changes.
+**Step B ✓ COMPLETE:** v1.14.4 GA released (GH Release + R2 binaries, JFrog container + helm).
+  amd64 + arm64 binaries published. Ready for internal testing.
 
-**Step C:** Migrate to clickhouse-rs fork — done LOCK-STEP with dfe-loader.
+**Step C (NEXT):** Migrate to clickhouse-rs fork — done LOCK-STEP with dfe-loader.
   Fork branches are merged in order and tested via `[patch.crates-io]` in
   dfe-loader. Each branch is a separate dfe-loader test session.
   The fork and dfe-loader evolve together — NOT independently.
@@ -307,11 +281,22 @@ Direct `rdkafka` dependency in `Cargo.toml` can be dropped after removal.
 - [ ] Receiver WAL — required for at-least-once with gRPC mesh
 - [ ] TLS configuration — use when needed
 - [ ] Memory size tracking — per-buffer accounting
-- [ ] OIDC token fetch — OAuth Bearer refresh callback (awaiting requirement)
 
 ---
 
 ## Completed
+
+### 2026-03-16: Dead Code Cleanup + v1.14.4 GA Release
+
+- [x] Deleted `tests/fixtures/arrow_schema.rs` (246 lines, zero callers, arrow crate removed)
+- [x] Deleted `benches/simdjson_spike.rs` (379 lines, completed spike, decision documented)
+- [x] Removed `simd-json` and `mockall` dev-dependencies from Cargo.toml
+- [x] Removed `simdjson_spike` bench entry from Cargo.toml
+- [x] Fixed stale ArrowStream comment in `src/clickhouse/config.rs`
+- [x] Removed OIDC TODO comment from `src/kafka/consumer.rs`
+- [x] Updated CI references (CONTRIBUTING.md → hyperi-ci)
+- [x] v1.14.4 GA released: GH Release + R2 binaries + JFrog container + helm
+- [x] GitHub issue #3 (`_source` routing) closed as by-design
 
 ### 2026-03-09: Arrow → HTTP/JSONEachRow Migration (Phases 0–5, Complete)
 
@@ -456,4 +441,4 @@ Direct `rdkafka` dependency in `Cargo.toml` can be dropped after removal.
 
 ---
 
-**Last Updated:** 2026-03-11
+**Last Updated:** 2026-03-16
