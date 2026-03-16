@@ -1,3 +1,12 @@
+## [1.14.1-dev.2](https://github.com/hyperi-io/dfe-loader/compare/v1.14.1-dev.1...v1.14.1-dev.2) (2026-03-16)
+
+
+### Bug Fixes
+
+* cargo fmt import order in apply_figment_env [skip ci] ([10576c4](https://github.com/hyperi-io/dfe-loader/commit/10576c4ebfa491a7020bbf2c29181a9f4f82ffbd))
+* remove dead arrow/simd-json code and unused deps ([4aa6345](https://github.com/hyperi-io/dfe-loader/commit/4aa634502c9253893ffe1ea4bcce05d70de0c8b4))
+* respect dlq.mode disabled in config conversion [skip ci] ([a1a1cf6](https://github.com/hyperi-io/dfe-loader/commit/a1a1cf602e855204d3ff192796abdd064f4f21b2))
+
 ## [1.14.1-dev.1](https://github.com/hyperi-io/dfe-loader/compare/v1.14.0...v1.14.1-dev.1) (2026-03-16)
 
 
