@@ -335,7 +335,7 @@ impl Orchestrator {
         // DLQ (unified rustlib module — cascade: Kafka primary, file fallback)
         let dlq_config = self.config.routing.dlq.to_rustlib_config();
         let transport_kafka_config = TransportAdapter::convert_config(&self.config.kafka);
-        let dlq: Option<Arc<Dlq>> = if self.config.routing.dlq.enabled {
+        let dlq: Option<Arc<Dlq>> = if dlq_config.enabled {
             match Dlq::with_kafka(&dlq_config, "loader", &transport_kafka_config) {
                 Ok(d) => {
                     info!(mode = ?dlq_config.mode, "DLQ enabled");

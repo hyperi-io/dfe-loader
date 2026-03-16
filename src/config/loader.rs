@@ -801,15 +801,16 @@ impl DlqConfig {
     pub fn to_rustlib_config(&self) -> hyperi_rustlib::dlq::DlqConfig {
         use hyperi_rustlib::dlq::{DlqMode, FileDlqConfig};
 
-        let mode = match self.mode.as_str() {
-            "fan_out" => DlqMode::FanOut,
-            "file_only" => DlqMode::FileOnly,
-            "kafka_only" => DlqMode::KafkaOnly,
-            _ => DlqMode::Cascade,
+        let (mode, enabled) = match self.mode.as_str() {
+            "disabled" => (DlqMode::Cascade, false),
+            "fan_out" => (DlqMode::FanOut, self.enabled),
+            "file_only" => (DlqMode::FileOnly, self.enabled),
+            "kafka_only" => (DlqMode::KafkaOnly, self.enabled),
+            _ => (DlqMode::Cascade, self.enabled),
         };
 
         hyperi_rustlib::dlq::DlqConfig {
-            enabled: self.enabled,
+            enabled,
             mode,
             file: FileDlqConfig {
                 enabled: self.file_enabled,
@@ -1592,8 +1593,8 @@ fn apply_env_overrides(config: &mut Config) {
 /// Supports arbitrary nesting: DFE_LOADER_KAFKA__SASL__USERNAME → kafka.sasl.username
 /// Lists require bracket syntax: DFE_LOADER_KAFKA__BROKERS=[a, b, c]
 fn apply_figment_env(config: &mut Config) -> Result<()> {
-    use figment::Figment;
     use figment::providers::{Env, Serialized};
+    use figment::Figment;
 
     let figment = Figment::from(Serialized::defaults(&*config))
         .merge(Env::prefixed(&format!("{ENV_PREFIX}_")).split("__"));
