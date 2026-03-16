@@ -1,3 +1,10 @@
+## [1.14.2](https://github.com/hyperi-io/dfe-loader/compare/v1.14.1...v1.14.2) (2026-03-16)
+
+
+### Bug Fixes
+
+* enable binary publish to GitHub Releases and R2 ([af4a5fb](https://github.com/hyperi-io/dfe-loader/commit/af4a5fbc7aa90bc98679d39f510cd25ed9e3a484))
+
 ## [1.14.1](https://github.com/hyperi-io/dfe-loader/compare/v1.14.0...v1.14.1) (2026-03-12)
 
 
