@@ -27,7 +27,7 @@ pub enum Transport {
     /// HTTP protocol (port 8123).
     ///
     /// Better compatibility with proxies, load balancers, and firewalls.
-    /// Uses ArrowStream format for efficient data transfer.
+    /// Uses JSONEachRow format for dynamic schema inserts.
     Http,
 }
 
