@@ -1,3 +1,14 @@
+## [1.14.4](https://github.com/hyperi-io/dfe-loader/compare/v1.14.3...v1.14.4) (2026-03-16)
+
+
+### Bug Fixes
+
+* cargo fmt import order in apply_figment_env ([a638724](https://github.com/hyperi-io/dfe-loader/commit/a63872439816704a107b37e7419f37f56c997950))
+* respect dlq.mode disabled in config conversion [skip ci] ([a1a1cf6](https://github.com/hyperi-io/dfe-loader/commit/a1a1cf602e855204d3ff192796abdd064f4f21b2))
+* respect dlq.mode disabled in config conversion [skip ci] ([801f5af](https://github.com/hyperi-io/dfe-loader/commit/801f5afa00d5c21062512c256cef440120d6700e))
+* sync release with main for GA release ([6bb334e](https://github.com/hyperi-io/dfe-loader/commit/6bb334e21d52ed78aae9549d74e8fb8ff6bd362e))
+* update Dockerfile header to project standard [skip ci] ([636d0f0](https://github.com/hyperi-io/dfe-loader/commit/636d0f0751be076cd235ad3d60f1a8daa3bac262))
+
 ## [1.14.1-dev.1](https://github.com/hyperi-io/dfe-loader/compare/v1.14.0...v1.14.1-dev.1) (2026-03-16)
 
 
