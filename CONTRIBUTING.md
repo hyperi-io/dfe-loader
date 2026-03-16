@@ -151,26 +151,20 @@ anniversary of its release.
 
 ### Local Build
 
-Run the local build orchestrator before pushing — it runs quality checks, tests,
-and builds in the same sequence as CI:
+Run `hyperi-ci check` before pushing — it runs quality checks and tests in
+the same sequence as CI:
 
 ```bash
-ci/local-build.sh                    # Full: quality + tests + build
-ci/local-build.sh --skip-quality     # Tests + build only
-ci/local-build.sh --skip-tests       # Quality + build only
-ci/local-build.sh --skip-build       # Quality + tests only
+hyperi-ci check               # Quality + tests (default)
+hyperi-ci check --quick       # Quality only
+hyperi-ci check --full        # Quality + tests + build
+make check                    # Same as hyperi-ci check
 ```
 
 Or build binaries directly:
 
 ```bash
-# Native-only (quick)
 cargo build --release --features jemalloc
-
-# Cross-compile amd64 + arm64 (same as CI)
-RUST_BUILD_TARGETS='["x86_64-unknown-linux-gnu","aarch64-unknown-linux-gnu"]' \
-RUST_ALL_FEATURES=false RUST_FEATURES="jemalloc" \
-bash ci/scripts/languages/rust/build.sh
 ```
 
 ### Local Build Artifacts
