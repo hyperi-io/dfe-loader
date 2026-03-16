@@ -100,8 +100,6 @@ impl Consumer {
 
                 // OAuth configuration
                 if mechanism.is_oauth() {
-                    // Note: OAuth token refresh needs a callback - for now set static token
-                    // TODO: Implement OIDC token fetch callback
                     if let Some(ref endpoint) = sasl.oauth_token_endpoint {
                         client_config.set("sasl.oauthbearer.token.endpoint.url", endpoint);
                     }

@@ -1,27 +1,11 @@
-## [1.14.3](https://github.com/hyperi-io/dfe-loader/compare/v1.14.2...v1.14.3) (2026-03-16)
-
-
-### Bug Fixes
-
-* update lockfile with latest dependency versions ([5137b55](https://github.com/hyperi-io/dfe-loader/commit/5137b55bc17a9678944180dbc38954bb0b522777))
-
-## [1.14.2](https://github.com/hyperi-io/dfe-loader/compare/v1.14.1...v1.14.2) (2026-03-16)
-
-
-### Bug Fixes
-
-* enable binary publish to GitHub Releases and R2 ([af4a5fb](https://github.com/hyperi-io/dfe-loader/commit/af4a5fbc7aa90bc98679d39f510cd25ed9e3a484))
-
-## [1.14.1](https://github.com/hyperi-io/dfe-loader/compare/v1.14.0...v1.14.1) (2026-03-12)
+## [1.14.1-dev.1](https://github.com/hyperi-io/dfe-loader/compare/v1.14.0...v1.14.1-dev.1) (2026-03-16)
 
 
 ### Bug Fixes
 
 * apply rustfmt and update deployment test for ubuntu base ([5af32c5](https://github.com/hyperi-io/dfe-loader/commit/5af32c521b136d187e354acc5efdc601e246f862))
 * consume rustlib v1.16.0 with dynamic linking ([e1e59d7](https://github.com/hyperi-io/dfe-loader/commit/e1e59d7988c3c8b88aa6c7e82699b6c33a93119a))
-* update cargo config header to project standard ([10dac38](https://github.com/hyperi-io/dfe-loader/commit/10dac38888600c3ae96f7a01db15213ca2a91318))
-* update docker-compose header to project standard ([d1077bb](https://github.com/hyperi-io/dfe-loader/commit/d1077bbe7fc5c5e50549cd0d1c2e59842a61cde7))
-* update Dockerfile header to project standard ([d5f66e4](https://github.com/hyperi-io/dfe-loader/commit/d5f66e432293849baae0b81dea42c7dbbe1f875e))
+* update Dockerfile header to project standard [skip ci] ([636d0f0](https://github.com/hyperi-io/dfe-loader/commit/636d0f0751be076cd235ad3d60f1a8daa3bac262))
 
 # [1.14.0](https://github.com/hyperi-io/dfe-loader/compare/v1.13.6...v1.14.0) (2026-03-11)
 

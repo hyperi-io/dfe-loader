@@ -3,7 +3,7 @@
 
 //! Test fixture builders for creating test data
 //!
-//! Provides builder patterns for events, configs, Arrow schemas, and DDL
+//! Provides builder patterns for events, configs, and DDL
 
 pub mod config;
 pub mod ddl;
