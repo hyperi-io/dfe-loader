@@ -1,3 +1,10 @@
+## [1.14.3](https://github.com/hyperi-io/dfe-loader/compare/v1.14.2...v1.14.3) (2026-03-16)
+
+
+### Bug Fixes
+
+* update lockfile with latest dependency versions ([5137b55](https://github.com/hyperi-io/dfe-loader/commit/5137b55bc17a9678944180dbc38954bb0b522777))
+
 ## [1.14.2](https://github.com/hyperi-io/dfe-loader/compare/v1.14.1...v1.14.2) (2026-03-16)
 
 
