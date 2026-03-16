@@ -44,7 +44,7 @@ build:
 # Publishing (on release)
 publish:
   enabled: true
-  target: internal
+  target: both
   binaries: both
   container:
     enabled: true

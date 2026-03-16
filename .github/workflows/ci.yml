@@ -31,5 +31,5 @@ jobs:
   ci:
     uses: hyperi-io/hyperi-ci/.github/workflows/rust-ci.yml@main
     with:
-      publish-target: internal
+      publish-target: both
     secrets: inherit
