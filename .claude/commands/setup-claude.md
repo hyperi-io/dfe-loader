@@ -1,1 +1,1 @@
-../../hyperi-ai/templates/claude-code/commands/setup-claude.md
+../../hyperi-ai/commands/setup-claude.md
