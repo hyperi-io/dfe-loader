@@ -1,3 +1,12 @@
+## [1.14.1-dev.1](https://github.com/hyperi-io/dfe-loader/compare/v1.14.0...v1.14.1-dev.1) (2026-03-16)
+
+
+### Bug Fixes
+
+* apply rustfmt and update deployment test for ubuntu base ([5af32c5](https://github.com/hyperi-io/dfe-loader/commit/5af32c521b136d187e354acc5efdc601e246f862))
+* consume rustlib v1.16.0 with dynamic linking ([e1e59d7](https://github.com/hyperi-io/dfe-loader/commit/e1e59d7988c3c8b88aa6c7e82699b6c33a93119a))
+* update Dockerfile header to project standard [skip ci] ([636d0f0](https://github.com/hyperi-io/dfe-loader/commit/636d0f0751be076cd235ad3d60f1a8daa3bac262))
+
 # [1.14.0](https://github.com/hyperi-io/dfe-loader/compare/v1.13.6...v1.14.0) (2026-03-11)
 
 
