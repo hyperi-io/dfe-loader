@@ -39,6 +39,11 @@ kafka:
   # 0 = disabled.
   topic_refresh_secs: 60
 
+  # Raw librdkafka overrides (highest priority, override all other settings).
+  # Stats disabled by default to prevent log spam.
+  librdkafka_overrides:
+    statistics.interval.ms: "0"
+
   # SASL authentication (optional)
   # sasl:
   #   enabled: true
