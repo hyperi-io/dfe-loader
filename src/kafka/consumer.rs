@@ -158,6 +158,11 @@ impl Consumer {
             info!("TLS enabled");
         }
 
+        // Apply raw librdkafka overrides (highest priority)
+        for (k, v) in &config.librdkafka_overrides {
+            client_config.set(k, v);
+        }
+
         let consumer: StreamConsumer = client_config.create()?;
 
         Ok(Self {
