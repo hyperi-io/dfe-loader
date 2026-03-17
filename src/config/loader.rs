@@ -88,6 +88,9 @@ pub struct KafkaConfig {
     /// 0 = disabled. Default: 60.
     #[serde(default = "default_topic_refresh_secs")]
     pub topic_refresh_secs: u64,
+
+    /// Raw librdkafka configuration overrides (highest priority).
+    pub librdkafka_overrides: HashMap<String, String>,
 }
 
 fn default_topic_refresh_secs() -> u64 {
@@ -96,6 +99,11 @@ fn default_topic_refresh_secs() -> u64 {
 
 impl Default for KafkaConfig {
     fn default() -> Self {
+        let mut overrides = HashMap::new();
+        // Disable rdkafka statistics by default — dfe-loader doesn't use
+        // StatsContext so the stats just spam the log at INFO level.
+        overrides.insert("statistics.interval.ms".to_string(), "0".to_string());
+
         Self {
             brokers: vec!["localhost:9092".to_string()],
             group: "clickhouse-loader".to_string(),
@@ -107,6 +115,7 @@ impl Default for KafkaConfig {
             topic_include: vec![],
             topic_exclude: vec![],
             topic_refresh_secs: default_topic_refresh_secs(),
+            librdkafka_overrides: overrides,
         }
     }
 }
@@ -1593,8 +1602,8 @@ fn apply_env_overrides(config: &mut Config) {
 /// Supports arbitrary nesting: DFE_LOADER_KAFKA__SASL__USERNAME → kafka.sasl.username
 /// Lists require bracket syntax: DFE_LOADER_KAFKA__BROKERS=[a, b, c]
 fn apply_figment_env(config: &mut Config) -> Result<()> {
-    use figment::Figment;
     use figment::providers::{Env, Serialized};
+    use figment::Figment;
 
     let figment = Figment::from(Serialized::defaults(&*config))
         .merge(Env::prefixed(&format!("{ENV_PREFIX}_")).split("__"));
@@ -2294,5 +2303,59 @@ clickhouse:
             assert_eq!(config.routing.default_db, "dfe");
             assert_eq!(config.routing.default_table, "default");
         }
+    }
+
+    #[test]
+    fn test_kafka_default_disables_stats() {
+        let config = KafkaConfig::default();
+        assert_eq!(
+            config.librdkafka_overrides.get("statistics.interval.ms"),
+            Some(&"0".to_string()),
+            "stats must be disabled by default to prevent log spam"
+        );
+    }
+
+    #[test]
+    fn test_kafka_yaml_overrides_stats() {
+        let yaml = r#"
+kafka:
+  brokers:
+    - "localhost:9092"
+  librdkafka_overrides:
+    statistics.interval.ms: "5000"
+"#;
+        let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        assert_eq!(
+            config
+                .kafka
+                .librdkafka_overrides
+                .get("statistics.interval.ms"),
+            Some(&"5000".to_string()),
+            "user config must override the default"
+        );
+    }
+
+    #[test]
+    fn test_kafka_yaml_other_override_loses_stats_default() {
+        // When user provides librdkafka_overrides in YAML, serde replaces
+        // the entire map — the default stats.interval.ms=0 is NOT merged.
+        // Acceptable: users who set overrides are advanced and can add
+        // statistics.interval.ms themselves if needed.
+        let yaml = r#"
+kafka:
+  brokers:
+    - "localhost:9092"
+  librdkafka_overrides:
+    message.max.bytes: "2097152"
+"#;
+        let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        assert_eq!(
+            config
+                .kafka
+                .librdkafka_overrides
+                .get("statistics.interval.ms"),
+            None,
+            "serde replaces default map — only user-specified keys present"
+        );
     }
 }
