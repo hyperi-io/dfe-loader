@@ -368,8 +368,32 @@ Located at `clickhouse.devex.hyperi.io` (3-node replicated cluster, Keeper-manag
 
 - **Go loader**: `/projects/clickhouse-loader` — reference implementation for feature parity
 - **ClickHouse source**: `/projects/ClickHouse` — server source for protocol research
-- **clickhouse-rs fork**: `/projects/clickhouse-rs` — feature branch with native protocol + full type support (Phase 5.5)
+- **clickhouse-rs fork**: `/projects/clickhouse-rs` (GitHub: `hyperi-io/clickhouse-rs`) — native transport, connection pooling, LC insert, async inserter, DynamicInsert
 - **klickhouse fork**: Archived — was used for Variant/Dynamic/JSON/Nested type research (no longer used)
+
+### clickhouse-rs Fork Branch Chain
+
+```
+main (upstream v0.14.2)
+├── hyperi/native-transport — Native TCP SELECT + INSERT, full type coverage
+│   └── hyperi/connection-pooling — Deadpool pool, cursor drain, health checks
+│       └── hyperi/lc-insert — LowCardinality INSERT + LC(Nullable) reader fix
+│           └── hyperi/async-inserter — AsyncInserter (HTTP + native), TableBatcher
+│               └── hyperi/optimise-1 — DynamicInsert, ParsedType, schema recovery (NEW)
+└── hyperi/batching — HTTP TableBatcher (independent, mergeable to upstream)
+```
+
+**Merge order:** native-transport -> connection-pooling -> lc-insert -> async-inserter -> optimise-1
+**Swap mechanism:** `[patch.crates-io]` in Cargo.toml — zero change to `[dependencies]`
+**Design spec:** `docs/specs/2026-03-18-clickhouse-rs-fork-swap.md`
+
+### Fork Migration Phases (dfe-loader)
+
+1. **Swap to fork** — uncomment `[patch.crates-io]`, continue JSONEachRow, validate tests
+2. **Switch to DynamicInsert** — replace reqwest inserts with `client.dynamic_insert()`
+3. **Remove duplication** — drop loader's `ParsedType` (use fork's), consolidate schema cache
+4. **PR to upstream** — open PRs from hyperi/* branches
+5. **Swap back** — remove `[patch.crates-io]`, bump version to upstream release
 
 ---
 
