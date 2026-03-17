@@ -182,17 +182,27 @@ inherits = "release"
 debug = true
 
 # =============================================================================
-# clickhouse-rs Fork Swap (Phase 5.5 — Steps B/C only)
+# clickhouse-rs Fork Swap (hyperi-io/clickhouse-rs)
 # =============================================================================
 #
 # dfe-loader is the test harness for the HyperI clickhouse-rs fork.
 # Swap mechanism: uncomment [patch] below to activate the fork.
 # Zero change to [dependencies] — the patch overrides the crates.io version.
 #
-# Branch merge order (test each in dfe-loader before merging next):
-#   feature/batching → feature/native-transport → feature/connection-pooling → feature/lc-insert
+# Fork branch chain (merge order — test each in dfe-loader before merging next):
+#   native-transport → connection-pooling → lc-insert → async-inserter → optimise-1
+#   batching is independent (mergeable to upstream anytime)
 #
-# PREREQUISITE: Complete Phase 5.7 and release Step B binary BEFORE using this.
+# Branch structure:
+#   main (upstream v0.14.2)
+#   ├── hyperi/native-transport — Native TCP SELECT + INSERT, full type coverage
+#   │   └── hyperi/connection-pooling — Deadpool pool, cursor drain, health checks
+#   │       └── hyperi/lc-insert — LowCardinality INSERT + LC(Nullable) reader fix
+#   │           └── hyperi/async-inserter — AsyncInserter (HTTP + native), TableBatcher
+#   │               └── hyperi/optimise-1 — DynamicInsert, ParsedType, schema recovery
+#   └── hyperi/batching — HTTP TableBatcher (independent)
+#
+# Design spec: docs/specs/2026-03-18-clickhouse-rs-fork-swap.md
 #
 # [patch.crates-io]
 # clickhouse = { path = "../clickhouse-rs" }
