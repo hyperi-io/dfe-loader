@@ -48,9 +48,7 @@ use crate::transform::Coercer;
 /// Split "db.table" into (db, table). Panics if no dot — callers always
 /// pass fully qualified names from BufferManager.
 fn parse_db_table(table: &str) -> (&str, &str) {
-    table
-        .split_once('.')
-        .unwrap_or(("default", table))
+    table.split_once('.').unwrap_or(("default", table))
 }
 
 /// Configuration for the inserter
@@ -289,9 +287,7 @@ impl Inserter {
     ) -> Result<usize> {
         match self.insert_format {
             InsertFormat::RowBinary => self.insert_rows_rowbinary(table, rows).await,
-            InsertFormat::JsonEachRow => {
-                self.insert_rows_json(table, rows, raw_payloads).await
-            }
+            InsertFormat::JsonEachRow => self.insert_rows_json(table, rows, raw_payloads).await,
         }
     }
 

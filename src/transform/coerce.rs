@@ -15,6 +15,7 @@ use serde_json::Value;
 use tracing::warn;
 
 use crate::Result;
+use crate::clickhouse::types::ParsedTypeExt;
 use crate::clickhouse::{ParsedType, TableSchema};
 use crate::config::{CoercionConfig, NullHandling};
 
