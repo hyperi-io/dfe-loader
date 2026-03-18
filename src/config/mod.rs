@@ -24,18 +24,24 @@
 //! let mut rx = shared.subscribe();
 //! ```
 
+pub mod kafka;
 pub mod loader;
+pub mod pipeline;
 pub mod shared;
 pub mod watcher;
 
+// Re-export all config types — callers use `config::KafkaConfig` etc.
+pub use kafka::{GrpcConfig, KafkaConfig, SaslConfig, SaslMechanism, TlsConfig};
 pub use loader::{
-    AutoDownloadConfig, BufferConfig, ClickHouseConfig, CoercionConfig, ComputedColumnsConfig,
-    Config, DlqConfig, EnrichmentConfig, FieldMappingConfig, FieldMappingOverride,
-    FieldSanitizationConfig, GeoIpConfig, GeoIpProvider, GrpcConfig, HotReloadConfig, KafkaConfig,
-    LoggingConfig, MemoryConfig, MetadataConfig, MetricsConfig, NullHandling, OrgRoute,
-    PayloadConfig, ReputationEnrichmentConfig, RiskScoringConfig, RoutingConfig, RoutingRule,
-    SaslConfig, SaslMechanism, ScalingConfig, SchemaConfig, TableCaptureConfig, TimestampDqConfig,
-    TlsConfig,
+    BufferConfig, ClickHouseConfig, Config, HotReloadConfig, KedaConfig, LoggingConfig,
+    MemoryConfig, MetricsConfig, ScalingConfig,
+};
+pub use pipeline::{
+    AutoDownloadConfig, CoercionConfig, ComputedColumnsConfig, DlqConfig, EnrichmentConfig,
+    FieldMappingConfig, FieldMappingOverride, FieldSanitizationConfig, GeoIpConfig, GeoIpProvider,
+    MetadataConfig, NullHandling, OrgRoute, PayloadConfig, ReputationEnrichmentConfig,
+    RiskScoringConfig, RoutingConfig, RoutingRule, SchemaConfig, TableCaptureConfig,
+    TimestampDqConfig,
 };
 pub use shared::SharedConfig;
 pub use watcher::{ConfigWatcher, WatcherConfig};
