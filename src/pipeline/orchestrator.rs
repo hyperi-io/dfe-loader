@@ -322,15 +322,36 @@ impl Orchestrator {
         let mut transport = TransportBackend::from_config(&self.config).await?;
         info!(transport = transport.name(), "Transport initialized");
 
-        // Create HTTP client for JSONEachRow inserts and DDL/schema queries
+        // Create HTTP client for DDL/schema queries (and JSONEachRow fallback)
         let ch_config: crate::clickhouse::ClickHouseConfig = (&self.config.clickhouse).into();
         let http_client = Arc::new(
             HttpClickHouseClient::new(&ch_config)
                 .map_err(|e| crate::Error::ClickHouse(e.to_string()))?,
         );
 
-        // Inserter uses JSONEachRow HTTP inserts
-        let inserter = Inserter::new(Arc::clone(&http_client), InserterConfig::default());
+        // Build clickhouse::Client for DynamicInsert (RowBinary path)
+        let ch_client = {
+            let host = ch_config
+                .primary_endpoint()
+                .unwrap_or_else(|| "localhost:8123".to_string());
+            let scheme = if ch_config.tls { "https" } else { "http" };
+            let mut client = clickhouse::Client::default()
+                .with_url(format!("{scheme}://{host}"))
+                .with_user(&ch_config.username)
+                .with_password(&ch_config.password)
+                .with_database(&ch_config.database);
+            if ch_config.compression {
+                client = client.with_compression(clickhouse::Compression::Lz4);
+            }
+            client
+        };
+
+        let insert_format = ch_config.insert_format;
+        info!(format = %insert_format, "Insert format configured");
+
+        // Inserter dispatches based on insert_format
+        let inserter = Inserter::new(Arc::clone(&http_client), InserterConfig::default())
+            .with_insert_format(insert_format, Some(ch_client));
 
         // DLQ (unified rustlib module — cascade: Kafka primary, file fallback)
         let dlq_config = self.config.routing.dlq.to_rustlib_config();
