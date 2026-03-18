@@ -23,37 +23,88 @@ use crate::Result;
 pub use super::kafka::*;
 pub use super::pipeline::*;
 
-/// Main configuration
+/// Main configuration for dfe-loader.
+///
+/// ## Hot-Reload Behaviour
+///
+/// **Hot-reloaded (takes effect on next batch):**
+/// - `routing.*` — routing rules, table mapping, org routing
+/// - `timestamp_dq.*` — timestamp validation thresholds
+/// - `metadata.*` — common header injection, tags, _raw handling
+/// - `field_sanitization.*` — field name sanitisation rules
+/// - `buffer.flush_rows` / `buffer.flush_bytes` / `buffer.flush_age_secs`
+/// - `coercion.*` — type coercion config
+/// - `enrichment.ip_fields` — which fields to enrich
+/// - `field_mapping.*` — field mapping overrides
+///
+/// **Requires pod restart (connections/state established at startup):**
+/// - `transport` — transport type (kafka/grpc) bound at startup
+/// - `kafka.*` — Kafka consumer created at startup
+/// - `grpc.*` — gRPC server binds at startup
+/// - `clickhouse.*` — HTTP client + clickhouse::Client created at startup
+/// - `payload.format` — format detection set at startup
+/// - `metrics.*` — HTTP metrics server binds at startup
+/// - `logging.*` — tracing subscriber installed at startup
+/// - `scaling.*` / `keda.*` — scaling pressure built at startup
+/// - `hot_reload.*` — watcher config set at startup
+/// - `schema.*` — schema cache created at startup
+/// - `geoip.*` — MMDB readers opened at startup
+/// - `computed_columns.*` — computed column cache built at startup
+/// - `column_directives.*` — column directive cache built at startup
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 #[derive(Default)]
 pub struct Config {
-    /// Transport backend: "kafka" (default) or "grpc"
+    // --- Requires restart (connections/state established at startup) ---
+    /// Transport backend: "kafka" (default) or "grpc". **Restart required.**
     #[serde(default = "default_transport")]
     pub transport: String,
+    /// Kafka consumer config. **Restart required.**
     pub kafka: KafkaConfig,
+    /// gRPC transport config. **Restart required.**
     pub grpc: GrpcConfig,
+    /// ClickHouse connection config. **Restart required.**
     pub clickhouse: ClickHouseConfig,
+    /// Payload format detection. **Restart required.**
     pub payload: PayloadConfig,
-    pub routing: RoutingConfig,
-    pub buffer: BufferConfig,
-    pub memory: MemoryConfig,
+    /// Metrics server config. **Restart required.**
     pub metrics: MetricsConfig,
+    /// Logging config. **Restart required.**
     pub logging: LoggingConfig,
-    pub timestamp_dq: TimestampDqConfig,
-    pub field_sanitization: FieldSanitizationConfig,
-    pub metadata: MetadataConfig,
-    pub coercion: CoercionConfig,
+    /// Schema cache config. **Restart required.**
     pub schema: SchemaConfig,
-    pub field_mapping: FieldMappingConfig,
-    pub computed_columns: ComputedColumnsConfig,
-    /// Unified per-column directive config (config wins over DDL COMMENT annotations).
-    pub column_directives: crate::column_meta::ColumnDirectivesConfig,
+    /// GeoIP enrichment (MMDB readers). **Restart required.**
     pub geoip: GeoIpConfig,
-    pub enrichment: EnrichmentConfig,
+    /// Computed columns cache. **Restart required.**
+    pub computed_columns: ComputedColumnsConfig,
+    /// Per-column directive config. **Restart required.**
+    pub column_directives: crate::column_meta::ColumnDirectivesConfig,
+    /// Hot-reload watcher config. **Restart required.**
     pub hot_reload: HotReloadConfig,
+    /// KEDA autoscaling config. **Restart required.**
     pub keda: KedaConfig,
+    /// Scaling pressure config. **Restart required.**
     pub scaling: ScalingConfig,
+
+    // --- Hot-reloaded (takes effect on next batch) ---
+    /// Routing rules and table mapping. **Hot-reloaded.**
+    pub routing: RoutingConfig,
+    /// Buffer flush thresholds. **Hot-reloaded.**
+    pub buffer: BufferConfig,
+    /// Memory limits. **Hot-reloaded.**
+    pub memory: MemoryConfig,
+    /// Timestamp data quality validation. **Hot-reloaded.**
+    pub timestamp_dq: TimestampDqConfig,
+    /// Field name sanitisation. **Hot-reloaded.**
+    pub field_sanitization: FieldSanitizationConfig,
+    /// Common header injection, tags, _raw handling. **Hot-reloaded.**
+    pub metadata: MetadataConfig,
+    /// Type coercion config. **Hot-reloaded.**
+    pub coercion: CoercionConfig,
+    /// Field mapping overrides. **Hot-reloaded.**
+    pub field_mapping: FieldMappingConfig,
+    /// IP enrichment field selection. **Hot-reloaded.**
+    pub enrichment: EnrichmentConfig,
 }
 
 fn default_transport() -> String {
@@ -64,7 +115,7 @@ fn default_transport() -> String {
 // ClickHouse Configuration
 // ============================================================================
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ClickHouseConfig {
     pub hosts: Vec<String>,

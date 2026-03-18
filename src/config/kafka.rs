@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 // Kafka Configuration
 // ============================================================================
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct KafkaConfig {
     pub brokers: Vec<String>,
@@ -78,7 +78,7 @@ impl Default for KafkaConfig {
 ///
 /// When `transport = "grpc"`, the loader starts a gRPC server listening on
 /// `listen` and accepts Push RPCs from remote senders (e.g. dfe-receiver).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GrpcConfig {
     /// Server listen address (e.g., "0.0.0.0:6000").
@@ -181,7 +181,7 @@ impl std::fmt::Display for SaslMechanism {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SaslConfig {
     /// Enable SASL authentication
@@ -297,7 +297,7 @@ impl SaslConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 #[derive(Default)]
 pub struct TlsConfig {

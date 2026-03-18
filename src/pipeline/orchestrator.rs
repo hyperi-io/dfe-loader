@@ -590,9 +590,12 @@ impl Orchestrator {
                         let new_config = shared.read().clone();
                         let version = shared.version();
 
+                        // Warn about restart-required changes (silently ignored otherwise)
+                        warn_restart_required(&self.config, &new_config);
+
                         info!(version = version, "Config reloaded, applying safe changes");
 
-                        // Rebuild router and transformer (safe to hot-reload)
+                        // --- Hot-reloaded: takes effect on next batch ---
                         router = Router::new(&new_config.routing);
                         transformer = Transformer::with_routing(
                             &new_config.timestamp_dq,
@@ -600,17 +603,9 @@ impl Orchestrator {
                             &new_config.field_sanitization,
                             &new_config.routing,
                         );
-
-                        // Update buffer thresholds
                         buffer_manager.update_config(&new_config.buffer);
-
-                        // Rebuild capture overrides
                         capture_overrides = CaptureOverrides::new(&new_config.metadata);
 
-                        // Rebuild extractor and mode gate on config change
-                        // (col_meta_cache and schema_cache are Arc, not rebuilt)
-
-                        // Update flush interval if changed
                         if new_config.buffer.flush_age_secs != self.config.buffer.flush_age_secs {
                             flush_interval = interval(Duration::from_secs(
                                 new_config.buffer.flush_age_secs,
@@ -1314,6 +1309,85 @@ fn inject_risk(
             .map(|s| Value::String(s.to_string()))
             .collect();
         data.insert("risk_factors".to_string(), Value::Array(factors));
+    }
+}
+
+// =============================================================================
+// Hot-Reload Safety: restart-required change detection
+// =============================================================================
+//
+// Hot-reloaded (takes effect on next batch):
+//   routing.*             — router rebuilt on reload
+//   timestamp_dq.*        — transformer rebuilt on reload
+//   metadata.*            — transformer + capture overrides rebuilt on reload
+//   field_sanitization.*  — transformer rebuilt on reload
+//   buffer.flush_rows / flush_bytes / flush_age_secs — buffer thresholds updated
+//   coercion.*            — coercer config (referenced per-batch)
+//   enrichment.ip_fields  — which fields to enrich
+//   field_mapping.*       — field mapping overrides
+//
+// Requires pod restart (connections/state established at startup):
+//   kafka.*               — Kafka consumer created at startup
+//   grpc.*                — gRPC server binds at startup
+//   transport             — transport type bound at startup
+//   clickhouse.*          — HTTP client + clickhouse::Client created at startup
+//   payload.format        — format detection set at startup
+//   metrics.*             — HTTP metrics server binds at startup
+//   logging.*             — tracing subscriber installed at startup
+//   scaling.* / keda.*    — scaling pressure built at startup
+//   hot_reload.*          — watcher config set at startup
+//   schema.*              — schema cache created at startup
+//   geoip.*               — MMDB readers opened at startup
+//   computed_columns.*    — computed column cache built at startup
+//   column_directives.*   — column directive cache built at startup
+
+/// Log warnings for config fields that changed but require a pod restart.
+///
+/// These fields are bound to connections or state created at startup. Changing
+/// them via hot-reload has no effect — the old values remain active until the
+/// pod is restarted.
+fn warn_restart_required(old: &Config, new: &Config) {
+    if old.transport != new.transport {
+        warn!("transport changed — requires restart to take effect");
+    }
+    if old.kafka != new.kafka {
+        warn!("kafka config changed — requires restart to take effect");
+    }
+    if old.grpc != new.grpc {
+        warn!("grpc config changed — requires restart to take effect");
+    }
+    if old.clickhouse != new.clickhouse {
+        warn!("clickhouse config changed — requires restart to take effect");
+    }
+    if old.payload != new.payload {
+        warn!("payload config changed — requires restart to take effect");
+    }
+    if old.metrics != new.metrics {
+        warn!("metrics config changed — requires restart to take effect");
+    }
+    if old.logging != new.logging {
+        warn!("logging config changed — requires restart to take effect");
+    }
+    if old.scaling != new.scaling {
+        warn!("scaling config changed — requires restart to take effect");
+    }
+    if old.keda != new.keda {
+        warn!("keda config changed — requires restart to take effect");
+    }
+    if old.hot_reload != new.hot_reload {
+        warn!("hot_reload config changed — requires restart to take effect");
+    }
+    if old.schema != new.schema {
+        warn!("schema config changed — requires restart to take effect");
+    }
+    if old.geoip != new.geoip {
+        warn!("geoip config changed — requires restart to take effect");
+    }
+    if old.computed_columns != new.computed_columns {
+        warn!("computed_columns config changed — requires restart to take effect");
+    }
+    if old.column_directives != new.column_directives {
+        warn!("column_directives config changed — requires restart to take effect");
     }
 }
 

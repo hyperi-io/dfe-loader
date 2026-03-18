@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 // Payload Configuration
 // ============================================================================
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PayloadConfig {
     /// Format mode: "auto" (default), "json", "messagepack"/"msgpack"
@@ -49,7 +49,7 @@ impl Default for PayloadConfig {
 ///
 /// Rules are evaluated top-to-bottom, first match wins. If no rule matches,
 /// falls through to field-extraction routing (db_fields/table_fields).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RoutingRule {
     /// CEL expression that must evaluate to true for this rule to match
     pub when: String,
@@ -67,7 +67,7 @@ pub struct RoutingRule {
 /// When an org is listed here, messages from that org are routed to the
 /// specified database (or `org_id` if `database` is omitted). Orgs NOT
 /// listed always go to `default_db`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OrgRoute {
     /// Organisation identifier (matched against org_id_field value)
     pub org_id: String,
@@ -84,7 +84,7 @@ impl OrgRoute {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RoutingConfig {
     /// CEL-based routing rules (top-to-bottom, first match wins).
@@ -176,7 +176,7 @@ impl Default for RoutingConfig {
 /// 1. Config per-table override (`overrides."db.table".column`)
 /// 2. Config global (`columns.column`)
 /// 3. ClickHouse column COMMENT `@computed:` directive
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ComputedColumnsConfig {
     /// Global computed columns (applied to all tables).
@@ -220,7 +220,7 @@ pub enum GeoIpProvider {
 }
 
 /// Auto-download settings for GeoIP databases
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AutoDownloadConfig {
     /// Enable auto-download on startup if MMDB files missing or stale
@@ -256,7 +256,7 @@ impl Default for AutoDownloadConfig {
 }
 
 /// GeoIP enrichment configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GeoIpConfig {
     /// Enable GeoIP enrichment
@@ -296,7 +296,7 @@ impl Default for GeoIpConfig {
 // ============================================================================
 
 /// IP enrichment pipeline configuration (GeoIP + reputation + risk scoring)
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct EnrichmentConfig {
     /// Fields to check for IP addresses (first match wins, order matters)
@@ -327,7 +327,7 @@ impl Default for EnrichmentConfig {
 }
 
 /// Reputation enrichment configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ReputationEnrichmentConfig {
     /// Enable reputation lookups
@@ -351,7 +351,7 @@ impl Default for ReputationEnrichmentConfig {
 }
 
 /// Risk scoring configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RiskScoringConfig {
     /// Enable risk scoring (requires at least GeoIP or reputation to be useful)
@@ -375,7 +375,7 @@ impl Default for RiskScoringConfig {
 
 // ============================================================================
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DlqConfig {
     pub enabled: bool,
@@ -436,7 +436,7 @@ impl DlqConfig {
 // Buffer Configuration
 // ============================================================================
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct BufferConfig {
     pub flush_bytes: usize,
@@ -458,7 +458,7 @@ impl Default for BufferConfig {
 // Memory Configuration
 // ============================================================================
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MemoryConfig {
     /// Maximum memory for buffers in bytes. 0 = auto-detect (67% of available)
@@ -480,7 +480,7 @@ impl Default for MemoryConfig {
 // Metrics Configuration
 // ============================================================================
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MetricsConfig {
     pub enabled: bool,
@@ -500,7 +500,7 @@ impl Default for MetricsConfig {
 // Logging Configuration
 // ============================================================================
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LoggingConfig {
     pub level: String,
@@ -520,7 +520,7 @@ impl Default for LoggingConfig {
 // Timestamp Data Quality Configuration
 // ============================================================================
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TimestampDqConfig {
     pub enabled: bool,
@@ -546,7 +546,7 @@ impl Default for TimestampDqConfig {
 // Field Sanitization Configuration
 // ============================================================================
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct FieldSanitizationConfig {
     pub strip_at_prefix: bool,
@@ -574,7 +574,7 @@ impl Default for FieldSanitizationConfig {
 // Metadata Configuration
 // ============================================================================
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MetadataConfig {
     /// Master switch for common header field injection (default: true)
@@ -688,7 +688,7 @@ impl Default for MetadataConfig {
 /// The contract sync test validates that chart/values.yaml matches these
 /// defaults. Override at runtime via env vars:
 ///   DFE_LOADER__KEDA__KAFKA_LAG_THRESHOLD=5000
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct KedaConfig {
     pub enabled: bool,
@@ -736,7 +736,7 @@ impl Default for KedaConfig {
 /// Override weights at runtime via env vars:
 ///   DFE_LOADER__SCALING__WEIGHT_KAFKA_LAG=0.45
 ///   DFE_LOADER__SCALING__SATURATION_BUFFER_DEPTH=20000
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ScalingConfig {
     /// Enable scaling pressure calculation.
@@ -815,7 +815,7 @@ impl ScalingConfig {
 /// Resolved from two sources (DDL tags take precedence over config lists):
 /// 1. Config: `disable_json_tables` / `disable_raw_tables` lists
 /// 2. DDL: `@no_capture_json: true` / `@no_capture_raw: true` in table COMMENT
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct TableCaptureConfig {
     /// Whether _json capture is disabled for this table
     pub disable_json: bool,
@@ -846,7 +846,7 @@ pub enum NullHandling {
 /// - Type mappings for custom types
 /// - Configurable null handling
 /// - Timezone handling for naive timestamps
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CoercionConfig {
     /// Map custom type names to base coercer categories
@@ -922,7 +922,7 @@ impl CoercionConfig {
 // Schema Configuration
 // ============================================================================
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SchemaConfig {
     pub cache_ttl_secs: u64,
@@ -953,7 +953,7 @@ impl Default for SchemaConfig {
 ///
 /// **Requires restart:** Kafka brokers/topics/auth, ClickHouse hosts/auth,
 /// payload format, transport type.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct HotReloadConfig {
     /// Enable config file watching (default: false)
@@ -989,7 +989,7 @@ impl Default for HotReloadConfig {
 ///
 /// CSV files are compatible with the elastic/ecs-mapper format:
 /// `source_field,destination_field,copy_action`
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct FieldMappingConfig {
     /// Master switch (default: false — no impact on existing pipelines)
@@ -1012,7 +1012,7 @@ pub struct FieldMappingConfig {
 }
 
 /// Per-field override for mapping action
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FieldMappingOverride {
     /// Action for this field: "rename" or "copy"
     pub action: String,
