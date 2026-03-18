@@ -1,6 +1,8 @@
 edition = "2024"
 max_width = 100
 tab_spaces = 4
-imports_granularity = "Module"
-group_imports = "StdExternalCrate"
 reorder_imports = true
+# imports_granularity and group_imports require nightly rustfmt
+# Uncomment when nightly is available in CI:
+# imports_granularity = "Module"
+# group_imports = "StdExternalCrate"
