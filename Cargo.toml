@@ -187,7 +187,9 @@ debug = true
 strip = false
 
 [lints.rust]
-unsafe_code = "forbid"
+# Tests require unsafe for env::set_var (edition 2024). Warn, not deny/forbid.
+# CI can enforce stricter for lib: cargo clippy --lib -- -D unsafe_code
+unsafe_code = "warn"
 
 [lints.clippy]
 pedantic = { level = "warn", priority = -1 }
