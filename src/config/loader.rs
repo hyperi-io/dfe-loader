@@ -399,6 +399,7 @@ impl From<&ClickHouseConfig> for crate::clickhouse::ClickHouseConfig {
         crate::clickhouse::ClickHouseConfig {
             hosts: cfg.hosts.clone(),
             transport,
+            insert_format: crate::clickhouse::InsertFormat::default(),
             database: cfg.database.clone(),
             username: cfg.username.clone(),
             password: cfg.password.clone(),
