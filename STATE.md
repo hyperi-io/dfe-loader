@@ -489,5 +489,6 @@ Start a fresh session after any changes to this file.
 | Drop simd-json (0.17) | Benchmarks: <3% net pipeline gain after switching to `sonic_dom` (single full parse). Fatal incompatibility: simd-json requires `&mut [u8]`, but payloads are `Arc<[u8]>` — mandatory `Vec<u8>` clone per message destroys zero-copy `_json` model. Full results: `docs/DESIGN.md` § Parser Selection History, `benches/simdjson_spike.rs`. |
 | JSONEachRow via reqwest | Bypasses `clickhouse::Row` compile-time trait. `Map<String, Value>` serialises naturally. Serde overhead ~3-5% of pipeline time vs 40-75ms network I/O. |
 | Test tables: ON CLUSTER + MergeTree/ReplicatedMergeTree | 3-node load-balanced cluster, no sticky sessions. CREATE without ON CLUSTER creates on one node only — inserts to other nodes cannot be queried back. Use benchmark DB (Atomic + ON CLUSTER + MergeTree) for most tests; default DB (Replicated + ReplicatedMergeTree) only when query-back verification required. |
+| clickhouse-rs fork licensing | Fork is `MIT OR Apache-2.0` (upstream license). NEVER use FSL-1.1-ALv2 in the fork. No file-level license headers — follow upstream convention. |
 
 ---
