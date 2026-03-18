@@ -276,6 +276,21 @@ Direct `rdkafka` dependency in `Cargo.toml` can be dropped after removal.
 
 ---
 
+## Backlog: Migrate `paste` → `pastey` in clickhouse-rs fork
+
+RUSTSEC-2024-0436: `paste` crate unmaintained. Transitive dependency via
+`polonius-the-crab` → `higher-kinded-types` → `macro_rules_attribute`.
+`pastey` is the recommended drop-in replacement fork.
+
+Not a direct dep of dfe-loader — lives in the clickhouse-rs fork's dependency chain.
+`cel-interpreter` also depends on `paste` (via hyperi-rustlib) — upstream fix needed.
+
+- [ ] Replace `paste` with `pastey` in clickhouse-rs fork (if `polonius-the-crab` migrates)
+- [ ] Track `cel-interpreter` upstream migration
+- [ ] Remove `RUSTSEC-2024-0436` ignore from `deny.toml` once resolved
+
+---
+
 ## Deferred
 
 - [ ] Receiver WAL — required for at-least-once with gRPC mesh
