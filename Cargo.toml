@@ -204,8 +204,8 @@ debug = true
 #
 # Design spec: docs/specs/2026-03-18-clickhouse-rs-fork-swap.md
 #
-# [patch.crates-io]
-# clickhouse = { path = "../clickhouse-rs" }
+[patch.crates-io]
+clickhouse = { path = "../clickhouse-rs" }
 #
 # To revert: comment out or remove the [patch.crates-io] section above.
 # =============================================================================
