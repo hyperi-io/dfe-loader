@@ -12,6 +12,7 @@
 //! JSONEachRow HTTP inserts to ClickHouse.
 
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 use std::time::Duration;
 
 use serde_json::Value;
@@ -790,10 +791,16 @@ impl Orchestrator {
                                                     debug!(error = %e, "Message queued for DLQ");
                                                 }
                                                 Err(mpsc::error::TrySendError::Full(_)) => {
-                                                    warn!(error = %e, "DLQ channel full, message dropped");
+                                                    static DLQ_FULL_TS: AtomicU64 = AtomicU64::new(0);
+                                                    if hyperi_rustlib::logger::log_debounced(&DLQ_FULL_TS, 5000) {
+                                                        warn!(error = %e, "DLQ channel full, messages dropped (max 1 per 5s)");
+                                                    }
                                                 }
                                                 Err(mpsc::error::TrySendError::Closed(_)) => {
-                                                    warn!(error = %e, "DLQ channel closed");
+                                                    static DLQ_CLOSED_TS: AtomicU64 = AtomicU64::new(0);
+                                                    if hyperi_rustlib::logger::log_debounced(&DLQ_CLOSED_TS, 5000) {
+                                                        warn!(error = %e, "DLQ channel closed (max 1 per 5s)");
+                                                    }
                                                 }
                                             }
                                         } else {

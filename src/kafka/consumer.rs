@@ -216,7 +216,11 @@ impl Consumer {
                             }
                         }
                         Err(e) => {
-                            error!(error = %e, "Consumer error");
+                            static CONSUMER_ERR_TS: std::sync::atomic::AtomicU64 =
+                                std::sync::atomic::AtomicU64::new(0);
+                            if hyperi_rustlib::logger::log_debounced(&CONSUMER_ERR_TS, 5000) {
+                                error!(error = %e, "Consumer error (max 1 per 5s)");
+                            }
                             // Brief pause before retry
                             tokio::time::sleep(Duration::from_millis(100)).await;
                         }
