@@ -13,9 +13,7 @@
 
 use std::path::Path;
 
-use hyperi_rustlib::config::env_compat::EnvVar;
 use serde::{Deserialize, Serialize};
-use tracing::debug;
 
 use crate::Result;
 
@@ -171,160 +169,129 @@ impl From<&ClickHouseConfig> for crate::clickhouse::ClickHouseConfig {
 /// Environment variable prefix for all dfe-loader settings
 const ENV_PREFIX: &str = "DFE_LOADER";
 
-/// Read a flat env var with the DFE_LOADER_ prefix
-fn env(name: &str) -> Option<String> {
-    EnvVar::new(&format!("{ENV_PREFIX}_{name}")).get()
-}
+use hyperi_rustlib::config::flat_env::{self, ApplyFlatEnv, Normalize};
 
-/// Read a flat env var as a comma-separated list
-fn env_list(name: &str) -> Option<Vec<String>> {
-    EnvVar::new(&format!("{ENV_PREFIX}_{name}")).get_list()
-}
-
-/// Read a flat env var as a boolean
-fn env_bool(name: &str) -> Option<bool> {
-    EnvVar::new(&format!("{ENV_PREFIX}_{name}")).get_bool()
-}
-
-/// Read a flat env var parsed to a type
-fn env_parsed<T: std::str::FromStr>(name: &str) -> Option<T> {
-    EnvVar::new(&format!("{ENV_PREFIX}_{name}")).get_parsed()
-}
-
-/// Apply explicit flat environment variable overrides (DFE_LOADER_* prefix).
-///
-/// These are K8s-friendly single-underscore vars that override config file values.
-/// For nested/advanced config, use `__` (double underscore) nesting via figment:
-///   DFE_LOADER_KAFKA__SASL__OAUTH_TOKEN_ENDPOINT=https://...
-fn apply_env_overrides(config: &mut Config) {
-    // Kafka
-    if let Some(v) = env_list("KAFKA_BROKERS") {
-        config.kafka.brokers = v;
-        debug!("Override: kafka.brokers from env");
-    }
-    if let Some(v) = env("KAFKA_GROUP_ID") {
-        config.kafka.group = v;
-        debug!("Override: kafka.group from env");
-    }
-    if let Some(v) = env_list("KAFKA_TOPICS") {
-        config.kafka.topics = v;
-        debug!("Override: kafka.topics from env");
-    }
-    if let Some(v) = env("KAFKA_CLIENT_ID") {
-        config.kafka.client_id = v;
-        debug!("Override: kafka.client_id from env");
-    }
-    if let Some(v) = env("KAFKA_SASL_MECHANISM") {
-        let sasl = config.kafka.sasl.get_or_insert_with(SaslConfig::default);
-        sasl.enabled = true;
-        sasl.mechanism = v;
-        debug!("Override: kafka.sasl.mechanism from env");
-    }
-    if let Some(v) = env("KAFKA_SASL_USERNAME") {
-        let sasl = config.kafka.sasl.get_or_insert_with(SaslConfig::default);
-        sasl.enabled = true;
-        sasl.username = v;
-        debug!("Override: kafka.sasl.username from env");
-    }
-    if let Some(v) = env("KAFKA_SASL_PASSWORD") {
-        let sasl = config.kafka.sasl.get_or_insert_with(SaslConfig::default);
-        sasl.enabled = true;
-        sasl.password = v;
-        debug!("Override: kafka.sasl.password from env (redacted)");
-    }
-    if let Some(v) = env("KAFKA_SECURITY_PROTOCOL") {
-        // Map common protocol names to TLS/SASL config
-        let proto = v.to_uppercase();
-        if proto.contains("SSL") || proto.contains("TLS") {
-            let tls = config.kafka.tls.get_or_insert_with(TlsConfig::default);
-            tls.enabled = true;
+impl ApplyFlatEnv for Config {
+    /// Apply flat DFE_LOADER_* env var overrides.
+    ///
+    /// These are K8s-friendly single-underscore vars. Same names as before — contract
+    /// with dfe-engine. For nested config use `__` nesting via figment.
+    fn apply_flat_env(&mut self, prefix: &str) {
+        // Kafka
+        if let Some(v) = flat_env::flat_env_list(prefix, "KAFKA_BROKERS") {
+            self.kafka.brokers = v;
         }
-        debug!(protocol = %v, "Override: kafka security_protocol from env");
-    }
+        if let Some(v) = flat_env::flat_env_string(prefix, "KAFKA_GROUP_ID") {
+            self.kafka.group = v;
+        }
+        if let Some(v) = flat_env::flat_env_list(prefix, "KAFKA_TOPICS") {
+            self.kafka.topics = v;
+        }
+        if let Some(v) = flat_env::flat_env_string(prefix, "KAFKA_CLIENT_ID") {
+            self.kafka.client_id = v;
+        }
+        if let Some(v) = flat_env::flat_env_string(prefix, "KAFKA_SASL_MECHANISM") {
+            let sasl = self.kafka.sasl.get_or_insert_with(SaslConfig::default);
+            sasl.mechanism = v;
+        }
+        if let Some(v) = flat_env::flat_env_string(prefix, "KAFKA_SASL_USERNAME") {
+            let sasl = self.kafka.sasl.get_or_insert_with(SaslConfig::default);
+            sasl.username = v;
+        }
+        if let Some(v) = flat_env::flat_env_string_sensitive(prefix, "KAFKA_SASL_PASSWORD") {
+            let sasl = self.kafka.sasl.get_or_insert_with(SaslConfig::default);
+            sasl.password = v;
+        }
+        if let Some(v) = flat_env::flat_env_string(prefix, "KAFKA_SECURITY_PROTOCOL") {
+            let proto = v.to_uppercase();
+            if proto.contains("SSL") || proto.contains("TLS") {
+                let tls = self.kafka.tls.get_or_insert_with(TlsConfig::default);
+                tls.enabled = true;
+            }
+        }
 
-    // ClickHouse
-    if let Some(v) = env_list("CLICKHOUSE_HOSTS") {
-        config.clickhouse.hosts = v;
-        debug!("Override: clickhouse.hosts from env");
-    }
-    if let Some(v) = env("CLICKHOUSE_DATABASE") {
-        config.clickhouse.database = v;
-        debug!("Override: clickhouse.database from env");
-    }
-    if let Some(v) = env("CLICKHOUSE_USERNAME") {
-        config.clickhouse.username = v;
-        debug!("Override: clickhouse.username from env");
-    }
-    if let Some(v) = env("CLICKHOUSE_PASSWORD") {
-        config.clickhouse.password = v;
-        debug!("Override: clickhouse.password from env (redacted)");
-    }
+        // ClickHouse
+        if let Some(v) = flat_env::flat_env_list(prefix, "CLICKHOUSE_HOSTS") {
+            self.clickhouse.hosts = v;
+        }
+        if let Some(v) = flat_env::flat_env_string(prefix, "CLICKHOUSE_DATABASE") {
+            self.clickhouse.database = v;
+        }
+        if let Some(v) = flat_env::flat_env_string(prefix, "CLICKHOUSE_USERNAME") {
+            self.clickhouse.username = v;
+        }
+        if let Some(v) = flat_env::flat_env_string_sensitive(prefix, "CLICKHOUSE_PASSWORD") {
+            self.clickhouse.password = v;
+        }
 
-    // Buffer
-    if let Some(v) = env_parsed::<usize>("BUFFER_FLUSH_ROWS") {
-        config.buffer.flush_rows = v;
-        debug!("Override: buffer.flush_rows from env");
-    }
-    if let Some(v) = env_parsed::<usize>("BUFFER_FLUSH_BYTES") {
-        config.buffer.flush_bytes = v;
-        debug!("Override: buffer.flush_bytes from env");
-    }
-    if let Some(v) = env_parsed::<u64>("BUFFER_FLUSH_AGE_SECS") {
-        config.buffer.flush_age_secs = v;
-        debug!("Override: buffer.flush_age_secs from env");
-    }
+        // Buffer
+        if let Some(v) = flat_env::flat_env_parsed::<usize>(prefix, "BUFFER_FLUSH_ROWS") {
+            self.buffer.flush_rows = v;
+        }
+        if let Some(v) = flat_env::flat_env_parsed::<usize>(prefix, "BUFFER_FLUSH_BYTES") {
+            self.buffer.flush_bytes = v;
+        }
+        if let Some(v) = flat_env::flat_env_parsed::<u64>(prefix, "BUFFER_FLUSH_AGE_SECS") {
+            self.buffer.flush_age_secs = v;
+        }
 
-    // Metrics
-    if let Some(v) = env("METRICS_ADDRESS") {
-        config.metrics.address = v;
-        debug!("Override: metrics.address from env");
-    }
-    if let Some(v) = env_bool("METRICS_ENABLED") {
-        config.metrics.enabled = v;
-        debug!("Override: metrics.enabled from env");
-    }
+        // Metrics
+        if let Some(v) = flat_env::flat_env_string(prefix, "METRICS_ADDRESS") {
+            self.metrics.address = v;
+        }
+        if let Some(v) = flat_env::flat_env_bool(prefix, "METRICS_ENABLED") {
+            self.metrics.enabled = v;
+        }
 
-    // Metadata (common header)
-    if let Some(v) = env_bool("METADATA_ENABLED") {
-        config.metadata.enabled = v;
-        debug!("Override: metadata.enabled from env");
-    }
+        // Metadata
+        if let Some(v) = flat_env::flat_env_bool(prefix, "METADATA_ENABLED") {
+            self.metadata.enabled = v;
+        }
 
-    // Logging
-    if let Some(v) = env("LOG_LEVEL") {
-        config.logging.level = v;
-        debug!("Override: logging.level from env");
-    }
-    if let Some(v) = env("LOG_FORMAT") {
-        config.logging.format = v;
-        debug!("Override: logging.format from env");
-    }
+        // Logging (generic names — no prefix)
+        if let Some(v) = flat_env::flat_env_string(prefix, "LOG_LEVEL") {
+            self.logging.level = v;
+        }
+        if let Some(v) = flat_env::flat_env_string(prefix, "LOG_FORMAT") {
+            self.logging.format = v;
+        }
 
-    // Hot-reload
-    if let Some(v) = env_parsed::<u64>("CONFIG_RELOAD_SECS") {
-        config.hot_reload.poll_interval_secs = v;
-        config.hot_reload.enabled = true;
-        debug!("Override: hot_reload.poll_interval_secs from env");
-    }
-    if let Some(v) = env_bool("HOT_RELOAD_ENABLED") {
-        config.hot_reload.enabled = v;
-        debug!("Override: hot_reload.enabled from env");
-    }
+        // Hot-reload
+        if let Some(v) = flat_env::flat_env_parsed::<u64>(prefix, "CONFIG_RELOAD_SECS") {
+            self.hot_reload.poll_interval_secs = v;
+            self.hot_reload.enabled = true;
+        }
+        if let Some(v) = flat_env::flat_env_bool(prefix, "HOT_RELOAD_ENABLED") {
+            self.hot_reload.enabled = v;
+        }
 
-    // Routing
-    if let Some(v) = env("ROUTING_DEFAULT_DB") {
-        config.routing.default_db = v;
-        debug!("Override: routing.default_db from env");
-    }
-    if let Some(v) = env("ROUTING_DEFAULT_TABLE") {
-        config.routing.default_table = v;
-        debug!("Override: routing.default_table from env");
-    }
+        // Routing
+        if let Some(v) = flat_env::flat_env_string(prefix, "ROUTING_DEFAULT_DB") {
+            self.routing.default_db = v;
+        }
+        if let Some(v) = flat_env::flat_env_string(prefix, "ROUTING_DEFAULT_TABLE") {
+            self.routing.default_table = v;
+        }
 
-    // Memory
-    if let Some(v) = env_parsed::<usize>("MEMORY_LIMIT_BYTES") {
-        config.memory.limit_bytes = v;
-        debug!("Override: memory.limit_bytes from env");
+        // Memory
+        if let Some(v) = flat_env::flat_env_parsed::<usize>(prefix, "MEMORY_LIMIT_BYTES") {
+            self.memory.limit_bytes = v;
+        }
+    }
+}
+
+impl Normalize for Config {
+    /// Side-effects: credentials present → enable auth, protocol → enable TLS.
+    fn normalize(&mut self) {
+        // SASL credentials present → auto-enable
+        if let Some(ref sasl) = self.kafka.sasl {
+            if !sasl.username.is_empty() || !sasl.password.is_empty() || !sasl.mechanism.is_empty()
+            {
+                if let Some(ref mut sasl) = self.kafka.sasl {
+                    sasl.enabled = true;
+                }
+            }
+        }
     }
 }
 
@@ -387,8 +354,10 @@ impl Config {
         apply_figment_env(&mut config)?;
 
         // 4. Apply explicit flat env overrides (DFE_LOADER_KAFKA_BROKERS etc.)
-        // These are highest priority (after CLI args which caller handles)
-        apply_env_overrides(&mut config);
+        config.apply_flat_env(ENV_PREFIX);
+
+        // 5. Side-effects: credentials → enable auth, etc.
+        config.normalize();
 
         Ok(config)
     }
