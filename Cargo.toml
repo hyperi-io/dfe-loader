@@ -23,7 +23,7 @@ tokio = { version = ">=1.48", features = ["full"] }
 tokio-util = { version = ">=0.7", features = ["rt"] }
 
 # Shared library with transport abstraction
-hyperi-rustlib = { version = ">=1.16.0", features = ["transport-kafka", "transport-grpc", "dlq-kafka", "config", "config-reload", "deployment", "version-check", "scaling", "cli", "top", "logger", "expression"] }
+hyperi-rustlib = { version = ">=1.16.3", features = ["transport-kafka", "transport-grpc", "dlq-kafka", "config", "config-reload", "deployment", "version-check", "scaling", "cli", "top", "logger", "metrics", "expression"] }
 
 # CEL expression evaluation (same crate as rustlib uses, needed for Program type)
 cel-interpreter = { version = ">=0.10.0, <0.11", features = ["json"] }
@@ -215,16 +215,21 @@ cast_lossless = "allow"
 #
 # Fork branch chain (merge order — test each in dfe-loader before merging next):
 #   native-transport → connection-pooling → lc-insert → async-inserter → optimise-1
-#   batching is independent (mergeable to upstream anytime)
+#   batching and remediation are independent (mergeable to upstream anytime)
 #
 # Branch structure:
 #   main (upstream v0.14.2)
+#   ├── hyperi/remediation-deps — Drop fxhash + linked-hash-map (RUSTSEC-2025-0057)
+#   │   └── hyperi/remediation-polonius — Drop polonius-the-crab (RUSTSEC-2024-0436)
 #   ├── hyperi/native-transport — Native TCP SELECT + INSERT, full type coverage
 #   │   └── hyperi/connection-pooling — Deadpool pool, cursor drain, health checks
 #   │       └── hyperi/lc-insert — LowCardinality INSERT + LC(Nullable) reader fix
 #   │           └── hyperi/async-inserter — AsyncInserter (HTTP + native), TableBatcher
 #   │               └── hyperi/optimise-1 — DynamicInsert, ParsedType, schema recovery
 #   └── hyperi/batching — HTTP TableBatcher (independent)
+#
+# optimise-1 has remediation-polonius merged in (no code overlap, clean merge)
+# so dfe-loader gets both feature work and dep remediation from one checkout.
 #
 # Design spec: docs/specs/2026-03-18-clickhouse-rs-fork-swap.md
 #
