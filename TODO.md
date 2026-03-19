@@ -6,7 +6,7 @@
 
 **Reference:** `/projects/clickhouse-loader` (Go version)
 
-**Architecture:** Per-table row buffers with JSONEachRow inserts via `clickhouse` crate (HTTP)
+**Architecture:** Per-table row buffers with RowBinary inserts via `clickhouse-rs` fork (default), JSONEachRow fallback
 
 ---
 
@@ -139,20 +139,18 @@ Remove or comment out the `[patch]` section to revert to upstream.
 **Step B ✓ COMPLETE:** v1.14.4 GA released (GH Release + R2 binaries, JFrog container + helm).
   amd64 + arm64 binaries published. Ready for internal testing.
 
-**Step C (NEXT):** Migrate to clickhouse-rs fork — done LOCK-STEP with dfe-loader.
-  Fork branches are merged in order and tested via `[patch.crates-io]` in
-  dfe-loader. Each branch is a separate dfe-loader test session.
-  The fork and dfe-loader evolve together — NOT independently.
+**Step C:** Migrate to clickhouse-rs fork — done LOCK-STEP with dfe-loader.
 
-Tasks (Step C only — Steps A/B must be complete first):
-- [ ] Merge fork: feature/batching → main
-- [ ] Test batching in dfe-loader: `[patch.crates-io]` → TableBatcher HTTP path
-- [ ] Merge fork: feature/native-transport → main
-- [ ] Test native TCP in dfe-loader: INSERT + SELECT + schema cache end-to-end
-- [ ] Merge fork: feature/connection-pooling → main
-- [ ] Test pooling in dfe-loader: deadpool, cursor drain, connection health
-- [ ] Merge fork: feature/lc-insert → main
-- [ ] Test LowCardinality INSERT in dfe-loader: LC columns + LC(Nullable(T))
+Phases 1-3 complete (fork activated, InsertFormat dispatch wired, ParsedType deduplicated).
+Fork `hyperi/optimise-1` branch has `src/dynamic/` module: ParsedType, DynamicSchema,
+SchemaCache, RowBinary encoder, DynamicInsert, DynamicBatcher.
+
+Remaining tasks:
+- [x] Activate fork via `[patch.crates-io]`
+- [x] Wire `InsertFormat` dispatch (RowBinary default, JSONEachRow fallback)
+- [x] Replace loader `ParsedType` with re-export from fork
+- [ ] Integration test DynamicInsert RowBinary path against devex cluster
+- [ ] Merge fork branch chain to main (batching → native → pooling → lc-insert → optimise-1)
 - [ ] Publish merged fork to crates.io as a pre-release (`0.14.x-hyperi.1`)
 - [ ] Update `Cargo.toml` to use published pre-release (remove `[patch]`)
 - [ ] Confirm JSON type (GA v25.3) insert/query works end-to-end
@@ -172,6 +170,24 @@ rustlib v1.14.0+ switches rdkafka to dynamic-linking against system librdkafka
 - [x] Add `native_deps` + `image_profile` to deployment contract
 - [x] Regenerate Dockerfile from contract (+ Ubuntu 24.04 UID fix + GeoIP COPY)
 - [ ] Test container image starts and connects to Kafka (deferred to CI)
+
+### rustlib v1.16.3 Remediation (DFE Observability) ✓ COMPLETE
+
+- [x] Bump hyperi-rustlib to >=1.16.3 with `metrics` feature
+- [x] Migrate `apply_env_overrides()` to rustlib `ApplyFlatEnv` trait
+- [x] Add `DfeMetrics` dual-emit alongside existing prometheus metrics
+- [x] Wire security events at config reload, DLQ, and validation sites
+- [x] Fix log spam sites: sampled coercion, debounced DLQ/consumer errors
+
+### Code Review Remediation ✓ COMPLETE
+
+- [x] Add `[lints]` section with pedantic + unwrap/expect warnings
+- [x] Add `deny.toml`, `rustfmt.toml`, `clippy.toml`, `rust-toolchain.toml`
+- [x] Switch GeoIP + reputation to `parking_lot::RwLock` (no poison panics)
+- [x] Remove blanket `From<String> for Error` (masks error category)
+- [x] Split `config/loader.rs` (2,362 → 1,041 lines) into `kafka.rs` + `pipeline.rs`
+- [x] Hot-reload safety: warn on restart-required config changes (transport, clickhouse URL, format)
+- [x] Security fix: `lz4_flex` 0.11.5 → 0.11.6 (GHSA-vvp9-7p8x-rfvv)
 
 ### Phase 6: Dependency Audit + Version Bumps
 
@@ -449,11 +465,11 @@ Not a direct dep of dfe-loader — lives in the clickhouse-rs fork's dependency 
 
 ## Notes
 
-- Test environment: k8s.tyrell.com.au (see .env for credentials)
+- Test environment: clickhouse.devex.hyperi.io (see .env for credentials)
 - Benchmark results: `benches/insert_bakeoff.rs` (run with `cargo bench --bench insert_bakeoff`)
-- clickhouse crate: HTTP + JSONEachRow (official, v0.14.x) for DDL/queries
-- reqwest: HTTP POST with JSONEachRow for data inserts (dynamic schemas)
+- clickhouse-rs fork: RowBinary via DynamicInsert (default), JSONEachRow fallback via reqwest
+- clickhouse crate: HTTP for DDL/queries (system.columns, health checks)
 
 ---
 
-**Last Updated:** 2026-03-16
+**Last Updated:** 2026-03-19
