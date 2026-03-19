@@ -615,6 +615,11 @@ impl Orchestrator {
                         // Store new config (for process_message to reference)
                         self.config = new_config;
 
+                        hyperi_rustlib::logger::security::config_changed(
+                            "config_reload",
+                            "system",
+                            &format!("pipeline config reloaded (version {version})"),
+                        );
                         info!(version = version, "Config hot-reload complete");
                     }
                 }
@@ -772,6 +777,16 @@ impl Orchestrator {
 
                                             match dlq_tx.try_send(entry) {
                                                 Ok(()) => {
+                                                    hyperi_rustlib::logger::security::record_dlq(
+                                                        "processing",
+                                                        &e.to_string(),
+                                                        Some(&format!(
+                                                            "topic: {}, partition: {}, offset: {}",
+                                                            kafka_msg.topic,
+                                                            kafka_msg.partition,
+                                                            kafka_msg.offset
+                                                        )),
+                                                    );
                                                     debug!(error = %e, "Message queued for DLQ");
                                                 }
                                                 Err(mpsc::error::TrySendError::Full(_)) => {
@@ -913,6 +928,11 @@ impl Orchestrator {
         let format = match format_detector.check_and_detect(&msg.payload) {
             Ok(fmt) => fmt,
             Err(_expected) => {
+                hyperi_rustlib::logger::security::input_validation_failure(
+                    "format_check",
+                    "payload format mismatch",
+                    None,
+                );
                 return Err(crate::Error::Json("Format mismatch".into()));
             }
         };
