@@ -2,13 +2,27 @@
 // Copyright (c) 2026 HYPERI PTY LIMITED
 
 //! Prometheus metrics implementation
+//!
+//! Dual-emit: existing `loader_*` metrics (prometheus crate) alongside new
+//! `dfe_*` platform metrics (rustlib DfeMetrics). Both are emitted until
+//! migration is confirmed complete across all dashboards and alerts.
+
+use std::sync::Arc;
 
 use prometheus::{Counter, CounterVec, Gauge, GaugeVec, Histogram, HistogramVec, Opts, Registry};
 
-/// Application metrics with Prometheus instrumentation
+use hyperi_rustlib::metrics::DfeMetrics;
+
+/// Application metrics with Prometheus instrumentation.
+///
+/// Dual-emits: old `loader_*` metrics via the `prometheus` crate Registry,
+/// and new `dfe_*` platform metrics via rustlib `DfeMetrics`. Both are served
+/// on `/metrics` until migration is complete.
 #[derive(Clone)]
 pub struct Metrics {
     registry: Registry,
+    /// Standard DFE platform metrics (new — dual-emitted alongside loader_* names)
+    dfe: Option<Arc<DfeMetrics>>,
     pub messages_received: Counter,
     pub messages_processed: Counter,
     pub messages_dlq: Counter,
@@ -27,9 +41,12 @@ pub struct Metrics {
 }
 
 impl Metrics {
-    /// Create and register metrics with default registry
+    /// Create and register all metrics including DfeMetrics platform layer.
     pub fn new() -> Self {
-        Self::with_registry(Registry::new())
+        let mut m = Self::with_registry(Registry::new());
+        // Register DfeMetrics after the prometheus registry so both emit
+        m.dfe = Some(Arc::new(DfeMetrics::register()));
+        m
     }
 
     /// Create and register metrics with custom registry
@@ -167,6 +184,7 @@ impl Metrics {
 
         Self {
             registry,
+            dfe: None, // Set by new(); None for tests using with_registry() directly
             messages_received,
             messages_processed,
             messages_dlq,
@@ -203,17 +221,26 @@ impl Metrics {
     /// Record a message received
     pub fn record_received(&self) {
         self.messages_received.inc();
+        if let Some(ref dfe) = self.dfe {
+            dfe.records_received(1);
+        }
     }
 
     /// Record a message processed for a table
     pub fn record_processed(&self, table: &str) {
         self.messages_processed.inc();
         self.messages_by_table.with_label_values(&[table]).inc();
+        if let Some(ref dfe) = self.dfe {
+            dfe.records_delivered(1);
+        }
     }
 
     /// Record a message sent to DLQ
     pub fn record_dlq(&self) {
         self.messages_dlq.inc();
+        if let Some(ref dfe) = self.dfe {
+            dfe.records_dlq(1);
+        }
     }
 
     /// Record a batch flush
@@ -221,6 +248,10 @@ impl Metrics {
         self.batches_flushed.inc();
         self.rows_inserted.inc_by(rows as f64);
         self.insert_latency.observe(latency_secs);
+        if let Some(ref dfe) = self.dfe {
+            dfe.transport_sent("clickhouse", rows as u64);
+            dfe.transport_send_duration("clickhouse", latency_secs);
+        }
     }
 
     /// Record a batch flush for a specific table
@@ -231,11 +262,18 @@ impl Metrics {
         self.insert_latency_by_table
             .with_label_values(&[table])
             .observe(latency_secs);
+        if let Some(ref dfe) = self.dfe {
+            dfe.transport_sent("clickhouse", rows as u64);
+            dfe.transport_send_duration("clickhouse", latency_secs);
+        }
     }
 
     /// Record an insert error
     pub fn record_error(&self) {
         self.insert_errors.inc();
+        if let Some(ref dfe) = self.dfe {
+            dfe.transport_send_errors("clickhouse", 1);
+        }
     }
 
     /// Update buffer stats
@@ -248,6 +286,20 @@ impl Metrics {
     /// Record Kafka offsets committed after successful insert
     pub fn record_offsets_committed(&self, count: usize) {
         self.offsets_committed.inc_by(count as f64);
+    }
+
+    /// Update pipeline readiness
+    pub fn set_pipeline_ready(&self, ready: bool) {
+        if let Some(ref dfe) = self.dfe {
+            dfe.pipeline_ready(ready);
+        }
+    }
+
+    /// Update scaling pressure
+    pub fn set_scaling_pressure(&self, pressure: f64) {
+        if let Some(ref dfe) = self.dfe {
+            dfe.scaling_pressure(pressure);
+        }
     }
 }
 
