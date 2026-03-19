@@ -984,7 +984,7 @@ loader:
 ### Phase 2: dfe-loader
 
 1. Update Cargo.toml — `transport-zenoh` → `transport-grpc`
-2. Update `src/config/loader.rs` — remove `ZenohConfig`, add `GrpcConfig`
+2. Update `src/config/` — remove `ZenohConfig`, add `GrpcConfig`
 3. Update `src/kafka/transport.rs` — remove `ZenohTransportAdapter`, add `GrpcTransportAdapter`
 4. Update `TransportBackend` enum
 5. Update config examples and docs

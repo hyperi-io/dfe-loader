@@ -97,7 +97,7 @@ Transform (flatten, timestamp, _org_id, _tags, _raw, field sanitize) → Map<Str
 BufferManager — per-table Vec<Map<String, Value>> + KafkaOffset accumulation
   │   (flush when: row count, byte size, or time threshold exceeded)
   ▼
-Inserter — JSONEachRow via reqwest HTTP POST → ClickHouse
+Inserter — RowBinary via DynamicInsert (default) or JSONEachRow via reqwest (fallback) → ClickHouse
   │   (batch salvage on failure, circuit breaker, concurrent semaphore)
   ▼
 Kafka offset commit (at-least-once delivery)
@@ -105,12 +105,12 @@ Kafka offset commit (at-least-once delivery)
 
 ### Key Design Decisions
 
-1. **JSONEachRow inserts**: `reqwest` HTTP POST with NDJSON body. Bypasses `clickhouse::Row` trait's compile-time schema requirement — dynamic `Map<String, Value>` serialises naturally to JSON. ClickHouse handles type coercion.
+1. **Dual insert format**: Default is RowBinary via clickhouse-rs fork's `DynamicInsert` (schema-reflected typed binary encoding — ClickHouse skips JSON parsing). Fallback is JSONEachRow via `reqwest` HTTP POST. Both bypass `clickhouse::Row` compile-time schema — dynamic `Map<String, Value>` at runtime.
 2. **Per-table buffers**: `HashMap<db.table, TableBuffer>` — each table accumulates rows independently. High-volume tables flush more often.
 3. **Pre-flatten routing**: Extract db.table from the raw Value BEFORE flattening. Dot notation (`tags.event.category`) for nested field access.
 4. **sonic-rs on-demand routing**: `get_from_slice()` for routing field extraction without full DOM parse (4-8x faster than full parse for routing-only).
 5. **Kafka offset tracking**: Per-batch `Vec<KafkaOffset>`. Committed only after successful ClickHouse insert (at-least-once).
-6. **Dual ClickHouse clients**: `clickhouse::Client` for DDL/queries (static Row types, system.columns), `reqwest::Client` for JSONEachRow data inserts.
+6. **ClickHouse clients**: `clickhouse::Client` for DDL/queries/RowBinary inserts (via fork's DynamicInsert), `reqwest::Client` for JSONEachRow fallback inserts.
 
 ### Development Principles
 
@@ -118,14 +118,15 @@ Kafka offset commit (at-least-once delivery)
 - **Pre-flatten routing**: Always route before flattening (dot notation for nested access)
 - **Per-table buffers**: Each db.table gets its own buffer for independent flush control
 - **SIMD parsing**: sonic-rs for JSON, rmp-serde for MessagePack
-- **No schema at compile time**: `Map<String, Value>` — ClickHouse coerces from JSON
+- **No schema at compile time**: `Map<String, Value>` — fork encodes to RowBinary via runtime schema reflection
 
 ### Libraries
 
 | Purpose | Library | Notes |
 |---------|---------|-------|
-| ClickHouse DDL/queries | `clickhouse` (official, HTTP) | Static Row types for system.columns |
-| ClickHouse inserts | `reqwest` (HTTP) | JSONEachRow, dynamic `Map<String, Value>` |
+| ClickHouse DDL/queries | `clickhouse` (fork, HTTP) | Static Row types for system.columns |
+| ClickHouse inserts (default) | `clickhouse` (fork, DynamicInsert) | RowBinary, schema-reflected `Map<String, Value>` |
+| ClickHouse inserts (fallback) | `reqwest` (HTTP) | JSONEachRow, dynamic `Map<String, Value>` |
 | JSON parsing (SIMD) | `sonic-rs` | `from_slice::<Value>()` + `get_from_slice()` for routing |
 | MessagePack | `rmp-serde` | `from_slice::<Value>()` |
 | Internal hash maps | `rustc-hash` (FxHashMap) | 5-10% faster than std for short string keys |
@@ -255,7 +256,7 @@ struct BufferManager {
 }
 
 struct TableBuffer {
-    rows: Vec<Map<String, Value>>,  // Accumulated rows for JSONEachRow insert
+    rows: Vec<Map<String, Value>>,  // Accumulated rows for insert (RowBinary or JSONEachRow)
     offsets: Vec<KafkaOffset>,      // For at-least-once commit
     created_at: Instant,            // Time-based flush trigger
 }
@@ -272,7 +273,7 @@ struct TableBuffer {
 ```rust
 struct FlushBatch {
     table: CompactString,              // "db.table" (stack-allocated for ≤24 bytes)
-    batch: Vec<Map<String, Value>>,    // Rows ready for JSONEachRow
+    batch: Vec<Map<String, Value>>,    // Rows ready for insert
     offsets: Vec<KafkaOffset>,         // Committed to Kafka on success
 }
 ```
@@ -389,9 +390,9 @@ main (upstream v0.14.2)
 
 ### Fork Migration Phases (dfe-loader)
 
-1. **Swap to fork** — uncomment `[patch.crates-io]`, continue JSONEachRow, validate tests
-2. **Switch to DynamicInsert** — replace reqwest inserts with `client.dynamic_insert()`
-3. **Remove duplication** — drop loader's `ParsedType` (use fork's), consolidate schema cache
+1. ~~**Swap to fork**~~ — DONE. `[patch.crates-io]` activated, tests pass.
+2. ~~**Switch to DynamicInsert**~~ — DONE. `InsertFormat` dispatch: RowBinary default, JSONEachRow fallback.
+3. ~~**Remove duplication**~~ — DONE. Loader's `ParsedType` replaced with re-export from fork (-298 lines).
 4. **PR to upstream** — open PRs from hyperi/* branches
 5. **Swap back** — remove `[patch.crates-io]`, bump version to upstream release
 
@@ -487,7 +488,8 @@ Start a fresh session after any changes to this file.
 | Drop Arrow/clickhouse-arrow | Benchmarks: sonic-rs→Map 6-9x faster than Arrow building; insert paths within noise (network-dominated). Arrow adds complexity with zero insert throughput benefit. |
 | Drop Mison structural index | Benchmarks: 4–7% throughput improvement — insufficient to justify maintaining a separate codebase (mison required a custom fork + Rust bindings). 3,436 lines removed (commit `2a7a635`). Full rationale: `docs/DESIGN.md` § Parser Selection History. |
 | Drop simd-json (0.17) | Benchmarks: <3% net pipeline gain after switching to `sonic_dom` (single full parse). Fatal incompatibility: simd-json requires `&mut [u8]`, but payloads are `Arc<[u8]>` — mandatory `Vec<u8>` clone per message destroys zero-copy `_json` model. Full results: `docs/DESIGN.md` § Parser Selection History, `benches/simdjson_spike.rs`. |
-| JSONEachRow via reqwest | Bypasses `clickhouse::Row` compile-time trait. `Map<String, Value>` serialises naturally. Serde overhead ~3-5% of pipeline time vs 40-75ms network I/O. |
+| RowBinary via DynamicInsert (default) | Schema-reflected typed binary encoding via clickhouse-rs fork. ClickHouse skips JSON parsing — lower server CPU. JSONEachRow kept as fallback via config. |
+| JSONEachRow via reqwest (fallback) | Bypasses `clickhouse::Row` compile-time trait. `Map<String, Value>` serialises naturally. Available via `insert_format = "json_each_row"`. |
 | Test tables: ON CLUSTER + MergeTree/ReplicatedMergeTree | 3-node load-balanced cluster, no sticky sessions. CREATE without ON CLUSTER creates on one node only — inserts to other nodes cannot be queried back. Use benchmark DB (Atomic + ON CLUSTER + MergeTree) for most tests; default DB (Replicated + ReplicatedMergeTree) only when query-back verification required. |
 | clickhouse-rs fork licensing | Fork is `MIT OR Apache-2.0` (upstream license). NEVER use FSL-1.1-ALv2 in the fork. No file-level license headers — follow upstream convention. |
 

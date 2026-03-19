@@ -1,17 +1,19 @@
 # Design Document: dfe-loader
 
-**Version:** 4.0 (Schema-Guided Extraction + Zero-Copy _json)
-**Date:** 2026-03-11
+**Version:** 5.0 (DynamicInsert RowBinary + Schema Recovery)
+**Date:** 2026-03-19
 
 ---
 
 ## Overview
 
-High-performance data loader from message transports to ClickHouse via HTTP JSONEachRow.
+High-performance data loader from message transports to ClickHouse. Default insert path
+uses RowBinary via the clickhouse-rs fork's `DynamicInsert` (schema-reflected, typed binary
+encoding). JSONEachRow via reqwest HTTP POST is available as a fallback (`insert_format = "json_each_row"`).
 
 ```text
-Transport ──► Arc<[u8]> ──► Route ──► Extract ──► Coerce+Enrich ──► Buffer ──► ClickHouse HTTP
-(Kafka/gRPC/Memory)  (zero-copy)  (db.table)  (schema-guided)  (promoted cols)  (per-table)  (JSONEachRow)
+Transport ──► Arc<[u8]> ──► Route ──► Extract ──► Coerce+Enrich ──► Buffer ──► ClickHouse
+(Kafka/gRPC/Memory)  (zero-copy)  (db.table)  (schema-guided)  (promoted cols)  (per-table)  (RowBinary default / JSONEachRow fallback)
 ```
 
 ### Transport Selection
@@ -41,7 +43,7 @@ See [GRPC-MESH.md](./GRPC-MESH.md) for the complete gRPC transport design.
 ### 1. Per-Table Buffer Architecture
 
 Each destination table (db.table) has its own row buffer. This ensures batch inserts
-are grouped by table (required for JSONEachRow inserts targeting a specific table).
+are grouped by table (required for per-table inserts regardless of format).
 
 ```rust
 struct BufferManager {
@@ -66,7 +68,7 @@ struct FlushBatch {
 
 **Why per-table?**
 
-- **ClickHouse target:** JSONEachRow inserts are per-table; all rows in a batch go to one table
+- **ClickHouse target:** Inserts are per-table; all rows in a batch go to one table
 - **Independent flush:** High-volume tables flush more often, low-volume wait for age trigger
 - **Schema flexibility:** Each row is a `Map<String, Value>` — no fixed schema required
 - **Memory bounded:** Rows accumulate until flush threshold (rows, bytes, or age)
@@ -79,8 +81,8 @@ struct FlushBatch {
 4. Coerce promoted fields only (delta coercions, O(schema_cols × 1 branch))
 5. Enrich promoted fields (GeoIP, reputation, risk — inject flat cols)
 6. Push promoted `Map` + `Arc<[u8]>` to per-table buffer (with Kafka offset)
-7. When ready (row count or age): serialise promoted cols as NDJSON, splice raw bytes as `_json`
-8. Insert to ClickHouse via `reqwest` HTTP POST
+7. When ready (row count or age): encode promoted cols + splice raw bytes as `_json`
+8. Insert to ClickHouse (RowBinary via DynamicInsert, or JSONEachRow via reqwest fallback)
 9. Success: Commit **this batch's** Kafka offsets (independent of other tables)
 10. Failure: Retry batch
 
@@ -178,7 +180,7 @@ The extractor extracts:
 ```rust
 // SchemaCache stores ColumnInfo per table, fetched from system.columns.
 // Used for: CEL expression evaluation, auto-init DDL, computed column dispatch.
-// NOT used for insert schema validation — JSONEachRow is schema-flexible.
+// Also used by DynamicInsert (RowBinary path) for runtime schema-driven encoding.
 
 struct SchemaCache {
     entries: DashMap<String, SchemaCacheEntry>,
@@ -230,41 +232,39 @@ all data — no field is silently dropped.
 `_timestamp`, `_org_id`, `_source`, `_timestamp_received`. These are required
 for DFE operational correctness (routing, tenancy, TTL, audit).
 
-### 5. ClickHouse Insert (HTTP JSONEachRow)
+### 5. ClickHouse Insert (Dual Format)
 
-Two clients in `HttpClickHouseClient`:
+The `Inserter` dispatches based on `InsertFormat` config (default: RowBinary):
+
+**RowBinary (default):** Uses `clickhouse-rs` fork's `DynamicInsert`. Schema-reflected
+typed binary encoding — ClickHouse skips JSON parsing entirely. The fork's `SchemaCache`
+fetches column types from `system.columns` and encodes `Map<String, Value>` to RowBinary
+at runtime. Schema recovery on mismatch: pause, re-fetch schema, re-encode, resume.
+
+**JSONEachRow (fallback):** Uses `reqwest` HTTP POST with NDJSON body. Zero-copy `_json`
+splice from `Arc<[u8]>`. Available via `insert_format = "json_each_row"` in config.
+
+```rust
+enum InsertFormat {
+    RowBinary,     // Default — DynamicInsert via clickhouse-rs fork
+    JsonEachRow,   // Fallback — reqwest HTTP POST with NDJSON body
+}
+```
+
+**Client architecture:**
 
 ```rust
 struct HttpClickHouseClient {
-    // Official clickhouse crate — DDL, queries, schema introspection
+    // Official clickhouse crate — DDL, queries, schema introspection, RowBinary inserts
     ch_client: clickhouse::Client,
-    // reqwest — data inserts via JSONEachRow
+    // reqwest — JSONEachRow fallback inserts only
     http_client: reqwest::Client,
     insert_url: String,
 }
-
-impl HttpClickHouseClient {
-    // Data insert: serialise promoted cols to NDJSON, splice _json from raw bytes
-    async fn insert_json_rows(
-        &self,
-        table: &str,
-        rows: &[Map<String, Value>],
-        raw_payloads: &[Arc<[u8]>],
-    ) -> Result<usize>;
-
-    // DDL / queries use clickhouse::Client
-    async fn execute_ddl(&self, query: &str) -> Result<()>;
-    async fn fetch_columns(&self, db: &str, table: &str) -> Result<Vec<ColumnInfo>>;
-}
 ```
 
-NDJSON body assembly (zero-copy fast path, ~99% of messages):
-```
-{<promoted_cols_json_without_closing_brace>,"_json":<raw_arc_bytes>}\n
-```
-
-The `_json` value is the original payload bytes spliced directly — no re-encoding.
-ClickHouse receives valid JSON on the wire because the source payload IS valid JSON.
+DDL/queries always use `clickhouse::Client`. Data inserts route through the `Inserter`
+which dispatches to `DynamicInsert` (RowBinary) or `reqwest` (JSONEachRow) based on config.
 
 ---
 
@@ -325,7 +325,7 @@ ClickHouse receives valid JSON on the wire because the source payload IS valid J
 ┌─────────────────────────────────────────────────────────────────────┐
 │                   Delta Coercion (promoted cols only)                │
 │  Runs ONLY on the promoted Map — O(schema_cols × 1 branch)          │
-│  Handles 4 cases JSONEachRow cannot do server-side:                 │
+│  Handles 4 cases the wire format cannot coerce server-side:         │
 │    - Epoch ms/μs/ns → DateTime64 ISO string (magnitude detection)  │
 │    - ISO 8601 T separator → space (default parser incompatibility)  │
 │    - UUID without hyphens → RFC 4122 format                         │
@@ -350,19 +350,19 @@ ClickHouse receives valid JSON on the wire because the source payload IS valid J
                              │ FlushBatch { rows, raw_payloads, offsets }
                              ▼ (flush trigger: rows or time per table)
 ┌─────────────────────────────────────────────────────────────────────┐
-│                  NDJSON Body Assembly (zero-copy)                    │
-│  For each (promoted_map, raw_bytes) pair:                           │
-│    {<promoted_cols>,"_json":<raw_bytes>}\n                          │
-│  Fast path (~99%): raw bytes spliced directly (no alloc)            │
-│  Slow path (source has _json key): parse + deep-merge + re-encode  │
-└────────────────────────────┬────────────────────────────────────────┘
-                             │ NDJSON bytes
-                             ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│                    ClickHouse Inserter                               │
-│  - reqwest HTTP POST to /{db}/{table}?format=JSONEachRow            │
-│  - Retry with exponential backoff + batch salvage                   │
-│  - Circuit breaker per table                                        │
+│                    ClickHouse Inserter (format dispatch)             │
+│                                                                     │
+│  RowBinary (default):                                               │
+│    DynamicInsert via clickhouse-rs fork                              │
+│    Schema-reflected typed binary encoding (Map → RowBinary)          │
+│    Schema recovery: pause → re-fetch → re-encode → resume           │
+│                                                                     │
+│  JSONEachRow (fallback):                                            │
+│    reqwest HTTP POST to /{db}/{table}?format=JSONEachRow            │
+│    Zero-copy _json splice from Arc<[u8]>                            │
+│                                                                     │
+│  Both paths: retry with exponential backoff + batch salvage         │
+│  Circuit breaker per table                                          │
 └────────────────────────────┬────────────────────────────────────────┘
                              │
                              ▼
@@ -378,27 +378,18 @@ ClickHouse receives valid JSON on the wire because the source payload IS valid J
 
 ## Type Handling
 
-ClickHouse handles most type coercion server-side for JSONEachRow inserts. The loader
-sends JSON strings/numbers/booleans; ClickHouse converts on ingest.
+**RowBinary path (default):** The clickhouse-rs fork's `DynamicInsert` encodes
+`Map<String, Value>` to typed RowBinary columns using the schema reflected from
+`system.columns`. Type conversion happens client-side in the fork's encoder —
+ClickHouse receives pre-typed binary data and skips parsing entirely. Missing columns
+get default values, extra columns are silently dropped.
 
-| ClickHouse Type | JSON Value Sent | Notes |
-|-----------------|-----------------|-------|
-| Int8-Int256 | number | ClickHouse parses as integer |
-| Float32/64 | number | ClickHouse parses as float |
-| String | string | Pass-through |
-| DateTime64(3) | `"2024-01-15T10:30:00.123Z"` | ISO 8601 string |
-| UUID | string | ClickHouse parses RFC 4122 format |
-| Bool | boolean or number | 0/1 or true/false |
-| Array(T) | JSON array | Elements must match inner type |
-| JSON type | string or object | ClickHouse parses at insert time |
-| LowCardinality(T) | same as T | Dictionary encoding is server-side |
-| Nullable(T) | null or T value | null JSON maps to NULL |
+**JSONEachRow path (fallback):** ClickHouse handles most type coercion server-side.
+The loader sends JSON strings/numbers/booleans; ClickHouse converts on ingest. Unknown
+fields are silently ignored (default JSONEachRow behaviour).
 
-Unknown fields are silently ignored by ClickHouse (default JSONEachRow behaviour).
-This is the key advantage over Arrow: no fixed-schema enforcement on the loader side.
-
-The loader performs **delta coercions** client-side — only the 4 cases that
-ClickHouse JSONEachRow cannot handle server-side:
+Both paths use the same **delta coercions** client-side — 4 cases that
+cannot be handled automatically:
 
 | Delta coercion | Why needed |
 |---|---|
@@ -498,30 +489,41 @@ source.port: 54321
 ```
 
 Arrays are preserved as-is (JSON array value). Only objects are flattened.
-This matches ClickHouse JSONEachRow expectations for `Array(T)` columns.
+This matches ClickHouse expectations for `Array(T)` columns in both RowBinary and JSONEachRow paths.
 
 **Phase 5.6 note:** For columns typed as `JSON`, `Nested`, or `Variant` in ClickHouse,
 additional client-side handling may be needed. See TODO Phase 5.6 for the gap analysis.
 
 ---
 
-## clickhouse-rs Fork (Phase 5.5)
+## clickhouse-rs Fork
 
-The project uses the upstream `clickhouse` crate (HTTP only) by default.
-A HyperI fork at `/projects/clickhouse-rs` adds:
+The project uses a HyperI fork of `clickhouse-rs` activated via `[patch.crates-io]`
+in `Cargo.toml`. The fork (`hyperi/optimise-1` branch) adds:
 
+- **`src/dynamic/` module** — `DynamicInsert`, `DynamicBatcher`, `ParsedType`,
+  `DynamicSchema`, `SchemaCache`, runtime RowBinary encoder with schema recovery
 - Native TCP protocol (lower CPU, higher throughput for bulk inserts)
 - HTTP `TableBatcher<T>` (server-side buffering)
 - Connection pooling via Deadpool
 - `LowCardinality` INSERT encoder + LC(Nullable(T)) reader fix
 - JSON, Variant, Dynamic, Nested, BFloat16, Time, AggregateFunction types
 
-**dfe-loader is the test harness for this fork.** Once the fork branches are
-merged and published, dfe-loader validates native protocol + batching end-to-end.
+**dfe-loader is the test harness for this fork.** The loader's `ParsedType` has been
+replaced with a re-export from the fork. The `Inserter` dispatches to `DynamicInsert`
+(RowBinary, default) or `reqwest` (JSONEachRow, fallback) based on `InsertFormat` config.
+
+### Insert Format Config
+
+```toml
+[clickhouse]
+insert_format = "row_binary"   # Default — DynamicInsert via fork
+# insert_format = "json_each_row"  # Fallback — reqwest HTTP POST
+```
 
 ### Swap Mechanism (`[patch.crates-io]`)
 
-To test the fork locally, add to the bottom of `Cargo.toml`:
+The fork is activated via `[patch.crates-io]` in `Cargo.toml`:
 
 ```toml
 [patch.crates-io]
@@ -533,8 +535,6 @@ Zero changes to the main `[dependencies]` declaration required.
 
 The fork will also be published to crates.io (as a versioned pre-release)
 so CI can test it without local path dependencies.
-
-See TODO Phase 5.5 for the merge order and task list.
 
 ## Future Optimisations
 
