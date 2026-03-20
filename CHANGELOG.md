@@ -1,3 +1,10 @@
+# [1.15.0-dev.2](https://github.com/hyperi-io/dfe-loader/compare/v1.15.0-dev.1...v1.15.0-dev.2) (2026-03-20)
+
+
+### Bug Fixes
+
+* add per-table buffer and circuit breaker metrics ([ffbd9ae](https://github.com/hyperi-io/dfe-loader/commit/ffbd9ae5b543f90b6616b04d31d79c7290180c33))
+
 # [1.15.0-dev.1](https://github.com/hyperi-io/dfe-loader/compare/v1.14.1-dev.2...v1.15.0-dev.1) (2026-03-20)
 
 
