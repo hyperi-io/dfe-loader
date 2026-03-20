@@ -126,11 +126,32 @@ impl Metrics {
         self.dfe.transport_send_errors("clickhouse", 1);
     }
 
-    /// Update buffer stats.
+    /// Update aggregate buffer stats.
     pub fn update_buffer_stats(&self, rows: usize, bytes: usize, tables: usize) {
         self.buffer_rows.set(rows as f64);
         self.buffer_bytes.set(bytes as f64);
         self.buffer_tables.set(tables as f64);
+    }
+
+    /// Update per-table buffer depth.
+    ///
+    /// Emits `loader_buffer_rows_by_table` and `loader_buffer_bytes_by_table`
+    /// gauges labelled by table name. Enables monitoring individual table
+    /// backlog when one table has a problematic schema or cluster-side issue.
+    pub fn update_per_table_buffer(&self, table: &str, rows: usize, bytes: usize) {
+        metrics::gauge!("loader_buffer_rows_by_table", "table" => table.to_string())
+            .set(rows as f64);
+        metrics::gauge!("loader_buffer_bytes_by_table", "table" => table.to_string())
+            .set(bytes as f64);
+    }
+
+    /// Update per-table circuit breaker state.
+    ///
+    /// Emits `loader_circuit_breaker_state` gauge labelled by table.
+    /// Values: 0=closed (healthy), 1=open (failing), 2=half-open (probing).
+    pub fn update_circuit_breaker_state(&self, table: &str, state: u8) {
+        metrics::gauge!("loader_circuit_breaker_state", "table" => table.to_string())
+            .set(f64::from(state));
     }
 
     /// Record Kafka offsets committed after successful insert.

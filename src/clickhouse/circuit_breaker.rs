@@ -265,6 +265,24 @@ impl CircuitBreaker {
             .unwrap_or(CircuitState::Closed)
     }
 
+    /// Per-table circuit state for metrics emission.
+    ///
+    /// Returns `(table_name, state_u8)` where state is 0=closed, 1=open, 2=half-open.
+    pub fn per_table_states(&self) -> Vec<(String, u8)> {
+        let circuits = self.circuits.read().unwrap();
+        circuits
+            .iter()
+            .map(|(table, c)| {
+                let state = match c.state {
+                    CircuitState::Closed => 0,
+                    CircuitState::Open => 1,
+                    CircuitState::HalfOpen => 2,
+                };
+                (table.clone(), state)
+            })
+            .collect()
+    }
+
     /// Get all tables with open circuits
     pub fn get_open_circuits(&self) -> Vec<String> {
         let circuits = self.circuits.read().unwrap();
