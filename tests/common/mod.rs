@@ -141,6 +141,19 @@ impl ClickHouseTestConfig {
     }
 }
 
+/// Returns `" ON CLUSTER 'default'"` for remote mode, `""` for Docker single-node.
+///
+/// Use in DDL format strings: `format!("CREATE TABLE {}{} ...", table, on_cluster_clause())`
+pub fn on_cluster_clause() -> &'static str {
+    load_dotenv();
+    let ch = ClickHouseTestConfig::from_env();
+    if ch.cluster.is_some() {
+        " ON CLUSTER 'default'"
+    } else {
+        ""
+    }
+}
+
 // ============================================================================
 // Kafka Test Config
 // ============================================================================

@@ -11,6 +11,7 @@ use std::time::Duration;
 use serde_json::{Map, Value, json};
 
 use dfe_loader::clickhouse::circuit_breaker::{CircuitBreaker, CircuitBreakerConfig};
+use dfe_loader::clickhouse::config::InsertFormat;
 use dfe_loader::clickhouse::{Inserter, InserterConfig};
 
 use crate::common::{create_http_test_client, drop_http_test_table, unique_table_name};
@@ -48,10 +49,11 @@ async fn test_inserter_basic_insert() {
         }
     };
     let table_name = unique_table_name("test_inserter_basic");
+    let oc = crate::common::on_cluster_clause();
 
     // Create test table
     let ddl = format!(
-        "CREATE TABLE {} ON CLUSTER 'default' (
+        "CREATE TABLE {}{oc} (
             id UInt64,
             name String,
             value Float64
@@ -61,7 +63,8 @@ async fn test_inserter_basic_insert() {
     client.execute(&ddl).await.expect("Failed to create table");
 
     // Create inserter
-    let inserter = Inserter::new(client.clone(), InserterConfig::default());
+    let inserter = Inserter::new(client.clone(), InserterConfig::default())
+        .with_insert_format(InsertFormat::JsonEachRow, None);
 
     // Create rows
     let rows = make_test_rows(3);
@@ -86,10 +89,11 @@ async fn test_inserter_large_batch() {
         None => return,
     };
     let table_name = unique_table_name("test_large_batch");
+    let oc = crate::common::on_cluster_clause();
 
     // Create test table
     let ddl = format!(
-        "CREATE TABLE {} ON CLUSTER 'default' (
+        "CREATE TABLE {}{oc} (
             id UInt64,
             name String,
             value Float64
@@ -98,7 +102,8 @@ async fn test_inserter_large_batch() {
     );
     client.execute(&ddl).await.expect("Failed to create table");
 
-    let inserter = Inserter::new(client.clone(), InserterConfig::default());
+    let inserter = Inserter::new(client.clone(), InserterConfig::default())
+        .with_insert_format(InsertFormat::JsonEachRow, None);
 
     // Create large batch (10,000 rows)
     let row_count = 10_000usize;
@@ -215,10 +220,11 @@ async fn test_circuit_breaker_with_inserter() {
         None => return,
     };
     let table_name = unique_table_name("test_cb_inserter");
+    let oc = crate::common::on_cluster_clause();
 
     // Create test table
     let ddl = format!(
-        "CREATE TABLE {} ON CLUSTER 'default' (
+        "CREATE TABLE {}{oc} (
             id UInt64,
             name String
         ) ENGINE = MergeTree() ORDER BY tuple()",
@@ -236,6 +242,7 @@ async fn test_circuit_breaker_with_inserter() {
     let circuit_breaker = Arc::new(CircuitBreaker::new(cb_config));
 
     let inserter = Inserter::new(client.clone(), InserterConfig::default())
+        .with_insert_format(InsertFormat::JsonEachRow, None)
         .with_circuit_breaker(circuit_breaker.clone());
 
     // Create valid rows
@@ -275,10 +282,11 @@ async fn test_concurrent_inserts() {
         None => return,
     };
     let table_name = unique_table_name("test_concurrent");
+    let oc = crate::common::on_cluster_clause();
 
     // Create test table
     let ddl = format!(
-        "CREATE TABLE {} ON CLUSTER 'default' (
+        "CREATE TABLE {}{oc} (
             id UInt64,
             batch_id UInt64,
             value Float64
@@ -292,7 +300,9 @@ async fn test_concurrent_inserts() {
         max_concurrent_inserts: 4,
         ..Default::default()
     };
-    let inserter = Arc::new(Inserter::new(client.clone(), config));
+    let inserter = Arc::new(
+        Inserter::new(client.clone(), config).with_insert_format(InsertFormat::JsonEachRow, None),
+    );
 
     // Spawn multiple concurrent inserts
     let mut handles = Vec::new();
@@ -357,10 +367,11 @@ async fn test_inserter_batch_salvage() {
         None => return,
     };
     let table_name = unique_table_name("test_salvage");
+    let oc = crate::common::on_cluster_clause();
 
     // Create test table
     let ddl = format!(
-        "CREATE TABLE {} ON CLUSTER 'default' (
+        "CREATE TABLE {}{oc} (
             id UInt64,
             name String
         ) ENGINE = MergeTree() ORDER BY tuple()",
@@ -375,7 +386,8 @@ async fn test_inserter_batch_salvage() {
         max_retries: 1,
         ..Default::default()
     };
-    let inserter = Inserter::new(client.clone(), config);
+    let inserter =
+        Inserter::new(client.clone(), config).with_insert_format(InsertFormat::JsonEachRow, None);
 
     // Create rows
     let rows: Vec<Map<String, Value>> = (0..5)

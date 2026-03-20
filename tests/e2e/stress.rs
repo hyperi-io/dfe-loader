@@ -77,9 +77,10 @@ async fn test_stress_10k_single_batch() {
         None => return,
     };
 
+    let oc = crate::common::on_cluster_clause();
     let table_name = unique_table_name("stress_10k");
     let ddl = format!(
-        "CREATE TABLE {} ON CLUSTER 'default' (
+        "CREATE TABLE {}{oc} (
             id UInt64,
             event String,
             value Float64
@@ -121,9 +122,10 @@ async fn test_stress_50k_single_batch() {
         None => return,
     };
 
+    let oc = crate::common::on_cluster_clause();
     let table_name = unique_table_name("stress_50k");
     let ddl = format!(
-        "CREATE TABLE {} ON CLUSTER 'default' (
+        "CREATE TABLE {}{oc} (
             id UInt64,
             category String,
             value Float64
@@ -165,9 +167,10 @@ async fn test_stress_multiple_batches() {
         None => return,
     };
 
+    let oc = crate::common::on_cluster_clause();
     let table_name = unique_table_name("stress_multi");
     let ddl = format!(
-        "CREATE TABLE {} ON CLUSTER 'default' (
+        "CREATE TABLE {}{oc} (
             id UInt64,
             batch_id UInt64,
             data String
@@ -227,9 +230,10 @@ async fn test_stress_concurrent_inserts() {
         None => return,
     });
 
+    let oc = crate::common::on_cluster_clause();
     let table_name = unique_table_name("stress_concurrent");
     let ddl = format!(
-        "CREATE TABLE {} ON CLUSTER 'default' (
+        "CREATE TABLE {}{oc} (
             id UInt64,
             thread_id UInt64,
             value Float64
