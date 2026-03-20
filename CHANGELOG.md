@@ -1,3 +1,12 @@
+## [1.14.5](https://github.com/hyperi-io/dfe-loader/compare/v1.14.4...v1.14.5) (2026-03-20)
+
+
+### Bug Fixes
+
+* cargo fmt failing ([084d2f0](https://github.com/hyperi-io/dfe-loader/commit/084d2f07232c411e61b0b3d9eb2e47563bda6306))
+* ci quality fail fix ([5c1ae45](https://github.com/hyperi-io/dfe-loader/commit/5c1ae4558f2fb04f02278be7335415c9b98ae363))
+* disable rdkafka stats spam by default (closes [#5](https://github.com/hyperi-io/dfe-loader/issues/5)) ([57c60e1](https://github.com/hyperi-io/dfe-loader/commit/57c60e1d7681456a361d760a05d1914de045f0e9))
+
 ## [1.14.4](https://github.com/hyperi-io/dfe-loader/compare/v1.14.3...v1.14.4) (2026-03-16)
 
 
