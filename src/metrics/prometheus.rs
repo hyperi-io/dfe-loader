@@ -301,6 +301,11 @@ impl Metrics {
             dfe.scaling_pressure(pressure);
         }
     }
+
+    /// Update memory usage from MemoryGuard
+    pub fn set_memory_usage(&self, current_bytes: u64, _limit_bytes: u64) {
+        self.memory_used.set(current_bytes as f64);
+    }
 }
 
 impl Default for Metrics {

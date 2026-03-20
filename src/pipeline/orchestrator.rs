@@ -25,6 +25,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use hyperi_rustlib::ScalingPressure;
 use hyperi_rustlib::dlq::{Dlq, DlqEntry, DlqSource};
+use hyperi_rustlib::memory::{MemoryGuard, MemoryGuardConfig};
 
 use crate::Result;
 use crate::buffer::{BufferManager, FlushBatch, KafkaOffset};
@@ -271,11 +272,13 @@ pub struct Orchestrator {
     stats: PipelineStats,
     metrics: Option<Metrics>,
     scaling: Option<Arc<ScalingPressure>>,
+    memory_guard: Arc<MemoryGuard>,
 }
 
 impl Orchestrator {
     /// Create a new orchestrator with config
     pub fn new(config: Config) -> Self {
+        let memory_guard = Arc::new(MemoryGuard::new(memory_guard_config(&config)));
         Self {
             config,
             shared_config: None,
@@ -283,11 +286,13 @@ impl Orchestrator {
             stats: PipelineStats::default(),
             metrics: None,
             scaling: None,
+            memory_guard,
         }
     }
 
     /// Create a new orchestrator with config and metrics
     pub fn with_metrics(config: Config, metrics: Metrics) -> Self {
+        let memory_guard = Arc::new(MemoryGuard::new(memory_guard_config(&config)));
         Self {
             config,
             shared_config: None,
@@ -295,6 +300,7 @@ impl Orchestrator {
             stats: PipelineStats::default(),
             metrics: Some(metrics),
             scaling: None,
+            memory_guard,
         }
     }
 
@@ -568,6 +574,8 @@ impl Orchestrator {
             flush_secs = self.config.buffer.flush_age_secs,
             recv_batch_size = RECV_BATCH_SIZE,
             hot_reload = self.shared_config.is_some(),
+            memory_limit_bytes = self.memory_guard.limit_bytes(),
+            memory_pressure_threshold = self.config.memory.pressure_threshold,
             "Pipeline running"
         );
 
@@ -670,14 +678,20 @@ impl Orchestrator {
                 }
 
                 _ = flush_interval.tick() => {
-                    // Update memory scaling pressure (periodic, low cost)
-                    if let Some(ref scaling) = self.scaling
-                        && let Some((used, limit)) = read_process_memory() {
+                    // Update memory metrics and scaling pressure from MemoryGuard
+                    {
+                        let used = self.memory_guard.current_bytes();
+                        let limit = self.memory_guard.limit_bytes();
+                        if let Some(ref m) = self.metrics {
+                            m.set_memory_usage(used, limit);
+                        }
+                        if let Some(ref scaling) = self.scaling {
                             scaling.set_memory(used, limit);
                             if limit > 0 {
                                 scaling.set_component("memory", used as f64 / limit as f64);
                             }
                         }
+                    }
 
                     // Check for buffers ready to flush
                     let batches = buffer_manager.get_ready_for_flush();
@@ -725,10 +739,31 @@ impl Orchestrator {
                 // Receive batch of messages from transport
                 // Zero-copy: payload is moved (not copied), topic is Arc<str> clone (refcount only)
                 messages = transport.recv(RECV_BATCH_SIZE) => {
+                    // Memory pressure gate (Pattern B): skip processing when under pressure.
+                    // Messages stay in Kafka (not committed) — consumer lag rises, KEDA scales.
+                    if self.memory_guard.under_pressure() {
+                        static PRESSURE_TS: AtomicU64 = AtomicU64::new(0);
+                        if hyperi_rustlib::logger::log_debounced(&PRESSURE_TS, 5000) {
+                            let current = self.memory_guard.current_bytes();
+                            let limit = self.memory_guard.limit_bytes();
+                            warn!(
+                                current_bytes = current,
+                                limit_bytes = limit,
+                                ratio = format_args!("{:.1}%", if limit > 0 { current as f64 / limit as f64 * 100.0 } else { 0.0 }),
+                                "Memory pressure HIGH — pausing consumption (max 1 per 5s)"
+                            );
+                        }
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        continue;
+                    }
+
                     match messages {
                         Ok(batch) if !batch.is_empty() => {
                             // Process batch of messages
                             for kafka_msg in batch {
+                                // Track memory for backpressure
+                                self.memory_guard.add_bytes(kafka_msg.payload.len() as u64);
+
                                 self.stats.messages_received += 1;
                                 if let Some(ref m) = self.metrics {
                                     m.record_received();
@@ -1095,13 +1130,17 @@ impl Orchestrator {
 
         debug!(batches = batch_count, rows = total_rows, "Flushing batches");
 
-        // Extract per-batch offsets in parallel with batches — enables independent commit.
+        // Extract per-batch offsets and byte sizes — enables independent commit and memory release.
         // A failure in Table A must not block offset commit for Table B (correctness fix).
         let mut per_batch_offsets: Vec<Vec<KafkaOffset>> = Vec::with_capacity(batches.len());
+        let mut per_batch_bytes: Vec<u64> = Vec::with_capacity(batches.len());
         let batches_for_insert: Vec<FlushBatch> = batches
             .into_iter()
             .map(|mut b| {
                 per_batch_offsets.push(std::mem::take(&mut b.offsets));
+                // Track original payload bytes for memory guard release
+                let batch_bytes: u64 = b.raw_payloads.iter().map(|p| p.len() as u64).sum();
+                per_batch_bytes.push(batch_bytes);
                 b
             })
             .collect();
@@ -1116,7 +1155,16 @@ impl Orchestrator {
         }
 
         // Commit offsets independently per batch — Table A success/failure is isolated
-        for (result, offsets) in results.into_iter().zip(per_batch_offsets.into_iter()) {
+        for ((result, offsets), batch_bytes) in results
+            .into_iter()
+            .zip(per_batch_offsets.into_iter())
+            .zip(per_batch_bytes.into_iter())
+        {
+            // Release tracked memory regardless of insert outcome.
+            // Success: data is in ClickHouse, memory freed.
+            // Failure: offsets withheld, Kafka re-delivers — we'll re-track on re-consume.
+            self.memory_guard.release(batch_bytes);
+
             match result {
                 Ok(count) => {
                     self.stats.rows_inserted += count as u64;
@@ -1166,47 +1214,23 @@ impl Default for Orchestrator {
     }
 }
 
-/// Read process RSS from /proc/self/status (Linux only).
-/// Returns (rss_bytes, memory_limit_bytes) or None if unavailable.
-#[cfg(target_os = "linux")]
-fn read_process_memory() -> Option<(u64, u64)> {
-    // RSS from /proc/self/status
-    let status = std::fs::read_to_string("/proc/self/status").ok()?;
-    let rss_kb = status
-        .lines()
-        .find(|l| l.starts_with("VmRSS:"))
-        .and_then(|l| l.split_whitespace().nth(1))
-        .and_then(|v| v.parse::<u64>().ok())?;
-    let rss_bytes = rss_kb * 1024;
-
-    // Memory limit from cgroup v2 (k8s containers)
-    let limit = std::fs::read_to_string("/sys/fs/cgroup/memory.max")
-        .ok()
-        .and_then(|s| s.trim().parse::<u64>().ok())
-        // Fallback: cgroup v1
-        .or_else(|| {
-            std::fs::read_to_string("/sys/fs/cgroup/memory/memory.limit_in_bytes")
-                .ok()
-                .and_then(|s| s.trim().parse::<u64>().ok())
-        })
-        // Fallback: total system memory from /proc/meminfo
-        .or_else(|| {
-            let meminfo = std::fs::read_to_string("/proc/meminfo").ok()?;
-            meminfo
-                .lines()
-                .find(|l| l.starts_with("MemTotal:"))
-                .and_then(|l| l.split_whitespace().nth(1))
-                .and_then(|v| v.parse::<u64>().ok())
-                .map(|kb| kb * 1024)
-        })
-        .unwrap_or(0);
-
-    Some((rss_bytes, limit))
-}
-
-#[cfg(not(target_os = "linux"))]
-fn read_process_memory() -> Option<(u64, u64)> {
-    None
+/// Build a `MemoryGuardConfig` from the loader's `MemoryConfig`.
+///
+/// Maps dfe-loader config fields to the rustlib `MemoryGuardConfig`.
+/// Falls back to `DFE_LOADER_MEMORY_*` env vars when config values are default.
+fn memory_guard_config(config: &Config) -> MemoryGuardConfig {
+    let mem = &config.memory;
+    if mem.limit_bytes > 0 || (mem.pressure_threshold - 0.8).abs() > f64::EPSILON {
+        // Explicit config — use directly
+        MemoryGuardConfig {
+            limit_bytes: mem.limit_bytes as u64,
+            pressure_threshold: mem.pressure_threshold,
+            ..MemoryGuardConfig::default()
+        }
+    } else {
+        // Default config — let env vars override (K8s ConfigMap pattern)
+        MemoryGuardConfig::from_env("DFE_LOADER")
+    }
 }
 
 // =============================================================================
