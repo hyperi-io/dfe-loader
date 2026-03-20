@@ -1,29 +1,48 @@
 // SPDX-License-Identifier: FSL-1.1-ALv2
 // Copyright (c) 2026 HYPERI PTY LIMITED
 
-//! Metrics via hyperi-rustlib MetricsManager.
+//! Metrics via hyperi-rustlib MetricsManager + DFE metric groups.
 //!
-//! All `loader_*` metrics are registered through the global `metrics` crate
-//! recorder installed by `MetricsManager`. The `/metrics`, `/healthz`, and
-//! `/readyz` endpoints are served by `MetricsManager::start_server()`.
+//! Three layers:
+//! 1. `DfeMetrics` — platform `dfe_*` metrics (records, transport, scaling)
+//! 2. Metric groups — standardised `dfe_loader_*` metrics (app, buffer, consumer, sink, CB)
+//! 3. Loader-specific — per-table gauges, salvage, routing metrics
 //!
-//! `DfeMetrics` provides the standard `dfe_*` platform metrics alongside
-//! the loader-specific names.
+//! Legacy `loader_*` names are dual-emitted alongside new `dfe_loader_*` names.
+//! Remove legacy names after dashboard migration.
 
 use std::sync::Arc;
 
 use metrics::{Counter, Gauge, Histogram};
 
 use hyperi_rustlib::ScalingPressure;
+use hyperi_rustlib::metrics::dfe_groups::{
+    AppMetrics, BackpressureMetrics, BufferMetrics, CircuitBreakerMetrics, ConsumerMetrics,
+    EnrichmentMetrics, SchemaCacheMetrics, SinkMetrics,
+};
 use hyperi_rustlib::metrics::{DfeMetrics, MetricsManager};
 
 /// Application metrics backed by rustlib MetricsManager.
 ///
-/// Registers `loader_*` metrics via the global `metrics` recorder and
-/// `dfe_*` platform metrics via `DfeMetrics`. Both are served on `/metrics`.
+/// Registers metrics at three layers:
+/// - `dfe_*` platform metrics via `DfeMetrics`
+/// - `dfe_loader_*` standardised metrics via metric groups
+/// - `loader_*` legacy metrics (dual-emit, remove after dashboard migration)
 #[derive(Clone)]
 pub struct Metrics {
     dfe: Arc<DfeMetrics>,
+
+    // Standardised metric groups (dfe_loader_* namespace)
+    pub app: AppMetrics,
+    pub buffer: BufferMetrics,
+    pub consumer: ConsumerMetrics,
+    pub sink: SinkMetrics,
+    pub circuit_breaker: CircuitBreakerMetrics,
+    pub backpressure: BackpressureMetrics,
+    pub enrichment: EnrichmentMetrics,
+    pub schema_cache: SchemaCacheMetrics,
+
+    // Legacy loader_* metrics (dual-emit — remove after dashboard migration)
     pub messages_received: Counter,
     pub messages_processed: Counter,
     pub messages_dlq: Counter,
@@ -48,6 +67,18 @@ impl Metrics {
 
         Self {
             dfe,
+
+            // Standardised groups (dfe_loader_* namespace)
+            app: AppMetrics::new(manager, env!("CARGO_PKG_VERSION"), ""),
+            buffer: BufferMetrics::new(manager),
+            consumer: ConsumerMetrics::new(manager),
+            sink: SinkMetrics::new(manager),
+            circuit_breaker: CircuitBreakerMetrics::new(manager),
+            backpressure: BackpressureMetrics::new(manager),
+            enrichment: EnrichmentMetrics::new(manager),
+            schema_cache: SchemaCacheMetrics::new(manager),
+
+            // Legacy metrics (dual-emit)
             messages_received: manager.counter(
                 "messages_received_total",
                 "Total messages received from Kafka",
@@ -80,12 +111,14 @@ impl Metrics {
     /// Record a message received.
     pub fn record_received(&self) {
         self.messages_received.increment(1);
+        self.app.record_received(1);
         self.dfe.records_received(1);
     }
 
     /// Record a message processed for a table.
     pub fn record_processed(&self, table: &str) {
         self.messages_processed.increment(1);
+        self.app.record_processed(1);
         metrics::counter!("loader_messages_by_table_total", "table" => table.to_string())
             .increment(1);
         self.dfe.records_delivered(1);
@@ -94,6 +127,7 @@ impl Metrics {
     /// Record a message sent to DLQ.
     pub fn record_dlq(&self) {
         self.messages_dlq.increment(1);
+        self.app.record_error(1);
         self.dfe.records_dlq(1);
     }
 
@@ -102,6 +136,7 @@ impl Metrics {
         self.batches_flushed.increment(1);
         self.rows_inserted.increment(rows as u64);
         self.insert_latency.record(latency_secs);
+        self.sink.record_duration("clickhouse", latency_secs);
         self.dfe.transport_sent("clickhouse", rows as u64);
         self.dfe.transport_send_duration("clickhouse", latency_secs);
     }
@@ -116,6 +151,7 @@ impl Metrics {
             "table" => table.to_string()
         )
         .record(latency_secs);
+        self.sink.record_duration("clickhouse", latency_secs);
         self.dfe.transport_sent("clickhouse", rows as u64);
         self.dfe.transport_send_duration("clickhouse", latency_secs);
     }
@@ -123,6 +159,7 @@ impl Metrics {
     /// Record an insert error.
     pub fn record_error(&self) {
         self.insert_errors.increment(1);
+        self.sink.record_error("clickhouse");
         self.dfe.transport_send_errors("clickhouse", 1);
     }
 
@@ -131,13 +168,10 @@ impl Metrics {
         self.buffer_rows.set(rows as f64);
         self.buffer_bytes.set(bytes as f64);
         self.buffer_tables.set(tables as f64);
+        self.buffer.set_buffer(bytes, rows);
     }
 
     /// Update per-table buffer depth.
-    ///
-    /// Emits `loader_buffer_rows_by_table` and `loader_buffer_bytes_by_table`
-    /// gauges labelled by table name. Enables monitoring individual table
-    /// backlog when one table has a problematic schema or cluster-side issue.
     pub fn update_per_table_buffer(&self, table: &str, rows: usize, bytes: usize) {
         metrics::gauge!("loader_buffer_rows_by_table", "table" => table.to_string())
             .set(rows as f64);
@@ -146,17 +180,16 @@ impl Metrics {
     }
 
     /// Update per-table circuit breaker state.
-    ///
-    /// Emits `loader_circuit_breaker_state` gauge labelled by table.
-    /// Values: 0=closed (healthy), 1=open (failing), 2=half-open (probing).
     pub fn update_circuit_breaker_state(&self, table: &str, state: u8) {
         metrics::gauge!("loader_circuit_breaker_state", "table" => table.to_string())
             .set(f64::from(state));
+        self.circuit_breaker.set_state(table, state);
     }
 
     /// Record Kafka offsets committed after successful insert.
     pub fn record_offsets_committed(&self, count: usize) {
         self.offsets_committed.increment(count as u64);
+        self.consumer.record_offsets_committed(count as u64);
     }
 
     /// Update pipeline readiness.
@@ -170,8 +203,9 @@ impl Metrics {
     }
 
     /// Update memory usage from MemoryGuard.
-    pub fn set_memory_usage(&self, current_bytes: u64, _limit_bytes: u64) {
+    pub fn set_memory_usage(&self, current_bytes: u64, limit_bytes: u64) {
         self.memory_used.set(current_bytes as f64);
+        self.app.set_memory(current_bytes, limit_bytes);
     }
 }
 
@@ -220,8 +254,6 @@ impl ServerState {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn test_server_state_ready() {
         let ready = std::sync::atomic::AtomicBool::new(false);
