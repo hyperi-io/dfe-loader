@@ -1097,6 +1097,7 @@ dependencies = [
  "mimalloc",
  "parking_lot",
  "proptest",
+ "rdkafka",
  "regex",
  "reqwest 0.12.28",
  "rmp-serde",
