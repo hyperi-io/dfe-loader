@@ -196,14 +196,18 @@ rustlib v1.14.0+ switches rdkafka to dynamic-linking against system librdkafka
 - [ ] Remove stale/unused dependencies
 - [ ] `cargo update` + full test suite
 
-### Rustlib Capability Review
+### DFE Metrics Standard Migration
 
-Audit dfe-loader for bespoke code that duplicates hyperi-rustlib functionality.
-Replace with rustlib equivalents + extensions where applicable.
+Standard: `hyperi-ai/standards/rules/dfe-metrics.md`
+rustlib v1.17.0 provides `metrics-dfe` feature with composable metric groups.
 
-- [ ] Full comparison of loader modules vs rustlib features
-- [ ] Replace any duplicated patterns (config, logging, metrics, resilience, transport)
-- [ ] Document remaining loader-specific code that is genuinely application-specific
+- [x] Implement `metrics-dfe` feature in rustlib (8 metric groups)
+- [x] Wire auto-emit: ConfigReloader `config_reloads_total`, StatsContext `rdkafka_*`
+- [x] Adopt all 8 groups in dfe-loader (dual-emit with legacy `loader_*` names)
+- [x] Write DFE metrics standard in hyperi-ai
+- [x] Write per-app migration prompts (`~/DFE-METRICS-MIGRATION-*.md`)
+- [ ] Change MetricsManager namespace from `loader` to `dfe_loader` (breaks dashboards — coordinate)
+- [ ] Remove legacy `loader_*` metric names after dashboard migration
 
 ---
 
