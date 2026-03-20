@@ -267,6 +267,11 @@ impl Inserter {
         self
     }
 
+    /// Get a reference to the circuit breaker (for metrics emission).
+    pub fn circuit_breaker(&self) -> Option<&Arc<CircuitBreaker>> {
+        self.circuit_breaker.as_ref()
+    }
+
     /// Insert rows into a table with error-aware retry.
     ///
     /// Dispatches based on `insert_format`:

@@ -853,6 +853,18 @@ impl Orchestrator {
                                     buf_stats.pending_bytes,
                                     buf_stats.pending_chunks,
                                 );
+
+                                // Per-table buffer depth for monitoring individual table backlog
+                                for (table, rows, bytes) in buffer_manager.per_table_stats() {
+                                    m.update_per_table_buffer(table, rows, bytes);
+                                }
+
+                                // Per-table circuit breaker state
+                                if let Some(ref cb) = inserter.circuit_breaker() {
+                                    for (table, state) in cb.per_table_states() {
+                                        m.update_circuit_breaker_state(&table, state);
+                                    }
+                                }
                             }
 
                             // Update scaling pressure components
