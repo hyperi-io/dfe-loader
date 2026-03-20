@@ -1,6 +1,6 @@
 [package]
 name = "dfe-loader"
-version = "1.14.5"
+version = "1.15.0-dev.1"
 edition = "2024"
 authors = ["HyperI <dev@hyperi.com.au>"]
 description = "High-performance Kafka to ClickHouse data loader"
@@ -23,13 +23,10 @@ tokio = { version = ">=1.48", features = ["full"] }
 tokio-util = { version = ">=0.7", features = ["rt"] }
 
 # Shared library with transport abstraction
-hyperi-rustlib = { version = ">=1.16.0", features = ["transport-kafka", "transport-grpc", "dlq-kafka", "config", "config-reload", "deployment", "version-check", "scaling", "cli", "top", "logger", "expression"] }
+hyperi-rustlib = { version = ">=1.17.0", features = ["transport-kafka", "transport-grpc", "dlq-kafka", "config", "config-reload", "deployment", "version-check", "scaling", "cli", "top", "logger", "metrics", "metrics-dfe", "expression", "memory"] }
 
 # CEL expression evaluation (same crate as rustlib uses, needed for Program type)
 cel-interpreter = { version = ">=0.10.0, <0.11", features = ["json"] }
-
-# Kafka (SASL/SCRAM required for auth) - also needed for DLQ producer
-rdkafka = { version = ">=0.39.0", features = ["dynamic-linking", "ssl", "sasl"] }
 
 # JSON parsing (SIMD-accelerated)
 sonic-rs = ">=0.5"
@@ -52,10 +49,7 @@ anyhow = ">=1.0"
 
 # Logging & metrics
 tracing = ">=0.1"
-prometheus = ">=0.14"
-hyper = { version = ">=1.8", features = ["server", "http1"] }
-hyper-util = { version = ">=0.1", features = ["tokio"] }
-http-body-util = ">=0.1"
+metrics = ">=0.24"
 
 # Memory management - alternative allocators for performance
 # jemalloc: Good for long-running servers with large allocations
@@ -111,6 +105,9 @@ rstest = ">=0.22"
 # Integration test containers
 testcontainers = ">=0.26"
 testcontainers-modules = { version = ">=0.10", features = ["kafka", "clickhouse"] }
+
+# Kafka producer for e2e tests (test message injection)
+rdkafka = { version = ">=0.39.0", features = ["dynamic-linking"] }
 
 # ClickHouse official crate (HTTP/RowBinary) — bakeoff comparison vs JSONEachRow path
 clickhouse = { version = ">=0.14", features = ["lz4", "time", "rustls-tls", "rustls-tls-native-roots"] }
@@ -181,21 +178,60 @@ opt-level = 3          # Maximum optimization (default for release, explicit for
 inherits = "release"
 debug = true
 
+[profile.profiling]
+inherits = "release"
+debug = true
+strip = false
+
+[lints.rust]
+# Tests require unsafe for env::set_var (edition 2024). Warn, not deny/forbid.
+# CI can enforce stricter for lib: cargo clippy --lib -- -D unsafe_code
+unsafe_code = "warn"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "warn"
+expect_used = "warn"
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+# These are too strict for a codebase with dynamic Map<String, Value> patterns
+cast_possible_truncation = "allow"
+cast_sign_loss = "allow"
+cast_precision_loss = "allow"
+cast_lossless = "allow"
+
 # =============================================================================
-# clickhouse-rs Fork Swap (Phase 5.5 — Steps B/C only)
+# clickhouse-rs Fork Swap (hyperi-io/clickhouse-rs)
 # =============================================================================
 #
 # dfe-loader is the test harness for the HyperI clickhouse-rs fork.
 # Swap mechanism: uncomment [patch] below to activate the fork.
 # Zero change to [dependencies] — the patch overrides the crates.io version.
 #
-# Branch merge order (test each in dfe-loader before merging next):
-#   feature/batching → feature/native-transport → feature/connection-pooling → feature/lc-insert
+# Fork branch chain (merge order — test each in dfe-loader before merging next):
+#   native-transport → connection-pooling → lc-insert → async-inserter → optimise-1
+#   batching and remediation are independent (mergeable to upstream anytime)
 #
-# PREREQUISITE: Complete Phase 5.7 and release Step B binary BEFORE using this.
+# Branch structure:
+#   main (upstream v0.14.2)
+#   ├── hyperi/remediation-deps — Drop fxhash + linked-hash-map (RUSTSEC-2025-0057)
+#   │   └── hyperi/remediation-polonius — Drop polonius-the-crab (RUSTSEC-2024-0436)
+#   ├── hyperi/native-transport — Native TCP SELECT + INSERT, full type coverage
+#   │   └── hyperi/connection-pooling — Deadpool pool, cursor drain, health checks
+#   │       └── hyperi/lc-insert — LowCardinality INSERT + LC(Nullable) reader fix
+#   │           └── hyperi/async-inserter — AsyncInserter (HTTP + native), TableBatcher
+#   │               └── hyperi/optimise-1 — DynamicInsert, ParsedType, schema recovery
+#   └── hyperi/batching — HTTP TableBatcher (independent)
 #
-# [patch.crates-io]
-# clickhouse = { path = "../clickhouse-rs" }
+# optimise-1 has remediation-polonius merged in (no code overlap, clean merge)
+# so dfe-loader gets both feature work and dep remediation from one checkout.
+#
+# Design spec: docs/specs/2026-03-18-clickhouse-rs-fork-swap.md
+#
+[patch.crates-io]
+clickhouse = { git = "https://github.com/hyperi-io/clickhouse-rs.git", branch = "hyperi/optimise-1" }
 #
 # To revert: comment out or remove the [patch.crates-io] section above.
 # =============================================================================

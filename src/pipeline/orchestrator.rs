@@ -12,6 +12,7 @@
 //! JSONEachRow HTTP inserts to ClickHouse.
 
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 use std::time::Duration;
 
 use serde_json::Value;
@@ -24,6 +25,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use hyperi_rustlib::ScalingPressure;
 use hyperi_rustlib::dlq::{Dlq, DlqEntry, DlqSource};
+use hyperi_rustlib::memory::{MemoryGuard, MemoryGuardConfig};
 
 use crate::Result;
 use crate::buffer::{BufferManager, FlushBatch, KafkaOffset};
@@ -270,11 +272,13 @@ pub struct Orchestrator {
     stats: PipelineStats,
     metrics: Option<Metrics>,
     scaling: Option<Arc<ScalingPressure>>,
+    memory_guard: Arc<MemoryGuard>,
 }
 
 impl Orchestrator {
     /// Create a new orchestrator with config
     pub fn new(config: Config) -> Self {
+        let memory_guard = Arc::new(MemoryGuard::new(memory_guard_config(&config)));
         Self {
             config,
             shared_config: None,
@@ -282,11 +286,13 @@ impl Orchestrator {
             stats: PipelineStats::default(),
             metrics: None,
             scaling: None,
+            memory_guard,
         }
     }
 
     /// Create a new orchestrator with config and metrics
     pub fn with_metrics(config: Config, metrics: Metrics) -> Self {
+        let memory_guard = Arc::new(MemoryGuard::new(memory_guard_config(&config)));
         Self {
             config,
             shared_config: None,
@@ -294,6 +300,7 @@ impl Orchestrator {
             stats: PipelineStats::default(),
             metrics: Some(metrics),
             scaling: None,
+            memory_guard,
         }
     }
 
@@ -322,15 +329,36 @@ impl Orchestrator {
         let mut transport = TransportBackend::from_config(&self.config).await?;
         info!(transport = transport.name(), "Transport initialized");
 
-        // Create HTTP client for JSONEachRow inserts and DDL/schema queries
+        // Create HTTP client for DDL/schema queries (and JSONEachRow fallback)
         let ch_config: crate::clickhouse::ClickHouseConfig = (&self.config.clickhouse).into();
         let http_client = Arc::new(
             HttpClickHouseClient::new(&ch_config)
                 .map_err(|e| crate::Error::ClickHouse(e.to_string()))?,
         );
 
-        // Inserter uses JSONEachRow HTTP inserts
-        let inserter = Inserter::new(Arc::clone(&http_client), InserterConfig::default());
+        // Build clickhouse::Client for DynamicInsert (RowBinary path)
+        let ch_client = {
+            let host = ch_config
+                .primary_endpoint()
+                .unwrap_or_else(|| "localhost:8123".to_string());
+            let scheme = if ch_config.tls { "https" } else { "http" };
+            let mut client = clickhouse::Client::default()
+                .with_url(format!("{scheme}://{host}"))
+                .with_user(&ch_config.username)
+                .with_password(&ch_config.password)
+                .with_database(&ch_config.database);
+            if ch_config.compression {
+                client = client.with_compression(clickhouse::Compression::Lz4);
+            }
+            client
+        };
+
+        let insert_format = ch_config.insert_format;
+        info!(format = %insert_format, "Insert format configured");
+
+        // Inserter dispatches based on insert_format
+        let inserter = Inserter::new(Arc::clone(&http_client), InserterConfig::default())
+            .with_insert_format(insert_format, Some(ch_client));
 
         // DLQ (unified rustlib module — cascade: Kafka primary, file fallback)
         let dlq_config = self.config.routing.dlq.to_rustlib_config();
@@ -546,6 +574,8 @@ impl Orchestrator {
             flush_secs = self.config.buffer.flush_age_secs,
             recv_batch_size = RECV_BATCH_SIZE,
             hot_reload = self.shared_config.is_some(),
+            memory_limit_bytes = self.memory_guard.limit_bytes(),
+            memory_pressure_threshold = self.config.memory.pressure_threshold,
             "Pipeline running"
         );
 
@@ -569,9 +599,12 @@ impl Orchestrator {
                         let new_config = shared.read().clone();
                         let version = shared.version();
 
+                        // Warn about restart-required changes (silently ignored otherwise)
+                        warn_restart_required(&self.config, &new_config);
+
                         info!(version = version, "Config reloaded, applying safe changes");
 
-                        // Rebuild router and transformer (safe to hot-reload)
+                        // --- Hot-reloaded: takes effect on next batch ---
                         router = Router::new(&new_config.routing);
                         transformer = Transformer::with_routing(
                             &new_config.timestamp_dq,
@@ -579,17 +612,9 @@ impl Orchestrator {
                             &new_config.field_sanitization,
                             &new_config.routing,
                         );
-
-                        // Update buffer thresholds
                         buffer_manager.update_config(&new_config.buffer);
-
-                        // Rebuild capture overrides
                         capture_overrides = CaptureOverrides::new(&new_config.metadata);
 
-                        // Rebuild extractor and mode gate on config change
-                        // (col_meta_cache and schema_cache are Arc, not rebuilt)
-
-                        // Update flush interval if changed
                         if new_config.buffer.flush_age_secs != self.config.buffer.flush_age_secs {
                             flush_interval = interval(Duration::from_secs(
                                 new_config.buffer.flush_age_secs,
@@ -599,6 +624,11 @@ impl Orchestrator {
                         // Store new config (for process_message to reference)
                         self.config = new_config;
 
+                        hyperi_rustlib::logger::security::config_changed(
+                            "config_reload",
+                            "system",
+                            &format!("pipeline config reloaded (version {version})"),
+                        );
                         info!(version = version, "Config hot-reload complete");
                     }
                 }
@@ -648,14 +678,20 @@ impl Orchestrator {
                 }
 
                 _ = flush_interval.tick() => {
-                    // Update memory scaling pressure (periodic, low cost)
-                    if let Some(ref scaling) = self.scaling
-                        && let Some((used, limit)) = read_process_memory() {
+                    // Update memory metrics and scaling pressure from MemoryGuard
+                    {
+                        let used = self.memory_guard.current_bytes();
+                        let limit = self.memory_guard.limit_bytes();
+                        if let Some(ref m) = self.metrics {
+                            m.set_memory_usage(used, limit);
+                        }
+                        if let Some(ref scaling) = self.scaling {
                             scaling.set_memory(used, limit);
                             if limit > 0 {
                                 scaling.set_component("memory", used as f64 / limit as f64);
                             }
                         }
+                    }
 
                     // Check for buffers ready to flush
                     let batches = buffer_manager.get_ready_for_flush();
@@ -703,10 +739,31 @@ impl Orchestrator {
                 // Receive batch of messages from transport
                 // Zero-copy: payload is moved (not copied), topic is Arc<str> clone (refcount only)
                 messages = transport.recv(RECV_BATCH_SIZE) => {
+                    // Memory pressure gate (Pattern B): skip processing when under pressure.
+                    // Messages stay in Kafka (not committed) — consumer lag rises, KEDA scales.
+                    if self.memory_guard.under_pressure() {
+                        static PRESSURE_TS: AtomicU64 = AtomicU64::new(0);
+                        if hyperi_rustlib::logger::log_debounced(&PRESSURE_TS, 5000) {
+                            let current = self.memory_guard.current_bytes();
+                            let limit = self.memory_guard.limit_bytes();
+                            warn!(
+                                current_bytes = current,
+                                limit_bytes = limit,
+                                ratio = format_args!("{:.1}%", if limit > 0 { current as f64 / limit as f64 * 100.0 } else { 0.0 }),
+                                "Memory pressure HIGH — pausing consumption (max 1 per 5s)"
+                            );
+                        }
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        continue;
+                    }
+
                     match messages {
                         Ok(batch) if !batch.is_empty() => {
                             // Process batch of messages
                             for kafka_msg in batch {
+                                // Track memory for backpressure
+                                self.memory_guard.add_bytes(kafka_msg.payload.len() as u64);
+
                                 self.stats.messages_received += 1;
                                 if let Some(ref m) = self.metrics {
                                     m.record_received();
@@ -756,13 +813,29 @@ impl Orchestrator {
 
                                             match dlq_tx.try_send(entry) {
                                                 Ok(()) => {
+                                                    hyperi_rustlib::logger::security::record_dlq(
+                                                        "processing",
+                                                        &e.to_string(),
+                                                        Some(&format!(
+                                                            "topic: {}, partition: {}, offset: {}",
+                                                            kafka_msg.topic,
+                                                            kafka_msg.partition,
+                                                            kafka_msg.offset
+                                                        )),
+                                                    );
                                                     debug!(error = %e, "Message queued for DLQ");
                                                 }
                                                 Err(mpsc::error::TrySendError::Full(_)) => {
-                                                    warn!(error = %e, "DLQ channel full, message dropped");
+                                                    static DLQ_FULL_TS: AtomicU64 = AtomicU64::new(0);
+                                                    if hyperi_rustlib::logger::log_debounced(&DLQ_FULL_TS, 5000) {
+                                                        warn!(error = %e, "DLQ channel full, messages dropped (max 1 per 5s)");
+                                                    }
                                                 }
                                                 Err(mpsc::error::TrySendError::Closed(_)) => {
-                                                    warn!(error = %e, "DLQ channel closed");
+                                                    static DLQ_CLOSED_TS: AtomicU64 = AtomicU64::new(0);
+                                                    if hyperi_rustlib::logger::log_debounced(&DLQ_CLOSED_TS, 5000) {
+                                                        warn!(error = %e, "DLQ channel closed (max 1 per 5s)");
+                                                    }
                                                 }
                                             }
                                         } else {
@@ -780,6 +853,18 @@ impl Orchestrator {
                                     buf_stats.pending_bytes,
                                     buf_stats.pending_chunks,
                                 );
+
+                                // Per-table buffer depth for monitoring individual table backlog
+                                for (table, rows, bytes) in buffer_manager.per_table_stats() {
+                                    m.update_per_table_buffer(table, rows, bytes);
+                                }
+
+                                // Per-table circuit breaker state
+                                if let Some(ref cb) = inserter.circuit_breaker() {
+                                    for (table, state) in cb.per_table_states() {
+                                        m.update_circuit_breaker_state(&table, state);
+                                    }
+                                }
                             }
 
                             // Update scaling pressure components
@@ -897,6 +982,11 @@ impl Orchestrator {
         let format = match format_detector.check_and_detect(&msg.payload) {
             Ok(fmt) => fmt,
             Err(_expected) => {
+                hyperi_rustlib::logger::security::input_validation_failure(
+                    "format_check",
+                    "payload format mismatch",
+                    None,
+                );
                 return Err(crate::Error::Json("Format mismatch".into()));
             }
         };
@@ -1052,13 +1142,17 @@ impl Orchestrator {
 
         debug!(batches = batch_count, rows = total_rows, "Flushing batches");
 
-        // Extract per-batch offsets in parallel with batches — enables independent commit.
+        // Extract per-batch offsets and byte sizes — enables independent commit and memory release.
         // A failure in Table A must not block offset commit for Table B (correctness fix).
         let mut per_batch_offsets: Vec<Vec<KafkaOffset>> = Vec::with_capacity(batches.len());
+        let mut per_batch_bytes: Vec<u64> = Vec::with_capacity(batches.len());
         let batches_for_insert: Vec<FlushBatch> = batches
             .into_iter()
             .map(|mut b| {
                 per_batch_offsets.push(std::mem::take(&mut b.offsets));
+                // Track original payload bytes for memory guard release
+                let batch_bytes: u64 = b.raw_payloads.iter().map(|p| p.len() as u64).sum();
+                per_batch_bytes.push(batch_bytes);
                 b
             })
             .collect();
@@ -1073,7 +1167,16 @@ impl Orchestrator {
         }
 
         // Commit offsets independently per batch — Table A success/failure is isolated
-        for (result, offsets) in results.into_iter().zip(per_batch_offsets.into_iter()) {
+        for ((result, offsets), batch_bytes) in results
+            .into_iter()
+            .zip(per_batch_offsets.into_iter())
+            .zip(per_batch_bytes.into_iter())
+        {
+            // Release tracked memory regardless of insert outcome.
+            // Success: data is in ClickHouse, memory freed.
+            // Failure: offsets withheld, Kafka re-delivers — we'll re-track on re-consume.
+            self.memory_guard.release(batch_bytes);
+
             match result {
                 Ok(count) => {
                     self.stats.rows_inserted += count as u64;
@@ -1123,47 +1226,23 @@ impl Default for Orchestrator {
     }
 }
 
-/// Read process RSS from /proc/self/status (Linux only).
-/// Returns (rss_bytes, memory_limit_bytes) or None if unavailable.
-#[cfg(target_os = "linux")]
-fn read_process_memory() -> Option<(u64, u64)> {
-    // RSS from /proc/self/status
-    let status = std::fs::read_to_string("/proc/self/status").ok()?;
-    let rss_kb = status
-        .lines()
-        .find(|l| l.starts_with("VmRSS:"))
-        .and_then(|l| l.split_whitespace().nth(1))
-        .and_then(|v| v.parse::<u64>().ok())?;
-    let rss_bytes = rss_kb * 1024;
-
-    // Memory limit from cgroup v2 (k8s containers)
-    let limit = std::fs::read_to_string("/sys/fs/cgroup/memory.max")
-        .ok()
-        .and_then(|s| s.trim().parse::<u64>().ok())
-        // Fallback: cgroup v1
-        .or_else(|| {
-            std::fs::read_to_string("/sys/fs/cgroup/memory/memory.limit_in_bytes")
-                .ok()
-                .and_then(|s| s.trim().parse::<u64>().ok())
-        })
-        // Fallback: total system memory from /proc/meminfo
-        .or_else(|| {
-            let meminfo = std::fs::read_to_string("/proc/meminfo").ok()?;
-            meminfo
-                .lines()
-                .find(|l| l.starts_with("MemTotal:"))
-                .and_then(|l| l.split_whitespace().nth(1))
-                .and_then(|v| v.parse::<u64>().ok())
-                .map(|kb| kb * 1024)
-        })
-        .unwrap_or(0);
-
-    Some((rss_bytes, limit))
-}
-
-#[cfg(not(target_os = "linux"))]
-fn read_process_memory() -> Option<(u64, u64)> {
-    None
+/// Build a `MemoryGuardConfig` from the loader's `MemoryConfig`.
+///
+/// Maps dfe-loader config fields to the rustlib `MemoryGuardConfig`.
+/// Falls back to `DFE_LOADER_MEMORY_*` env vars when config values are default.
+fn memory_guard_config(config: &Config) -> MemoryGuardConfig {
+    let mem = &config.memory;
+    if mem.limit_bytes > 0 || (mem.pressure_threshold - 0.8).abs() > f64::EPSILON {
+        // Explicit config — use directly
+        MemoryGuardConfig {
+            limit_bytes: mem.limit_bytes as u64,
+            pressure_threshold: mem.pressure_threshold,
+            ..MemoryGuardConfig::default()
+        }
+    } else {
+        // Default config — let env vars override (K8s ConfigMap pattern)
+        MemoryGuardConfig::from_env("DFE_LOADER")
+    }
 }
 
 // =============================================================================
@@ -1293,6 +1372,85 @@ fn inject_risk(
             .map(|s| Value::String(s.to_string()))
             .collect();
         data.insert("risk_factors".to_string(), Value::Array(factors));
+    }
+}
+
+// =============================================================================
+// Hot-Reload Safety: restart-required change detection
+// =============================================================================
+//
+// Hot-reloaded (takes effect on next batch):
+//   routing.*             — router rebuilt on reload
+//   timestamp_dq.*        — transformer rebuilt on reload
+//   metadata.*            — transformer + capture overrides rebuilt on reload
+//   field_sanitization.*  — transformer rebuilt on reload
+//   buffer.flush_rows / flush_bytes / flush_age_secs — buffer thresholds updated
+//   coercion.*            — coercer config (referenced per-batch)
+//   enrichment.ip_fields  — which fields to enrich
+//   field_mapping.*       — field mapping overrides
+//
+// Requires pod restart (connections/state established at startup):
+//   kafka.*               — Kafka consumer created at startup
+//   grpc.*                — gRPC server binds at startup
+//   transport             — transport type bound at startup
+//   clickhouse.*          — HTTP client + clickhouse::Client created at startup
+//   payload.format        — format detection set at startup
+//   metrics.*             — HTTP metrics server binds at startup
+//   logging.*             — tracing subscriber installed at startup
+//   scaling.* / keda.*    — scaling pressure built at startup
+//   hot_reload.*          — watcher config set at startup
+//   schema.*              — schema cache created at startup
+//   geoip.*               — MMDB readers opened at startup
+//   computed_columns.*    — computed column cache built at startup
+//   column_directives.*   — column directive cache built at startup
+
+/// Log warnings for config fields that changed but require a pod restart.
+///
+/// These fields are bound to connections or state created at startup. Changing
+/// them via hot-reload has no effect — the old values remain active until the
+/// pod is restarted.
+fn warn_restart_required(old: &Config, new: &Config) {
+    if old.transport != new.transport {
+        warn!("transport changed — requires restart to take effect");
+    }
+    if old.kafka != new.kafka {
+        warn!("kafka config changed — requires restart to take effect");
+    }
+    if old.grpc != new.grpc {
+        warn!("grpc config changed — requires restart to take effect");
+    }
+    if old.clickhouse != new.clickhouse {
+        warn!("clickhouse config changed — requires restart to take effect");
+    }
+    if old.payload != new.payload {
+        warn!("payload config changed — requires restart to take effect");
+    }
+    if old.metrics != new.metrics {
+        warn!("metrics config changed — requires restart to take effect");
+    }
+    if old.logging != new.logging {
+        warn!("logging config changed — requires restart to take effect");
+    }
+    if old.scaling != new.scaling {
+        warn!("scaling config changed — requires restart to take effect");
+    }
+    if old.keda != new.keda {
+        warn!("keda config changed — requires restart to take effect");
+    }
+    if old.hot_reload != new.hot_reload {
+        warn!("hot_reload config changed — requires restart to take effect");
+    }
+    if old.schema != new.schema {
+        warn!("schema config changed — requires restart to take effect");
+    }
+    if old.geoip != new.geoip {
+        warn!("geoip config changed — requires restart to take effect");
+    }
+    if old.computed_columns != new.computed_columns {
+        warn!("computed_columns config changed — requires restart to take effect");
+    }
+    if old.column_directives != new.column_directives {
+        warn!("column_directives config changed — requires restart to take effect");
     }
 }
 

@@ -310,56 +310,81 @@ async fn test_with_isolated_clickhouse() {
 
 ---
 
+## Test Modes
+
+Tests support two backends, controlled by `TEST_MODE` in `.env`:
+
+### Remote (default)
+
+Uses the devex cluster endpoints from `.env`. Tests skip if endpoints are unreachable.
+
+```bash
+# Ensure .env has CLICKHOUSE_HOST, KAFKA_BROKERS, etc.
+TEST_MODE=remote cargo nextest run
+```
+
+- ClickHouse: `clickhouse.devex.hyperi.io:8543` (HTTPS) / `:9440` (native TLS)
+- Kafka: `kafka.devex.hyperi.io:32089` (SASL_SSL, SCRAM-SHA-512)
+- 3-node cluster: DDL uses `ON CLUSTER 'default'`
+
+### Docker-local
+
+Uses `dfe-docker` infra profile (ClickHouse + Kafka on localhost, no auth, no TLS).
+
+```bash
+# Start infrastructure (once, stays running)
+cd /projects/dfe-docker
+docker compose --profile infra up -d
+
+# Run tests
+TEST_MODE=docker cargo nextest run
+
+# Tear down (when done)
+docker compose --profile infra down
+```
+
+- ClickHouse: `localhost:8123` (HTTP) / `localhost:9000` (native)
+- Kafka: `localhost:19092` (PLAINTEXT, no SASL)
+- Single node: DDL omits `ON CLUSTER`
+
+### Config Helpers
+
+Tests use `ClickHouseTestConfig::from_env()` and `KafkaTestConfig::from_env()` which
+return the correct connection details for the active mode. Use `skip_if_no_clickhouse!()`
+and `skip_if_no_kafka!()` macros to gracefully skip when endpoints are unreachable.
+
+---
+
 ## Running Tests
 
 ### All Tests
 
 ```bash
-cargo test
+cargo nextest run
 ```
 
 ### Unit Tests Only
 
 ```bash
-cargo test --lib
+cargo nextest run --lib
 ```
 
 ### Integration Tests Only
 
 ```bash
-cargo test --test integration_tests
+cargo nextest run --test integration_tests
 ```
 
 ### Property Tests Only
 
 ```bash
-cargo test --test integration_tests property::
+cargo nextest run --test integration_tests -E 'test(property)'
 ```
 
 ### Performance Example
 
 ```bash
-cargo test --test performance_example -- --nocapture
-```
-
-### With External ClickHouse
-
-Integration tests require ClickHouse. Configure via `.env`:
-
-```bash
-CLICKHOUSE_HOST=k8s.tyrell.com.au
-CLICKHOUSE_NATIVE_PORT=30900
-CLICKHOUSE_DATABASE=benchmark
-CLICKHOUSE_USER=default
-CLICKHOUSE_PASSWORD=<password>
-```
-
-Tests automatically skip if ClickHouse is unavailable.
-
-### With Testcontainers (Future)
-
-```bash
-cargo test --test integration_tests --features testcontainers
+cargo nextest run --test performance_example --no-capture
 ```
 
 ---

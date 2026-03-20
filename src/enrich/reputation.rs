@@ -17,9 +17,9 @@
 //! 3. **Prefix trie**: CIDR ranges with prefix matching
 //! 4. **Lazy loading**: Only load enabled blocklists
 
+use parking_lot::RwLock;
 use std::collections::HashSet;
 use std::net::IpAddr;
-use std::sync::RwLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use rustc_hash::FxHashMap;
@@ -389,7 +389,7 @@ impl ReputationEnricher {
 
     /// Add a single IP to the blocklist
     pub fn add_ip(&self, ip: IpAddr, threat_type: ThreatType, source: ThreatSource) {
-        let mut threats = self.ip_threats.write().unwrap();
+        let mut threats = self.ip_threats.write();
         let info = IpSourceInfo {
             threat_type,
             source,
@@ -405,7 +405,7 @@ impl ReputationEnricher {
         threat_type: ThreatType,
         source: ThreatSource,
     ) {
-        let mut prefixes = self.prefixes.write().unwrap();
+        let mut prefixes = self.prefixes.write();
         prefixes.push(IpPrefix {
             addr,
             prefix_len,
@@ -455,16 +455,16 @@ impl ReputationEnricher {
 
     /// Check if any blocklists are loaded
     pub fn is_available(&self) -> bool {
-        let threats = self.ip_threats.read().unwrap();
-        let prefixes = self.prefixes.read().unwrap();
+        let threats = self.ip_threats.read();
+        let prefixes = self.prefixes.read();
         !threats.is_empty() || !prefixes.is_empty()
     }
 
     /// Get cache and blocklist statistics
     pub fn stats(&self) -> ReputationCacheStats {
-        let cache = self.cache.read().unwrap();
-        let threats = self.ip_threats.read().unwrap();
-        let prefixes = self.prefixes.read().unwrap();
+        let cache = self.cache.read();
+        let threats = self.ip_threats.read();
+        let prefixes = self.prefixes.read();
 
         ReputationCacheStats {
             hits: self.cache_hits.load(Ordering::Relaxed),
@@ -510,7 +510,7 @@ impl ReputationEnricher {
 
         // Check IP sets (O(1) lookup)
         {
-            let threats = self.ip_threats.read().unwrap();
+            let threats = self.ip_threats.read();
             if let Some(infos) = threats.get(addr) {
                 for info in infos {
                     self.apply_threat(&mut result, info.threat_type, info.source);
@@ -522,7 +522,7 @@ impl ReputationEnricher {
 
         // Check CIDR prefixes (O(N) but necessary for ranges)
         {
-            let prefixes = self.prefixes.read().unwrap();
+            let prefixes = self.prefixes.read();
             for prefix in prefixes.iter() {
                 if prefix.contains(addr) {
                     self.apply_threat(&mut result, prefix.threat_type, prefix.source);
@@ -605,7 +605,7 @@ impl ReputationEnricher {
 
     /// Cache lookup (read path)
     fn cache_get(&self, ip: &str) -> Option<ReputationResult> {
-        let cache = self.cache.read().unwrap();
+        let cache = self.cache.read();
         if let Some(entry) = cache.get(ip) {
             self.cache_hits.fetch_add(1, Ordering::Relaxed);
             Some(entry.result.clone())
@@ -616,7 +616,7 @@ impl ReputationEnricher {
 
     /// Cache insert with LRU eviction (write path)
     fn cache_put(&self, ip: String, result: ReputationResult) {
-        let mut cache = self.cache.write().unwrap();
+        let mut cache = self.cache.write();
 
         // LRU eviction: remove oldest 25% when at capacity
         if cache.len() >= self.cache_capacity {
@@ -654,9 +654,9 @@ impl ReputationEnricher {
 
     /// Clear all blocklists and cache
     pub fn clear(&self) {
-        self.ip_threats.write().unwrap().clear();
-        self.prefixes.write().unwrap().clear();
-        self.cache.write().unwrap().clear();
+        self.ip_threats.write().clear();
+        self.prefixes.write().clear();
+        self.cache.write().clear();
     }
 }
 
