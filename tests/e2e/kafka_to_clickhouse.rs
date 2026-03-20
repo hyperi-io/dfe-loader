@@ -14,7 +14,6 @@
 //! - Org-level database routing (creates db + table in the test)
 //! - Graceful pipeline shutdown after all messages are consumed
 
-use std::env;
 use std::time::Duration;
 
 use rdkafka::ClientConfig;
@@ -27,21 +26,22 @@ use dfe_loader::config::{
 };
 use dfe_loader::pipeline::Orchestrator;
 
-use crate::common::{check_clickhouse_reachable, check_kafka_reachable, load_dotenv};
+use crate::common::{ClickHouseTestConfig, KafkaTestConfig, TestMode};
 
 // ─── Skip guard ──────────────────────────────────────────────────────────────
 
 fn skip_if_no_env() -> bool {
-    load_dotenv();
-    if env::var("CLICKHOUSE_HOST").is_err() || env::var("KAFKA_BROKERS").is_err() {
-        eprintln!("Skipping: CLICKHOUSE_HOST or KAFKA_BROKERS not set");
+    let ch = ClickHouseTestConfig::from_env();
+    let kf = KafkaTestConfig::from_env();
+    if !kf.is_reachable() {
+        eprintln!(
+            "Skipping: Kafka not reachable at {} (TEST_MODE={})",
+            kf.brokers,
+            TestMode::detect()
+        );
         return true;
     }
-    if !check_kafka_reachable() {
-        eprintln!("Skipping: Kafka not reachable");
-        return true;
-    }
-    if !check_clickhouse_reachable() {
+    if !ch.is_reachable() {
         eprintln!("Skipping: ClickHouse not reachable");
         return true;
     }
@@ -92,45 +92,26 @@ async fn ch_count(
     text.trim().parse().unwrap_or(0)
 }
 
-fn ch_tls_from_env() -> bool {
-    load_dotenv();
-    env::var("CLICKHOUSE_TLS")
-        .unwrap_or_default()
-        .to_lowercase()
-        == "true"
-}
-
 fn make_reqwest_client() -> (reqwest::Client, String, String, String) {
-    load_dotenv();
-    let host = env::var("CLICKHOUSE_HOST").expect("CLICKHOUSE_HOST");
-    let port = env::var("CLICKHOUSE_HTTP_PORT").unwrap_or_else(|_| "8123".to_string());
-    let user = env::var("CLICKHOUSE_USER").unwrap_or_else(|_| "default".to_string());
-    let pass = env::var("CLICKHOUSE_PASSWORD").unwrap_or_default();
-    let scheme = if ch_tls_from_env() { "https" } else { "http" };
-    let base_url = format!("{}://{}:{}", scheme, host, port);
+    let ch = ClickHouseTestConfig::from_env();
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
         .build()
         .expect("reqwest client build failed");
-    (client, base_url, user, pass)
+    (client, ch.http_url(), ch.user.clone(), ch.password.clone())
 }
 
 // ─── Kafka helpers ────────────────────────────────────────────────────────────
 
 fn make_client_config() -> ClientConfig {
-    load_dotenv();
-    let brokers = env::var("KAFKA_BROKERS").expect("KAFKA_BROKERS");
+    let kf = KafkaTestConfig::from_env();
     let mut cfg = ClientConfig::new();
-    cfg.set("bootstrap.servers", &brokers);
-    if let Ok(user) = env::var("KAFKA_SASL_USER") {
-        let pass = env::var("KAFKA_SASL_PASSWORD").unwrap_or_default();
-        let mech = env::var("KAFKA_SASL_MECHANISM").unwrap_or_else(|_| "SCRAM-SHA-512".to_string());
-        let protocol =
-            env::var("KAFKA_SECURITY_PROTOCOL").unwrap_or_else(|_| "SASL_PLAINTEXT".to_string());
-        cfg.set("security.protocol", &protocol);
-        cfg.set("sasl.mechanism", &mech);
-        cfg.set("sasl.username", &user);
-        cfg.set("sasl.password", &pass);
+    cfg.set("bootstrap.servers", &kf.brokers);
+    cfg.set("security.protocol", &kf.security_protocol);
+    if let Some(ref mech) = kf.sasl_mechanism {
+        cfg.set("sasl.mechanism", mech);
+        cfg.set("sasl.username", kf.sasl_user.as_deref().unwrap_or(""));
+        cfg.set("sasl.password", kf.sasl_password.as_deref().unwrap_or(""));
     }
     cfg
 }
@@ -139,9 +120,8 @@ fn make_client_config() -> ClientConfig {
 /// protocol requires SSL. Uses the system trust store — no CA file needed
 /// when the HyperI DevEx Root CA is installed system-wide.
 fn kafka_tls_from_env() -> Option<TlsConfig> {
-    load_dotenv();
-    let protocol = env::var("KAFKA_SECURITY_PROTOCOL").unwrap_or_default();
-    if protocol.contains("SSL") {
+    let kf = KafkaTestConfig::from_env();
+    if kf.security_protocol.contains("SSL") {
         Some(TlsConfig {
             enabled: true,
             ..Default::default()
@@ -172,10 +152,9 @@ async fn produce_messages(producer: &FutureProducer, topic: &str, payloads: &[Ve
 }
 
 fn sasl_config_from_env() -> Option<SaslConfig> {
-    load_dotenv();
-    env::var("KAFKA_SASL_USER").ok()?;
-    let mech_str = env::var("KAFKA_SASL_MECHANISM").unwrap_or_else(|_| "SCRAM-SHA-512".to_string());
-    let mechanism = match mech_str.as_str() {
+    let kf = KafkaTestConfig::from_env();
+    let mech_str = kf.sasl_mechanism.as_deref()?;
+    let mechanism = match mech_str {
         "PLAIN" => "plain",
         "SCRAM-SHA-256" => "scram_sha_256",
         _ => "scram_sha_512",
@@ -183,24 +162,22 @@ fn sasl_config_from_env() -> Option<SaslConfig> {
     Some(SaslConfig {
         enabled: true,
         mechanism: mechanism.to_string(),
-        username: env::var("KAFKA_SASL_USER").unwrap_or_default(),
-        password: env::var("KAFKA_SASL_PASSWORD").unwrap_or_default(),
+        username: kf.sasl_user.unwrap_or_default(),
+        password: kf.sasl_password.unwrap_or_default(),
         ..Default::default()
     })
 }
 
 fn ch_config_from_env() -> ClickHouseConfig {
-    load_dotenv();
-    let host = env::var("CLICKHOUSE_HOST").expect("CLICKHOUSE_HOST");
-    let port = env::var("CLICKHOUSE_HTTP_PORT").unwrap_or_else(|_| "8123".to_string());
+    let ch = ClickHouseTestConfig::from_env();
     ClickHouseConfig {
-        hosts: vec![format!("{}:{}", host, port)],
-        database: env::var("CLICKHOUSE_DATABASE").unwrap_or_else(|_| "default".to_string()),
-        username: env::var("CLICKHOUSE_USER").unwrap_or_else(|_| "default".to_string()),
-        password: env::var("CLICKHOUSE_PASSWORD").unwrap_or_default(),
+        hosts: vec![format!("{}:{}", ch.host, ch.http_port)],
+        database: ch.database,
+        username: ch.user,
+        password: ch.password,
         protocol: "http".to_string(),
         tables: Vec::new(),
-        tls: if ch_tls_from_env() {
+        tls: if ch.tls {
             Some(TlsConfig {
                 enabled: true,
                 ..Default::default()
@@ -212,11 +189,8 @@ fn ch_config_from_env() -> ClickHouseConfig {
 }
 
 fn brokers_from_env() -> Vec<String> {
-    env::var("KAFKA_BROKERS")
-        .unwrap_or_default()
-        .split(',')
-        .map(|s| s.to_string())
-        .collect()
+    let kf = KafkaTestConfig::from_env();
+    kf.brokers.split(',').map(|s| s.to_string()).collect()
 }
 
 // ─── Log format generators ────────────────────────────────────────────────────
@@ -359,6 +333,7 @@ async fn test_kafka_to_clickhouse_bulk_load() {
         return;
     }
 
+    let oc = crate::common::on_cluster_clause();
     let pid = std::process::id();
     let ts = chrono::Utc::now().timestamp_millis();
     let topic = format!("e2e_bulk_{pid}_{ts}_land");
@@ -371,7 +346,7 @@ async fn test_kafka_to_clickhouse_bulk_load() {
         &base_url,
         &user,
         &pass,
-        "CREATE DATABASE IF NOT EXISTS benchmark ON CLUSTER 'default'",
+        &format!("CREATE DATABASE IF NOT EXISTS benchmark{oc}"),
     )
     .await
     .expect("Failed to create benchmark database");
@@ -384,7 +359,7 @@ async fn test_kafka_to_clickhouse_bulk_load() {
         &user,
         &pass,
         &format!(
-            "CREATE TABLE IF NOT EXISTS benchmark.{table_name} ON CLUSTER 'default' (
+            "CREATE TABLE IF NOT EXISTS benchmark.{table_name}{oc} (
                 _timestamp  DateTime64(3, 'UTC'),
                 _org_id     String,
                 _source     LowCardinality(String),
@@ -519,7 +494,7 @@ async fn test_kafka_to_clickhouse_bulk_load() {
         &base_url,
         &user,
         &pass,
-        &format!("DROP TABLE IF EXISTS benchmark.{table_name} ON CLUSTER 'default'"),
+        &format!("DROP TABLE IF EXISTS benchmark.{table_name}{oc}"),
     )
     .await
     .ok();
@@ -540,6 +515,7 @@ async fn test_kafka_to_clickhouse_org_routing() {
         return;
     }
 
+    let oc = crate::common::on_cluster_clause();
     let pid = std::process::id();
     let ts = chrono::Utc::now().timestamp_millis();
     let topic = format!("e2e_org_{pid}_{ts}_land");
@@ -559,7 +535,7 @@ async fn test_kafka_to_clickhouse_org_routing() {
         &base_url,
         &user,
         &pass,
-        "CREATE DATABASE IF NOT EXISTS benchmark ON CLUSTER 'default'",
+        &format!("CREATE DATABASE IF NOT EXISTS benchmark{oc}"),
     )
     .await
     .expect("Failed to create benchmark database");
@@ -570,7 +546,7 @@ async fn test_kafka_to_clickhouse_org_routing() {
         &base_url,
         &user,
         &pass,
-        &format!("CREATE DATABASE IF NOT EXISTS {org_db} ON CLUSTER 'default'"),
+        &format!("CREATE DATABASE IF NOT EXISTS {org_db}{oc}"),
     )
     .await
     .expect("Failed to create org database");
@@ -582,7 +558,7 @@ async fn test_kafka_to_clickhouse_org_routing() {
         &user,
         &pass,
         &format!(
-            "CREATE TABLE IF NOT EXISTS {org_db}.{org_table} ON CLUSTER 'default' (
+            "CREATE TABLE IF NOT EXISTS {org_db}.{org_table}{oc} (
                 _timestamp  DateTime64(3, 'UTC'),
                 _org_id     String,
                 _source     LowCardinality(String),
@@ -603,7 +579,7 @@ async fn test_kafka_to_clickhouse_org_routing() {
         &user,
         &pass,
         &format!(
-            "CREATE TABLE IF NOT EXISTS {shared_full} ON CLUSTER 'default' (
+            "CREATE TABLE IF NOT EXISTS {shared_full}{oc} (
                 _timestamp  DateTime64(3, 'UTC'),
                 _org_id     String,
                 _source     LowCardinality(String),
@@ -738,9 +714,9 @@ async fn test_kafka_to_clickhouse_org_routing() {
     );
 
     for stmt in [
-        format!("DROP TABLE IF EXISTS {org_db}.{org_table} ON CLUSTER 'default'"),
-        format!("DROP DATABASE IF EXISTS {org_db} ON CLUSTER 'default'"),
-        format!("DROP TABLE IF EXISTS {shared_full} ON CLUSTER 'default'"),
+        format!("DROP TABLE IF EXISTS {org_db}.{org_table}{oc}"),
+        format!("DROP DATABASE IF EXISTS {org_db}{oc}"),
+        format!("DROP TABLE IF EXISTS {shared_full}{oc}"),
     ] {
         ch_execute(&http, &base_url, &user, &pass, &stmt).await.ok();
     }

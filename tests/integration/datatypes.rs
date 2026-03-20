@@ -23,9 +23,10 @@ async fn test_integer_types() {
         None => return,
     };
     let table_name = unique_table_name("test_integers");
+    let oc = crate::common::on_cluster_clause();
 
     let ddl = format!(
-        "CREATE TABLE {} ON CLUSTER 'default' (
+        "CREATE TABLE {}{oc} (
             i8_col Int8,
             i16_col Int16,
             i32_col Int32,
@@ -62,9 +63,10 @@ async fn test_float_types() {
         None => return,
     };
     let table_name = unique_table_name("test_floats");
+    let oc = crate::common::on_cluster_clause();
 
     let ddl = format!(
-        "CREATE TABLE {} ON CLUSTER 'default' (
+        "CREATE TABLE {}{oc} (
             f32_col Float32,
             f64_col Float64
         ) ENGINE = MergeTree() ORDER BY tuple()",
@@ -104,9 +106,10 @@ async fn test_string_types() {
         None => return,
     };
     let table_name = unique_table_name("test_strings");
+    let oc = crate::common::on_cluster_clause();
 
     let ddl = format!(
-        "CREATE TABLE {} ON CLUSTER 'default' (
+        "CREATE TABLE {}{oc} (
             str_col String,
             fixed_col FixedString(10)
         ) ENGINE = MergeTree() ORDER BY tuple()",
@@ -146,9 +149,10 @@ async fn test_datetime_types() {
         None => return,
     };
     let table_name = unique_table_name("test_datetime");
+    let oc = crate::common::on_cluster_clause();
 
     let ddl = format!(
-        "CREATE TABLE {} ON CLUSTER 'default' (
+        "CREATE TABLE {}{oc} (
             dt64_ms DateTime64(3),
             date_col Date
         ) ENGINE = MergeTree() ORDER BY tuple()",
@@ -195,9 +199,10 @@ async fn test_boolean_type() {
         None => return,
     };
     let table_name = unique_table_name("test_bool");
+    let oc = crate::common::on_cluster_clause();
 
     let ddl = format!(
-        "CREATE TABLE {} ON CLUSTER 'default' (
+        "CREATE TABLE {}{oc} (
             bool_col Bool
         ) ENGINE = MergeTree() ORDER BY tuple()",
         table_name
@@ -228,9 +233,10 @@ async fn test_nullable_types() {
         None => return,
     };
     let table_name = unique_table_name("test_nullable");
+    let oc = crate::common::on_cluster_clause();
 
     let ddl = format!(
-        "CREATE TABLE {} ON CLUSTER 'default' (
+        "CREATE TABLE {}{oc} (
             id UInt64,
             nullable_str Nullable(String),
             nullable_int Nullable(Int64),
@@ -280,9 +286,10 @@ async fn test_low_cardinality_type() {
         None => return,
     };
     let table_name = unique_table_name("test_lowcard");
+    let oc = crate::common::on_cluster_clause();
 
     let ddl = format!(
-        "CREATE TABLE {} ON CLUSTER 'default' (
+        "CREATE TABLE {}{oc} (
             id UInt64,
             category LowCardinality(String)
         ) ENGINE = MergeTree() ORDER BY tuple()",
@@ -325,9 +332,10 @@ async fn test_realistic_event_table() {
         None => return,
     };
     let table_name = unique_table_name("test_events");
+    let oc = crate::common::on_cluster_clause();
 
     let ddl = format!(
-        "CREATE TABLE {} ON CLUSTER 'default' (
+        "CREATE TABLE {}{oc} (
             timestamp DateTime64(3),
             event_id UInt64,
             org_id String,
@@ -415,9 +423,10 @@ async fn test_coerce_datetime64_from_epoch_ms() {
         None => return,
     };
     let table_name = unique_table_name("test_coerce_dt64_epoch");
+    let oc = crate::common::on_cluster_clause();
 
     let ddl = format!(
-        "CREATE TABLE {} ON CLUSTER 'default' (
+        "CREATE TABLE {}{oc} (
             ts DateTime64(3)
         ) ENGINE = MergeTree() ORDER BY tuple()",
         table_name
@@ -458,9 +467,10 @@ async fn test_coerce_datetime64_from_iso_string() {
         None => return,
     };
     let table_name = unique_table_name("test_coerce_dt64_iso");
+    let oc = crate::common::on_cluster_clause();
 
     let ddl = format!(
-        "CREATE TABLE {} ON CLUSTER 'default' (
+        "CREATE TABLE {}{oc} (
             ts DateTime64(3)
         ) ENGINE = MergeTree() ORDER BY tuple()",
         table_name
@@ -503,9 +513,10 @@ async fn test_coerce_bool_from_string() {
         None => return,
     };
     let table_name = unique_table_name("test_coerce_bool_str");
+    let oc = crate::common::on_cluster_clause();
 
     let ddl = format!(
-        "CREATE TABLE {} ON CLUSTER 'default' (
+        "CREATE TABLE {}{oc} (
             b Bool
         ) ENGINE = MergeTree() ORDER BY tuple()",
         table_name
@@ -562,9 +573,10 @@ async fn test_coerce_bool_from_int() {
         None => return,
     };
     let table_name = unique_table_name("test_coerce_bool_int");
+    let oc = crate::common::on_cluster_clause();
 
     let ddl = format!(
-        "CREATE TABLE {} ON CLUSTER 'default' (
+        "CREATE TABLE {}{oc} (
             b Bool
         ) ENGINE = MergeTree() ORDER BY tuple()",
         table_name
@@ -615,9 +627,10 @@ async fn test_coerce_uuid_normalisation() {
         None => return,
     };
     let table_name = unique_table_name("test_coerce_uuid");
+    let oc = crate::common::on_cluster_clause();
 
     let ddl = format!(
-        "CREATE TABLE {} ON CLUSTER 'default' (
+        "CREATE TABLE {}{oc} (
             id UUID
         ) ENGINE = MergeTree() ORDER BY tuple()",
         table_name
@@ -661,9 +674,10 @@ async fn test_coerce_ipv4_from_integer() {
         None => return,
     };
     let table_name = unique_table_name("test_coerce_ipv4");
+    let oc = crate::common::on_cluster_clause();
 
     let ddl = format!(
-        "CREATE TABLE {} ON CLUSTER 'default' (
+        "CREATE TABLE {}{oc} (
             ip IPv4
         ) ENGINE = MergeTree() ORDER BY tuple()",
         table_name
@@ -708,9 +722,10 @@ async fn test_coerce_null_non_nullable_defaults_to_empty() {
         None => return,
     };
     let table_name = unique_table_name("test_coerce_null_nonnullable");
+    let oc = crate::common::on_cluster_clause();
 
     let ddl = format!(
-        "CREATE TABLE {} ON CLUSTER 'default' (
+        "CREATE TABLE {}{oc} (
             name String,
             score UInt64
         ) ENGINE = MergeTree() ORDER BY tuple()",
@@ -760,9 +775,10 @@ async fn test_coerce_array_datetime64_from_epoch_ms() {
         None => return,
     };
     let table_name = unique_table_name("test_coerce_arr_dt64");
+    let oc = crate::common::on_cluster_clause();
 
     let ddl = format!(
-        "CREATE TABLE {} ON CLUSTER 'default' (
+        "CREATE TABLE {}{oc} (
             timestamps Array(DateTime64(3))
         ) ENGINE = MergeTree() ORDER BY tuple()",
         table_name
@@ -817,10 +833,11 @@ async fn test_coerce_json_column_accepts_string_and_object() {
         None => return,
     };
     let table_name = unique_table_name("test_coerce_json_col");
+    let oc = crate::common::on_cluster_clause();
 
     // JSON type requires ClickHouse 25.3+; skip gracefully on older versions
     let ddl = format!(
-        "CREATE TABLE {} ON CLUSTER 'default' (
+        "CREATE TABLE {}{oc} (
             data JSON
         ) ENGINE = MergeTree() ORDER BY tuple()",
         table_name

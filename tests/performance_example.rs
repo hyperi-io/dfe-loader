@@ -8,91 +8,74 @@
 //!
 //! Run with: cargo test --test performance_example -- --nocapture
 
-use prometheus::Registry;
-
 mod common;
 use common::metrics::MetricsSnapshot;
-use dfe_loader::metrics::Metrics;
 
 #[test]
 fn example_metrics_snapshot_workflow() {
-    // Create metrics registry
-    let registry = Registry::new();
-    let metrics = Metrics::with_registry(registry.clone());
+    // === Simulate baseline Prometheus text output ===
+    let baseline_text = r#"# HELP loader_messages_received_total Total messages received
+# TYPE loader_messages_received_total counter
+loader_messages_received_total 10000
+# HELP loader_messages_processed_total Total messages processed
+# TYPE loader_messages_processed_total counter
+loader_messages_processed_total 10000
+# HELP loader_batches_flushed_total Total batches flushed
+# TYPE loader_batches_flushed_total counter
+loader_batches_flushed_total 10
+# HELP loader_rows_inserted_total Total rows inserted
+# TYPE loader_rows_inserted_total counter
+loader_rows_inserted_total 10000
+# HELP loader_insert_latency_seconds Insert latency
+# TYPE loader_insert_latency_seconds histogram
+loader_insert_latency_seconds_sum 0.725
+loader_insert_latency_seconds_count 10
+"#;
 
-    // === Simulate baseline workload ===
-    eprintln!("Running baseline workload...");
-
-    // Simulate processing 10,000 messages
-    for _ in 0..10_000 {
-        metrics.messages_received.inc();
-        metrics.messages_processed.inc();
-    }
-
-    // Simulate 10 batch inserts with latency
-    for i in 0..10 {
-        metrics.batches_flushed.inc();
-        metrics.rows_inserted.inc_by(1000.0);
-
-        // Simulate varying latency (baseline: 50-100ms)
-        let latency = 0.05 + (i as f64 * 0.005);
-        metrics.insert_latency.observe(latency);
-    }
-
-    // Capture baseline snapshot
-    let baseline = MetricsSnapshot::capture(&registry, "baseline_v1");
+    let baseline = MetricsSnapshot::from_text(baseline_text, "baseline_v1");
     baseline
         .save(".tmp/metrics_baseline.json")
         .expect("Failed to save baseline");
 
-    eprintln!("✓ Baseline snapshot saved to .tmp/metrics_baseline.json");
+    eprintln!("Baseline snapshot saved to .tmp/metrics_baseline.json");
 
-    // === Simulate improved workload (after optimization) ===
+    // === Simulate optimised Prometheus text output ===
+    let current_text = r#"# HELP loader_messages_received_total Total messages received
+# TYPE loader_messages_received_total counter
+loader_messages_received_total 12000
+# HELP loader_messages_processed_total Total messages processed
+# TYPE loader_messages_processed_total counter
+loader_messages_processed_total 12000
+# HELP loader_batches_flushed_total Total batches flushed
+# TYPE loader_batches_flushed_total counter
+loader_batches_flushed_total 10
+# HELP loader_rows_inserted_total Total rows inserted
+# TYPE loader_rows_inserted_total counter
+loader_rows_inserted_total 10000
+# HELP loader_insert_latency_seconds Insert latency
+# TYPE loader_insert_latency_seconds histogram
+loader_insert_latency_seconds_sum 0.435
+loader_insert_latency_seconds_count 10
+"#;
 
-    // Reset counters for fair comparison (in real test, use separate registry)
-    let registry2 = Registry::new();
-    let metrics2 = Metrics::with_registry(registry2.clone());
-
-    eprintln!("Running optimized workload...");
-
-    // Process same 10,000 messages (20% faster)
-    for _ in 0..12_000 {
-        metrics2.messages_received.inc();
-        metrics2.messages_processed.inc();
-    }
-
-    // Same 10 batch inserts with improved latency
-    for i in 0..10 {
-        metrics2.batches_flushed.inc();
-        metrics2.rows_inserted.inc_by(1000.0);
-
-        // Improved latency (30-60ms, 40% improvement)
-        let latency = 0.03 + (i as f64 * 0.003);
-        metrics2.insert_latency.observe(latency);
-    }
-
-    // Capture current snapshot
-    let current = MetricsSnapshot::capture(&registry2, "optimized_v2");
+    let current = MetricsSnapshot::from_text(current_text, "optimized_v2");
     current
         .save(".tmp/metrics_current.json")
         .expect("Failed to save current");
 
-    eprintln!("✓ Current snapshot saved to .tmp/metrics_current.json");
+    eprintln!("Current snapshot saved to .tmp/metrics_current.json");
 
     // === Compare snapshots ===
     let comparison = current.compare(&baseline);
-
-    // Print to console
     comparison.print_report();
 
-    // Save markdown report
     comparison
         .save_markdown(".tmp/metrics_comparison.md")
         .expect("Failed to save report");
 
-    eprintln!("\n✓ Comparison report saved to .tmp/metrics_comparison.md");
+    eprintln!("\nComparison report saved to .tmp/metrics_comparison.md");
 
-    // Assert no significant regressions (ignore histogram bucket counts which increase with more data)
+    // Assert no significant regressions
     let real_regressions: Vec<_> = comparison
         .regressions
         .iter()
@@ -110,14 +93,12 @@ fn example_metrics_snapshot_workflow() {
 #[test]
 #[ignore] // Run manually with: cargo test test_load_and_compare_snapshots -- --ignored --nocapture
 fn test_load_and_compare_snapshots() {
-    // Load previously saved snapshots
     let baseline = MetricsSnapshot::load(".tmp/metrics_baseline.json")
         .expect("Failed to load baseline - run example_metrics_snapshot_workflow first");
 
     let current = MetricsSnapshot::load(".tmp/metrics_current.json")
         .expect("Failed to load current - run example_metrics_snapshot_workflow first");
 
-    // Compare
     let comparison = current.compare(&baseline);
     comparison.print_report();
 }

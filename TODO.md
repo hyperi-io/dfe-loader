@@ -6,7 +6,7 @@
 
 **Reference:** `/projects/clickhouse-loader` (Go version)
 
-**Architecture:** Per-table row buffers with JSONEachRow inserts via `clickhouse` crate (HTTP)
+**Architecture:** Per-table row buffers with RowBinary inserts via `clickhouse-rs` fork (default), JSONEachRow fallback
 
 ---
 
@@ -15,7 +15,7 @@
 The architecture is deliberately staged:
 
 ```
-Stage 1 (CURRENT):  JSONEachRow + upstream clickhouse crate (HTTP) + coercion fixes
+Stage 1 (COMPLETE): JSONEachRow + upstream clickhouse crate (HTTP) + coercion fixes
 Stage 2 (Phase 5.5): Native protocol via /projects/clickhouse-rs fork (lower CPU)
 ```
 
@@ -76,33 +76,9 @@ Phase 5.5 Step C), perform a CPU-first review of the hot path:
 
 ### Spike: simdjson vs sonic-rs targeted bake-off ✓ COMPLETE — REJECTED
 
-**Bench:** `benches/simdjson_spike.rs` — flat30 and nested payloads, 15/30 schema columns,
-batch sizes 100/1K/10K. Three approaches measured (actual numbers, batch=10K):
-
-| Approach | flat30/col30 | flat30/col15 | nested/col15 |
-|---|---|---|---|
-| `sonic_selective` — `get_from_slice × N` (was current) | 196 ms | 59.7 ms | 179 ms |
-| `sonic_dom` — `from_slice` × 1 + `.get()` × N | **71.7 ms** | **58.1 ms** | **42.8 ms** |
-| `simd_dom+clone` — simd-json + mandatory `Vec<u8>` clone | 48.2 ms | 41.8 ms | 37.6 ms |
-
-**Finding 1 — sonic_dom wins over sonic_selective:**
-- 2.7× faster at N=30 flat payload
-- 4.2× faster at N=15 nested (each miss still scans full doc with get_from_slice)
-- Tied at N=15 flat payload with high hit-rate (58 vs 60 ms)
-- Implemented immediately: `HeaderExtractor` now does `sonic_rs::from_slice` once + O(1) lookups.
-
-**Finding 2 — simd-json: REJECTED:**
-- Requires `&mut [u8]` (in-place string unescaping). `Arc<[u8]>` is immutable — mandatory
-  `Vec<u8>` clone before every parse. Architecturally incompatible with zero-copy `_json`.
-- `simd_dom` is ~28–33% faster than `sonic_dom` for flat extraction, ~12% for nested.
-- Extraction is <10% of total pipeline time (dominated by 40–75 ms network I/O per batch).
-- Net pipeline improvement: ~2–3% — well below the 5% mison rejection threshold.
-- Decision: keep sonic-rs. No simd-json in production.
-
-**Routing parse only (flat30/10K):** sonic 50.1 ms vs simd 38.5 ms (+23%). Same verdict —
-routing is not a bottleneck and the mandatory clone negates the gain.
-
-Full rationale permanently pinned in `docs/DESIGN.md` § Parser Selection History and `STATE.md`.
+sonic_dom (single full parse + O(1) lookups) beats sonic_selective (get_from_slice×N) by 2.7–4.2×.
+simd-json rejected: requires `&mut [u8]` incompatible with `Arc<[u8]>` zero-copy `_json` model.
+Net pipeline improvement only ~2–3%. Bench file removed; full rationale in `docs/DESIGN.md`.
 
 ### Phase 5.6: Type Coercion Completeness ✓ COMPLETE
 
@@ -148,9 +124,8 @@ Remove or comment out the `[patch]` section to revert to upstream.
 
 **WBS Breakdown (sequential — do NOT skip steps):**
 
-**Step A (CURRENT):** Get everything working with upstream `clickhouse` crate (crates.io).
-  Phase 5.7 (schema-guided extraction) must be complete and 520 tests passing.
-  This is prerequisite for Steps B and C.
+**Step A ✓ COMPLETE:** Upstream `clickhouse` crate (crates.io), 564 tests passing.
+  Phase 5.7 (schema-guided extraction) complete. Dead code cleanup done (v1.14.4 GA released).
 
 **Step A.5 (code review) ✓ COMPLETE:** Full simplification pass run (2026-03-11).
   - `fmt_ts` made `pub(crate)`, shared between transformer + extractor (no duplication)
@@ -161,24 +136,21 @@ Remove or comment out the `[patch]` section to revert to upstream.
   - Orchestrator double schema-cache lookup collapsed to single
   - `hyperi-ai` submodule updated to v2.7.0, re-attached with `--force --agent claude`
 
-**Step B:** Release binary for internal testing (Kaz).
-  Binary builds from `main` once Phase 5.7 is merged.
-  Kaz validates end-to-end pipeline before any fork changes.
+**Step B ✓ COMPLETE:** v1.14.4 GA released (GH Release + R2 binaries, JFrog container + helm).
+  amd64 + arm64 binaries published. Ready for internal testing.
 
 **Step C:** Migrate to clickhouse-rs fork — done LOCK-STEP with dfe-loader.
-  Fork branches are merged in order and tested via `[patch.crates-io]` in
-  dfe-loader. Each branch is a separate dfe-loader test session.
-  The fork and dfe-loader evolve together — NOT independently.
 
-Tasks (Step C only — Steps A/B must be complete first):
-- [ ] Merge fork: feature/batching → main
-- [ ] Test batching in dfe-loader: `[patch.crates-io]` → TableBatcher HTTP path
-- [ ] Merge fork: feature/native-transport → main
-- [ ] Test native TCP in dfe-loader: INSERT + SELECT + schema cache end-to-end
-- [ ] Merge fork: feature/connection-pooling → main
-- [ ] Test pooling in dfe-loader: deadpool, cursor drain, connection health
-- [ ] Merge fork: feature/lc-insert → main
-- [ ] Test LowCardinality INSERT in dfe-loader: LC columns + LC(Nullable(T))
+Phases 1-3 complete (fork activated, InsertFormat dispatch wired, ParsedType deduplicated).
+Fork `hyperi/optimise-1` branch has `src/dynamic/` module: ParsedType, DynamicSchema,
+SchemaCache, RowBinary encoder, DynamicInsert, DynamicBatcher.
+
+Remaining tasks:
+- [x] Activate fork via `[patch.crates-io]`
+- [x] Wire `InsertFormat` dispatch (RowBinary default, JSONEachRow fallback)
+- [x] Replace loader `ParsedType` with re-export from fork
+- [ ] Integration test DynamicInsert RowBinary path against devex cluster
+- [ ] Merge fork branch chain to main (batching → native → pooling → lc-insert → optimise-1)
 - [ ] Publish merged fork to crates.io as a pre-release (`0.14.x-hyperi.1`)
 - [ ] Update `Cargo.toml` to use published pre-release (remove `[patch]`)
 - [ ] Confirm JSON type (GA v25.3) insert/query works end-to-end
@@ -199,6 +171,24 @@ rustlib v1.14.0+ switches rdkafka to dynamic-linking against system librdkafka
 - [x] Regenerate Dockerfile from contract (+ Ubuntu 24.04 UID fix + GeoIP COPY)
 - [ ] Test container image starts and connects to Kafka (deferred to CI)
 
+### rustlib v1.16.3 Remediation (DFE Observability) ✓ COMPLETE
+
+- [x] Bump hyperi-rustlib to >=1.16.3 with `metrics` feature
+- [x] Migrate `apply_env_overrides()` to rustlib `ApplyFlatEnv` trait
+- [x] Add `DfeMetrics` dual-emit alongside existing prometheus metrics
+- [x] Wire security events at config reload, DLQ, and validation sites
+- [x] Fix log spam sites: sampled coercion, debounced DLQ/consumer errors
+
+### Code Review Remediation ✓ COMPLETE
+
+- [x] Add `[lints]` section with pedantic + unwrap/expect warnings
+- [x] Add `deny.toml`, `rustfmt.toml`, `clippy.toml`, `rust-toolchain.toml`
+- [x] Switch GeoIP + reputation to `parking_lot::RwLock` (no poison panics)
+- [x] Remove blanket `From<String> for Error` (masks error category)
+- [x] Split `config/loader.rs` (2,362 → 1,041 lines) into `kafka.rs` + `pipeline.rs`
+- [x] Hot-reload safety: warn on restart-required config changes (transport, clickhouse URL, format)
+- [x] Security fix: `lz4_flex` 0.11.5 → 0.11.6 (GHSA-vvp9-7p8x-rfvv)
+
 ### Phase 6: Dependency Audit + Version Bumps
 
 - [ ] Web search ALL external crate versions for latest
@@ -206,18 +196,18 @@ rustlib v1.14.0+ switches rdkafka to dynamic-linking against system librdkafka
 - [ ] Remove stale/unused dependencies
 - [ ] `cargo update` + full test suite
 
-### Phase 7: Crates Workspace Extraction (Post-Migration)
+### DFE Metrics Standard Migration
 
-Extract reusable modules into workspace crates (following `dfe-transform-wasm/crates/` pattern):
+Standard: `hyperi-ai/standards/rules/dfe-metrics.md`
+rustlib v1.17.0 provides `metrics-dfe` feature with composable metric groups.
 
-- [ ] Create workspace root `Cargo.toml` with `[workspace]` section
-- [ ] Extract `crates/clickhouse` — HTTP client, types, schema cache, inserter, circuit breaker
-- [ ] Extract `crates/buffer` — Row buffer management, pool
-- [ ] Main binary stays at workspace root or `crates/loader`
-- [ ] Shared workspace dependencies in `[workspace.dependencies]`
-- [ ] Compile + test
-
-**Benefits:** Cleaner dep boundaries, faster incremental compilation, reusable by other DFE services.
+- [x] Implement `metrics-dfe` feature in rustlib (8 metric groups)
+- [x] Wire auto-emit: ConfigReloader `config_reloads_total`, StatsContext `rdkafka_*`
+- [x] Adopt all 8 groups in dfe-loader (dual-emit with legacy `loader_*` names)
+- [x] Write DFE metrics standard in hyperi-ai
+- [x] Write per-app migration prompts (`~/DFE-METRICS-MIGRATION-*.md`)
+- [ ] Change MetricsManager namespace from `loader` to `dfe_loader` (breaks dashboards — coordinate)
+- [ ] Remove legacy `loader_*` metric names after dashboard migration
 
 ---
 
@@ -286,19 +276,28 @@ Each is a new file implementing `DlqBackend` trait + feature flag. No changes to
 
 ---
 
-## Backlog: Kafka Transport Consolidation
+## Completed: Kafka Transport Consolidation
 
-The project has TWO Kafka consumers:
-- `src/kafka/transport.rs` — uses rustlib `KafkaTransport` (via `TransportAdapter`)
-- `src/kafka/consumer.rs` — uses `rdkafka` directly (legacy)
+- [x] Verified `TransportAdapter` covers all consumer.rs functionality
+- [x] Removed `src/kafka/consumer.rs` (352 lines, legacy direct rdkafka)
+- [x] Removed `rdkafka` direct dependency from `Cargo.toml`
+- [x] Removed `Error::KafkaLib(rdkafka::error::KafkaError)` variant
+- [x] Moved `KafkaMessage` struct to `kafka/mod.rs`
 
-Both are compiled. The orchestrator uses `TransportBackend` (rustlib transport).
-The legacy `consumer.rs` should be removed once transport adapter coverage is confirmed complete.
-Direct `rdkafka` dependency in `Cargo.toml` can be dropped after removal.
+---
 
-- [ ] Verify `TransportAdapter` covers all consumer.rs functionality (commit, seek, pause/resume)
-- [ ] Remove `src/kafka/consumer.rs` (legacy direct rdkafka)
-- [ ] Remove `rdkafka` from `Cargo.toml` dependencies
+## Backlog: Migrate `paste` → `pastey` in clickhouse-rs fork
+
+RUSTSEC-2024-0436: `paste` crate unmaintained. Transitive dependency via
+`polonius-the-crab` → `higher-kinded-types` → `macro_rules_attribute`.
+`pastey` is the recommended drop-in replacement fork.
+
+Not a direct dep of dfe-loader — lives in the clickhouse-rs fork's dependency chain.
+`cel-interpreter` also depends on `paste` (via hyperi-rustlib) — upstream fix needed.
+
+- [ ] Replace `paste` with `pastey` in clickhouse-rs fork (if `polonius-the-crab` migrates)
+- [ ] Track `cel-interpreter` upstream migration
+- [ ] Remove `RUSTSEC-2024-0436` ignore from `deny.toml` once resolved
 
 ---
 
@@ -307,11 +306,22 @@ Direct `rdkafka` dependency in `Cargo.toml` can be dropped after removal.
 - [ ] Receiver WAL — required for at-least-once with gRPC mesh
 - [ ] TLS configuration — use when needed
 - [ ] Memory size tracking — per-buffer accounting
-- [ ] OIDC token fetch — OAuth Bearer refresh callback (awaiting requirement)
 
 ---
 
 ## Completed
+
+### 2026-03-16: Dead Code Cleanup + v1.14.4 GA Release
+
+- [x] Deleted `tests/fixtures/arrow_schema.rs` (246 lines, zero callers, arrow crate removed)
+- [x] Deleted `benches/simdjson_spike.rs` (379 lines, completed spike, decision documented)
+- [x] Removed `simd-json` and `mockall` dev-dependencies from Cargo.toml
+- [x] Removed `simdjson_spike` bench entry from Cargo.toml
+- [x] Fixed stale ArrowStream comment in `src/clickhouse/config.rs`
+- [x] Removed OIDC TODO comment from `src/kafka/consumer.rs`
+- [x] Updated CI references (CONTRIBUTING.md → hyperi-ci)
+- [x] v1.14.4 GA released: GH Release + R2 binaries + JFrog container + helm
+- [x] GitHub issue #3 (`_source` routing) closed as by-design
 
 ### 2026-03-09: Arrow → HTTP/JSONEachRow Migration (Phases 0–5, Complete)
 
@@ -449,11 +459,11 @@ Direct `rdkafka` dependency in `Cargo.toml` can be dropped after removal.
 
 ## Notes
 
-- Test environment: k8s.tyrell.com.au (see .env for credentials)
+- Test environment: clickhouse.devex.hyperi.io (see .env for credentials)
 - Benchmark results: `benches/insert_bakeoff.rs` (run with `cargo bench --bench insert_bakeoff`)
-- clickhouse crate: HTTP + JSONEachRow (official, v0.14.x) for DDL/queries
-- reqwest: HTTP POST with JSONEachRow for data inserts (dynamic schemas)
+- clickhouse-rs fork: RowBinary via DynamicInsert (default), JSONEachRow fallback via reqwest
+- clickhouse crate: HTTP for DDL/queries (system.columns, health checks)
 
 ---
 
-**Last Updated:** 2026-03-11
+**Last Updated:** 2026-03-19

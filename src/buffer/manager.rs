@@ -284,6 +284,19 @@ impl BufferManager {
         stats
     }
 
+    /// Per-table buffer stats for metrics emission.
+    ///
+    /// Returns `(table_name, rows, estimated_bytes)` for each active buffer.
+    pub fn per_table_stats(&self) -> Vec<(&str, usize, usize)> {
+        self.buffers
+            .iter()
+            .map(|(table, buf)| {
+                let rows = buf.len();
+                (table.as_str(), rows, rows * 200)
+            })
+            .collect()
+    }
+
     /// Get total pending row count
     pub fn pending_rows(&self) -> usize {
         self.buffers.values().map(|b| b.len()).sum()

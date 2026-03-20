@@ -40,6 +40,44 @@ impl std::fmt::Display for Transport {
     }
 }
 
+/// Insert format for data writes.
+///
+/// Controls how rows are encoded and sent to ClickHouse. `RowBinary` is the
+/// default — it uses schema reflection to encode `Map<String, Value>` directly
+/// to binary, so ClickHouse skips JSON parsing entirely. This significantly
+/// reduces CPU load on the ClickHouse cluster at scale.
+///
+/// `JsonEachRow` is the fallback — simpler, self-describing, but the ClickHouse
+/// server pays the cost of parsing every JSON row on ingest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum InsertFormat {
+    /// Schema-reflected RowBinary (default).
+    ///
+    /// Fetches schema from `system.columns`, encodes values to binary client-side.
+    /// ClickHouse receives pre-columnarised data — zero server-side parsing.
+    /// Total CPU (client + cluster) is significantly lower than JSONEachRow.
+    #[default]
+    #[serde(alias = "rowbinary", alias = "native", alias = "binary")]
+    RowBinary,
+
+    /// JSONEachRow over HTTP.
+    ///
+    /// Self-describing format — ClickHouse coerces types server-side.
+    /// Simpler but the cluster pays the JSON parsing cost on every row.
+    #[serde(alias = "json", alias = "json_each_row")]
+    JsonEachRow,
+}
+
+impl std::fmt::Display for InsertFormat {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            InsertFormat::RowBinary => write!(f, "rowbinary"),
+            InsertFormat::JsonEachRow => write!(f, "jsoneachrow"),
+        }
+    }
+}
+
 /// ClickHouse connection configuration.
 ///
 /// Supports multiple hosts for high availability, with credentials and timeouts.
@@ -81,6 +119,16 @@ pub struct ClickHouseConfig {
     /// Transport protocol (native or http).
     #[serde(default)]
     pub transport: Transport,
+
+    /// Insert format — how rows are encoded for INSERT.
+    ///
+    /// `RowBinary` (default): schema-reflected binary encoding. ClickHouse
+    /// skips JSON parsing. Lower total CPU across client + cluster.
+    ///
+    /// `JsonEachRow`: JSON text via HTTP. Self-describing, ClickHouse coerces
+    /// types server-side. Higher cluster CPU but simpler.
+    #[serde(default)]
+    pub insert_format: InsertFormat,
 
     /// Database name to connect to.
     pub database: String,
@@ -126,6 +174,7 @@ impl Default for ClickHouseConfig {
         Self {
             hosts: vec!["localhost:9000".to_string()],
             transport: Transport::Native,
+            insert_format: InsertFormat::RowBinary,
             database: "default".to_string(),
             username: "default".to_string(),
             password: String::new(),
@@ -293,5 +342,35 @@ mod tests {
     fn test_transport_display() {
         assert_eq!(Transport::Native.to_string(), "native");
         assert_eq!(Transport::Http.to_string(), "http");
+    }
+
+    #[test]
+    fn test_insert_format_default() {
+        let config = ClickHouseConfig::default();
+        assert_eq!(config.insert_format, InsertFormat::RowBinary);
+    }
+
+    #[test]
+    fn test_insert_format_display() {
+        assert_eq!(InsertFormat::RowBinary.to_string(), "rowbinary");
+        assert_eq!(InsertFormat::JsonEachRow.to_string(), "jsoneachrow");
+    }
+
+    #[test]
+    fn test_insert_format_serde_aliases() {
+        // All aliases should deserialise to the same variant
+        let rb: InsertFormat = serde_json::from_str(r#""rowbinary""#).unwrap();
+        assert_eq!(rb, InsertFormat::RowBinary);
+        let rb: InsertFormat = serde_json::from_str(r#""native""#).unwrap();
+        assert_eq!(rb, InsertFormat::RowBinary);
+        let rb: InsertFormat = serde_json::from_str(r#""binary""#).unwrap();
+        assert_eq!(rb, InsertFormat::RowBinary);
+
+        let je: InsertFormat = serde_json::from_str(r#""jsoneachrow""#).unwrap();
+        assert_eq!(je, InsertFormat::JsonEachRow);
+        let je: InsertFormat = serde_json::from_str(r#""json""#).unwrap();
+        assert_eq!(je, InsertFormat::JsonEachRow);
+        let je: InsertFormat = serde_json::from_str(r#""json_each_row""#).unwrap();
+        assert_eq!(je, InsertFormat::JsonEachRow);
     }
 }
