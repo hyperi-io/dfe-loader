@@ -55,14 +55,21 @@ export CARGO_BUILD_JOBS=2
 
 ### hyperi-rustlib via crates.io
 
-**hyperi-rustlib is published publicly on crates.io. Use crates.io, NOT local path.**
+**CRITICAL: hyperi-rustlib MUST always use the crates.io release. NEVER commit a local path.**
+
+You may READ code at `/projects/hyperi-rustlib` for reference, but Cargo.toml must ALWAYS
+point to crates.io. No `path = ` overrides, no `[patch.crates-io]` for rustlib. Ever.
 
 ```toml
 # ✅ CORRECT - crates.io (default registry, no registry key needed)
-hyperi-rustlib = { version = "1.13.2", features = ["transport-kafka"] }
+hyperi-rustlib = { version = ">=1.16.6", features = ["transport-kafka"] }
 
-# ❌ WRONG - Local path (development only, never commit)
+# ❌ WRONG - Local path (NEVER commit this)
 # hyperi-rustlib = { path = "../hyperi-rustlib", features = ["transport-kafka"] }
+
+# ❌ WRONG - patch override (NEVER commit this)
+# [patch.crates-io]
+# hyperi-rustlib = { path = "../hyperi-rustlib" }
 ```
 
 No registry configuration or credentials required — standard `cargo fetch` / `cargo build` resolves it.
