@@ -196,18 +196,14 @@ rustlib v1.14.0+ switches rdkafka to dynamic-linking against system librdkafka
 - [ ] Remove stale/unused dependencies
 - [ ] `cargo update` + full test suite
 
-### Phase 7: Crates Workspace Extraction (Post-Migration)
+### Rustlib Capability Review
 
-Extract reusable modules into workspace crates (following `dfe-transform-wasm/crates/` pattern):
+Audit dfe-loader for bespoke code that duplicates hyperi-rustlib functionality.
+Replace with rustlib equivalents + extensions where applicable.
 
-- [ ] Create workspace root `Cargo.toml` with `[workspace]` section
-- [ ] Extract `crates/clickhouse` — HTTP client, types, schema cache, inserter, circuit breaker
-- [ ] Extract `crates/buffer` — Row buffer management, pool
-- [ ] Main binary stays at workspace root or `crates/loader`
-- [ ] Shared workspace dependencies in `[workspace.dependencies]`
-- [ ] Compile + test
-
-**Benefits:** Cleaner dep boundaries, faster incremental compilation, reusable by other DFE services.
+- [ ] Full comparison of loader modules vs rustlib features
+- [ ] Replace any duplicated patterns (config, logging, metrics, resilience, transport)
+- [ ] Document remaining loader-specific code that is genuinely application-specific
 
 ---
 
@@ -276,19 +272,13 @@ Each is a new file implementing `DlqBackend` trait + feature flag. No changes to
 
 ---
 
-## Backlog: Kafka Transport Consolidation
+## Completed: Kafka Transport Consolidation
 
-The project has TWO Kafka consumers:
-- `src/kafka/transport.rs` — uses rustlib `KafkaTransport` (via `TransportAdapter`)
-- `src/kafka/consumer.rs` — uses `rdkafka` directly (legacy)
-
-Both are compiled. The orchestrator uses `TransportBackend` (rustlib transport).
-The legacy `consumer.rs` should be removed once transport adapter coverage is confirmed complete.
-Direct `rdkafka` dependency in `Cargo.toml` can be dropped after removal.
-
-- [ ] Verify `TransportAdapter` covers all consumer.rs functionality (commit, seek, pause/resume)
-- [ ] Remove `src/kafka/consumer.rs` (legacy direct rdkafka)
-- [ ] Remove `rdkafka` from `Cargo.toml` dependencies
+- [x] Verified `TransportAdapter` covers all consumer.rs functionality
+- [x] Removed `src/kafka/consumer.rs` (352 lines, legacy direct rdkafka)
+- [x] Removed `rdkafka` direct dependency from `Cargo.toml`
+- [x] Removed `Error::KafkaLib(rdkafka::error::KafkaError)` variant
+- [x] Moved `KafkaMessage` struct to `kafka/mod.rs`
 
 ---
 

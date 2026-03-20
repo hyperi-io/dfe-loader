@@ -9,9 +9,6 @@ use thiserror::Error;
 #[derive(Error, Debug)]
 pub enum Error {
     #[error("Kafka error: {0}")]
-    KafkaLib(#[from] rdkafka::error::KafkaError),
-
-    #[error("Kafka error: {0}")]
     Kafka(String),
 
     #[error("ClickHouse error: {0}")]

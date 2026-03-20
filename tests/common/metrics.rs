@@ -12,7 +12,6 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
-use prometheus::Registry;
 use serde::{Deserialize, Serialize};
 
 /// Snapshot of Prometheus metrics at a point in time
@@ -53,30 +52,20 @@ pub struct MetricDelta {
 }
 
 impl MetricsSnapshot {
-    /// Capture current metrics from a Prometheus registry
-    pub fn capture(registry: &Registry, test_name: &str) -> Self {
-        use prometheus::Encoder;
-
+    /// Capture current metrics from Prometheus text format output.
+    ///
+    /// Pass the result of `MetricsManager::render()` or any Prometheus
+    /// exposition format string.
+    pub fn from_text(text: &str, test_name: &str) -> Self {
         let mut metrics = HashMap::new();
 
-        // Gather metrics and encode to text format
-        let encoder = prometheus::TextEncoder::new();
-        let metric_families = registry.gather();
-        let mut buffer = Vec::new();
-        encoder.encode(&metric_families, &mut buffer).unwrap();
-
-        // Parse text format to extract values
-        let text = String::from_utf8(buffer).unwrap();
-
         for line in text.lines() {
-            // Skip comments and empty lines
             if line.starts_with('#') || line.is_empty() {
                 continue;
             }
 
             // Parse metric line: "metric_name{labels} value"
             if let Some((name_part, value_str)) = line.rsplit_once(' ') {
-                // Extract metric name (before { or space)
                 let name = if let Some(idx) = name_part.find('{') {
                     &name_part[..idx]
                 } else {
@@ -84,7 +73,6 @@ impl MetricsSnapshot {
                 };
 
                 if let Ok(value) = value_str.parse::<f64>() {
-                    // Aggregate values for same metric name
                     metrics
                         .entry(name.to_string())
                         .and_modify(|m: &mut MetricValue| m.value += value)
@@ -110,7 +98,6 @@ impl MetricsSnapshot {
         let json = serde_json::to_string_pretty(self)
             .map_err(|e| format!("Failed to serialize: {}", e))?;
 
-        // Ensure parent directory exists
         if let Some(parent) = path.as_ref().parent() {
             fs::create_dir_all(parent).map_err(|e| format!("Failed to create directory: {}", e))?;
         }
@@ -133,25 +120,20 @@ impl MetricsSnapshot {
         let mut regressions = Vec::new();
         let mut unchanged = Vec::new();
 
-        // Compare metrics present in both snapshots
         for (name, current_metric) in &self.metrics {
             if let Some(baseline_metric) = baseline.metrics.get(name) {
                 let delta = current_metric.value - baseline_metric.value;
                 let percent_change = if baseline_metric.value != 0.0 {
                     (delta / baseline_metric.value) * 100.0
                 } else if delta != 0.0 {
-                    100.0 // 0 -> non-zero is 100% change
+                    100.0
                 } else {
                     0.0
                 };
 
-                // Determine if this is an improvement or regression
-                // For latency/errors: lower is better
-                // For throughput/processed: higher is better
                 let is_improvement = is_metric_improvement(name, delta);
 
                 if delta.abs() < 0.001 {
-                    // No significant change
                     unchanged.push(name.clone());
                 } else if is_improvement {
                     improvements.push(MetricDelta {
@@ -173,7 +155,6 @@ impl MetricsSnapshot {
             }
         }
 
-        // Sort by absolute percent change
         improvements.sort_by(|a, b| {
             b.percent_change
                 .abs()
@@ -213,37 +194,36 @@ impl MetricsComparison {
         );
 
         if !self.improvements.is_empty() {
-            println!("\n✅ Improvements ({}):", self.improvements.len());
+            println!("\nImprovements ({}):", self.improvements.len());
             for delta in &self.improvements {
                 println!(
-                    "  {} : {:.2} → {:.2} ({:+.1}%)",
+                    "  {} : {:.2} -> {:.2} ({:+.1}%)",
                     delta.name, delta.baseline_value, delta.current_value, delta.percent_change
                 );
             }
         }
 
         if !self.regressions.is_empty() {
-            println!("\n❌ Regressions ({}):", self.regressions.len());
+            println!("\nRegressions ({}):", self.regressions.len());
             for delta in &self.regressions {
                 println!(
-                    "  {} : {:.2} → {:.2} ({:+.1}%)",
+                    "  {} : {:.2} -> {:.2} ({:+.1}%)",
                     delta.name, delta.baseline_value, delta.current_value, delta.percent_change
                 );
             }
         }
 
-        println!("\n📊 Summary:");
+        println!("\nSummary:");
         println!("  Improvements: {}", self.improvements.len());
         println!("  Regressions:  {}", self.regressions.len());
         println!("  Unchanged:    {}", self.unchanged.len());
 
-        // Overall verdict
         if self.regressions.is_empty() && !self.improvements.is_empty() {
-            println!("\n✅ PASS: Performance improved with no regressions");
+            println!("\nPASS: Performance improved with no regressions");
         } else if !self.regressions.is_empty() {
-            println!("\n⚠️  WARNING: Performance regressions detected");
+            println!("\nWARNING: Performance regressions detected");
         } else {
-            println!("\n➡️  No significant performance changes");
+            println!("\nNo significant performance changes");
         }
     }
 
@@ -264,7 +244,7 @@ impl MetricsComparison {
         ));
 
         if !self.improvements.is_empty() {
-            md.push_str("## ✅ Improvements\n\n");
+            md.push_str("## Improvements\n\n");
             md.push_str("| Metric | Baseline | Current | Change | % |\n");
             md.push_str("|--------|----------|---------|--------|---|\n");
             for delta in &self.improvements {
@@ -281,7 +261,7 @@ impl MetricsComparison {
         }
 
         if !self.regressions.is_empty() {
-            md.push_str("## ❌ Regressions\n\n");
+            md.push_str("## Regressions\n\n");
             md.push_str("| Metric | Baseline | Current | Change | % |\n");
             md.push_str("|--------|----------|---------|--------|---|\n");
             for delta in &self.regressions {
@@ -305,7 +285,6 @@ impl MetricsComparison {
         md.push_str(&format!("- **Regressions:** {}\n", self.regressions.len()));
         md.push_str(&format!("- **Unchanged:** {}\n", self.unchanged.len()));
 
-        // Ensure parent directory exists
         if let Some(parent) = path.as_ref().parent() {
             fs::create_dir_all(parent).map_err(|e| format!("Failed to create directory: {}", e))?;
         }
@@ -316,29 +295,25 @@ impl MetricsComparison {
 
 /// Determine if a metric change is an improvement
 fn is_metric_improvement(metric_name: &str, delta: f64) -> bool {
-    // For these metrics, lower is better
     if metric_name.contains("latency")
         || metric_name.contains("error")
         || metric_name.contains("dlq")
         || metric_name.contains("lag")
     {
-        return delta < 0.0; // Decrease is improvement
+        return delta < 0.0;
     }
 
-    // For throughput metrics, higher is better
     if metric_name.contains("processed")
         || metric_name.contains("inserted")
         || metric_name.contains("flushed")
     {
-        return delta > 0.0; // Increase is improvement
+        return delta > 0.0;
     }
 
-    // For buffer metrics, lower is better (less memory)
     if metric_name.contains("buffer") || metric_name.contains("memory") {
         return delta < 0.0;
     }
 
-    // Default: assume increase is improvement
     delta > 0.0
 }
 
@@ -362,17 +337,14 @@ fn get_git_commit() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use prometheus::{Counter, Opts, Registry};
 
     #[test]
-    fn test_metrics_snapshot_capture() {
-        let registry = Registry::new();
-
-        let counter = Counter::with_opts(Opts::new("test_counter", "Test counter")).unwrap();
-        counter.inc_by(100.0);
-        registry.register(Box::new(counter)).unwrap();
-
-        let snapshot = MetricsSnapshot::capture(&registry, "test");
+    fn test_metrics_snapshot_from_text() {
+        let text = r#"# HELP test_counter A test counter
+# TYPE test_counter counter
+test_counter 100
+"#;
+        let snapshot = MetricsSnapshot::from_text(text, "test");
 
         assert_eq!(snapshot.test_name, "test");
         assert!(snapshot.metrics.contains_key("test_counter"));
@@ -403,7 +375,7 @@ mod tests {
         current_metrics.insert(
             "loader_messages_processed_total".to_string(),
             MetricValue {
-                value: 1200.0, // 20% improvement
+                value: 1200.0,
                 metric_type: "Counter".to_string(),
                 help: "Test".to_string(),
             },
@@ -411,7 +383,7 @@ mod tests {
         current_metrics.insert(
             "loader_insert_latency_seconds".to_string(),
             MetricValue {
-                value: 0.4, // 20% improvement (lower latency)
+                value: 0.4,
                 metric_type: "Histogram".to_string(),
                 help: "Test".to_string(),
             },
@@ -436,7 +408,6 @@ mod tests {
         assert_eq!(comparison.improvements.len(), 2);
         assert_eq!(comparison.regressions.len(), 0);
 
-        // Check throughput improvement
         let throughput_delta = comparison
             .improvements
             .iter()
@@ -445,7 +416,6 @@ mod tests {
         assert_eq!(throughput_delta.delta, 200.0);
         assert!((throughput_delta.percent_change - 20.0).abs() < 0.1);
 
-        // Check latency improvement
         let latency_delta = comparison
             .improvements
             .iter()
