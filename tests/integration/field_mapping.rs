@@ -630,11 +630,12 @@ mod clickhouse_tests {
         };
 
         let table_name = unique_table_name("fm_comments");
+        let oc = crate::common::on_cluster_clause();
         let full_name = format!("default.{}", table_name);
 
         // Create table with @renamed directives in column comments
         let ddl = format!(
-            "CREATE TABLE default.{} ON CLUSTER 'default' (\
+            "CREATE TABLE default.{}{oc} (\
                 _timestamp DateTime64(3),\
                 source_ip String COMMENT '@renamed: first(src_ip/srcip)',\
                 dest_ip String COMMENT '@renamed: dst_ip',\

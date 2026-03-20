@@ -51,9 +51,10 @@ async fn test_full_pipeline_e2e() {
         }
     };
 
+    let oc = crate::common::on_cluster_clause();
     let table_name = unique_table_name("e2e_pipeline");
     let ddl = format!(
-        "CREATE TABLE {} ON CLUSTER 'default' (
+        "CREATE TABLE {}{oc} (
             id UInt64,
             action String,
             user_id UInt64,
@@ -181,12 +182,13 @@ async fn test_pipeline_multi_table_routing() {
         None => return,
     };
 
+    let oc = crate::common::on_cluster_clause();
     let table1 = unique_table_name("e2e_auth");
     let table2 = unique_table_name("e2e_api");
 
     let ddl_template = |name: &str| {
         format!(
-            "CREATE TABLE {} ON CLUSTER 'default' (
+            "CREATE TABLE {}{oc} (
                 id UInt64,
                 event String,
                 value Float64
@@ -320,9 +322,10 @@ async fn test_pipeline_with_flattening() {
         None => return,
     };
 
+    let oc = crate::common::on_cluster_clause();
     let table_name = unique_table_name("e2e_flat");
     let ddl = format!(
-        "CREATE TABLE {} ON CLUSTER 'default' (
+        "CREATE TABLE {}{oc} (
             id UInt64,
             user_id UInt64,
             user_email String,
