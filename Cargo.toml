@@ -106,6 +106,9 @@ rstest = ">=0.22"
 testcontainers = ">=0.26"
 testcontainers-modules = { version = ">=0.10", features = ["kafka", "clickhouse"] }
 
+# Kafka producer for e2e tests (test message injection)
+rdkafka = { version = ">=0.39.0", features = ["dynamic-linking"] }
+
 # ClickHouse official crate (HTTP/RowBinary) — bakeoff comparison vs JSONEachRow path
 clickhouse = { version = ">=0.14", features = ["lz4", "time", "rustls-tls", "rustls-tls-native-roots"] }
 time = ">=0.3"

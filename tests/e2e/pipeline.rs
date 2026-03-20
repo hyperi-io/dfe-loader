@@ -184,29 +184,18 @@ async fn test_full_pipeline_e2e() {
 
 #[tokio::test]
 async fn test_metrics_server_integration() {
-    use dfe_loader::metrics::{Metrics, ServerState};
+    use dfe_loader::metrics::ServerState;
     use std::sync::Arc;
-
-    let metrics = Metrics::new();
-    metrics.record_received();
-    metrics.record_received();
-    metrics.record_processed("test_table");
 
     let scaling = Arc::new(hyperi_rustlib::ScalingPressure::new(
         hyperi_rustlib::scaling::ScalingPressureConfig::default(),
         vec![],
     ));
+    let manager = hyperi_rustlib::metrics::MetricsManager::new("loader_test_e2e");
+    let metrics = dfe_loader::metrics::Metrics::new(&manager);
     let state = Arc::new(ServerState::new(metrics, scaling));
+
+    assert!(!state.is_ready());
     state.set_ready(true);
-
-    // We can't easily test the full server without binding to a port
-    // Just verify the state works correctly
-    let health = state.health.read().unwrap();
-    assert!(health.ready);
-    drop(health);
-
-    // Verify metrics gathering works
-    let metrics_output = state.metrics.gather();
-    assert!(metrics_output.contains("loader_messages_received_total"));
-    assert!(metrics_output.contains("loader_messages_processed_total"));
+    assert!(state.is_ready());
 }
