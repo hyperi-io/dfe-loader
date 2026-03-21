@@ -62,7 +62,7 @@ point to crates.io. No `path = ` overrides, no `[patch.crates-io]` for rustlib. 
 
 ```toml
 # ✅ CORRECT - crates.io (default registry, no registry key needed)
-hyperi-rustlib = { version = ">=1.16.6", features = ["transport-kafka"] }
+hyperi-rustlib = { version = ">=1.17.0", features = ["transport-kafka"] }
 
 # ❌ WRONG - Local path (NEVER commit this)
 # hyperi-rustlib = { path = "../hyperi-rustlib", features = ["transport-kafka"] }

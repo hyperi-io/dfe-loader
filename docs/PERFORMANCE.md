@@ -155,17 +155,6 @@ clickhouse:
 - Increase for high-latency ClickHouse connections
 - Decrease if ClickHouse is CPU-bound
 
-### Buffer Pool Pre-warming
-
-For consistent low-latency from startup:
-
-```rust
-use clickhouse_arrow::simd::BUFFER_POOL;
-
-// During initialization
-BUFFER_POOL.prewarm();
-```
-
 ## Profiling
 
 ### CPU Profiling with perf
