@@ -3,25 +3,13 @@
 
 //! Kafka integration tests
 //!
-//! Tests run against k8s.tyrell.com.au AutoMQ cluster via .env settings
+//! Tests run against the configured Kafka cluster via .env settings.
+//! Uses rustlib TransportAdapter (not legacy direct-rdkafka consumer).
 
 use std::env;
 
 use dfe_loader::config::{KafkaConfig, SaslConfig, SaslMechanism};
-use dfe_loader::kafka::Consumer;
-
-/// Convert SaslMechanism to the string format used in config
-fn mechanism_to_string(m: SaslMechanism) -> String {
-    match m {
-        SaslMechanism::None => "none",
-        SaslMechanism::Plain => "plain",
-        SaslMechanism::ScramSha256 => "scram_sha_256",
-        SaslMechanism::ScramSha512 => "scram_sha_512",
-        SaslMechanism::OAuthBearer => "oauthbearer",
-        SaslMechanism::AwsMskIam => "aws_msk_iam",
-    }
-    .to_string()
-}
+use dfe_loader::kafka::TransportAdapter;
 
 fn load_dotenv() {
     let _ = dotenvy::from_path("/projects/dfe-loader/.env");
@@ -37,7 +25,6 @@ fn skip_if_no_kafka() -> bool {
         return true;
     }
 
-    // Try to connect to first broker
     let first_broker = brokers.split(',').next().unwrap_or(&brokers);
     eprintln!("Checking Kafka at {}...", first_broker);
 
@@ -76,7 +63,6 @@ fn get_test_config() -> KafkaConfig {
     let brokers = env::var("KAFKA_BROKERS").expect("KAFKA_BROKERS not set");
     let group = env::var("KAFKA_GROUP").unwrap_or_else(|_| "integration-test-group".to_string());
 
-    // Use .env SASL settings
     let sasl = if env::var("KAFKA_SASL_USER").is_ok() || env::var("KAFKA_SASL_MECHANISM").is_ok() {
         let mechanism = match env::var("KAFKA_SASL_MECHANISM")
             .unwrap_or_default()
@@ -89,6 +75,19 @@ fn get_test_config() -> KafkaConfig {
             "AWS_MSK_IAM" => SaslMechanism::AwsMskIam,
             _ => SaslMechanism::ScramSha512,
         };
+
+        fn mechanism_to_string(m: SaslMechanism) -> String {
+            match m {
+                SaslMechanism::None => "none",
+                SaslMechanism::Plain => "plain",
+                SaslMechanism::ScramSha256 => "scram_sha_256",
+                SaslMechanism::ScramSha512 => "scram_sha_512",
+                SaslMechanism::OAuthBearer => "oauthbearer",
+                SaslMechanism::AwsMskIam => "aws_msk_iam",
+            }
+            .to_string()
+        }
+
         Some(SaslConfig {
             enabled: true,
             mechanism: mechanism_to_string(mechanism),
@@ -109,7 +108,7 @@ fn get_test_config() -> KafkaConfig {
 
     KafkaConfig {
         brokers: brokers.split(',').map(|s| s.to_string()).collect(),
-        topics: vec!["test-events".to_string()], // Default test topic
+        topics: vec!["test-events".to_string()],
         group,
         topic_regex: None,
         client_id: "integration-test".to_string(),
@@ -120,7 +119,7 @@ fn get_test_config() -> KafkaConfig {
 }
 
 #[tokio::test]
-async fn test_kafka_consumer_creation() {
+async fn test_kafka_transport_creation() {
     if skip_if_no_kafka() {
         eprintln!("Skipping test: no Kafka available");
         return;
@@ -128,37 +127,26 @@ async fn test_kafka_consumer_creation() {
 
     let config = get_test_config();
     let start = std::time::Instant::now();
-    let result = Consumer::new(&config);
+    let result = TransportAdapter::new(&config).await;
 
     match result {
-        Ok(consumer) => {
+        Ok(transport) => {
             let elapsed = start.elapsed();
-            eprintln!("✓ Created Kafka consumer in {:?}", elapsed);
+            eprintln!("Created Kafka transport in {:?}", elapsed);
             eprintln!("  Brokers: {:?}", config.brokers);
             eprintln!("  Group: {}", config.group);
             eprintln!("  SASL: {}", config.sasl.is_some());
-
-            // Try to subscribe
-            let start = std::time::Instant::now();
-            match consumer.subscribe() {
-                Ok(()) => {
-                    eprintln!("✓ Subscribed to topics in {:?}", start.elapsed());
-                }
-                Err(e) => {
-                    eprintln!("✗ Subscribe failed: {}", e);
-                }
-            }
+            assert!(transport.is_healthy());
         }
         Err(e) => {
-            eprintln!("✗ Kafka consumer creation failed: {}", e);
-            panic!("Consumer should be created when Kafka is reachable");
+            eprintln!("Kafka transport creation failed: {}", e);
+            panic!("Transport should be created when Kafka is reachable");
         }
     }
 }
 
 #[tokio::test]
 async fn test_kafka_config_validation() {
-    // This test doesn't need Kafka running - just validates config structure
     let config = KafkaConfig {
         brokers: vec!["localhost:9092".to_string()],
         topics: vec!["test-topic".to_string()],
@@ -174,7 +162,6 @@ async fn test_kafka_config_validation() {
     assert!(!config.topics.is_empty());
     assert!(!config.group.is_empty());
 
-    // Empty brokers should be invalid
     let mut invalid = config;
     invalid.brokers = vec![];
     assert!(invalid.brokers.is_empty());
@@ -182,7 +169,6 @@ async fn test_kafka_config_validation() {
 
 #[tokio::test]
 async fn test_kafka_sasl_config() {
-    // Test that SASL configuration is properly set up (no Kafka needed)
     let config = KafkaConfig {
         brokers: vec!["localhost:9092".to_string()],
         topics: vec!["test-topic".to_string()],

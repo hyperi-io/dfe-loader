@@ -10,11 +10,13 @@
 
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::str::FromStr;
+use std::sync::atomic::AtomicU64;
 
 use serde_json::Value;
 use tracing::warn;
 
 use crate::Result;
+use crate::clickhouse::types::ParsedTypeExt;
 use crate::clickhouse::{ParsedType, TableSchema};
 use crate::config::{CoercionConfig, NullHandling};
 
@@ -98,12 +100,16 @@ impl Coercer {
                         if self.config.strict {
                             return Err(e);
                         }
-                        // Non-strict: log warning and use default
-                        warn!(
-                            field = field_name,
-                            error = %e,
-                            "Coercion failed, using default"
-                        );
+                        // Non-strict: log sampled warning and use default
+                        static COERCE_FAILS: AtomicU64 = AtomicU64::new(0);
+                        if hyperi_rustlib::logger::log_sampled(&COERCE_FAILS, 1000) {
+                            warn!(
+                                field = field_name,
+                                error = %e,
+                                total = COERCE_FAILS.load(std::sync::atomic::Ordering::Relaxed),
+                                "Coercion failed, using default (1 in 1000)"
+                            );
+                        }
                         *value = self.default_value(&col.parsed_type);
                     }
                 }

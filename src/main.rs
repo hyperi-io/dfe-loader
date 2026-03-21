@@ -19,7 +19,6 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -29,9 +28,10 @@ use tokio::signal;
 use tracing::{error, info, warn};
 
 use dfe_loader::config::{Config, ConfigWatcher, SharedConfig, WatcherConfig};
-use dfe_loader::metrics::{Metrics, ServerState, run_server};
+use dfe_loader::metrics::{Metrics, ServerState};
 use dfe_loader::pipeline::Orchestrator;
 use hyperi_rustlib::cli::{CliError, CommonArgs, DfeApp, StandardCommand, VersionInfo, run_app};
+use hyperi_rustlib::metrics::MetricsManager;
 
 #[derive(Parser, Debug)]
 #[command(name = "dfe-loader")]
@@ -101,10 +101,22 @@ impl DfeApp for App {
             "Starting dfe-loader"
         );
 
-        // Initialise metrics and scaling pressure
-        let metrics = Metrics::new();
+        // Initialise metrics via rustlib MetricsManager
+        let mut manager = MetricsManager::new("loader");
+
+        // Wire readiness check — MetricsManager serves /readyz
         let scaling = Arc::new(config.scaling.build_pressure());
+        let metrics = Metrics::new(&manager);
         let server_state = Arc::new(ServerState::new(metrics.clone(), Arc::clone(&scaling)));
+
+        let readiness_state = Arc::clone(&server_state);
+        manager.set_readiness_check(move || readiness_state.is_ready());
+
+        // Start metrics server (serves /metrics, /healthz, /readyz)
+        let metrics_addr = self.common_args().metrics_addr.as_str();
+        if let Err(e) = manager.start_server(metrics_addr).await {
+            error!(error = %e, addr = metrics_addr, "Failed to start metrics server");
+        }
 
         // Create shared config for hot-reload
         let shared_config = SharedConfig::new(config.clone());
@@ -142,24 +154,6 @@ impl DfeApp for App {
                 warn!("Hot-reload enabled but no config file path provided (--config), skipping");
             }
         }
-
-        // Start metrics server
-        let metrics_addr: SocketAddr =
-            self.common_args()
-                .metrics_addr
-                .parse()
-                .unwrap_or_else(|_| {
-                    warn!(addr = %self.common_args().metrics_addr, "Invalid metrics address, using default");
-                    "0.0.0.0:9090".parse().unwrap()
-                });
-
-        let metrics_shutdown = shutdown_token.clone();
-        let metrics_state = server_state.clone();
-        tokio::spawn(async move {
-            if let Err(e) = run_server(metrics_addr, metrics_state, metrics_shutdown).await {
-                error!(error = %e, "Metrics server error");
-            }
-        });
 
         // Spawn signal handler
         let signal_shutdown = shutdown_token.clone();

@@ -63,8 +63,9 @@ async fn test_clickhouse_insert_json() {
     };
 
     let table_name = unique_table_name("test_insert");
+    let oc = crate::common::on_cluster_clause();
     let create_sql = format!(
-        "CREATE TABLE IF NOT EXISTS {} ON CLUSTER 'default' (
+        "CREATE TABLE IF NOT EXISTS {}{oc} (
             id UInt64,
             event String,
             category String,
@@ -195,9 +196,10 @@ async fn test_clickhouse_variant_type_support() {
     };
 
     let table_name = unique_table_name("test_variant");
+    let oc = crate::common::on_cluster_clause();
 
     let create_sql = format!(
-        "CREATE TABLE IF NOT EXISTS {} ON CLUSTER 'default' (
+        "CREATE TABLE IF NOT EXISTS {}{oc} (
             id UInt64,
             data Variant(String, Int64, Float64)
         ) ENGINE = MergeTree() ORDER BY tuple()

@@ -9,9 +9,6 @@ use thiserror::Error;
 #[derive(Error, Debug)]
 pub enum Error {
     #[error("Kafka error: {0}")]
-    KafkaLib(#[from] rdkafka::error::KafkaError),
-
-    #[error("Kafka error: {0}")]
     Kafka(String),
 
     #[error("ClickHouse error: {0}")]
@@ -48,11 +45,8 @@ pub enum Error {
     Shutdown,
 }
 
-impl From<String> for Error {
-    fn from(s: String) -> Self {
-        Error::Config(s)
-    }
-}
+// Removed: impl From<String> for Error — masks error category.
+// Use explicit Error::Config(...), Error::Json(...), etc. at each call site.
 
 impl From<crate::clickhouse::ClickHouseError> for Error {
     fn from(err: crate::clickhouse::ClickHouseError) -> Self {

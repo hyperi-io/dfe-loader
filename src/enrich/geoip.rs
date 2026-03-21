@@ -12,10 +12,10 @@
 //! 3. **Batch Deduplication**: Process unique IPs once, apply to all matching events
 //! 4. **Schema-Aware Output**: Only compute fields that exist in destination schema
 
+use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::Path;
-use std::sync::RwLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use maxminddb::{MaxMindDbError, Reader, geoip2};
@@ -242,7 +242,7 @@ impl GeoIpEnricher {
 
     /// Get cache statistics
     pub fn cache_stats(&self) -> CacheStats {
-        let cache = self.cache.read().unwrap();
+        let cache = self.cache.read();
         CacheStats {
             hits: self.cache_hits.load(Ordering::Relaxed),
             misses: self.cache_misses.load(Ordering::Relaxed),
@@ -308,7 +308,7 @@ impl GeoIpEnricher {
 
     /// Cache lookup (read path)
     fn cache_get(&self, ip: &str) -> Option<GeoIpResult> {
-        let cache = self.cache.read().unwrap();
+        let cache = self.cache.read();
         if let Some(entry) = cache.get(ip) {
             self.cache_hits.fetch_add(1, Ordering::Relaxed);
             Some(entry.result.clone())
@@ -319,7 +319,7 @@ impl GeoIpEnricher {
 
     /// Cache insert with LRU eviction (write path)
     fn cache_put(&self, ip: String, result: GeoIpResult) {
-        let mut cache = self.cache.write().unwrap();
+        let mut cache = self.cache.write();
 
         // LRU eviction: remove oldest 25% when at capacity
         if cache.len() >= self.cache_capacity {

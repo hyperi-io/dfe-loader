@@ -200,6 +200,13 @@ async fn test_org_id_insert_to_clickhouse() {
             return;
         }
     };
+    let oc = crate::common::on_cluster_clause();
+
+    // This test requires a Replicated database (ReplicatedMergeTree) — skip in Docker single-node
+    if crate::common::TestMode::detect() == crate::common::TestMode::Docker {
+        eprintln!("Skipping: ReplicatedMergeTree requires cluster (TEST_MODE=docker)");
+        return;
+    }
 
     // The cluster has two relevant databases:
     //   benchmark = Atomic engine (plain MergeTree, no replication, no auto-conversion)
@@ -253,10 +260,7 @@ async fn test_org_id_insert_to_clickhouse() {
     // Sync all replicas — the table is ReplicatedMergeTree (auto-converted by Replicated DB),
     // so SYSTEM SYNC REPLICA forces all nodes to catch up before we query back.
     client
-        .execute(&format!(
-            "SYSTEM SYNC REPLICA ON CLUSTER 'default' {}",
-            full_name
-        ))
+        .execute(&format!("SYSTEM SYNC REPLICA{oc} {}", full_name))
         .await
         .expect("Failed to sync replicas");
 

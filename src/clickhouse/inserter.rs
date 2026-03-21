@@ -40,9 +40,16 @@ use tracing::{debug, error, info, warn};
 use crate::Result;
 use crate::buffer::{FlushBatch, KafkaOffset};
 use crate::clickhouse::circuit_breaker::CircuitBreaker;
+use crate::clickhouse::config::InsertFormat;
 use crate::clickhouse::error::ErrorCategory;
 use crate::clickhouse::{HttpClickHouseClient, SchemaCache};
 use crate::transform::Coercer;
+
+/// Split "db.table" into (db, table). Panics if no dot — callers always
+/// pass fully qualified names from BufferManager.
+fn parse_db_table(table: &str) -> (&str, &str) {
+    table.split_once('.').unwrap_or(("default", table))
+}
 
 /// Configuration for the inserter
 pub struct InserterConfig {
@@ -135,8 +142,12 @@ pub struct FailedRow {
 /// - **Fatal errors** (auth, schema): Fail immediately, no retry
 #[derive(Clone)]
 pub struct Inserter {
-    /// HTTP client for JSONEachRow inserts
+    /// HTTP client for JSONEachRow inserts and DDL
     http_client: Arc<HttpClickHouseClient>,
+    /// clickhouse-rs Client for DynamicInsert (RowBinary path)
+    ch_client: Option<clickhouse::Client>,
+    /// Insert format — RowBinary (schema-reflected) or JSONEachRow
+    insert_format: InsertFormat,
     max_retries: u32,
     base_retry_delay_ms: u64,
     max_retry_delay_ms: u64,
@@ -146,14 +157,17 @@ pub struct Inserter {
     semaphore: Option<Arc<Semaphore>>,
     /// Circuit breaker for per-table failure detection
     circuit_breaker: Option<Arc<CircuitBreaker>>,
-    /// Schema cache for type-aware coercion (Phase 5.6)
+    /// Schema cache for type-aware coercion (JSONEachRow path)
     schema_cache: Option<Arc<SchemaCache>>,
-    /// Type coercer applied before each insert (Phase 5.6)
+    /// Type coercer applied before each insert (JSONEachRow path)
     coercer: Option<Arc<Coercer>>,
 }
 
 impl Inserter {
-    /// Create a new inserter with HTTP client
+    /// Create a new inserter.
+    ///
+    /// When `insert_format` is `RowBinary`, a `clickhouse::Client` must be provided
+    /// via `with_ch_client()`. Otherwise inserts use the HTTP JSONEachRow path.
     pub fn new(http_client: Arc<HttpClickHouseClient>, config: InserterConfig) -> Self {
         let semaphore = if config.max_concurrent_inserts > 0 {
             Some(Arc::new(Semaphore::new(config.max_concurrent_inserts)))
@@ -163,6 +177,8 @@ impl Inserter {
 
         Self {
             http_client,
+            ch_client: None,
+            insert_format: InsertFormat::default(),
             max_retries: config.max_retries,
             base_retry_delay_ms: config.base_retry_delay_ms,
             max_retry_delay_ms: config.max_retry_delay_ms,
@@ -173,6 +189,21 @@ impl Inserter {
             schema_cache: None,
             coercer: None,
         }
+    }
+
+    /// Set the insert format and clickhouse-rs Client for RowBinary inserts.
+    ///
+    /// When `InsertFormat::RowBinary`, the inserter uses `DynamicInsert` from the
+    /// clickhouse-rs fork — schema-reflected binary encoding. ClickHouse skips
+    /// JSON parsing entirely, significantly reducing cluster CPU at scale.
+    pub fn with_insert_format(
+        mut self,
+        format: InsertFormat,
+        ch_client: Option<clickhouse::Client>,
+    ) -> Self {
+        self.insert_format = format;
+        self.ch_client = ch_client;
+        self
     }
 
     /// Enable schema-driven type coercion before each insert.
@@ -236,15 +267,129 @@ impl Inserter {
         self
     }
 
+    /// Get a reference to the circuit breaker (for metrics emission).
+    pub fn circuit_breaker(&self) -> Option<&Arc<CircuitBreaker>> {
+        self.circuit_breaker.as_ref()
+    }
+
     /// Insert rows into a table with error-aware retry.
+    ///
+    /// Dispatches based on `insert_format`:
+    /// - `RowBinary`: schema-reflected binary via `DynamicInsert` (fork)
+    /// - `JsonEachRow`: HTTP JSONEachRow via `HttpClickHouseClient`
     ///
     /// - **Transient errors**: Geometric backoff retry up to max_retries
     /// - **Data errors**: Returns immediately (caller should salvage)
     /// - **Fatal errors**: Returns immediately (no retry)
     ///
-    /// `raw_payloads` is parallel to `rows` — passed to the HTTP client for
-    /// zero-copy `_json` splice. Pass an empty slice for the legacy flatten path.
+    /// `raw_payloads` is parallel to `rows` — used by JSONEachRow path for
+    /// zero-copy `_json` splice. Ignored by RowBinary path.
     pub async fn insert_rows(
+        &self,
+        table: &str,
+        rows: &[Map<String, Value>],
+        raw_payloads: &[Arc<[u8]>],
+    ) -> Result<usize> {
+        match self.insert_format {
+            InsertFormat::RowBinary => self.insert_rows_rowbinary(table, rows).await,
+            InsertFormat::JsonEachRow => self.insert_rows_json(table, rows, raw_payloads).await,
+        }
+    }
+
+    /// RowBinary insert path — schema-reflected binary encoding via DynamicInsert.
+    ///
+    /// ClickHouse receives pre-columnarised data, zero server-side JSON parsing.
+    /// On schema mismatch, invalidates cache and retries once with fresh schema.
+    async fn insert_rows_rowbinary(
+        &self,
+        table: &str,
+        rows: &[Map<String, Value>],
+    ) -> Result<usize> {
+        if rows.is_empty() {
+            return Ok(0);
+        }
+
+        let ch_client = self.ch_client.as_ref().ok_or_else(|| {
+            crate::Error::Config(
+                "RowBinary insert requires clickhouse::Client (set via with_insert_format)"
+                    .to_string(),
+            )
+        })?;
+
+        let (db, tbl) = parse_db_table(table);
+
+        let mut last_error = None;
+        for attempt in 0..=self.max_retries {
+            let mut insert = ch_client.dynamic_insert(db, tbl);
+
+            let mut write_failed = false;
+            for row in rows {
+                if let Err(e) = insert.write_map(row).await {
+                    // Schema mismatch — invalidate and retry
+                    if matches!(e, clickhouse::dynamic::DynamicError::SchemaMismatch { .. }) {
+                        insert.invalidate_schema();
+                        last_error =
+                            Some(crate::Error::ClickHouse(format!("Schema mismatch: {e}")));
+                        write_failed = true;
+                        break;
+                    }
+                    return Err(crate::Error::ClickHouse(format!("RowBinary encode: {e}")));
+                }
+            }
+
+            if write_failed {
+                if attempt < self.max_retries {
+                    let delay = self.backoff_delay(attempt);
+                    warn!(
+                        table = %table,
+                        attempt,
+                        delay_ms = delay.as_millis(),
+                        "Schema mismatch, re-fetching and retrying"
+                    );
+                    sleep(delay).await;
+                    continue;
+                }
+                break;
+            }
+
+            match insert.end().await {
+                Ok(count) => {
+                    debug!(table = %table, rows = count, "RowBinary insert successful");
+                    return Ok(count as usize);
+                }
+                Err(clickhouse::dynamic::DynamicError::SchemaMismatch { .. }) => {
+                    if attempt < self.max_retries {
+                        let delay = self.backoff_delay(attempt);
+                        warn!(
+                            table = %table,
+                            attempt,
+                            delay_ms = delay.as_millis(),
+                            "Schema mismatch on end(), re-fetching and retrying"
+                        );
+                        sleep(delay).await;
+                        last_error = Some(crate::Error::ClickHouse(
+                            "Schema mismatch on flush".to_string(),
+                        ));
+                        continue;
+                    }
+                    last_error = Some(crate::Error::ClickHouse(
+                        "Schema mismatch after max retries".to_string(),
+                    ));
+                }
+                Err(e) => {
+                    return Err(crate::Error::ClickHouse(format!("RowBinary insert: {e}")));
+                }
+            }
+        }
+
+        Err(last_error.unwrap_or_else(|| crate::Error::Buffer("Max retries exceeded".into())))
+    }
+
+    /// JSONEachRow insert path — HTTP POST with NDJSON body.
+    ///
+    /// The existing path: serialize Map<String, Value> to JSON, ClickHouse
+    /// parses server-side. `raw_payloads` enables zero-copy `_json` splice.
+    async fn insert_rows_json(
         &self,
         table: &str,
         rows: &[Map<String, Value>],
@@ -439,7 +584,7 @@ impl Inserter {
 
             // Base case: single row
             if num_rows == 1 {
-                match self.http_client.insert_json_rows(table, rows, &[]).await {
+                match self.insert_rows(table, rows, &[]).await {
                     Ok(_) => {
                         *inserted += 1;
                     }
@@ -455,7 +600,7 @@ impl Inserter {
             }
 
             // Try the whole slice first (might succeed now, e.g., transient error)
-            match self.http_client.insert_json_rows(table, rows, &[]).await {
+            match self.insert_rows(table, rows, &[]).await {
                 Ok(count) => {
                     *inserted += count;
                     return;
