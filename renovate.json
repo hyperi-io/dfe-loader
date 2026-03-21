@@ -3,8 +3,7 @@
   "extends": [
     "config:recommended",
     "docker:pinDigests",
-    ":pinActionsToFullSha",
-    "schedule:nonOfficeHours"
+    ":pinActionsToFullSha"
   ],
   "labels": ["dependencies"],
   "prHourlyLimit": 5,
