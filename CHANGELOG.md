@@ -1,3 +1,40 @@
+# [1.15.0](https://github.com/hyperi-io/dfe-loader/compare/v1.14.5...v1.15.0) (2026-03-21)
+
+
+### Bug Fixes
+
+* activate clickhouse-rs fork via patch.crates-io ([bb7ab5a](https://github.com/hyperi-io/dfe-loader/commit/bb7ab5ad451d15bada598595936c6ecc3563efff))
+* add [lints] section with pedantic + unwrap/expect warnings ([ff57f6e](https://github.com/hyperi-io/dfe-loader/commit/ff57f6e667313ca98237960c3a965b5d6fe2185b))
+* add InsertFormat config (RowBinary default, JsonEachRow fallback) ([592d375](https://github.com/hyperi-io/dfe-loader/commit/592d37582e11a7d78112e11dc00165341c4b36f3))
+* add per-table buffer and circuit breaker metrics ([ffbd9ae](https://github.com/hyperi-io/dfe-loader/commit/ffbd9ae5b543f90b6616b04d31d79c7290180c33))
+* add per-table buffer and circuit breaker metrics ([d9fa247](https://github.com/hyperi-io/dfe-loader/commit/d9fa247cf6b3a631993a49871721a4e4a4150f56))
+* add per-table buffer and circuit breaker metrics ([f6bc07f](https://github.com/hyperi-io/dfe-loader/commit/f6bc07f7e6b3dd7c9113a5026d43adb6185da88e))
+* add per-table buffer and circuit breaker metrics ([253e0a3](https://github.com/hyperi-io/dfe-loader/commit/253e0a36f1c0affca30b626e76c1ed8fbf29c33c))
+* add required tooling files (deny.toml, rustfmt.toml, clippy.toml, rust-toolchain.toml) ([784a41e](https://github.com/hyperi-io/dfe-loader/commit/784a41e9a68fd72235e8f239c5e5b998341d84a4))
+* bump hyperi-rustlib to >=1.16.3, add metrics feature ([ad9cf62](https://github.com/hyperi-io/dfe-loader/commit/ad9cf6279b280c6c375473f9e624d968658788aa))
+* cargo fmt import order in apply_figment_env [skip ci] ([10576c4](https://github.com/hyperi-io/dfe-loader/commit/10576c4ebfa491a7020bbf2c29181a9f4f82ffbd))
+* ci quality fail fix ([29a0758](https://github.com/hyperi-io/dfe-loader/commit/29a075802c8c649c7bd2023096e95dfb9d45442c))
+* consume hyperi-rustlib v1.16.2 with rdkafka log level fix ([629bc70](https://github.com/hyperi-io/dfe-loader/commit/629bc704b2fa9aafa2406af262d9f1943c03c7bd)), closes [#5](https://github.com/hyperi-io/dfe-loader/issues/5)
+* disable rdkafka stats spam by default (closes [#5](https://github.com/hyperi-io/dfe-loader/issues/5)) ([17ceb14](https://github.com/hyperi-io/dfe-loader/commit/17ceb141f2d97359520e78c5d3ea11762df7236a))
+* fix test compilation after metrics/kafka consolidation ([0a007b9](https://github.com/hyperi-io/dfe-loader/commit/0a007b935ac6a7241379402aafb4583bf20dc1b2))
+* hot-reload safety — warn on restart-required config changes ([06ad21c](https://github.com/hyperi-io/dfe-loader/commit/06ad21cd48e7e7002c5bfd6509d5b81d0b7b2077))
+* log spam sites — sampled coercion, debounced DLQ/consumer errors ([e86aaca](https://github.com/hyperi-io/dfe-loader/commit/e86aacaf802070ad33d219dc79b8bd0437a3da86))
+* remove blanket From<String> for Error (masks error category) ([ef02baa](https://github.com/hyperi-io/dfe-loader/commit/ef02baa52c35ea2dafef99d33f66e242a8557dfc))
+* remove dead arrow/simd-json code and unused deps ([4aa6345](https://github.com/hyperi-io/dfe-loader/commit/4aa634502c9253893ffe1ea4bcce05d70de0c8b4))
+* remove stale ci submodule reference from git index ([367b3da](https://github.com/hyperi-io/dfe-loader/commit/367b3da28ad62e8508cdfd0ac032000d2e4e4e64))
+* replace bespoke metrics/kafka with rustlib (-957 lines, -5 deps) ([163ef9b](https://github.com/hyperi-io/dfe-loader/commit/163ef9b9089592237670f096f190dc27eb98e2b4))
+* standardise test infrastructure with dual-mode (remote/docker) ([6f1909a](https://github.com/hyperi-io/dfe-loader/commit/6f1909ad709d2c440f9b7eeb7f7c5f1e116c0c19))
+* switch clickhouse-rs patch from local path to git URL ([d9bd3a5](https://github.com/hyperi-io/dfe-loader/commit/d9bd3a5a71c512ec13f69f46e8a1db82ef43370f))
+* switch GeoIP + reputation to parking_lot::RwLock (no poison panics) ([0d34f4c](https://github.com/hyperi-io/dfe-loader/commit/0d34f4c7196424e753b65d46b765a6af212f6218))
+
+
+### Features
+
+* add cgroup-aware memory backpressure via rustlib MemoryGuard ([4f12961](https://github.com/hyperi-io/dfe-loader/commit/4f129617fba30517f63450cff78477f704b62942))
+* add DfeMetrics dual-emit alongside existing prometheus metrics ([95ee967](https://github.com/hyperi-io/dfe-loader/commit/95ee96785bd3ca580de3ccff48ae36c312a22cac))
+* wire InsertFormat dispatch — RowBinary default, JSONEachRow fallback ([502012c](https://github.com/hyperi-io/dfe-loader/commit/502012c406ff62d39b543184c25b9c207cf177d5))
+* wire security events at config reload, DLQ, and validation sites ([99226c8](https://github.com/hyperi-io/dfe-loader/commit/99226c8d6c086028fb96f7652a816ebafc429b74))
+
 ## [1.14.5](https://github.com/hyperi-io/dfe-loader/compare/v1.14.4...v1.14.5) (2026-03-20)
 
 
