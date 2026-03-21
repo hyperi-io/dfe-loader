@@ -1,3 +1,10 @@
+# [1.15.0-dev.3](https://github.com/hyperi-io/dfe-loader/compare/v1.15.0-dev.2...v1.15.0-dev.3) (2026-03-21)
+
+
+### Bug Fixes
+
+* inline Renovate config (test preset resolution issue) ([9a32898](https://github.com/hyperi-io/dfe-loader/commit/9a328986b817ce459b97c0341dc8c197ef9cb698))
+
 # [1.15.0-dev.2](https://github.com/hyperi-io/dfe-loader/compare/v1.15.0-dev.1...v1.15.0-dev.2) (2026-03-20)
 
 
