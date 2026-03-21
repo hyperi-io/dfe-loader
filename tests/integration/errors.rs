@@ -316,8 +316,9 @@ async fn test_error_insert_schema_mismatch() {
     };
 
     let table_name = unique_table_name("error_mismatch");
+    let oc = crate::common::on_cluster_clause();
     let ddl = format!(
-        "CREATE TABLE {} ON CLUSTER 'default' (
+        "CREATE TABLE {}{oc} (
             id UInt64,
             name String
         ) ENGINE = MergeTree() ORDER BY tuple()",
@@ -352,8 +353,9 @@ async fn test_error_insert_missing_column() {
     };
 
     let table_name = unique_table_name("error_missing_col");
+    let oc = crate::common::on_cluster_clause();
     let ddl = format!(
-        "CREATE TABLE {} ON CLUSTER 'default' (
+        "CREATE TABLE {}{oc} (
             id UInt64,
             required_field String
         ) ENGINE = MergeTree() ORDER BY tuple()",
@@ -387,8 +389,9 @@ async fn test_error_insert_extra_column() {
     };
 
     let table_name = unique_table_name("error_extra_col");
+    let oc = crate::common::on_cluster_clause();
     let ddl = format!(
-        "CREATE TABLE {} ON CLUSTER 'default' (
+        "CREATE TABLE {}{oc} (
             id UInt64
         ) ENGINE = MergeTree() ORDER BY tuple()",
         table_name
@@ -425,8 +428,9 @@ async fn test_error_empty_batch_insert() {
     };
 
     let table_name = unique_table_name("error_empty");
+    let oc = crate::common::on_cluster_clause();
     let ddl = format!(
-        "CREATE TABLE {} ON CLUSTER 'default' (
+        "CREATE TABLE {}{oc} (
             id UInt64
         ) ENGINE = MergeTree() ORDER BY tuple()",
         table_name

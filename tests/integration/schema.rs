@@ -215,10 +215,11 @@ async fn test_schema_introspection_from_clickhouse() {
     };
 
     let table_name = unique_table_name("schema_test");
+    let oc = crate::common::on_cluster_clause();
 
     // Create test table with various types
     let ddl = format!(
-        "CREATE TABLE {} ON CLUSTER 'default' (
+        "CREATE TABLE {}{oc} (
             id UInt64,
             name String,
             score Float64,
@@ -263,10 +264,11 @@ async fn test_schema_cache_with_clickhouse() {
     };
 
     let table_name = unique_table_name("cache_test");
+    let oc = crate::common::on_cluster_clause();
 
     // Create test table
     let ddl = format!(
-        "CREATE TABLE {} ON CLUSTER 'default' (
+        "CREATE TABLE {}{oc} (
             id UInt64,
             data String
         ) ENGINE = MergeTree() ORDER BY tuple()",

@@ -11,46 +11,98 @@
 //!   5. Config file specified by --config or DFE_LOADER_CONFIG
 //!   6. Hard-coded defaults
 
-use std::collections::HashMap;
 use std::path::Path;
 
-use hyperi_rustlib::config::env_compat::EnvVar;
 use serde::{Deserialize, Serialize};
-use tracing::debug;
 
 use crate::Result;
 
-/// Main configuration
+// Re-export from sub-modules
+pub use super::kafka::*;
+pub use super::pipeline::*;
+
+/// Main configuration for dfe-loader.
+///
+/// ## Hot-Reload Behaviour
+///
+/// **Hot-reloaded (takes effect on next batch):**
+/// - `routing.*` — routing rules, table mapping, org routing
+/// - `timestamp_dq.*` — timestamp validation thresholds
+/// - `metadata.*` — common header injection, tags, _raw handling
+/// - `field_sanitization.*` — field name sanitisation rules
+/// - `buffer.flush_rows` / `buffer.flush_bytes` / `buffer.flush_age_secs`
+/// - `coercion.*` — type coercion config
+/// - `enrichment.ip_fields` — which fields to enrich
+/// - `field_mapping.*` — field mapping overrides
+///
+/// **Requires pod restart (connections/state established at startup):**
+/// - `transport` — transport type (kafka/grpc) bound at startup
+/// - `kafka.*` — Kafka consumer created at startup
+/// - `grpc.*` — gRPC server binds at startup
+/// - `clickhouse.*` — HTTP client + clickhouse::Client created at startup
+/// - `payload.format` — format detection set at startup
+/// - `metrics.*` — HTTP metrics server binds at startup
+/// - `logging.*` — tracing subscriber installed at startup
+/// - `scaling.*` / `keda.*` — scaling pressure built at startup
+/// - `hot_reload.*` — watcher config set at startup
+/// - `schema.*` — schema cache created at startup
+/// - `geoip.*` — MMDB readers opened at startup
+/// - `computed_columns.*` — computed column cache built at startup
+/// - `column_directives.*` — column directive cache built at startup
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 #[derive(Default)]
 pub struct Config {
-    /// Transport backend: "kafka" (default) or "grpc"
+    // --- Requires restart (connections/state established at startup) ---
+    /// Transport backend: "kafka" (default) or "grpc". **Restart required.**
     #[serde(default = "default_transport")]
     pub transport: String,
+    /// Kafka consumer config. **Restart required.**
     pub kafka: KafkaConfig,
+    /// gRPC transport config. **Restart required.**
     pub grpc: GrpcConfig,
+    /// ClickHouse connection config. **Restart required.**
     pub clickhouse: ClickHouseConfig,
+    /// Payload format detection. **Restart required.**
     pub payload: PayloadConfig,
-    pub routing: RoutingConfig,
-    pub buffer: BufferConfig,
-    pub memory: MemoryConfig,
+    /// Metrics server config. **Restart required.**
     pub metrics: MetricsConfig,
+    /// Logging config. **Restart required.**
     pub logging: LoggingConfig,
-    pub timestamp_dq: TimestampDqConfig,
-    pub field_sanitization: FieldSanitizationConfig,
-    pub metadata: MetadataConfig,
-    pub coercion: CoercionConfig,
+    /// Schema cache config. **Restart required.**
     pub schema: SchemaConfig,
-    pub field_mapping: FieldMappingConfig,
-    pub computed_columns: ComputedColumnsConfig,
-    /// Unified per-column directive config (config wins over DDL COMMENT annotations).
-    pub column_directives: crate::column_meta::ColumnDirectivesConfig,
+    /// GeoIP enrichment (MMDB readers). **Restart required.**
     pub geoip: GeoIpConfig,
-    pub enrichment: EnrichmentConfig,
+    /// Computed columns cache. **Restart required.**
+    pub computed_columns: ComputedColumnsConfig,
+    /// Per-column directive config. **Restart required.**
+    pub column_directives: crate::column_meta::ColumnDirectivesConfig,
+    /// Hot-reload watcher config. **Restart required.**
     pub hot_reload: HotReloadConfig,
+    /// KEDA autoscaling config. **Restart required.**
     pub keda: KedaConfig,
+    /// Scaling pressure config. **Restart required.**
     pub scaling: ScalingConfig,
+
+    // --- Hot-reloaded (takes effect on next batch) ---
+    /// Routing rules and table mapping. **Hot-reloaded.**
+    pub routing: RoutingConfig,
+    /// Buffer flush thresholds. **Hot-reloaded.**
+    pub buffer: BufferConfig,
+    /// Memory limits. **Hot-reloaded.**
+    pub memory: MemoryConfig,
+    /// Timestamp data quality validation. **Hot-reloaded.**
+    pub timestamp_dq: TimestampDqConfig,
+    /// Field name sanitisation. **Hot-reloaded.**
+    pub field_sanitization: FieldSanitizationConfig,
+    /// Common header injection, tags, _raw handling. **Hot-reloaded.**
+    pub metadata: MetadataConfig,
+    /// Type coercion config. **Hot-reloaded.**
+    pub coercion: CoercionConfig,
+    /// Field mapping overrides. **Hot-reloaded.**
+    pub field_mapping: FieldMappingConfig,
+    /// IP enrichment field selection. **Hot-reloaded.**
+    pub enrichment: EnrichmentConfig,
 }
 
 fn default_transport() -> String {
@@ -58,311 +110,10 @@ fn default_transport() -> String {
 }
 
 // ============================================================================
-// Kafka Configuration
-// ============================================================================
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct KafkaConfig {
-    pub brokers: Vec<String>,
-    pub group: String,
-    /// Explicit topic list. Empty = auto-discover all `*_load` / `*_land` topics
-    /// from the broker, with load-over-land fallback applied.
-    pub topics: Vec<String>,
-    pub topic_regex: Option<String>,
-    pub client_id: String,
-    pub sasl: Option<SaslConfig>,
-    pub tls: Option<TlsConfig>,
-
-    /// Regex patterns for topics to include during auto-discovery.
-    /// Empty = include all discovered topics. Applied after load-over-land fallback.
-    #[serde(default)]
-    pub topic_include: Vec<String>,
-
-    /// Regex patterns for topics to exclude during auto-discovery.
-    /// Applied after include filter.
-    #[serde(default)]
-    pub topic_exclude: Vec<String>,
-
-    /// How often (seconds) to re-check the broker for new/removed topics.
-    /// 0 = disabled. Default: 60.
-    #[serde(default = "default_topic_refresh_secs")]
-    pub topic_refresh_secs: u64,
-
-    /// Raw librdkafka configuration overrides (highest priority).
-    pub librdkafka_overrides: HashMap<String, String>,
-}
-
-fn default_topic_refresh_secs() -> u64 {
-    60
-}
-
-impl Default for KafkaConfig {
-    fn default() -> Self {
-        let mut overrides = HashMap::new();
-        // Disable rdkafka statistics by default — dfe-loader doesn't use
-        // StatsContext so the stats just spam the log at INFO level.
-        overrides.insert("statistics.interval.ms".to_string(), "0".to_string());
-
-        Self {
-            brokers: vec!["localhost:9092".to_string()],
-            group: "clickhouse-loader".to_string(),
-            topics: vec![], // Empty = auto-discover
-            topic_regex: None,
-            client_id: "clickhouse-loader".to_string(),
-            sasl: None,
-            tls: None,
-            topic_include: vec![],
-            topic_exclude: vec![],
-            topic_refresh_secs: default_topic_refresh_secs(),
-            librdkafka_overrides: overrides,
-        }
-    }
-}
-
-// ============================================================================
-// gRPC Transport Configuration
-// ============================================================================
-
-/// gRPC transport configuration for receiving messages from dfe-receiver.
-///
-/// When `transport = "grpc"`, the loader starts a gRPC server listening on
-/// `listen` and accepts Push RPCs from remote senders (e.g. dfe-receiver).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct GrpcConfig {
-    /// Server listen address (e.g., "0.0.0.0:6000").
-    /// Required when `transport = "grpc"`.
-    pub listen: Option<String>,
-
-    /// Receive buffer size (messages buffered from incoming RPCs).
-    pub recv_buffer_size: usize,
-
-    /// Receive timeout in milliseconds (0 = non-blocking).
-    pub recv_timeout_ms: u64,
-
-    /// Maximum message size in bytes (both send and receive).
-    pub max_message_size: usize,
-
-    /// Enable gzip compression for gRPC messages.
-    pub compression: bool,
-
-    /// Default topic name for messages without a topic in gRPC metadata.
-    /// Used as the routing key when the sender doesn't set a topic.
-    pub default_topic: String,
-}
-
-impl Default for GrpcConfig {
-    fn default() -> Self {
-        Self {
-            listen: None,
-            recv_buffer_size: 10_000,
-            recv_timeout_ms: 100,
-            max_message_size: 16 * 1024 * 1024,
-            compression: false,
-            default_topic: "default_land".to_string(),
-        }
-    }
-}
-
-/// SASL authentication mechanism
-///
-/// Config file values (case-insensitive): none, plain, scram_sha_256, scram_sha_512, oauthbearer, aws_msk_iam
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[allow(clippy::upper_case_acronyms)]
-pub enum SaslMechanism {
-    /// No authentication (dev/test only - full admin access)
-    None,
-    /// SASL/PLAIN - simple username/password (use with TLS!)
-    Plain,
-    /// SASL/SCRAM-SHA-256
-    ScramSha256,
-    /// SASL/SCRAM-SHA-512 (recommended for production)
-    #[default]
-    ScramSha512,
-    /// SASL/OAUTHBEARER - OAuth 2.0 / OIDC token authentication
-    OAuthBearer,
-    /// AWS MSK IAM authentication
-    AwsMskIam,
-}
-
-impl SaslMechanism {
-    /// Get the rdkafka mechanism string
-    pub fn as_rdkafka_mechanism(&self) -> Option<&'static str> {
-        match self {
-            SaslMechanism::None => None,
-            SaslMechanism::Plain => Some("PLAIN"),
-            SaslMechanism::ScramSha256 => Some("SCRAM-SHA-256"),
-            SaslMechanism::ScramSha512 => Some("SCRAM-SHA-512"),
-            SaslMechanism::OAuthBearer => Some("OAUTHBEARER"),
-            SaslMechanism::AwsMskIam => Some("OAUTHBEARER"), // AWS IAM uses OAUTHBEARER
-        }
-    }
-
-    /// Check if this mechanism requires username/password
-    pub fn requires_credentials(&self) -> bool {
-        matches!(
-            self,
-            SaslMechanism::Plain | SaslMechanism::ScramSha256 | SaslMechanism::ScramSha512
-        )
-    }
-
-    /// Check if this mechanism uses OAuth
-    pub fn is_oauth(&self) -> bool {
-        matches!(self, SaslMechanism::OAuthBearer)
-    }
-
-    /// Check if this mechanism uses AWS IAM
-    pub fn is_aws_iam(&self) -> bool {
-        matches!(self, SaslMechanism::AwsMskIam)
-    }
-}
-
-impl std::fmt::Display for SaslMechanism {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            SaslMechanism::None => write!(f, "NONE"),
-            SaslMechanism::Plain => write!(f, "PLAIN"),
-            SaslMechanism::ScramSha256 => write!(f, "SCRAM-SHA-256"),
-            SaslMechanism::ScramSha512 => write!(f, "SCRAM-SHA-512"),
-            SaslMechanism::OAuthBearer => write!(f, "OAUTHBEARER"),
-            SaslMechanism::AwsMskIam => write!(f, "AWS_MSK_IAM"),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct SaslConfig {
-    /// Enable SASL authentication
-    pub enabled: bool,
-    /// SASL mechanism (none, plain, scram_sha_256, scram_sha_512, oauthbearer, aws_msk_iam)
-    #[serde(default = "default_mechanism_string")]
-    pub mechanism: String,
-
-    // --- Username/Password auth (PLAIN, SCRAM-*) ---
-    pub username: String,
-    pub password: String,
-
-    // --- OAuth 2.0 / OIDC auth (OAUTHBEARER) ---
-    /// OAuth token endpoint URL
-    pub oauth_token_endpoint: Option<String>,
-    /// OAuth client ID
-    pub oauth_client_id: Option<String>,
-    /// OAuth client secret
-    pub oauth_client_secret: Option<String>,
-    /// OAuth scope (space-separated)
-    pub oauth_scope: Option<String>,
-    /// OAuth extensions (key=value pairs)
-    pub oauth_extensions: Option<String>,
-
-    // --- AWS MSK IAM auth ---
-    /// AWS region for MSK IAM
-    pub aws_region: Option<String>,
-    /// AWS access key ID (optional - can use instance profile/environment)
-    pub aws_access_key_id: Option<String>,
-    /// AWS secret access key
-    pub aws_secret_access_key: Option<String>,
-    /// AWS session token (for temporary credentials)
-    pub aws_session_token: Option<String>,
-    /// AWS profile name (alternative to explicit credentials)
-    pub aws_profile: Option<String>,
-}
-
-fn default_mechanism_string() -> String {
-    "scram_sha_512".to_string()
-}
-
-impl Default for SaslConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            mechanism: default_mechanism_string(),
-            username: String::new(),
-            password: String::new(),
-            oauth_token_endpoint: None,
-            oauth_client_id: None,
-            oauth_client_secret: None,
-            oauth_scope: None,
-            oauth_extensions: None,
-            aws_region: None,
-            aws_access_key_id: None,
-            aws_secret_access_key: None,
-            aws_session_token: None,
-            aws_profile: None,
-        }
-    }
-}
-
-impl SaslConfig {
-    /// Parse the mechanism string into a SaslMechanism enum
-    pub fn mechanism(&self) -> SaslMechanism {
-        match self.mechanism.to_lowercase().replace('-', "_").as_str() {
-            "none" => SaslMechanism::None,
-            "plain" => SaslMechanism::Plain,
-            "scram_sha_256" | "scram_sha256" => SaslMechanism::ScramSha256,
-            "scram_sha_512" | "scram_sha512" => SaslMechanism::ScramSha512,
-            "oauthbearer" | "oauth" => SaslMechanism::OAuthBearer,
-            "aws_msk_iam" | "awsmskiam" => SaslMechanism::AwsMskIam,
-            _ => SaslMechanism::ScramSha512, // Default
-        }
-    }
-
-    /// Validate the SASL configuration based on mechanism
-    pub fn validate(&self) -> std::result::Result<(), String> {
-        if !self.enabled {
-            return Ok(());
-        }
-
-        let mech = self.mechanism();
-        match mech {
-            SaslMechanism::None => {
-                // No validation needed - this is explicitly insecure
-            }
-            SaslMechanism::Plain | SaslMechanism::ScramSha256 | SaslMechanism::ScramSha512 => {
-                if self.username.is_empty() {
-                    return Err(format!("{} requires username", mech));
-                }
-                if self.password.is_empty() {
-                    return Err(format!("{} requires password", mech));
-                }
-            }
-            SaslMechanism::OAuthBearer => {
-                if self.oauth_token_endpoint.is_none() {
-                    return Err("OAUTHBEARER requires oauth_token_endpoint".to_string());
-                }
-                if self.oauth_client_id.is_none() {
-                    return Err("OAUTHBEARER requires oauth_client_id".to_string());
-                }
-            }
-            SaslMechanism::AwsMskIam => {
-                // AWS region is required; credentials can come from environment/instance profile
-                if self.aws_region.is_none() {
-                    return Err("AWS_MSK_IAM requires aws_region".to_string());
-                }
-            }
-        }
-
-        Ok(())
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-#[derive(Default)]
-pub struct TlsConfig {
-    pub enabled: bool,
-    pub ca_cert_file: Option<String>,
-    pub cert_file: Option<String>,
-    pub key_file: Option<String>,
-    pub skip_verify: bool,
-}
-
-// ============================================================================
 // ClickHouse Configuration
 // ============================================================================
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ClickHouseConfig {
     pub hosts: Vec<String>,
@@ -399,6 +150,7 @@ impl From<&ClickHouseConfig> for crate::clickhouse::ClickHouseConfig {
         crate::clickhouse::ClickHouseConfig {
             hosts: cfg.hosts.clone(),
             transport,
+            insert_format: crate::clickhouse::InsertFormat::default(),
             database: cfg.database.clone(),
             username: cfg.username.clone(),
             password: cfg.password.clone(),
@@ -411,1189 +163,135 @@ impl From<&ClickHouseConfig> for crate::clickhouse::ClickHouseConfig {
 }
 
 // ============================================================================
-// Payload Configuration
-// ============================================================================
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct PayloadConfig {
-    /// Format mode: "auto" (default), "json", "messagepack"/"msgpack"
-    pub format: String,
-    /// Mismatch threshold before auto-reset (auto mode only)
-    pub mismatch_threshold: u8,
-    /// Pipeline processing mode.
-    ///
-    /// - `"json_primary"` (default): Schema-guided SIMD extraction + zero-copy `_json` splice.
-    ///   Only schema-matching columns are extracted; everything else is captured via `_json`.
-    ///   Requires schema resolution before per-column extraction works; messages arriving
-    ///   before schema is resolved fall back to the legacy path.
-    ///
-    /// - `"legacy_flatten"`: Existing full-flatten + transform path. All fields are promoted
-    ///   to the top level; `_json` is injected as a UTF-8 string copy of the raw payload.
-    pub pipeline_mode: String,
-}
-
-impl Default for PayloadConfig {
-    fn default() -> Self {
-        Self {
-            format: "auto".to_string(),
-            mismatch_threshold: 10,
-            pipeline_mode: "json_primary".to_string(),
-        }
-    }
-}
-
-// ============================================================================
-// Routing Configuration
-// ============================================================================
-
-/// CEL-based routing rule. When `when` evaluates to true against the message,
-/// route to the specified `target` table (and optionally `db` database).
-///
-/// Rules are evaluated top-to-bottom, first match wins. If no rule matches,
-/// falls through to field-extraction routing (db_fields/table_fields).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RoutingRule {
-    /// CEL expression that must evaluate to true for this rule to match
-    pub when: String,
-
-    /// Target table name
-    pub target: String,
-
-    /// Target database (optional — uses default_db if omitted)
-    #[serde(default)]
-    pub db: Option<String>,
-}
-
-/// Explicit per-organisation database routing.
-///
-/// When an org is listed here, messages from that org are routed to the
-/// specified database (or `org_id` if `database` is omitted). Orgs NOT
-/// listed always go to `default_db`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OrgRoute {
-    /// Organisation identifier (matched against org_id_field value)
-    pub org_id: String,
-
-    /// Target database. If omitted, the org_id itself is used as the database name.
-    #[serde(default)]
-    pub database: Option<String>,
-}
-
-impl OrgRoute {
-    /// Return the effective database name for this org route.
-    pub fn effective_database(&self) -> &str {
-        self.database.as_deref().unwrap_or(&self.org_id)
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct RoutingConfig {
-    /// CEL-based routing rules (top-to-bottom, first match wins).
-    /// Falls through to field-extraction routing if no rule matches.
-    #[serde(default)]
-    pub rules: Vec<RoutingRule>,
-
-    /// Fields to check for database name (first match wins, dot notation for nested)
-    /// Example: ["org_id", "tenant.id"]
-    /// NOTE: Leave empty to always use default_db (recommended for shared schema)
-    pub db_fields: Vec<String>,
-
-    /// Fields to check for table name (first match wins, dot notation for nested)
-    /// Default: ["_source"] — aligned with _source field extraction
-    pub table_fields: Vec<String>,
-
-    /// Default database if no db_field matches (or db_fields is empty), or if the
-    /// org is not listed in org_routes.
-    /// Default: "dfe" (shared multi-tenant schema)
-    pub default_db: String,
-
-    /// Default table if no table_field matches
-    /// Default: "dfe"
-    pub default_table: String,
-
-    /// Field to extract for _org_id column (stored in data for RLS)
-    /// Example: "org_id" or "tenant.id"
-    /// This field is extracted and stored as _org_id, regardless of routing behaviour
-    pub org_id_field: Option<String>,
-
-    /// Per-organisation database routing. Only orgs explicitly listed here receive
-    /// their own database — all other orgs always go to default_db.
-    /// Example: [{org_id: "acme"}, {org_id: "bigcorp", database: "bigcorp_dfe"}]
-    #[serde(default)]
-    pub org_routes: Vec<OrgRoute>,
-
-    /// Source value to table name mapping
-    /// Maps extracted source values to destination table names
-    pub source_to_table: HashMap<String, String>,
-
-    /// Legacy: mapping file path
-    pub mapping_file: Option<String>,
-
-    /// Topic suffixes to strip when deriving _source from Kafka topic name
-    /// Example: topic "auth_land" with suffix "_land" → _source = "auth"
-    pub topic_suffixes: Vec<String>,
-
-    /// Pre-DFE 2.2 compatibility: prepend event_category/tags.event_category to
-    /// source_fields and table_fields for backwards compatibility with older data formats
-    pub compat_v2_source: bool,
-
-    /// DLQ configuration
-    pub dlq: DlqConfig,
-}
-
-impl Default for RoutingConfig {
-    fn default() -> Self {
-        Self {
-            // No CEL routing rules by default (field extraction only)
-            rules: vec![],
-            // Default: db_fields empty = shared schema (all to dfe.*)
-            db_fields: vec![],
-            table_fields: vec!["_source".to_string()],
-            default_db: "dfe".to_string(),
-            default_table: "default".to_string(),
-            // Extract org_id for _org_id column (RLS)
-            org_id_field: Some("org_id".to_string()),
-            // No per-org routing by default (shared schema)
-            org_routes: vec![],
-            source_to_table: HashMap::new(),
-            mapping_file: None,
-            topic_suffixes: vec!["_land".to_string(), "_load".to_string()],
-            compat_v2_source: false,
-            dlq: DlqConfig::default(),
-        }
-    }
-}
-
-// ============================================================================
-// Computed Columns Configuration
-// ============================================================================
-
-/// Config cascade overrides for computed columns.
-///
-/// CEL expressions that produce column values at insert time.
-/// Expressions are also read from ClickHouse column comments (`@computed:` directive).
-///
-/// Precedence (highest wins):
-/// 1. Config per-table override (`overrides."db.table".column`)
-/// 2. Config global (`columns.column`)
-/// 3. ClickHouse column COMMENT `@computed:` directive
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct ComputedColumnsConfig {
-    /// Global computed columns (applied to all tables).
-    /// Key: destination column name, Value: CEL expression.
-    pub columns: indexmap::IndexMap<String, String>,
-
-    /// Per-table overrides. Key: "db.table", Value: column→expression map.
-    pub overrides: indexmap::IndexMap<String, indexmap::IndexMap<String, String>>,
-}
-
-impl Default for ComputedColumnsConfig {
-    fn default() -> Self {
-        Self {
-            columns: indexmap::IndexMap::new(),
-            overrides: indexmap::IndexMap::new(),
-        }
-    }
-}
-
-// ============================================================================
-// GeoIP Configuration
-// ============================================================================
-
-/// GeoIP enrichment provider
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum GeoIpProvider {
-    /// DB-IP Lite — free, anonymous download, city-level, CC BY 4.0
-    #[default]
-    DbIpLite,
-    /// MaxMind GeoLite2 — free account required (account_id + license_key)
-    MaxMindGeoLite2,
-    /// IPLocate.io — free, anonymous, country + ASN only
-    IpLocate,
-    /// IPinfo Lite — free token required, country + ASN only
-    IpInfoLite,
-    /// sapics/ip-location-db — free CC0, country + ASN only
-    Sapics,
-    /// User provides MMDB file paths directly
-    Custom,
-}
-
-/// Auto-download settings for GeoIP databases
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct AutoDownloadConfig {
-    /// Enable auto-download on startup if MMDB files missing or stale
-    pub enabled: bool,
-
-    /// Directory to store downloaded MMDB files
-    pub data_dir: String,
-
-    /// MaxMind account ID (required for max_mind_geo_lite2 provider)
-    pub maxmind_account_id: Option<String>,
-
-    /// MaxMind license key (required for max_mind_geo_lite2 provider)
-    pub maxmind_license_key: Option<String>,
-
-    /// IPinfo token (required for ip_info_lite provider)
-    pub ipinfo_token: Option<String>,
-
-    /// Max age in days before re-downloading (default: 30)
-    pub max_age_days: u32,
-}
-
-impl Default for AutoDownloadConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            data_dir: "/var/lib/dfe/geoip".into(),
-            maxmind_account_id: None,
-            maxmind_license_key: None,
-            ipinfo_token: None,
-            max_age_days: 30,
-        }
-    }
-}
-
-/// GeoIP enrichment configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct GeoIpConfig {
-    /// Enable GeoIP enrichment
-    pub enabled: bool,
-
-    /// GeoIP database provider
-    pub provider: GeoIpProvider,
-
-    /// Explicit path to city MMDB file (overrides auto-download)
-    pub city_db_path: Option<String>,
-
-    /// Explicit path to ASN MMDB file (overrides auto-download)
-    pub asn_db_path: Option<String>,
-
-    /// Auto-download settings
-    pub auto_download: AutoDownloadConfig,
-
-    /// LRU cache capacity for lookup results
-    pub cache_capacity: usize,
-}
-
-impl Default for GeoIpConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            provider: GeoIpProvider::DbIpLite,
-            city_db_path: None,
-            asn_db_path: None,
-            auto_download: AutoDownloadConfig::default(),
-            cache_capacity: 100_000,
-        }
-    }
-}
-
-// ============================================================================
-// Enrichment Configuration
-// ============================================================================
-
-/// IP enrichment pipeline configuration (GeoIP + reputation + risk scoring)
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct EnrichmentConfig {
-    /// Fields to check for IP addresses (first match wins, order matters)
-    ///
-    /// Common field names to try: ["src_ip", "client_ip", "ip", "source_ip"]
-    pub ip_fields: Vec<String>,
-
-    /// IP reputation enrichment (VPN, Tor, proxy, botnet detection)
-    pub reputation: ReputationEnrichmentConfig,
-
-    /// Risk scoring (weighted composite score from geo + reputation data)
-    pub risk_scoring: RiskScoringConfig,
-}
-
-impl Default for EnrichmentConfig {
-    fn default() -> Self {
-        Self {
-            ip_fields: vec![
-                "src_ip".into(),
-                "client_ip".into(),
-                "ip".into(),
-                "source_ip".into(),
-            ],
-            reputation: ReputationEnrichmentConfig::default(),
-            risk_scoring: RiskScoringConfig::default(),
-        }
-    }
-}
-
-/// Reputation enrichment configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct ReputationEnrichmentConfig {
-    /// Enable reputation lookups
-    pub enabled: bool,
-
-    /// LRU cache capacity for lookup results
-    pub cache_capacity: usize,
-
-    /// Load blocklists from local files (plain text, one IP or CIDR per line)
-    pub blocklist_files: Vec<String>,
-}
-
-impl Default for ReputationEnrichmentConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            cache_capacity: 100_000,
-            blocklist_files: Vec::new(),
-        }
-    }
-}
-
-/// Risk scoring configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct RiskScoringConfig {
-    /// Enable risk scoring (requires at least GeoIP or reputation to be useful)
-    pub enabled: bool,
-
-    /// Risk preset to use for country risk tables
-    ///
-    /// Options: "global" (default), "us_enterprise", "eu_enterprise",
-    ///          "apac_enterprise", "high_security"
-    pub preset: String,
-}
-
-impl Default for RiskScoringConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            preset: "global".into(),
-        }
-    }
-}
-
-// ============================================================================
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct DlqConfig {
-    pub enabled: bool,
-    /// Backend mode: cascade (default), fan_out, file_only, kafka_only
-    pub mode: String,
-    pub topic_suffix: String,
-    /// File backend settings
-    pub file_enabled: bool,
-    pub file_path: String,
-    /// Kafka backend settings
-    pub kafka_enabled: bool,
-}
-
-impl Default for DlqConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            mode: "cascade".to_string(),
-            topic_suffix: ".dlq".to_string(),
-            file_enabled: true,
-            file_path: "/var/spool/dfe/dlq".to_string(),
-            kafka_enabled: true,
-        }
-    }
-}
-
-impl DlqConfig {
-    /// Convert to rustlib DlqConfig for the unified DLQ module.
-    pub fn to_rustlib_config(&self) -> hyperi_rustlib::dlq::DlqConfig {
-        use hyperi_rustlib::dlq::{DlqMode, FileDlqConfig};
-
-        let (mode, enabled) = match self.mode.as_str() {
-            "disabled" => (DlqMode::Cascade, false),
-            "fan_out" => (DlqMode::FanOut, self.enabled),
-            "file_only" => (DlqMode::FileOnly, self.enabled),
-            "kafka_only" => (DlqMode::KafkaOnly, self.enabled),
-            _ => (DlqMode::Cascade, self.enabled),
-        };
-
-        hyperi_rustlib::dlq::DlqConfig {
-            enabled,
-            mode,
-            file: FileDlqConfig {
-                enabled: self.file_enabled,
-                path: self.file_path.clone().into(),
-                ..FileDlqConfig::default()
-            },
-            kafka: hyperi_rustlib::dlq::KafkaDlqConfig {
-                enabled: self.kafka_enabled,
-                topic_suffix: self.topic_suffix.clone(),
-                ..hyperi_rustlib::dlq::KafkaDlqConfig::default()
-            },
-        }
-    }
-}
-
-// ============================================================================
-// Buffer Configuration
-// ============================================================================
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct BufferConfig {
-    pub flush_bytes: usize,
-    pub flush_rows: usize,
-    pub flush_age_secs: u64,
-}
-
-impl Default for BufferConfig {
-    fn default() -> Self {
-        Self {
-            flush_bytes: 1_048_576, // 1MB
-            flush_rows: 20_000,
-            flush_age_secs: 5,
-        }
-    }
-}
-
-// ============================================================================
-// Memory Configuration
-// ============================================================================
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct MemoryConfig {
-    /// Maximum memory for buffers in bytes. 0 = auto-detect (67% of available)
-    pub limit_bytes: usize,
-    /// Pressure threshold (0.0-1.0) - pause consumption above this
-    pub pressure_threshold: f64,
-}
-
-impl Default for MemoryConfig {
-    fn default() -> Self {
-        Self {
-            limit_bytes: 0, // Auto-detect
-            pressure_threshold: 0.8,
-        }
-    }
-}
-
-// ============================================================================
-// Metrics Configuration
-// ============================================================================
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct MetricsConfig {
-    pub enabled: bool,
-    pub address: String,
-}
-
-impl Default for MetricsConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            address: "0.0.0.0:9090".to_string(),
-        }
-    }
-}
-
-// ============================================================================
-// Logging Configuration
-// ============================================================================
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct LoggingConfig {
-    pub level: String,
-    pub format: String,
-}
-
-impl Default for LoggingConfig {
-    fn default() -> Self {
-        Self {
-            level: "info".to_string(),
-            format: "json".to_string(),
-        }
-    }
-}
-
-// ============================================================================
-// Timestamp Data Quality Configuration
-// ============================================================================
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct TimestampDqConfig {
-    pub enabled: bool,
-    pub max_future_seconds: i64,
-    pub max_past_seconds: i64,
-    pub invalid_action: String,
-    pub correct_known_bad: bool,
-}
-
-impl Default for TimestampDqConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            max_future_seconds: 600,
-            max_past_seconds: 0, // 0 = no limit
-            invalid_action: "replace_with_now".to_string(),
-            correct_known_bad: true,
-        }
-    }
-}
-
-// ============================================================================
-// Field Sanitization Configuration
-// ============================================================================
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct FieldSanitizationConfig {
-    pub strip_at_prefix: bool,
-    pub handle_numeric_prefix: bool,
-    pub numeric_prefix: String,
-    pub collapse_underscores: bool,
-    pub trim_underscores: bool,
-    pub collision_strategy: String,
-}
-
-impl Default for FieldSanitizationConfig {
-    fn default() -> Self {
-        Self {
-            strip_at_prefix: true,
-            handle_numeric_prefix: true,
-            numeric_prefix: "col_".to_string(),
-            collapse_underscores: true,
-            trim_underscores: true,
-            collision_strategy: "last_wins".to_string(),
-        }
-    }
-}
-
-// ============================================================================
-// Metadata Configuration
-// ============================================================================
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct MetadataConfig {
-    /// Master switch for common header field injection (default: true)
-    /// When false, no common header fields (_timestamp, _org_id, _raw, _json, _tags, _source)
-    /// are injected. Flattening and sanitization still apply.
-    pub enabled: bool,
-
-    pub inject_timestamp_load: bool,
-    pub extract_timestamp_collector: bool,
-    pub collector_timestamp_path: String,
-
-    // Tags handling (Common Header v2)
-    /// Fields to check for tags (first match wins, dot notation for nested)
-    pub tags_fields: Vec<String>,
-    /// Output field name for tags (underscore prefix avoids collision)
-    pub tags_output: String,
-    /// Drop tags entirely after routing extraction (saves storage)
-    pub drop_tags: bool,
-
-    // _json capture (Common Header v2)
-    /// Store complete original Kafka message as JSON before transformation
-    #[serde(alias = "capture_logjson")]
-    pub capture_json: bool,
-    /// Output field name for _json
-    #[serde(alias = "logjson_output")]
-    pub json_output: String,
-
-    // _raw field injection (Common Header v2)
-    // Implements @renamed: first(source_fields...) → raw_output
-    // Silent no-op if destination already present in data
-    /// Enable _raw field injection from source (zero-copy rename)
-    pub capture_raw: bool,
-    /// Source fields to try for rename (first match wins). Default: ["logoriginal"]
-    pub raw_source_fields: Vec<String>,
-    /// Output field name for raw log line
-    pub raw_output: String,
-
-    // _source field (Common Header v2)
-    /// Enable _source field injection (destination table identifier)
-    pub capture_source: bool,
-    /// Fields to check for _source value in message data (first match wins)
-    pub source_fields: Vec<String>,
-    /// Output field name for _source
-    pub source_output: String,
-
-    // Per-table capture overrides
-    /// Tables where _json capture is disabled (e.g., ["dfe.metrics"])
-    pub disable_json_tables: Vec<String>,
-    /// Tables where _raw capture is disabled (e.g., ["dfe.metrics"])
-    pub disable_raw_tables: Vec<String>,
-
-    // Routing field removal (Common Header v2)
-    /// Remove routing fields from output after extraction
-    pub remove_routing_fields: bool,
-}
-
-impl Default for MetadataConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-
-            inject_timestamp_load: true,
-            extract_timestamp_collector: true,
-            collector_timestamp_path: "tags.collector.timestamp".to_string(),
-
-            // Tags handling defaults
-            tags_fields: vec![
-                "tags".to_string(),
-                "_tags".to_string(),
-                "meta".to_string(),
-                "metadata.tags".to_string(),
-            ],
-            tags_output: "_tags".to_string(),
-            drop_tags: false,
-
-            // _json capture defaults
-            capture_json: true,
-            json_output: "_json".to_string(),
-
-            // _raw capture defaults (@renamed: logoriginal → _raw)
-            capture_raw: true,
-            raw_source_fields: vec!["logoriginal".to_string()],
-            raw_output: "_raw".to_string(),
-
-            // _source capture defaults
-            capture_source: true,
-            source_fields: vec!["_source".to_string()],
-            source_output: "_source".to_string(),
-
-            // Per-table overrides
-            disable_json_tables: vec![],
-            disable_raw_tables: vec![],
-
-            // Routing field removal defaults
-            remove_routing_fields: true,
-        }
-    }
-}
-
-// ============================================================================
-// Profile Configuration
-// ============================================================================
-
-// ============================================================================
-// KEDA Autoscaling Configuration
-// ============================================================================
-
-/// KEDA autoscaling thresholds (deployment-level config).
-///
-/// These values are the SSoT for the Helm chart's KEDA ScaledObject.
-/// The contract sync test validates that chart/values.yaml matches these
-/// defaults. Override at runtime via env vars:
-///   DFE_LOADER__KEDA__KAFKA_LAG_THRESHOLD=5000
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct KedaConfig {
-    pub enabled: bool,
-    pub min_replicas: u32,
-    pub max_replicas: u32,
-    /// Seconds between KEDA polling the scaler
-    pub polling_interval: u32,
-    /// Seconds before scale-down after load drops
-    pub cooldown_period: u32,
-    /// Scale when consumer group lag exceeds this per partition
-    pub kafka_lag_threshold: u64,
-    /// Wake from zero replicas when lag exceeds this
-    pub activation_lag_threshold: u64,
-    /// Enable CPU-based scaling trigger
-    pub cpu_enabled: bool,
-    /// CPU utilisation percentage threshold
-    pub cpu_threshold: u32,
-}
-
-impl Default for KedaConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            min_replicas: 1,
-            max_replicas: 10,
-            polling_interval: 15,
-            cooldown_period: 300,
-            kafka_lag_threshold: 1000,
-            activation_lag_threshold: 0,
-            cpu_enabled: true,
-            cpu_threshold: 80,
-        }
-    }
-}
-
-// ============================================================================
-// Scaling Pressure Configuration
-// ============================================================================
-
-/// Scaling pressure configuration for KEDA autoscaling.
-///
-/// Produces a 0-100 composite metric (`loader_scaling_pressure`) based on
-/// weighted application signals with two hard gates (circuit breaker, memory).
-///
-/// Override weights at runtime via env vars:
-///   DFE_LOADER__SCALING__WEIGHT_KAFKA_LAG=0.45
-///   DFE_LOADER__SCALING__SATURATION_BUFFER_DEPTH=20000
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct ScalingConfig {
-    /// Enable scaling pressure calculation.
-    pub enabled: bool,
-    /// Memory usage ratio (0.0-1.0) that forces scaling_pressure to 100.
-    pub memory_gate_threshold: f64,
-    // Component weights (should sum to ~1.0)
-    pub weight_kafka_lag: f64,
-    pub weight_buffer_depth: f64,
-    pub weight_insert_latency: f64,
-    pub weight_memory: f64,
-    pub weight_errors: f64,
-    // Component saturation points
-    pub saturation_kafka_lag: f64,
-    pub saturation_buffer_depth: f64,
-    pub saturation_insert_latency: f64,
-    pub saturation_errors: f64,
-}
-
-impl Default for ScalingConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            memory_gate_threshold: 0.8,
-            weight_kafka_lag: 0.35,
-            weight_buffer_depth: 0.25,
-            weight_insert_latency: 0.15,
-            weight_memory: 0.15,
-            weight_errors: 0.10,
-            saturation_kafka_lag: 100_000.0,
-            saturation_buffer_depth: 10_000.0,
-            saturation_insert_latency: 5.0,
-            saturation_errors: 100.0,
-        }
-    }
-}
-
-impl ScalingConfig {
-    /// Build a `ScalingPressure` engine from this config.
-    pub fn build_pressure(&self) -> hyperi_rustlib::ScalingPressure {
-        use hyperi_rustlib::{ScalingComponent, ScalingPressureConfig};
-
-        let base = ScalingPressureConfig {
-            enabled: self.enabled,
-            memory_gate_threshold: self.memory_gate_threshold,
-        };
-        let components = vec![
-            ScalingComponent::new(
-                "kafka_lag",
-                self.weight_kafka_lag,
-                self.saturation_kafka_lag,
-            ),
-            ScalingComponent::new(
-                "buffer_depth",
-                self.weight_buffer_depth,
-                self.saturation_buffer_depth,
-            ),
-            ScalingComponent::new(
-                "insert_latency",
-                self.weight_insert_latency,
-                self.saturation_insert_latency,
-            ),
-            ScalingComponent::new("memory", self.weight_memory, 1.0),
-            ScalingComponent::new("errors", self.weight_errors, self.saturation_errors),
-        ];
-        hyperi_rustlib::ScalingPressure::new(base, components)
-    }
-}
-
-// ============================================================================
-// Per-Table Capture Override Configuration
-// ============================================================================
-
-/// Per-table capture override configuration.
-///
-/// Resolved from two sources (DDL tags take precedence over config lists):
-/// 1. Config: `disable_json_tables` / `disable_raw_tables` lists
-/// 2. DDL: `@no_capture_json: true` / `@no_capture_raw: true` in table COMMENT
-#[derive(Debug, Clone, Default)]
-pub struct TableCaptureConfig {
-    /// Whether _json capture is disabled for this table
-    pub disable_json: bool,
-    /// Whether _raw capture is disabled for this table
-    pub disable_raw: bool,
-}
-
-// ============================================================================
-// Type Coercion Configuration
-// ============================================================================
-
-/// Null handling strategy
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum NullHandling {
-    /// Substitute type-appropriate default value (recommended)
-    #[default]
-    Default,
-    /// Return error for null in non-nullable column
-    Error,
-    /// Pass null through (may cause ClickHouse errors)
-    Passthrough,
-}
-
-/// Type coercion configuration
-///
-/// Following the Go clickhouse-loader pattern:
-/// - Type mappings for custom types
-/// - Configurable null handling
-/// - Timezone handling for naive timestamps
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct CoercionConfig {
-    /// Map custom type names to base coercer categories
-    /// e.g., {"MyCustomInt": "Int", "SpecialString": "String"}
-    pub type_mappings: std::collections::HashMap<String, String>,
-
-    /// Fallback coercer for unknown types (default: "String")
-    pub unknown_type_fallback: String,
-
-    /// How to handle null values in non-nullable columns
-    pub null_handling: NullHandling,
-
-    /// Strings to recognise as null (case-sensitive)
-    pub null_strings: Vec<String>,
-
-    /// Default timezone for naive timestamps (IANA name or +HH:MM)
-    pub default_timezone: String,
-
-    /// Event fields to check for timezone info
-    pub timezone_fields: Vec<String>,
-
-    /// Convert arrays to JSON strings if true
-    pub array_to_json: bool,
-
-    /// Strict mode: fail on any coercion error
-    pub strict: bool,
-}
-
-impl Default for CoercionConfig {
-    fn default() -> Self {
-        Self {
-            type_mappings: std::collections::HashMap::new(),
-            unknown_type_fallback: "String".to_string(),
-            null_handling: NullHandling::Default,
-            null_strings: vec![
-                "null".to_string(),
-                "NULL".to_string(),
-                "Null".to_string(),
-                "None".to_string(),
-                "nil".to_string(),
-                "undefined".to_string(),
-                "\\N".to_string(),
-                "<null>".to_string(),
-                "NA".to_string(),
-                "N/A".to_string(),
-                "n/a".to_string(),
-                "NaN".to_string(),
-            ],
-            default_timezone: "UTC".to_string(),
-            timezone_fields: vec!["tags_collector_timezone".to_string()],
-            array_to_json: true,
-            strict: false,
-        }
-    }
-}
-
-impl CoercionConfig {
-    /// Check if a string value should be treated as null
-    pub fn is_null_string(&self, value: &str) -> bool {
-        value.is_empty() || self.null_strings.iter().any(|s| s == value)
-    }
-
-    /// Get the coercer category for a type, checking custom mappings first
-    pub fn get_coercer_category(&self, type_name: &str) -> &str {
-        self.type_mappings
-            .get(type_name)
-            .map(|s| s.as_str())
-            .unwrap_or(&self.unknown_type_fallback)
-    }
-}
-
-// ============================================================================
-// Schema Configuration
-// ============================================================================
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct SchemaConfig {
-    pub cache_ttl_secs: u64,
-    pub refresh_on_error: bool,
-}
-
-impl Default for SchemaConfig {
-    fn default() -> Self {
-        Self {
-            cache_ttl_secs: 300, // 5 minutes
-            refresh_on_error: true,
-        }
-    }
-}
-
-// ============================================================================
-// Auto-Initialization Configuration
-// ============================================================================
-
-/// Hot-reload configuration
-///
-/// Controls whether the config file is watched for changes at runtime.
-/// When enabled, the config cascade is re-evaluated on file change and
-/// safe-to-reload settings are applied without process restart.
-///
-/// **Safe to hot-reload:** buffer thresholds, routing, metadata, field
-/// sanitisation, timestamp DQ, coercion settings.
-///
-/// **Requires restart:** Kafka brokers/topics/auth, ClickHouse hosts/auth,
-/// payload format, transport type.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct HotReloadConfig {
-    /// Enable config file watching (default: false)
-    pub enabled: bool,
-
-    /// Polling interval in seconds for checking file changes
-    pub poll_interval_secs: u64,
-
-    /// Debounce duration in milliseconds — minimum time between reloads
-    pub debounce_ms: u64,
-}
-
-impl Default for HotReloadConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            poll_interval_secs: 5,
-            debounce_ms: 500,
-        }
-    }
-}
-
-// ============================================================================
-// Field Mapping Configuration
-// ============================================================================
-
-/// Field mapping configuration for normalising source field names.
-///
-/// Supports renaming or copying fields from source to destination names.
-/// Rules come from two sources with clear precedence:
-/// 1. ClickHouse column comments (`@renamed` directives) — highest priority
-/// 2. External remap files (CSV/YAML/JSON) and built-in presets — lower priority
-///
-/// CSV files are compatible with the elastic/ecs-mapper format:
-/// `source_field,destination_field,copy_action`
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct FieldMappingConfig {
-    /// Master switch (default: false — no impact on existing pipelines)
-    pub enabled: bool,
-
-    /// Default action when not specified per-field: "rename" or "copy"
-    /// - rename: source field removed, value moved to destination (zero-copy)
-    /// - copy: source field retained, value cloned to destination
-    pub default_action: String,
-
-    /// Built-in mapping preset: "ecs", "cim", "beats", or "none"
-    pub builtin: String,
-
-    /// External remap file paths (CSV/YAML/JSON, loaded in order)
-    /// Later files override earlier ones for the same destination field.
-    pub files: Vec<String>,
-
-    /// Per-destination field action overrides
-    pub overrides: HashMap<String, FieldMappingOverride>,
-}
-
-/// Per-field override for mapping action
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FieldMappingOverride {
-    /// Action for this field: "rename" or "copy"
-    pub action: String,
-}
-
-impl Default for FieldMappingConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            default_action: "rename".to_string(),
-            builtin: "none".to_string(),
-            files: vec![],
-            overrides: HashMap::new(),
-        }
-    }
-}
-
-// ============================================================================
 // Configuration Loading
 // ============================================================================
 
 /// Environment variable prefix for all dfe-loader settings
 const ENV_PREFIX: &str = "DFE_LOADER";
 
-/// Read a flat env var with the DFE_LOADER_ prefix
-fn env(name: &str) -> Option<String> {
-    EnvVar::new(&format!("{ENV_PREFIX}_{name}")).get()
-}
+use hyperi_rustlib::config::flat_env::{self, ApplyFlatEnv, Normalize};
 
-/// Read a flat env var as a comma-separated list
-fn env_list(name: &str) -> Option<Vec<String>> {
-    EnvVar::new(&format!("{ENV_PREFIX}_{name}")).get_list()
-}
-
-/// Read a flat env var as a boolean
-fn env_bool(name: &str) -> Option<bool> {
-    EnvVar::new(&format!("{ENV_PREFIX}_{name}")).get_bool()
-}
-
-/// Read a flat env var parsed to a type
-fn env_parsed<T: std::str::FromStr>(name: &str) -> Option<T> {
-    EnvVar::new(&format!("{ENV_PREFIX}_{name}")).get_parsed()
-}
-
-/// Apply explicit flat environment variable overrides (DFE_LOADER_* prefix).
-///
-/// These are K8s-friendly single-underscore vars that override config file values.
-/// For nested/advanced config, use `__` (double underscore) nesting via figment:
-///   DFE_LOADER_KAFKA__SASL__OAUTH_TOKEN_ENDPOINT=https://...
-fn apply_env_overrides(config: &mut Config) {
-    // Kafka
-    if let Some(v) = env_list("KAFKA_BROKERS") {
-        config.kafka.brokers = v;
-        debug!("Override: kafka.brokers from env");
-    }
-    if let Some(v) = env("KAFKA_GROUP_ID") {
-        config.kafka.group = v;
-        debug!("Override: kafka.group from env");
-    }
-    if let Some(v) = env_list("KAFKA_TOPICS") {
-        config.kafka.topics = v;
-        debug!("Override: kafka.topics from env");
-    }
-    if let Some(v) = env("KAFKA_CLIENT_ID") {
-        config.kafka.client_id = v;
-        debug!("Override: kafka.client_id from env");
-    }
-    if let Some(v) = env("KAFKA_SASL_MECHANISM") {
-        let sasl = config.kafka.sasl.get_or_insert_with(SaslConfig::default);
-        sasl.enabled = true;
-        sasl.mechanism = v;
-        debug!("Override: kafka.sasl.mechanism from env");
-    }
-    if let Some(v) = env("KAFKA_SASL_USERNAME") {
-        let sasl = config.kafka.sasl.get_or_insert_with(SaslConfig::default);
-        sasl.enabled = true;
-        sasl.username = v;
-        debug!("Override: kafka.sasl.username from env");
-    }
-    if let Some(v) = env("KAFKA_SASL_PASSWORD") {
-        let sasl = config.kafka.sasl.get_or_insert_with(SaslConfig::default);
-        sasl.enabled = true;
-        sasl.password = v;
-        debug!("Override: kafka.sasl.password from env (redacted)");
-    }
-    if let Some(v) = env("KAFKA_SECURITY_PROTOCOL") {
-        // Map common protocol names to TLS/SASL config
-        let proto = v.to_uppercase();
-        if proto.contains("SSL") || proto.contains("TLS") {
-            let tls = config.kafka.tls.get_or_insert_with(TlsConfig::default);
-            tls.enabled = true;
+impl ApplyFlatEnv for Config {
+    /// Apply flat DFE_LOADER_* env var overrides.
+    ///
+    /// These are K8s-friendly single-underscore vars. Same names as before — contract
+    /// with dfe-engine. For nested config use `__` nesting via figment.
+    fn apply_flat_env(&mut self, prefix: &str) {
+        // Kafka
+        if let Some(v) = flat_env::flat_env_list(prefix, "KAFKA_BROKERS") {
+            self.kafka.brokers = v;
         }
-        debug!(protocol = %v, "Override: kafka security_protocol from env");
-    }
+        if let Some(v) = flat_env::flat_env_string(prefix, "KAFKA_GROUP_ID") {
+            self.kafka.group = v;
+        }
+        if let Some(v) = flat_env::flat_env_list(prefix, "KAFKA_TOPICS") {
+            self.kafka.topics = v;
+        }
+        if let Some(v) = flat_env::flat_env_string(prefix, "KAFKA_CLIENT_ID") {
+            self.kafka.client_id = v;
+        }
+        if let Some(v) = flat_env::flat_env_string(prefix, "KAFKA_SASL_MECHANISM") {
+            let sasl = self.kafka.sasl.get_or_insert_with(SaslConfig::default);
+            sasl.mechanism = v;
+        }
+        if let Some(v) = flat_env::flat_env_string(prefix, "KAFKA_SASL_USERNAME") {
+            let sasl = self.kafka.sasl.get_or_insert_with(SaslConfig::default);
+            sasl.username = v;
+        }
+        if let Some(v) = flat_env::flat_env_string_sensitive(prefix, "KAFKA_SASL_PASSWORD") {
+            let sasl = self.kafka.sasl.get_or_insert_with(SaslConfig::default);
+            sasl.password = v;
+        }
+        if let Some(v) = flat_env::flat_env_string(prefix, "KAFKA_SECURITY_PROTOCOL") {
+            let proto = v.to_uppercase();
+            if proto.contains("SSL") || proto.contains("TLS") {
+                let tls = self.kafka.tls.get_or_insert_with(TlsConfig::default);
+                tls.enabled = true;
+            }
+        }
 
-    // ClickHouse
-    if let Some(v) = env_list("CLICKHOUSE_HOSTS") {
-        config.clickhouse.hosts = v;
-        debug!("Override: clickhouse.hosts from env");
-    }
-    if let Some(v) = env("CLICKHOUSE_DATABASE") {
-        config.clickhouse.database = v;
-        debug!("Override: clickhouse.database from env");
-    }
-    if let Some(v) = env("CLICKHOUSE_USERNAME") {
-        config.clickhouse.username = v;
-        debug!("Override: clickhouse.username from env");
-    }
-    if let Some(v) = env("CLICKHOUSE_PASSWORD") {
-        config.clickhouse.password = v;
-        debug!("Override: clickhouse.password from env (redacted)");
-    }
+        // ClickHouse
+        if let Some(v) = flat_env::flat_env_list(prefix, "CLICKHOUSE_HOSTS") {
+            self.clickhouse.hosts = v;
+        }
+        if let Some(v) = flat_env::flat_env_string(prefix, "CLICKHOUSE_DATABASE") {
+            self.clickhouse.database = v;
+        }
+        if let Some(v) = flat_env::flat_env_string(prefix, "CLICKHOUSE_USERNAME") {
+            self.clickhouse.username = v;
+        }
+        if let Some(v) = flat_env::flat_env_string_sensitive(prefix, "CLICKHOUSE_PASSWORD") {
+            self.clickhouse.password = v;
+        }
 
-    // Buffer
-    if let Some(v) = env_parsed::<usize>("BUFFER_FLUSH_ROWS") {
-        config.buffer.flush_rows = v;
-        debug!("Override: buffer.flush_rows from env");
-    }
-    if let Some(v) = env_parsed::<usize>("BUFFER_FLUSH_BYTES") {
-        config.buffer.flush_bytes = v;
-        debug!("Override: buffer.flush_bytes from env");
-    }
-    if let Some(v) = env_parsed::<u64>("BUFFER_FLUSH_AGE_SECS") {
-        config.buffer.flush_age_secs = v;
-        debug!("Override: buffer.flush_age_secs from env");
-    }
+        // Buffer
+        if let Some(v) = flat_env::flat_env_parsed::<usize>(prefix, "BUFFER_FLUSH_ROWS") {
+            self.buffer.flush_rows = v;
+        }
+        if let Some(v) = flat_env::flat_env_parsed::<usize>(prefix, "BUFFER_FLUSH_BYTES") {
+            self.buffer.flush_bytes = v;
+        }
+        if let Some(v) = flat_env::flat_env_parsed::<u64>(prefix, "BUFFER_FLUSH_AGE_SECS") {
+            self.buffer.flush_age_secs = v;
+        }
 
-    // Metrics
-    if let Some(v) = env("METRICS_ADDRESS") {
-        config.metrics.address = v;
-        debug!("Override: metrics.address from env");
-    }
-    if let Some(v) = env_bool("METRICS_ENABLED") {
-        config.metrics.enabled = v;
-        debug!("Override: metrics.enabled from env");
-    }
+        // Metrics
+        if let Some(v) = flat_env::flat_env_string(prefix, "METRICS_ADDRESS") {
+            self.metrics.address = v;
+        }
+        if let Some(v) = flat_env::flat_env_bool(prefix, "METRICS_ENABLED") {
+            self.metrics.enabled = v;
+        }
 
-    // Metadata (common header)
-    if let Some(v) = env_bool("METADATA_ENABLED") {
-        config.metadata.enabled = v;
-        debug!("Override: metadata.enabled from env");
-    }
+        // Metadata
+        if let Some(v) = flat_env::flat_env_bool(prefix, "METADATA_ENABLED") {
+            self.metadata.enabled = v;
+        }
 
-    // Logging
-    if let Some(v) = env("LOG_LEVEL") {
-        config.logging.level = v;
-        debug!("Override: logging.level from env");
-    }
-    if let Some(v) = env("LOG_FORMAT") {
-        config.logging.format = v;
-        debug!("Override: logging.format from env");
-    }
+        // Logging (generic names — no prefix)
+        if let Some(v) = flat_env::flat_env_string(prefix, "LOG_LEVEL") {
+            self.logging.level = v;
+        }
+        if let Some(v) = flat_env::flat_env_string(prefix, "LOG_FORMAT") {
+            self.logging.format = v;
+        }
 
-    // Hot-reload
-    if let Some(v) = env_parsed::<u64>("CONFIG_RELOAD_SECS") {
-        config.hot_reload.poll_interval_secs = v;
-        config.hot_reload.enabled = true;
-        debug!("Override: hot_reload.poll_interval_secs from env");
-    }
-    if let Some(v) = env_bool("HOT_RELOAD_ENABLED") {
-        config.hot_reload.enabled = v;
-        debug!("Override: hot_reload.enabled from env");
-    }
+        // Hot-reload
+        if let Some(v) = flat_env::flat_env_parsed::<u64>(prefix, "CONFIG_RELOAD_SECS") {
+            self.hot_reload.poll_interval_secs = v;
+            self.hot_reload.enabled = true;
+        }
+        if let Some(v) = flat_env::flat_env_bool(prefix, "HOT_RELOAD_ENABLED") {
+            self.hot_reload.enabled = v;
+        }
 
-    // Routing
-    if let Some(v) = env("ROUTING_DEFAULT_DB") {
-        config.routing.default_db = v;
-        debug!("Override: routing.default_db from env");
-    }
-    if let Some(v) = env("ROUTING_DEFAULT_TABLE") {
-        config.routing.default_table = v;
-        debug!("Override: routing.default_table from env");
-    }
+        // Routing
+        if let Some(v) = flat_env::flat_env_string(prefix, "ROUTING_DEFAULT_DB") {
+            self.routing.default_db = v;
+        }
+        if let Some(v) = flat_env::flat_env_string(prefix, "ROUTING_DEFAULT_TABLE") {
+            self.routing.default_table = v;
+        }
 
-    // Memory
-    if let Some(v) = env_parsed::<usize>("MEMORY_LIMIT_BYTES") {
-        config.memory.limit_bytes = v;
-        debug!("Override: memory.limit_bytes from env");
+        // Memory
+        if let Some(v) = flat_env::flat_env_parsed::<usize>(prefix, "MEMORY_LIMIT_BYTES") {
+            self.memory.limit_bytes = v;
+        }
+    }
+}
+
+impl Normalize for Config {
+    /// Side-effects: credentials present → enable auth, protocol → enable TLS.
+    fn normalize(&mut self) {
+        // SASL credentials present → auto-enable
+        if let Some(ref sasl) = self.kafka.sasl {
+            if !sasl.username.is_empty() || !sasl.password.is_empty() || !sasl.mechanism.is_empty()
+            {
+                if let Some(ref mut sasl) = self.kafka.sasl {
+                    sasl.enabled = true;
+                }
+            }
+        }
     }
 }
 
@@ -1656,8 +354,10 @@ impl Config {
         apply_figment_env(&mut config)?;
 
         // 4. Apply explicit flat env overrides (DFE_LOADER_KAFKA_BROKERS etc.)
-        // These are highest priority (after CLI args which caller handles)
-        apply_env_overrides(&mut config);
+        config.apply_flat_env(ENV_PREFIX);
+
+        // 5. Side-effects: credentials → enable auth, etc.
+        config.normalize();
 
         Ok(config)
     }
