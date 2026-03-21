@@ -189,6 +189,17 @@ rustlib v1.14.0+ switches rdkafka to dynamic-linking against system librdkafka
 - [x] Hot-reload safety: warn on restart-required config changes (transport, clickhouse URL, format)
 - [x] Security fix: `lz4_flex` 0.11.5 → 0.11.6 (GHSA-vvp9-7p8x-rfvv)
 
+### Security Fixes ✓ COMPLETE
+
+- [x] `tar` 0.4.44 → 0.4.45 (GHSA-gchp-q4r4-x4ff, GHSA-j4xf-2g29-59ph)
+- [x] `aws-lc-sys` 0.38.0 → 0.39.0 (GHSA-9f94-5g5w-gf6r, GHSA-394x-vwmw-crm3)
+- [x] `astral-tokio-tar` GHSA-6gx3-4362-rf54 dismissed (low, transitive dev-dep, no upstream fix)
+
+### v1.15.0 GA Released ✓
+
+Released with: MemoryGuard, DFE metrics groups, Kafka transport consolidation,
+clickhouse-rs fork activation, security events, dual-mode test infra, security fixes.
+
 ### Phase 6: Dependency Audit + Version Bumps
 
 - [ ] Web search ALL external crate versions for latest
