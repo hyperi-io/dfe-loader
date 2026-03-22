@@ -200,6 +200,19 @@ rustlib v1.14.0+ switches rdkafka to dynamic-linking against system librdkafka
 Released with: MemoryGuard, DFE metrics groups, Kafka transport consolidation,
 clickhouse-rs fork activation, security events, dual-mode test infra, security fixes.
 
+### Documentation Review
+
+- [ ] Update hyperi-ai submodule
+- [ ] Run full documentation review using `/review` skill
+- [ ] Fix all stale references, paths, and outdated examples
+
+### CI Rebuild with Updated hyperi-ci
+
+- [ ] Update hyperi-ai submodule
+- [ ] Re-attach CI (`ci/attach.sh`) — prod/test separation changes
+- [ ] Full rebuild and test cycle with new CI pipeline
+- [ ] Verify container build, helm chart, binary publish all pass
+
 ### Phase 6: Dependency Audit + Version Bumps
 
 - [ ] Web search ALL external crate versions for latest
