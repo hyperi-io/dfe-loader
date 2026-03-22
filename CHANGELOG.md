@@ -1,3 +1,11 @@
+# [1.15.0-dev.4](https://github.com/hyperi-io/dfe-loader/compare/v1.15.0-dev.3...v1.15.0-dev.4) (2026-03-22)
+
+
+### Bug Fixes
+
+* change Renovate schedule from weekly to nonOfficeHours for testing ([f1bafc6](https://github.com/hyperi-io/dfe-loader/commit/f1bafc67f6cdb57cdff21ef1f22ec7fe09824673))
+* remove Renovate schedule for testing (runs every cycle) ([4e922b6](https://github.com/hyperi-io/dfe-loader/commit/4e922b6fa1139a32964501ece5c21ff5837a3c4e))
+
 # [1.15.0-dev.3](https://github.com/hyperi-io/dfe-loader/compare/v1.15.0-dev.2...v1.15.0-dev.3) (2026-03-21)
 
 
