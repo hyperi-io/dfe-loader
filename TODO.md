@@ -207,6 +207,15 @@ clickhouse-rs fork activation, security events, dual-mode test infra, security f
 - [ ] Confirm at least one automated dependency PR has been created
 - [ ] Remove `schedule` workarounds once confirmed working
 
+### Test Coverage Review
+
+- [ ] Review existing tests for variety and gaps (unit, integration, e2e)
+- [ ] Add full startup smoke test to catch init panics (config load, transport init, schema cache, metrics bind)
+- [ ] Identify untested error paths (bad config, unreachable ClickHouse, schema mismatch, DLQ overflow)
+- [ ] Add negative tests for hot-reload (invalid config, restart-required field change)
+- [ ] Verify MemoryGuard triggers consumer pause under simulated pressure
+- [ ] Add circuit breaker state transition integration test (closed → open → half-open → closed)
+
 ### Documentation Review
 
 - [ ] Update hyperi-ai submodule

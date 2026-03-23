@@ -6,6 +6,7 @@
 mod clickhouse;
 mod config;
 mod datatypes;
+mod deployment;
 mod dlq;
 mod errors;
 mod field_mapping;
@@ -17,4 +18,3 @@ mod property;
 mod resilience;
 mod rls;
 mod schema;
-mod smoke;

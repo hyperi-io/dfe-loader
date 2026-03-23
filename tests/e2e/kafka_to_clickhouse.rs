@@ -328,6 +328,7 @@ fn syslog_rfc_parsed_messages(count: usize, org_id: &str, source: &str) -> Vec<V
 /// All messages carry `_source = {table_name}` so the pipeline routes them all
 /// to the same destination table. Row count is verified after replica sync.
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires infrastructure"]
 async fn test_kafka_to_clickhouse_bulk_load() {
     if skip_if_no_env() {
         return;
@@ -510,6 +511,7 @@ async fn test_kafka_to_clickhouse_bulk_load() {
 /// `clusterAllReplicas` so results are consistent regardless of which cluster
 /// node the load-balanced INSERT landed on.
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires infrastructure"]
 async fn test_kafka_to_clickhouse_org_routing() {
     if skip_if_no_env() {
         return;
