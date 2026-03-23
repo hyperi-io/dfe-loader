@@ -3,7 +3,7 @@
   "extends": [
     "config:recommended",
     "docker:pinDigests",
-    ":pinActionsToFullSha"
+    "helpers:pinGitHubActionDigestsToSemver"
   ],
   "labels": ["dependencies"],
   "prHourlyLimit": 5,
