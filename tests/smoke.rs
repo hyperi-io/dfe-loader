@@ -40,9 +40,12 @@ fn smoke_config_loads_example_yaml() {
 }
 
 /// Metrics struct creates all counters/gauges/histograms without panicking.
+/// Assertion: the constructor returns without panic (implicit).
+/// Recording a metric also works without panic.
 #[test]
 fn smoke_metrics_struct_creates() {
-    let _metrics = Metrics::new(shared_manager());
+    let metrics = Metrics::new(shared_manager());
+    metrics.record_received(); // Exercises counter registration
 }
 
 /// Full init sequence: Config -> Metrics -> SharedConfig -> Orchestrator.
