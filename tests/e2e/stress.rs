@@ -66,6 +66,7 @@ fn make_stress_rows(
 }
 
 #[tokio::test]
+#[ignore = "requires infrastructure"]
 async fn test_stress_10k_single_batch() {
     if skip_if_no_clickhouse() {
         eprintln!("Skipping stress test: no ClickHouse available");
@@ -111,6 +112,7 @@ async fn test_stress_10k_single_batch() {
 }
 
 #[tokio::test]
+#[ignore = "requires infrastructure"]
 async fn test_stress_50k_single_batch() {
     if skip_if_no_clickhouse() {
         eprintln!("Skipping stress test: no ClickHouse available");
@@ -156,6 +158,7 @@ async fn test_stress_50k_single_batch() {
 }
 
 #[tokio::test]
+#[ignore = "requires infrastructure"]
 async fn test_stress_multiple_batches() {
     if skip_if_no_clickhouse() {
         eprintln!("Skipping stress test: no ClickHouse available");
@@ -219,6 +222,7 @@ async fn test_stress_multiple_batches() {
 }
 
 #[tokio::test]
+#[ignore = "requires infrastructure"]
 async fn test_stress_concurrent_inserts() {
     if skip_if_no_clickhouse() {
         eprintln!("Skipping stress test: no ClickHouse available");
