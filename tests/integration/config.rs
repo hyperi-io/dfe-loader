@@ -480,3 +480,63 @@ async fn test_hot_reload_multiple_subscribers() {
 
     eprintln!("✓ Multiple subscribers all receive config update");
 }
+
+// === Negative config tests ===
+
+#[test]
+fn test_config_invalid_yaml_returns_error() {
+    let tmp = tempfile::NamedTempFile::new().expect("tempfile");
+    std::fs::write(tmp.path(), "this is not: valid: yaml: [[[").expect("write");
+    let result = Config::load(Some(tmp.path().to_str().expect("path")));
+    assert!(result.is_err(), "invalid YAML should return Err");
+}
+
+#[test]
+fn test_config_empty_brokers_fails_validation() {
+    let mut config = Config::default();
+    config.kafka.brokers.clear();
+    let result = config.validate();
+    assert!(result.is_err(), "empty brokers should fail validation");
+}
+
+#[test]
+fn test_config_empty_clickhouse_hosts_fails_validation() {
+    let mut config = Config::default();
+    config.clickhouse.hosts.clear();
+    let result = config.validate();
+    assert!(result.is_err(), "empty hosts should fail validation");
+}
+
+#[test]
+fn test_config_zero_flush_bytes_fails_validation() {
+    let mut config = Config::default();
+    config.buffer.flush_bytes = 0;
+    let result = config.validate();
+    assert!(result.is_err(), "zero flush_bytes should fail validation");
+}
+
+#[test]
+fn test_config_zero_flush_rows_fails_validation() {
+    let mut config = Config::default();
+    config.buffer.flush_rows = 0;
+    let result = config.validate();
+    assert!(result.is_err(), "zero flush_rows should fail validation");
+}
+
+#[test]
+fn test_config_invalid_pressure_threshold_fails_validation() {
+    let mut config = Config::default();
+    config.memory.pressure_threshold = 1.5;
+    let result = config.validate();
+    assert!(
+        result.is_err(),
+        "pressure_threshold > 1.0 should fail validation"
+    );
+
+    config.memory.pressure_threshold = -0.1;
+    let result = config.validate();
+    assert!(
+        result.is_err(),
+        "pressure_threshold < 0.0 should fail validation"
+    );
+}

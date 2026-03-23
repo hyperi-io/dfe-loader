@@ -14,5 +14,7 @@ mod inserter;
 mod kafka;
 mod offset;
 mod property;
+mod resilience;
 mod rls;
 mod schema;
+mod smoke;
