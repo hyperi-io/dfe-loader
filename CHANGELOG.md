@@ -1,3 +1,14 @@
+# [1.15.0-dev.5](https://github.com/hyperi-io/dfe-loader/compare/v1.15.0-dev.4...v1.15.0-dev.5) (2026-03-25)
+
+
+### Bug Fixes
+
+* replace invalid Renovate preset :pinActionsToFullSha ([070225e](https://github.com/hyperi-io/dfe-loader/commit/070225e38f4dc956bfd068c778d1d79b602dc231)), closes [#10](https://github.com/hyperi-io/dfe-loader/issues/10)
+* unified client, rustlib 1.19.6, SensitiveString, clippy pedantic clean ([cbffcdb](https://github.com/hyperi-io/dfe-loader/commit/cbffcdb3509911772124cbaa3fadd90622d9fdbe)), closes [#6](https://github.com/hyperi-io/dfe-loader/issues/6)
+* update clickhouse-rs fork — DNS panic resolved, revert test workaround ([a5d1481](https://github.com/hyperi-io/dfe-loader/commit/a5d1481c4afd7c96168d55bbdfa362079b9eb08a))
+* update rustls-webpki 0.103.9 → 0.103.10 (CRL matching CVE) ([4247eca](https://github.com/hyperi-io/dfe-loader/commit/4247eca3a2435d7b23d08d3eb98613d7266670af))
+* use HTTP transport in invalid-host test (native panics on DNS) ([8838f03](https://github.com/hyperi-io/dfe-loader/commit/8838f0328ad6cbb3f8ef8171fde1c4624ceec39a))
+
 # [1.15.0-dev.4](https://github.com/hyperi-io/dfe-loader/compare/v1.15.0-dev.3...v1.15.0-dev.4) (2026-03-22)
 
 
