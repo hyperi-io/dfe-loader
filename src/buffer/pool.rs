@@ -216,7 +216,7 @@ impl Poolable for PooledString {
 /// Pool for JSON Map objects (used in flattening and transform)
 pub type MapPool = ObjectPool<PooledMap>;
 
-/// Pool for KafkaOffset vectors (used in batch tracking)
+/// Pool for `KafkaOffset` vectors (used in batch tracking)
 pub type OffsetsPool = ObjectPool<PooledOffsets>;
 
 /// Pool for String buffers (used in key construction)
@@ -247,7 +247,7 @@ impl Default for PoolConfig {
 pub struct BufferPools {
     /// Pool for JSON Map objects
     pub maps: MapPool,
-    /// Pool for KafkaOffset vectors
+    /// Pool for `KafkaOffset` vectors
     pub offsets: OffsetsPool,
     /// Pool for String buffers
     pub strings: StringPool,
@@ -291,7 +291,7 @@ pub struct BufferPoolsStats {
 // Legacy compatibility - keep old BufferPool struct for now
 // ============================================================================
 
-/// Legacy buffer pool (deprecated, use BufferPools instead)
+/// Legacy buffer pool (deprecated, use `BufferPools` instead)
 #[deprecated(note = "Use BufferPools instead")]
 pub struct BufferPool;
 

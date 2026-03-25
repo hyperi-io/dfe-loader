@@ -3,8 +3,8 @@
 
 //! Payload format detection and parsing
 //!
-//! Auto-detects JSON vs MessagePack from raw bytes.
-//! Supports forced modes: Auto (default), ForceJson, ForceMessagePack.
+//! Auto-detects JSON vs `MessagePack` from raw bytes.
+//! Supports forced modes: Auto (default), `ForceJson`, `ForceMessagePack`.
 
 pub mod parse;
 

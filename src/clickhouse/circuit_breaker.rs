@@ -261,8 +261,7 @@ impl CircuitBreaker {
         let circuits = self.circuits.read().unwrap();
         circuits
             .get(table)
-            .map(|c| c.state)
-            .unwrap_or(CircuitState::Closed)
+            .map_or(CircuitState::Closed, |c| c.state)
     }
 
     /// Per-table circuit state for metrics emission.

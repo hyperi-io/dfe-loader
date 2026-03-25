@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: FSL-1.1-ALv2
 // Copyright (c) 2026 HYPERI PTY LIMITED
 
-//! GeoIP database auto-download
+//! `GeoIP` database auto-download
 //!
 //! Downloads MMDB files from various providers on startup when the local
 //! copy is missing or stale. Supports both anonymous and authenticated
@@ -28,7 +28,7 @@ use tracing::{debug, info, warn};
 
 use crate::config::{AutoDownloadConfig, GeoIpConfig, GeoIpProvider};
 
-/// Errors from GeoIP database download
+/// Errors from `GeoIP` database download
 #[derive(Debug, thiserror::Error)]
 pub enum GeoIpDownloadError {
     #[error("HTTP request failed: {0}")]
@@ -54,7 +54,7 @@ pub struct DatabasePaths {
     pub asn: Option<PathBuf>,
 }
 
-/// Ensure GeoIP databases are available, downloading if necessary.
+/// Ensure `GeoIP` databases are available, downloading if necessary.
 ///
 /// Returns paths to city and ASN MMDB files. Either or both may be `None`
 /// depending on the provider's capabilities and download success.
@@ -148,7 +148,7 @@ pub async fn ensure_databases(config: &GeoIpConfig) -> Result<DatabasePaths, Geo
     })
 }
 
-/// Return (city_filename, asn_filename) for a provider. `None` means the
+/// Return (`city_filename`, `asn_filename`) for a provider. `None` means the
 /// provider doesn't offer that database type.
 fn provider_filenames(provider: &GeoIpProvider) -> (Option<&'static str>, Option<&'static str>) {
     match provider {
@@ -216,13 +216,14 @@ async fn download_city_db(
             Ok(dest)
         }
         GeoIpProvider::IpInfoLite => {
-            let token =
-                auto.ipinfo_token
-                    .as_deref()
-                    .ok_or(GeoIpDownloadError::MissingCredential {
-                        provider: "IpInfoLite",
-                        field: "ipinfo_token",
-                    })?;
+            let token = auto
+                .ipinfo_token
+                .as_ref()
+                .map(hyperi_rustlib::config::sensitive::SensitiveString::expose)
+                .ok_or(GeoIpDownloadError::MissingCredential {
+                    provider: "IpInfoLite",
+                    field: "ipinfo_token",
+                })?;
             let url = format!("https://ipinfo.io/data/ipinfo_lite.mmdb?token={token}");
             let dest = data_dir.join("ipinfo-lite.mmdb");
             download_raw(&url, &dest, None).await?;

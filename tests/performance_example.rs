@@ -6,7 +6,7 @@
 //! This demonstrates how to capture metrics before/after changes
 //! to validate performance improvements.
 //!
-//! Run with: cargo test --test performance_example -- --nocapture
+//! Run with: cargo test --test `performance_example` -- --nocapture
 
 mod common;
 use common::metrics::MetricsSnapshot;
@@ -14,7 +14,7 @@ use common::metrics::MetricsSnapshot;
 #[test]
 fn example_metrics_snapshot_workflow() {
     // === Simulate baseline Prometheus text output ===
-    let baseline_text = r#"# HELP loader_messages_received_total Total messages received
+    let baseline_text = r"# HELP loader_messages_received_total Total messages received
 # TYPE loader_messages_received_total counter
 loader_messages_received_total 10000
 # HELP loader_messages_processed_total Total messages processed
@@ -30,7 +30,7 @@ loader_rows_inserted_total 10000
 # TYPE loader_insert_latency_seconds histogram
 loader_insert_latency_seconds_sum 0.725
 loader_insert_latency_seconds_count 10
-"#;
+";
 
     let baseline = MetricsSnapshot::from_text(baseline_text, "baseline_v1");
     baseline
@@ -40,7 +40,7 @@ loader_insert_latency_seconds_count 10
     eprintln!("Baseline snapshot saved to .tmp/metrics_baseline.json");
 
     // === Simulate optimised Prometheus text output ===
-    let current_text = r#"# HELP loader_messages_received_total Total messages received
+    let current_text = r"# HELP loader_messages_received_total Total messages received
 # TYPE loader_messages_received_total counter
 loader_messages_received_total 12000
 # HELP loader_messages_processed_total Total messages processed
@@ -56,7 +56,7 @@ loader_rows_inserted_total 10000
 # TYPE loader_insert_latency_seconds histogram
 loader_insert_latency_seconds_sum 0.435
 loader_insert_latency_seconds_count 10
-"#;
+";
 
     let current = MetricsSnapshot::from_text(current_text, "optimized_v2");
     current
@@ -91,7 +91,7 @@ loader_insert_latency_seconds_count 10
 }
 
 #[test]
-#[ignore] // Run manually with: cargo test test_load_and_compare_snapshots -- --ignored --nocapture
+#[ignore = "manual perf comparison — run with --ignored --nocapture"]
 fn test_load_and_compare_snapshots() {
     let baseline = MetricsSnapshot::load(".tmp/metrics_baseline.json")
         .expect("Failed to load baseline - run example_metrics_snapshot_workflow first");

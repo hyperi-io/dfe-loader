@@ -21,7 +21,7 @@ use std::collections::HashMap;
 use super::geoip::GeoIpResult;
 use super::reputation::ReputationResult;
 
-/// Risk level category (low cardinality for ClickHouse)
+/// Risk level category (low cardinality for `ClickHouse`)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RiskLevel {
     #[default]
@@ -57,7 +57,7 @@ impl RiskLevel {
     }
 }
 
-/// Risk input combining GeoIP and reputation data
+/// Risk input combining `GeoIP` and reputation data
 #[derive(Debug, Default)]
 pub struct RiskInput<'a> {
     // GeoIP data
@@ -81,7 +81,7 @@ pub struct RiskInput<'a> {
 }
 
 impl<'a> RiskInput<'a> {
-    /// Create from GeoIP and Reputation results
+    /// Create from `GeoIP` and Reputation results
     pub fn from_enrichment(
         geo: Option<&'a GeoIpResult>,
         rep: Option<&'a ReputationResult>,

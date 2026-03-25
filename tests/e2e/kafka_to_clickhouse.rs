@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: FSL-1.1-ALv2
 // Copyright (c) 2026 HYPERI PTY LIMITED
 
-//! Real Kafka → ClickHouse E2E bulk load test.
+//! Real Kafka → `ClickHouse` E2E bulk load test.
 //!
-//! Requires both Kafka (`KAFKA_BROKERS`) and ClickHouse (`CLICKHOUSE_HOST`)
+//! Requires both Kafka (`KAFKA_BROKERS`) and `ClickHouse` (`CLICKHOUSE_HOST`)
 //! to be reachable. Skips automatically when not available.
 //!
 //! Covers:
@@ -50,7 +50,7 @@ fn skip_if_no_env() -> bool {
 
 // ─── ClickHouse HTTP helpers ──────────────────────────────────────────────────
 
-/// Execute a DDL or DML statement via raw ClickHouse HTTP POST.
+/// Execute a DDL or DML statement via raw `ClickHouse` HTTP POST.
 async fn ch_execute(
     client: &reqwest::Client,
     base_url: &str,
@@ -116,9 +116,9 @@ fn make_client_config() -> ClientConfig {
     cfg
 }
 
-/// Returns a TLS config for the pipeline's KafkaConfig when the security
+/// Returns a TLS config for the pipeline's `KafkaConfig` when the security
 /// protocol requires SSL. Uses the system trust store — no CA file needed
-/// when the HyperI DevEx Root CA is installed system-wide.
+/// when the `HyperI` `DevEx` Root CA is installed system-wide.
 fn kafka_tls_from_env() -> Option<TlsConfig> {
     let kf = KafkaTestConfig::from_env();
     if kf.security_protocol.contains("SSL") {
@@ -163,7 +163,9 @@ fn sasl_config_from_env() -> Option<SaslConfig> {
         enabled: true,
         mechanism: mechanism.to_string(),
         username: kf.sasl_user.unwrap_or_default(),
-        password: kf.sasl_password.unwrap_or_default(),
+        password: hyperi_rustlib::config::sensitive::SensitiveString::from(
+            kf.sasl_password.unwrap_or_default(),
+        ),
         ..Default::default()
     })
 }
@@ -174,7 +176,7 @@ fn ch_config_from_env() -> ClickHouseConfig {
         hosts: vec![format!("{}:{}", ch.host, ch.http_port)],
         database: ch.database,
         username: ch.user,
-        password: ch.password,
+        password: hyperi_rustlib::config::sensitive::SensitiveString::from(ch.password),
         protocol: "http".to_string(),
         tables: Vec::new(),
         tls: if ch.tls {
@@ -190,7 +192,10 @@ fn ch_config_from_env() -> ClickHouseConfig {
 
 fn brokers_from_env() -> Vec<String> {
     let kf = KafkaTestConfig::from_env();
-    kf.brokers.split(',').map(|s| s.to_string()).collect()
+    kf.brokers
+        .split(',')
+        .map(std::string::ToString::to_string)
+        .collect()
 }
 
 // ─── Log format generators ────────────────────────────────────────────────────
@@ -318,7 +323,7 @@ fn syslog_rfc_parsed_messages(count: usize, org_id: &str, source: &str) -> Vec<V
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
-/// Bulk load: 1 200 messages via real Kafka → pipeline → ClickHouse.
+/// Bulk load: 1 200 messages via real Kafka → pipeline → `ClickHouse`.
 ///
 /// Three batches of 400 messages each, one per log format:
 ///   - Logstash JSON (logjson)
@@ -328,6 +333,7 @@ fn syslog_rfc_parsed_messages(count: usize, org_id: &str, source: &str) -> Vec<V
 /// All messages carry `_source = {table_name}` so the pipeline routes them all
 /// to the same destination table. Row count is verified after replica sync.
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires infrastructure"]
 async fn test_kafka_to_clickhouse_bulk_load() {
     if skip_if_no_env() {
         return;
@@ -506,10 +512,11 @@ async fn test_kafka_to_clickhouse_bulk_load() {
 /// which is required when per-org routing is active and the table does not yet
 /// exist. All other orgs fall back to the shared `default` database.
 ///
-/// Per-org table uses Atomic + MergeTree (ON CLUSTER). Count is verified via
+/// Per-org table uses Atomic + `MergeTree` (ON CLUSTER). Count is verified via
 /// `clusterAllReplicas` so results are consistent regardless of which cluster
 /// node the load-balanced INSERT landed on.
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires infrastructure"]
 async fn test_kafka_to_clickhouse_org_routing() {
     if skip_if_no_env() {
         return;

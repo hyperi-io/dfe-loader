@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 
-/// Maps _source values to ClickHouse table names
+/// Maps _source values to `ClickHouse` table names
 pub struct SourceMapping {
     mappings: HashMap<String, String>,
 }

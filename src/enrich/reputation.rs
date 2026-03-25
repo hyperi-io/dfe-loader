@@ -12,7 +12,7 @@
 //!
 //! ## Hot Path Optimizations
 //!
-//! 1. **O(1) IP lookup**: Individual IPs stored in FxHashMap
+//! 1. **O(1) IP lookup**: Individual IPs stored in `FxHashMap`
 //! 2. **LRU Cache**: Avoids repeated blocklist checks
 //! 3. **Prefix trie**: CIDR ranges with prefix matching
 //! 4. **Lazy loading**: Only load enabled blocklists
@@ -25,7 +25,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use rustc_hash::FxHashMap;
 use tracing::debug;
 
-/// Threat type classification (low cardinality for ClickHouse)
+/// Threat type classification (low cardinality for `ClickHouse`)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum ThreatType {
     #[default]
@@ -66,7 +66,7 @@ impl ThreatType {
     }
 }
 
-/// Threat source identification (low cardinality for ClickHouse)
+/// Threat source identification (low cardinality for `ClickHouse`)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum ThreatSource {
     #[default]
@@ -101,7 +101,7 @@ impl ThreatSource {
     }
 }
 
-/// Reputation lookup result with boolean flags optimized for ClickHouse indexing
+/// Reputation lookup result with boolean flags optimized for `ClickHouse` indexing
 #[derive(Debug, Clone, Default)]
 pub struct ReputationResult {
     // Detection flags (booleans - index-friendly in ClickHouse)
@@ -177,18 +177,18 @@ impl ReputationResult {
                 "is_anonymizer" => out.insert(field.to_string(), Value::Bool(self.is_anonymizer)),
                 "threat_type" => {
                     let s = self.threat_type.as_str();
-                    if !s.is_empty() {
-                        out.insert(field.to_string(), Value::String(s.to_string()))
-                    } else {
+                    if s.is_empty() {
                         None
+                    } else {
+                        out.insert(field.to_string(), Value::String(s.to_string()))
                     }
                 }
                 "threat_source" => {
                     let s = self.threat_source.as_str();
-                    if !s.is_empty() {
-                        out.insert(field.to_string(), Value::String(s.to_string()))
-                    } else {
+                    if s.is_empty() {
                         None
+                    } else {
+                        out.insert(field.to_string(), Value::String(s.to_string()))
                     }
                 }
                 "vpn_provider" => {
@@ -485,12 +485,11 @@ impl ReputationEnricher {
         }
 
         // Parse IP address
-        let addr: IpAddr = match ip.parse() {
-            Ok(a) => a,
-            Err(_) => {
-                debug!(ip = %ip, "Invalid IP address for reputation lookup");
-                return None;
-            }
+        let addr: IpAddr = if let Ok(a) = ip.parse() {
+            a
+        } else {
+            debug!(ip = %ip, "Invalid IP address for reputation lookup");
+            return None;
         };
 
         self.cache_misses.fetch_add(1, Ordering::Relaxed);
@@ -716,12 +715,12 @@ mod tests {
     fn test_load_plain_list() {
         let enricher = ReputationEnricher::new();
 
-        let list = r#"
+        let list = r"
 # Comment
 1.2.3.4
 5.6.7.8
 10.0.0.0/8
-"#;
+";
 
         let count = enricher.load_plain_list(list, ThreatType::Botnet, ThreatSource::AbuseCh);
         assert_eq!(count, 3);

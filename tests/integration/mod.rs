@@ -6,6 +6,7 @@
 mod clickhouse;
 mod config;
 mod datatypes;
+mod deployment;
 mod dlq;
 mod errors;
 mod field_mapping;
@@ -14,5 +15,6 @@ mod inserter;
 mod kafka;
 mod offset;
 mod property;
+mod resilience;
 mod rls;
 mod schema;

@@ -9,16 +9,17 @@
 // License:   FSL-1.1-ALv2
 // Copyright: (c) 2026 HYPERI PTY LIMITED
 
-//! ClickHouse client abstraction.
+//! `ClickHouse` client abstraction.
 //!
-//! Uses dual-client architecture:
-//! - `clickhouse::Client` for DDL, schema queries, and health checks (static Row types)
-//! - `reqwest::Client` for data inserts via JSONEachRow (dynamic `Map<String, Value>`)
+//! Uses two `clickhouse::Client` instances (from the fork):
+//! - `HttpClickHouseClient` wraps one for DDL, schema queries, and health checks
+//! - `Inserter` uses another for all data inserts (`RowBinary` via `DynamicInsert`,
+//!   `JSONEachRow` via `InsertFormatted`)
 //!
 //! ## Architecture
 //!
 //! Core client and types:
-//! - `HttpClickHouseClient` - DDL + JSONEachRow insert client
+//! - `HttpClickHouseClient` - DDL + schema queries (no inserts)
 //! - `ParsedType`, `ColumnInfo`, `TableSchema` - Type system
 //! - `ClickHouseConfig` - Connection configuration
 //!

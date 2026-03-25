@@ -179,9 +179,9 @@ fn test_validate_generated_chart() {
 }
 
 /// Write generated artifacts to .tmp/ for manual comparison.
-/// Run with: cargo test --test deployment -- write_artifacts --ignored --nocapture
+/// Run with: cargo test --test deployment -- `write_artifacts` --ignored --nocapture
 #[test]
-#[ignore]
+#[ignore = "writes to /tmp — manual verification only"]
 fn write_artifacts_to_tmp() {
     let contract = contract();
     let base = Path::new(env!("CARGO_MANIFEST_DIR")).join(".tmp/generated");

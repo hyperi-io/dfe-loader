@@ -139,9 +139,28 @@ Remove or comment out the `[patch]` section to revert to upstream.
 **Step B ✓ COMPLETE:** v1.14.4 GA released (GH Release + R2 binaries, JFrog container + helm).
   amd64 + arm64 binaries published. Ready for internal testing.
 
-**Step C:** Migrate to clickhouse-rs fork — done LOCK-STEP with dfe-loader.
+**Step C:** Migrate to clickhouse-rs fork -- done LOCK-STEP with dfe-loader.
 
 Phases 1-3 complete (fork activated, InsertFormat dispatch wired, ParsedType deduplicated).
+
+**Step D (IN PROGRESS):** Unified client migration (`hyperi/unified-client` branch).
+
+`HttpClickHouseClient` and `Inserter` now use `clickhouse::UnifiedClient` for
+runtime transport dispatch. Native TCP or HTTP selected from config at startup.
+
+Done:
+- [x] Cargo.toml: patch points to `hyperi/unified-client`, native-transport + native-tls-rustls enabled
+- [x] `HttpClickHouseClient::new()`: builds `UnifiedClient` from `Transport::Http` or `Transport::Native`
+- [x] `Inserter`: uses `UnifiedClient` for RowBinary inserts (both transports)
+- [x] JSONEachRow path: uses `as_http()` fallback (HTTP-only, errors on native)
+- [x] Compiles clean
+
+Remaining:
+- [ ] Integration test: native transport insert against devex cluster
+- [ ] Integration test: HTTP transport insert (regression check)
+- [ ] Rename `HttpClickHouseClient` to `ClickHouseQueryClient` (no longer HTTP-specific)
+- [ ] End-to-end test: Kafka -> native TCP -> ClickHouse pipeline
+- [ ] Update .env.example with CLICKHOUSE_PROTOCOL=native option
 Fork `hyperi/optimise-1` branch has `src/dynamic/` module: ParsedType, DynamicSchema,
 SchemaCache, RowBinary encoder, DynamicInsert, DynamicBatcher.
 
@@ -188,6 +207,46 @@ rustlib v1.14.0+ switches rdkafka to dynamic-linking against system librdkafka
 - [x] Split `config/loader.rs` (2,362 → 1,041 lines) into `kafka.rs` + `pipeline.rs`
 - [x] Hot-reload safety: warn on restart-required config changes (transport, clickhouse URL, format)
 - [x] Security fix: `lz4_flex` 0.11.5 → 0.11.6 (GHSA-vvp9-7p8x-rfvv)
+
+### Security Fixes ✓ COMPLETE
+
+- [x] `tar` 0.4.44 → 0.4.45 (GHSA-gchp-q4r4-x4ff, GHSA-j4xf-2g29-59ph)
+- [x] `aws-lc-sys` 0.38.0 → 0.39.0 (GHSA-9f94-5g5w-gf6r, GHSA-394x-vwmw-crm3)
+- [x] `astral-tokio-tar` GHSA-6gx3-4362-rf54 dismissed (low, transitive dev-dep, no upstream fix)
+
+### v1.15.0 GA Released ✓
+
+Released with: MemoryGuard, DFE metrics groups, Kafka transport consolidation,
+clickhouse-rs fork activation, security events, dual-mode test infra, security fixes.
+
+### Renovate Remediation
+
+- [ ] Verify Renovate is running (check Dependency Dashboard issue on GitHub)
+- [ ] If still broken: deep web research on Mend Renovate GitHub App resolution issues
+- [ ] Confirm at least one automated dependency PR has been created
+- [ ] Remove `schedule` workarounds once confirmed working
+
+### Test Coverage Review
+
+- [ ] Review existing tests for variety and gaps (unit, integration, e2e)
+- [ ] Add full startup smoke test to catch init panics (config load, transport init, schema cache, metrics bind)
+- [ ] Identify untested error paths (bad config, unreachable ClickHouse, schema mismatch, DLQ overflow)
+- [ ] Add negative tests for hot-reload (invalid config, restart-required field change)
+- [ ] Verify MemoryGuard triggers consumer pause under simulated pressure
+- [ ] Add circuit breaker state transition integration test (closed → open → half-open → closed)
+
+### Documentation Review
+
+- [ ] Update hyperi-ai submodule
+- [ ] Run full documentation review using `/review` skill
+- [ ] Fix all stale references, paths, and outdated examples
+
+### CI Rebuild with Updated hyperi-ci
+
+- [ ] Update hyperi-ci submodule — prod/test separation changes
+- [ ] Re-attach CI (`ci/attach.sh`)
+- [ ] Full rebuild and test cycle with new CI pipeline
+- [ ] Verify container build, helm chart, binary publish all pass
 
 ### Phase 6: Dependency Audit + Version Bumps
 
@@ -467,3 +526,15 @@ Not a direct dep of dfe-loader — lives in the clickhouse-rs fork's dependency 
 ---
 
 **Last Updated:** 2026-03-19
+
+## From dfe-receiver Audit (2026-03-25)
+
+- [x] Rename MetricsManager namespace from `loader` to `dfe_loader` (per dfe-metrics standard)
+- [x] Wire transport labels on all metric call sites (already done: `"clickhouse"` on transport metrics)
+- [x] Wire `DfeMetrics::register()` for standard `dfe_*` dual-emit (already done)
+- [x] Wire metric groups: AppMetrics, BufferMetrics, SinkMetrics, CircuitBreakerMetrics (all 8 groups wired)
+- [x] Wire `log_state_change()`, `log_sampled()`, `log_debounced()` for log spam prevention (already done)
+- [x] Wire security event logging where applicable (config_changed on reload — already done)
+- [x] Adopt `ConfigReloader` from rustlib (ConfigWatcher wraps it — already done)
+- [x] Review for lazy shims / pass-through functions over rustlib (none found)
+- [x] Bump rustlib to >=1.19.6, wire Config Registry, adopt SensitiveString for auth fields

@@ -16,7 +16,7 @@ use dfe_loader::transform::Transformer;
 
 use crate::common::{create_http_test_client, drop_http_test_table};
 
-/// Test that _org_id field is populated from source data
+/// Test that _`org_id` field is populated from source data
 #[tokio::test]
 async fn test_org_id_field_population() {
     let routing_config = RoutingConfig {
@@ -55,7 +55,7 @@ async fn test_org_id_field_population() {
     let value: serde_json::Value = serde_json::from_slice(&payload).unwrap();
     let org_id_owned = router
         .extract_org_id_from_value(&value)
-        .map(|s| s.to_string());
+        .map(std::string::ToString::to_string);
     assert_eq!(org_id_owned.as_deref(), Some("acme"));
 
     // Transform with org_id
@@ -74,7 +74,7 @@ async fn test_org_id_field_population() {
     assert!(!result.data.contains_key("org_id"));
 }
 
-/// Test that _org_id field works with different field names
+/// Test that _`org_id` field works with different field names
 #[tokio::test]
 async fn test_org_id_custom_field_name() {
     let routing_config = RoutingConfig {
@@ -106,7 +106,7 @@ async fn test_org_id_custom_field_name() {
 
     let org_id_owned = router
         .extract_org_id_from_value(&value)
-        .map(|s| s.to_string());
+        .map(std::string::ToString::to_string);
     assert_eq!(org_id_owned.as_deref(), Some("bigcorp"));
 
     let result = transformer
@@ -166,7 +166,7 @@ async fn test_shared_schema_multiple_orgs() {
 
             let org_id_owned = router
                 .extract_org_id_from_value(&value)
-                .map(|s| s.to_string());
+                .map(std::string::ToString::to_string);
             let result = transformer
                 .transform_with_raw(value, org_id_owned.as_deref(), None)
                 .unwrap();
@@ -183,9 +183,9 @@ async fn test_shared_schema_multiple_orgs() {
     assert_eq!(buffer.stats().table_count, 1); // Single table
 }
 
-/// Integration test: Insert data with _org_id and verify storage
+/// Integration test: Insert data with _`org_id` and verify storage
 ///
-/// Tests that _org_id field is correctly populated and stored in ClickHouse.
+/// Tests that _`org_id` field is correctly populated and stored in `ClickHouse`.
 #[tokio::test]
 async fn test_org_id_insert_to_clickhouse() {
     use crate::common::unique_table_name;
@@ -193,12 +193,11 @@ async fn test_org_id_insert_to_clickhouse() {
 
     skip_if_no_clickhouse!();
 
-    let client = match create_http_test_client() {
-        Some(c) => c,
-        None => {
-            eprintln!("Skipping RLS integration test: no ClickHouse available");
-            return;
-        }
+    let client = if let Some(c) = create_http_test_client() {
+        c
+    } else {
+        eprintln!("Skipping RLS integration test: no ClickHouse available");
+        return;
     };
     let oc = crate::common::on_cluster_clause();
 
@@ -215,13 +214,13 @@ async fn test_org_id_insert_to_clickhouse() {
     // For query-back verification we need the `default` database so that writes on any node
     // are replicated to all nodes. We omit ON CLUSTER — the Replicated DB propagates DDL itself.
     let table_name = unique_table_name("rls_test");
-    let full_name = format!("default.{}", table_name);
+    let full_name = format!("default.{table_name}");
 
     // Create table with _org_id field (Common Header v2 schema).
     // No ON CLUSTER — the Replicated `default` DB propagates DDL automatically.
     // ReplicatedMergeTree() with no args lets the Replicated DB auto-fill ZK paths.
     let create_ddl = format!(
-        "CREATE TABLE {} (
+        "CREATE TABLE {full_name} (
             _timestamp DateTime64(3),
             _timestamp_load DateTime64(3) DEFAULT now64(3),
             _uuid UUID DEFAULT generateUUIDv7(),
@@ -231,8 +230,7 @@ async fn test_org_id_insert_to_clickhouse() {
         )
         ENGINE = ReplicatedMergeTree()
         ORDER BY (_timestamp, _org_id, _uuid)
-        PARTITION BY _org_id",
-        full_name
+        PARTITION BY _org_id"
     );
 
     client
@@ -260,7 +258,7 @@ async fn test_org_id_insert_to_clickhouse() {
     // Sync all replicas — the table is ReplicatedMergeTree (auto-converted by Replicated DB),
     // so SYSTEM SYNC REPLICA forces all nodes to catch up before we query back.
     client
-        .execute(&format!("SYSTEM SYNC REPLICA{oc} {}", full_name))
+        .execute(&format!("SYSTEM SYNC REPLICA{oc} {full_name}"))
         .await
         .expect("Failed to sync replicas");
 

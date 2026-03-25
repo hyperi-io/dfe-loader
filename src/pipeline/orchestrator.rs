@@ -3,13 +3,13 @@
 
 //! Main pipeline coordinator.
 //!
-//! Orchestrates the Transport → Transform → Buffer → ClickHouse pipeline.
+//! Orchestrates the Transport → Transform → Buffer → `ClickHouse` pipeline.
 //!
 //! Uses the hyperi-rustlib Transport abstraction for message sources (Kafka/Memory).
 //! Processes messages in batches for efficiency.
 //!
 //! Accumulates rows as `Map<String, Value>` per table, then flushes via
-//! JSONEachRow HTTP inserts to ClickHouse.
+//! `JSONEachRow` HTTP inserts to `ClickHouse`.
 
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
@@ -58,14 +58,14 @@ pub struct PipelineStats {
     pub errors: u64,
 }
 
-/// Active enrichment pipeline (GeoIP + reputation + risk scoring)
+/// Active enrichment pipeline (`GeoIP` + reputation + risk scoring)
 ///
 /// All components are optional — each is only active if configured and
 /// initialised successfully. Failures are non-fatal (logged as warnings).
 struct EnrichmentPipeline {
     /// IP field names to check in event data (first match wins)
     ip_fields: Vec<String>,
-    /// GeoIP lookup (city + ASN)
+    /// `GeoIP` lookup (city + ASN)
     geoip: Option<GeoIpEnricher>,
     /// IP reputation lookup (VPN, Tor, proxy, botnet, ...)
     reputation: Option<ReputationEnricher>,
@@ -232,18 +232,10 @@ impl CaptureOverrides {
             });
 
         // DDL tags override config (only to disable)
-        if tags
-            .get("no_capture_json")
-            .map(|v| v == "true")
-            .unwrap_or(false)
-        {
+        if tags.get("no_capture_json").is_some_and(|v| v == "true") {
             entry.disable_json = true;
         }
-        if tags
-            .get("no_capture_raw")
-            .map(|v| v == "true")
-            .unwrap_or(false)
-        {
+        if tags.get("no_capture_raw").is_some_and(|v| v == "true") {
             entry.disable_raw = true;
         }
     }
@@ -258,13 +250,13 @@ struct TableResolutionResult {
     table: String,
     /// Table-level COMMENT string (for DDL capture tags)
     comment: String,
-    /// Full schema from system.columns (for field mapping + SharedSchemaCache)
+    /// Full schema from system.columns (for field mapping + `SharedSchemaCache`)
     schema: Option<crate::clickhouse::TableSchema>,
     /// Parsed per-column directives (skip/default/renamed/computed/coerce)
     column_directives: FxHashMap<String, crate::column_meta::ColumnDirectives>,
 }
 
-/// Orchestrates the Kafka → ClickHouse pipeline
+/// Orchestrates the Kafka → `ClickHouse` pipeline
 pub struct Orchestrator {
     config: Config,
     shared_config: Option<SharedConfig>,
@@ -329,36 +321,67 @@ impl Orchestrator {
         let mut transport = TransportBackend::from_config(&self.config).await?;
         info!(transport = transport.name(), "Transport initialized");
 
-        // Create HTTP client for DDL/schema queries (and JSONEachRow fallback)
+        // Validate ClickHouse config (transport/port mismatch, native not yet supported)
         let ch_config: crate::clickhouse::ClickHouseConfig = (&self.config.clickhouse).into();
+        match ch_config.validate() {
+            Err(e) => return Err(crate::Error::Config(e)),
+            Ok(warnings) => {
+                for w in warnings {
+                    warn!("{}", w);
+                }
+            }
+        }
+
+        // Create HTTP client for DDL/schema queries
         let http_client = Arc::new(
             HttpClickHouseClient::new(&ch_config)
                 .map_err(|e| crate::Error::ClickHouse(e.to_string()))?,
         );
 
-        // Build clickhouse::Client for DynamicInsert (RowBinary path)
+        // Build unified client for inserts -- same transport as the query client.
+        // RowBinary (DynamicInsert) works on both HTTP and native.
+        // JSONEachRow (InsertFormatted) is HTTP-only and will error on native.
         let ch_client = {
+            use crate::clickhouse::Transport;
             let host = ch_config
                 .primary_endpoint()
                 .unwrap_or_else(|| "localhost:8123".to_string());
-            let scheme = if ch_config.tls { "https" } else { "http" };
-            let mut client = clickhouse::Client::default()
-                .with_url(format!("{scheme}://{host}"))
-                .with_user(&ch_config.username)
-                .with_password(&ch_config.password)
-                .with_database(&ch_config.database);
-            if ch_config.compression {
-                client = client.with_compression(clickhouse::Compression::Lz4);
+            match ch_config.transport {
+                Transport::Http => {
+                    let scheme = if ch_config.tls { "https" } else { "http" };
+                    clickhouse::UnifiedClient::http()
+                        .with_url(format!("{scheme}://{host}"))
+                        .with_user(&ch_config.username)
+                        .with_password(&ch_config.password)
+                        .with_database(&ch_config.database)
+                        .build()
+                }
+                Transport::Native => {
+                    let mut builder = clickhouse::UnifiedClient::native()
+                        .with_addr(&*host)
+                        .with_user(&ch_config.username)
+                        .with_password(&ch_config.password)
+                        .with_database(&ch_config.database)
+                        .with_lz4();
+                    if ch_config.tls {
+                        let hostname = host.split(':').next().unwrap_or(&host);
+                        builder = builder.with_tls(hostname);
+                    }
+                    builder.build()
+                }
             }
-            client
         };
 
         let insert_format = ch_config.insert_format;
         info!(format = %insert_format, "Insert format configured");
 
-        // Inserter dispatches based on insert_format
-        let inserter = Inserter::new(Arc::clone(&http_client), InserterConfig::default())
-            .with_insert_format(insert_format, Some(ch_client));
+        // Inserter dispatches based on insert_format — single client handles all inserts
+        let inserter = Inserter::new(
+            Arc::clone(&http_client),
+            ch_client,
+            InserterConfig::default(),
+        )
+        .with_insert_format(insert_format);
 
         // DLQ (unified rustlib module — cascade: Kafka primary, file fallback)
         let dlq_config = self.config.routing.dlq.to_rustlib_config();
@@ -391,7 +414,7 @@ impl Orchestrator {
                 loop {
                     tokio::select! {
                         biased;
-                        _ = shutdown_bg.cancelled() => {
+                        () = shutdown_bg.cancelled() => {
                             // Drain remaining entries before exiting
                             while let Ok(entry) = dlq_rx.try_recv() {
                                 if let Err(e) = dlq_bg.send(entry).await {
@@ -438,7 +461,7 @@ impl Orchestrator {
                 loop {
                     tokio::select! {
                         biased;
-                        _ = shutdown_resolver.cancelled() => break,
+                        () = shutdown_resolver.cancelled() => break,
                         Some(table) = resolve_rx.recv() => {
                             let client = Arc::clone(&resolver_client);
                             let tx = result_tx.clone();
@@ -562,7 +585,10 @@ impl Orchestrator {
         topic_refresh_interval.tick().await;
 
         // Hot-reload: subscribe to config changes if SharedConfig is available
-        let mut config_rx = self.shared_config.as_ref().map(|sc| sc.subscribe());
+        let mut config_rx = self
+            .shared_config
+            .as_ref()
+            .map(hyperi_rustlib::SharedConfig::subscribe);
 
         // Batch size for transport.recv() - process multiple messages per iteration
         const RECV_BATCH_SIZE: usize = 100;
@@ -583,7 +609,7 @@ impl Orchestrator {
             tokio::select! {
                 biased; // Prioritize shutdown check
 
-                _ = self.shutdown.cancelled() => {
+                () = self.shutdown.cancelled() => {
                     info!("Shutdown requested, flushing remaining buffers");
                     break;
                 }
@@ -623,6 +649,9 @@ impl Orchestrator {
 
                         // Store new config (for process_message to reference)
                         self.config = new_config;
+
+                        // Update config registry (enables /config endpoint to reflect changes)
+                        self.config.register_sections();
 
                         hyperi_rustlib::logger::security::config_changed(
                             "config_reload",
@@ -860,7 +889,7 @@ impl Orchestrator {
                                 }
 
                                 // Per-table circuit breaker state
-                                if let Some(ref cb) = inserter.circuit_breaker() {
+                                if let Some(cb) = inserter.circuit_breaker() {
                                     for (table, state) in cb.per_table_states() {
                                         m.update_circuit_breaker_state(&table, state);
                                     }
@@ -958,7 +987,7 @@ impl Orchestrator {
     /// Returns the table name on success for metrics tracking.
     ///
     /// Two code paths:
-    /// - `json_primary`: schema-guided SIMD extraction (HeaderExtractor) + zero-copy `_json`.
+    /// - `json_primary`: schema-guided SIMD extraction (`HeaderExtractor`) + zero-copy `_json`.
     ///   When schema is not yet resolved, silently falls back to the legacy path.
     /// - `legacy_flatten`: existing full-flatten + Transformer path (unchanged).
     #[allow(clippy::too_many_arguments)]
@@ -994,9 +1023,9 @@ impl Orchestrator {
         // Step 2: Parse payload to JSON Value (needed for routing in both modes)
         let value: Value = match format {
             PayloadFormat::Json => sonic_rs::from_slice(&msg.payload)
-                .map_err(|e| crate::Error::Json(format!("JSON parse error: {}", e)))?,
+                .map_err(|e| crate::Error::Json(format!("JSON parse error: {e}")))?,
             PayloadFormat::MessagePack => rmp_serde::from_slice(&msg.payload)
-                .map_err(|e| crate::Error::Json(format!("MessagePack parse error: {}", e)))?,
+                .map_err(|e| crate::Error::Json(format!("MessagePack parse error: {e}")))?,
             PayloadFormat::Unknown => {
                 return Err(crate::Error::Json("Unknown format".into()));
             }
@@ -1008,7 +1037,7 @@ impl Orchestrator {
             RouteResult::Table(t) => t,
             RouteResult::Dlq(reason) => {
                 debug!(reason = %reason, "Routing to DLQ");
-                return Err(crate::Error::Json(format!("DLQ: {}", reason)));
+                return Err(crate::Error::Json(format!("DLQ: {reason}")));
             }
         };
 
@@ -1044,18 +1073,16 @@ impl Orchestrator {
             let org_id_owned = if common_header {
                 router
                     .extract_org_id_from_value(&value)
-                    .map(|s| s.to_string())
+                    .map(std::string::ToString::to_string)
             } else {
                 None
             };
 
             let source_owned = if common_header && self.config.metadata.capture_source {
-                Some(
-                    router
-                        .extract_source_from_value(&value)
-                        .map(|s| s.to_string())
-                        .unwrap_or_else(|| router.derive_source_from_topic(&msg.topic)),
-                )
+                Some(router.extract_source_from_value(&value).map_or_else(
+                    || router.derive_source_from_topic(&msg.topic),
+                    std::string::ToString::to_string,
+                ))
             } else {
                 None
             };
@@ -1128,7 +1155,7 @@ impl Orchestrator {
         Ok(table)
     }
 
-    /// Flush batches to ClickHouse and commit Kafka offsets via transport on success
+    /// Flush batches to `ClickHouse` and commit Kafka offsets via transport on success
     async fn flush_batches_transport(
         &mut self,
         inserter: &Inserter,
@@ -1267,7 +1294,7 @@ fn extract_enrich_ip(
     None
 }
 
-/// Inject GeoIP result fields into event data as `geo_*` prefixed fields.
+/// Inject `GeoIP` result fields into event data as `geo_*` prefixed fields.
 ///
 /// Only non-None fields are injected. If a `geo_*` field already exists in
 /// the data, it is preserved (not overwritten) to allow source-provided values.

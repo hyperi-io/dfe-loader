@@ -3,7 +3,7 @@
 
 //! Table metadata tags
 //!
-//! Tables support metadata tags stored in the ClickHouse COMMENT field,
+//! Tables support metadata tags stored in the `ClickHouse` COMMENT field,
 //! using `@tag: key=value` syntax:
 //!
 //! ```sql
@@ -15,7 +15,7 @@
 
 use std::collections::BTreeMap;
 
-/// Table-level tags stored in ClickHouse COMMENT field
+/// Table-level tags stored in `ClickHouse` COMMENT field
 ///
 /// Uses `@tag: key=value` syntax.
 /// Tags are separated by ` | ` (pipe with spaces) for readability.
@@ -56,7 +56,7 @@ impl TableTags {
 
     /// Get a tag value
     pub fn get(&self, key: &str) -> Option<&str> {
-        self.tags.get(key).map(|s| s.as_str())
+        self.tags.get(key).map(std::string::String::as_str)
     }
 
     /// Check if a tag exists
@@ -84,18 +84,18 @@ impl TableTags {
         self.tags.iter().map(|(k, v)| (k.as_str(), v.as_str()))
     }
 
-    /// Format as ClickHouse COMMENT string
+    /// Format as `ClickHouse` COMMENT string
     ///
     /// Uses `@key: value` syntax, separated by ` | `
     pub fn to_comment(&self) -> String {
         self.tags
             .iter()
-            .map(|(k, v)| format!("@{}: {}", k, v))
+            .map(|(k, v)| format!("@{k}: {v}"))
             .collect::<Vec<_>>()
             .join(" | ")
     }
 
-    /// Parse tags from a ClickHouse COMMENT string
+    /// Parse tags from a `ClickHouse` COMMENT string
     ///
     /// Expects `@key: value` pairs separated by ` | `
     pub fn from_comment(comment: &str) -> Self {

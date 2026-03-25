@@ -3,9 +3,9 @@
 
 //! Data types integration tests
 //!
-//! Tests for various ClickHouse data types via JSONEachRow inserts.
+//! Tests for various `ClickHouse` data types via `JSONEachRow` inserts.
 //! Includes Phase 5.6 coercion tests: verify that the Coercer correctly
-//! transforms ambiguous input values before they reach ClickHouse.
+//! transforms ambiguous input values before they reach `ClickHouse`.
 
 #![allow(clippy::approx_constant)]
 
@@ -26,7 +26,7 @@ async fn test_integer_types() {
     let oc = crate::common::on_cluster_clause();
 
     let ddl = format!(
-        "CREATE TABLE {}{oc} (
+        "CREATE TABLE {table_name}{oc} (
             i8_col Int8,
             i16_col Int16,
             i32_col Int32,
@@ -35,8 +35,7 @@ async fn test_integer_types() {
             u16_col UInt16,
             u32_col UInt32,
             u64_col UInt64
-        ) ENGINE = MergeTree() ORDER BY tuple()",
-        table_name
+        ) ENGINE = MergeTree() ORDER BY tuple()"
     );
     client.execute(&ddl).await.expect("Failed to create table");
 
@@ -66,11 +65,10 @@ async fn test_float_types() {
     let oc = crate::common::on_cluster_clause();
 
     let ddl = format!(
-        "CREATE TABLE {}{oc} (
+        "CREATE TABLE {table_name}{oc} (
             f32_col Float32,
             f64_col Float64
-        ) ENGINE = MergeTree() ORDER BY tuple()",
-        table_name
+        ) ENGINE = MergeTree() ORDER BY tuple()"
     );
     client.execute(&ddl).await.expect("Failed to create table");
 
@@ -109,11 +107,10 @@ async fn test_string_types() {
     let oc = crate::common::on_cluster_clause();
 
     let ddl = format!(
-        "CREATE TABLE {}{oc} (
+        "CREATE TABLE {table_name}{oc} (
             str_col String,
             fixed_col FixedString(10)
-        ) ENGINE = MergeTree() ORDER BY tuple()",
-        table_name
+        ) ENGINE = MergeTree() ORDER BY tuple()"
     );
     client.execute(&ddl).await.expect("Failed to create table");
 
@@ -152,11 +149,10 @@ async fn test_datetime_types() {
     let oc = crate::common::on_cluster_clause();
 
     let ddl = format!(
-        "CREATE TABLE {}{oc} (
+        "CREATE TABLE {table_name}{oc} (
             dt64_ms DateTime64(3),
             date_col Date
-        ) ENGINE = MergeTree() ORDER BY tuple()",
-        table_name
+        ) ENGINE = MergeTree() ORDER BY tuple()"
     );
     client.execute(&ddl).await.expect("Failed to create table");
 
@@ -202,10 +198,9 @@ async fn test_boolean_type() {
     let oc = crate::common::on_cluster_clause();
 
     let ddl = format!(
-        "CREATE TABLE {}{oc} (
+        "CREATE TABLE {table_name}{oc} (
             bool_col Bool
-        ) ENGINE = MergeTree() ORDER BY tuple()",
-        table_name
+        ) ENGINE = MergeTree() ORDER BY tuple()"
     );
     client.execute(&ddl).await.expect("Failed to create table");
 
@@ -236,13 +231,12 @@ async fn test_nullable_types() {
     let oc = crate::common::on_cluster_clause();
 
     let ddl = format!(
-        "CREATE TABLE {}{oc} (
+        "CREATE TABLE {table_name}{oc} (
             id UInt64,
             nullable_str Nullable(String),
             nullable_int Nullable(Int64),
             nullable_float Nullable(Float64)
-        ) ENGINE = MergeTree() ORDER BY tuple()",
-        table_name
+        ) ENGINE = MergeTree() ORDER BY tuple()"
     );
     client.execute(&ddl).await.expect("Failed to create table");
 
@@ -289,11 +283,10 @@ async fn test_low_cardinality_type() {
     let oc = crate::common::on_cluster_clause();
 
     let ddl = format!(
-        "CREATE TABLE {}{oc} (
+        "CREATE TABLE {table_name}{oc} (
             id UInt64,
             category LowCardinality(String)
-        ) ENGINE = MergeTree() ORDER BY tuple()",
-        table_name
+        ) ENGINE = MergeTree() ORDER BY tuple()"
     );
     client.execute(&ddl).await.expect("Failed to create table");
 
@@ -335,7 +328,7 @@ async fn test_realistic_event_table() {
     let oc = crate::common::on_cluster_clause();
 
     let ddl = format!(
-        "CREATE TABLE {}{oc} (
+        "CREATE TABLE {table_name}{oc} (
             timestamp DateTime64(3),
             event_id UInt64,
             org_id String,
@@ -345,8 +338,7 @@ async fn test_realistic_event_table() {
             value Float64,
             success Bool,
             metadata String
-        ) ENGINE = MergeTree() ORDER BY tuple()",
-        table_name
+        ) ENGINE = MergeTree() ORDER BY tuple()"
     );
     client.execute(&ddl).await.expect("Failed to create table");
 
@@ -426,10 +418,9 @@ async fn test_coerce_datetime64_from_epoch_ms() {
     let oc = crate::common::on_cluster_clause();
 
     let ddl = format!(
-        "CREATE TABLE {}{oc} (
+        "CREATE TABLE {table_name}{oc} (
             ts DateTime64(3)
-        ) ENGINE = MergeTree() ORDER BY tuple()",
-        table_name
+        ) ENGINE = MergeTree() ORDER BY tuple()"
     );
     client.execute(&ddl).await.expect("Failed to create table");
 
@@ -470,10 +461,9 @@ async fn test_coerce_datetime64_from_iso_string() {
     let oc = crate::common::on_cluster_clause();
 
     let ddl = format!(
-        "CREATE TABLE {}{oc} (
+        "CREATE TABLE {table_name}{oc} (
             ts DateTime64(3)
-        ) ENGINE = MergeTree() ORDER BY tuple()",
-        table_name
+        ) ENGINE = MergeTree() ORDER BY tuple()"
     );
     client.execute(&ddl).await.expect("Failed to create table");
 
@@ -516,10 +506,9 @@ async fn test_coerce_bool_from_string() {
     let oc = crate::common::on_cluster_clause();
 
     let ddl = format!(
-        "CREATE TABLE {}{oc} (
+        "CREATE TABLE {table_name}{oc} (
             b Bool
-        ) ENGINE = MergeTree() ORDER BY tuple()",
-        table_name
+        ) ENGINE = MergeTree() ORDER BY tuple()"
     );
     client.execute(&ddl).await.expect("Failed to create table");
 
@@ -540,7 +529,7 @@ async fn test_coerce_bool_from_string() {
             .coerce_row(&mut row, &schema)
             .expect("Coercion failed");
         // After coercion, "b" must be a JSON bool
-        assert_eq!(row["b"], json!(true), "Expected true for input {:?}", s);
+        assert_eq!(row["b"], json!(true), "Expected true for input {s:?}");
         rows.push(row);
     }
     for s in &string_falses {
@@ -548,7 +537,7 @@ async fn test_coerce_bool_from_string() {
         coercer
             .coerce_row(&mut row, &schema)
             .expect("Coercion failed");
-        assert_eq!(row["b"], json!(false), "Expected false for input {:?}", s);
+        assert_eq!(row["b"], json!(false), "Expected false for input {s:?}");
         rows.push(row);
     }
 
@@ -576,10 +565,9 @@ async fn test_coerce_bool_from_int() {
     let oc = crate::common::on_cluster_clause();
 
     let ddl = format!(
-        "CREATE TABLE {}{oc} (
+        "CREATE TABLE {table_name}{oc} (
             b Bool
-        ) ENGINE = MergeTree() ORDER BY tuple()",
-        table_name
+        ) ENGINE = MergeTree() ORDER BY tuple()"
     );
     client.execute(&ddl).await.expect("Failed to create table");
 
@@ -599,9 +587,7 @@ async fn test_coerce_bool_from_int() {
         assert_eq!(
             row["b"],
             json!(expected_bool),
-            "Expected {} for int input {}",
-            expected_bool,
-            int_val
+            "Expected {expected_bool} for int input {int_val}"
         );
         rows.push(row);
     }
@@ -630,10 +616,9 @@ async fn test_coerce_uuid_normalisation() {
     let oc = crate::common::on_cluster_clause();
 
     let ddl = format!(
-        "CREATE TABLE {}{oc} (
+        "CREATE TABLE {table_name}{oc} (
             id UUID
-        ) ENGINE = MergeTree() ORDER BY tuple()",
-        table_name
+        ) ENGINE = MergeTree() ORDER BY tuple()"
     );
     client.execute(&ddl).await.expect("Failed to create table");
 
@@ -677,10 +662,9 @@ async fn test_coerce_ipv4_from_integer() {
     let oc = crate::common::on_cluster_clause();
 
     let ddl = format!(
-        "CREATE TABLE {}{oc} (
+        "CREATE TABLE {table_name}{oc} (
             ip IPv4
-        ) ENGINE = MergeTree() ORDER BY tuple()",
-        table_name
+        ) ENGINE = MergeTree() ORDER BY tuple()"
     );
     client.execute(&ddl).await.expect("Failed to create table");
 
@@ -725,11 +709,10 @@ async fn test_coerce_null_non_nullable_defaults_to_empty() {
     let oc = crate::common::on_cluster_clause();
 
     let ddl = format!(
-        "CREATE TABLE {}{oc} (
+        "CREATE TABLE {table_name}{oc} (
             name String,
             score UInt64
-        ) ENGINE = MergeTree() ORDER BY tuple()",
-        table_name
+        ) ENGINE = MergeTree() ORDER BY tuple()"
     );
     client.execute(&ddl).await.expect("Failed to create table");
 
@@ -778,10 +761,9 @@ async fn test_coerce_array_datetime64_from_epoch_ms() {
     let oc = crate::common::on_cluster_clause();
 
     let ddl = format!(
-        "CREATE TABLE {}{oc} (
+        "CREATE TABLE {table_name}{oc} (
             timestamps Array(DateTime64(3))
-        ) ENGINE = MergeTree() ORDER BY tuple()",
-        table_name
+        ) ENGINE = MergeTree() ORDER BY tuple()"
     );
     client.execute(&ddl).await.expect("Failed to create table");
 
@@ -807,8 +789,7 @@ async fn test_coerce_array_datetime64_from_epoch_ms() {
     for elem in arr {
         assert!(
             elem.is_string(),
-            "Expected string datetime after coercion, got: {:?}",
-            elem
+            "Expected string datetime after coercion, got: {elem:?}"
         );
     }
 
@@ -837,10 +818,9 @@ async fn test_coerce_json_column_accepts_string_and_object() {
 
     // JSON type requires ClickHouse 25.3+; skip gracefully on older versions
     let ddl = format!(
-        "CREATE TABLE {}{oc} (
+        "CREATE TABLE {table_name}{oc} (
             data JSON
-        ) ENGINE = MergeTree() ORDER BY tuple()",
-        table_name
+        ) ENGINE = MergeTree() ORDER BY tuple()"
     );
     if client.execute(&ddl).await.is_err() {
         eprintln!("Skipping test_coerce_json_column: JSON type not supported on this server");
