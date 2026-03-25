@@ -276,6 +276,11 @@ impl Inserter {
         self.circuit_breaker.as_ref()
     }
 
+    /// Get connection pool stats (native transport only, `None` for HTTP).
+    pub fn pool_stats(&self) -> Option<clickhouse::PoolStats> {
+        self.ch_client.pool_stats()
+    }
+
     /// Insert rows into a table with error-aware retry.
     ///
     /// Dispatches based on `insert_format`:

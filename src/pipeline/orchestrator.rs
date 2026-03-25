@@ -888,6 +888,12 @@ impl Orchestrator {
                                     m.update_per_table_buffer(table, rows, bytes);
                                 }
 
+                                // EPS gauge (events per second from counter delta)
+                                m.update_eps();
+
+                                // ClickHouse connection pool stats (native transport only)
+                                m.update_pool_stats(inserter.pool_stats());
+
                                 // Per-table circuit breaker state
                                 if let Some(cb) = inserter.circuit_breaker() {
                                     for (table, state) in cb.per_table_states() {
@@ -1209,6 +1215,7 @@ impl Orchestrator {
                     self.stats.rows_inserted += count as u64;
                     if let Some(ref m) = self.metrics {
                         m.record_flush(count, latency);
+                        m.record_insert_quantities(batch_bytes, 1);
                     }
                     if !offsets.is_empty() {
                         match transport.commit(&offsets).await {

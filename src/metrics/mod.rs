@@ -12,6 +12,8 @@
 //! Remove legacy names after dashboard migration.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
 
 use metrics::{Counter, Gauge, Histogram};
 
@@ -41,6 +43,22 @@ pub struct Metrics {
     pub backpressure: BackpressureMetrics,
     pub enrichment: EnrichmentMetrics,
     pub schema_cache: SchemaCacheMetrics,
+
+    // ClickHouse connection pool gauges (native transport only)
+    pub pool_max: Gauge,
+    pub pool_active: Gauge,
+    pub pool_idle: Gauge,
+    pub pool_waiting: Gauge,
+
+    // Insert byte/transaction counters (from fork commit callbacks)
+    pub insert_bytes: Counter,
+    pub insert_transactions: Counter,
+
+    // EPS (events per second) — live gauge for top/debugging
+    pub eps: Gauge,
+    eps_counter: Arc<AtomicU64>,
+    eps_last_update: Arc<parking_lot::Mutex<Instant>>,
+    eps_last_count: Arc<AtomicU64>,
 
     // Legacy loader_* metrics (dual-emit — remove after dashboard migration)
     pub messages_received: Counter,
@@ -105,6 +123,29 @@ impl Metrics {
             insert_latency: manager
                 .histogram("insert_latency_seconds", "Insert batch latency in seconds"),
             memory_used: manager.gauge("memory_bytes", "Estimated memory used by loader"),
+
+            // ClickHouse connection pool (native transport only)
+            pool_max: manager.gauge("clickhouse_pool_max", "Max connections in pool"),
+            pool_active: manager.gauge("clickhouse_pool_active", "Active connections in pool"),
+            pool_idle: manager.gauge("clickhouse_pool_idle", "Idle connections in pool"),
+            pool_waiting: manager
+                .gauge("clickhouse_pool_waiting", "Tasks waiting for a connection"),
+
+            // Insert byte/transaction counters (from fork commit callbacks)
+            insert_bytes: manager.counter(
+                "insert_bytes_total",
+                "Total uncompressed bytes inserted to ClickHouse",
+            ),
+            insert_transactions: manager.counter(
+                "insert_transactions_total",
+                "Total INSERT statements committed",
+            ),
+
+            // EPS (events per second) — updated periodically from counter delta
+            eps: manager.gauge("events_per_second", "Current events processed per second"),
+            eps_counter: Arc::new(AtomicU64::new(0)),
+            eps_last_update: Arc::new(parking_lot::Mutex::new(Instant::now())),
+            eps_last_count: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -113,6 +154,7 @@ impl Metrics {
         self.messages_received.increment(1);
         self.app.record_received(1);
         self.dfe.records_received(1);
+        self.eps_counter.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Record a message processed for a table.
@@ -206,6 +248,43 @@ impl Metrics {
     pub fn set_memory_usage(&self, current_bytes: u64, limit_bytes: u64) {
         self.memory_used.set(current_bytes as f64);
         self.app.set_memory(current_bytes, limit_bytes);
+    }
+
+    /// Update EPS gauge from counter delta.
+    ///
+    /// Call periodically (e.g., every 5s alongside buffer stats).
+    /// Calculates events/second from the delta since last call.
+    pub fn update_eps(&self) {
+        let current = self.eps_counter.load(Ordering::Relaxed);
+        let previous = self.eps_last_count.swap(current, Ordering::Relaxed);
+        let mut last = self.eps_last_update.lock();
+        let elapsed = last.elapsed().as_secs_f64();
+        *last = Instant::now();
+
+        if elapsed > 0.0 {
+            let delta = current.saturating_sub(previous);
+            self.eps.set(delta as f64 / elapsed);
+        }
+    }
+
+    /// Update ClickHouse connection pool gauges from `PoolStats`.
+    ///
+    /// Call periodically (e.g., every 5s). No-op if `stats` is `None`
+    /// (HTTP transport has no managed pool).
+    pub fn update_pool_stats(&self, stats: Option<clickhouse::PoolStats>) {
+        if let Some(s) = stats {
+            self.pool_max.set(s.max_size as f64);
+            self.pool_active.set(s.size as f64);
+            self.pool_idle.set(s.available as f64);
+            self.pool_waiting.set(s.waiting as f64);
+        }
+    }
+
+    /// Record insert bytes and transactions from a commit callback.
+    pub fn record_insert_quantities(&self, bytes: u64, transactions: u64) {
+        self.insert_bytes.increment(bytes);
+        self.insert_transactions.increment(transactions);
+        self.app.record_bytes_written(bytes);
     }
 }
 
