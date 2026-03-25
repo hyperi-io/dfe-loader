@@ -40,7 +40,7 @@ fn bench_parse_throughput(c: &mut Criterion) {
     ] {
         group.throughput(Throughput::Bytes(payload.len() as u64));
         group.bench_with_input(BenchmarkId::new("parse_payload", name), payload, |b, p| {
-            b.iter(|| parse_payload(black_box(p)))
+            b.iter(|| parse_payload(black_box(p)));
         });
     }
 
@@ -53,34 +53,34 @@ fn bench_field_extraction(c: &mut Criterion) {
 
     // Simple field extraction - allocating (returns String)
     group.bench_function("extract_simple_alloc", |b| {
-        b.iter(|| extract_field_json(black_box(MEDIUM_PAYLOAD), "org_id"))
+        b.iter(|| extract_field_json(black_box(MEDIUM_PAYLOAD), "org_id"));
     });
 
     // Simple field extraction - zero-copy (returns Cow)
     group.bench_function("extract_simple_cow", |b| {
-        b.iter(|| extract_field_json_cow(black_box(MEDIUM_PAYLOAD), "org_id"))
+        b.iter(|| extract_field_json_cow(black_box(MEDIUM_PAYLOAD), "org_id"));
     });
 
     // Nested field extraction - allocating
     group.bench_function("extract_nested_alloc", |b| {
-        b.iter(|| extract_nested_field_json(black_box(MEDIUM_PAYLOAD), "tags.level"))
+        b.iter(|| extract_nested_field_json(black_box(MEDIUM_PAYLOAD), "tags.level"));
     });
 
     // Nested field extraction - zero-copy
     group.bench_function("extract_nested_cow", |b| {
-        b.iter(|| extract_nested_field_json_cow(black_box(MEDIUM_PAYLOAD), "tags.level"))
+        b.iter(|| extract_nested_field_json_cow(black_box(MEDIUM_PAYLOAD), "tags.level"));
     });
 
     // Deep nested field extraction - allocating
     group.bench_function("extract_deep_alloc", |b| {
-        b.iter(|| extract_nested_field_json(black_box(MEDIUM_PAYLOAD), "tags.collector.hostname"))
+        b.iter(|| extract_nested_field_json(black_box(MEDIUM_PAYLOAD), "tags.collector.hostname"));
     });
 
     // Deep nested field extraction - zero-copy
     group.bench_function("extract_deep_cow", |b| {
         b.iter(|| {
             extract_nested_field_json_cow(black_box(MEDIUM_PAYLOAD), "tags.collector.hostname")
-        })
+        });
     });
 
     group.finish();
@@ -95,18 +95,18 @@ fn bench_routing(c: &mut Criterion) {
 
     // Route from raw bytes (allocating version)
     group.bench_function("route_bytes", |b| {
-        b.iter(|| router.route(black_box(MEDIUM_PAYLOAD)))
+        b.iter(|| router.route(black_box(MEDIUM_PAYLOAD)));
     });
 
     // Route from raw bytes (zero-copy Cow version - fastest for raw bytes)
     group.bench_function("route_cow", |b| {
-        b.iter(|| router.route_cow(black_box(MEDIUM_PAYLOAD)))
+        b.iter(|| router.route_cow(black_box(MEDIUM_PAYLOAD)));
     });
 
     // Route from pre-parsed Value (avoids re-parsing - use when already parsed)
     let value: Value = serde_json::from_slice(MEDIUM_PAYLOAD).unwrap();
     group.bench_function("route_value", |b| {
-        b.iter(|| router.route_value(black_box(&value)))
+        b.iter(|| router.route_value(black_box(&value)));
     });
 
     group.finish();
@@ -124,7 +124,7 @@ fn bench_flatten(c: &mut Criterion) {
         let value: Value = serde_json::from_slice(payload).unwrap();
 
         group.bench_with_input(BenchmarkId::new("flatten_owned", name), &value, |b, v| {
-            b.iter(|| flatten_value_owned(black_box(v.clone())))
+            b.iter(|| flatten_value_owned(black_box(v.clone())));
         });
     }
 
@@ -147,7 +147,7 @@ fn bench_transform(c: &mut Criterion) {
             BenchmarkId::new("transform_with_raw", name),
             &(value.clone(), payload),
             |b, (v, _p)| {
-                b.iter(|| transformer.transform_with_raw(black_box(v.clone()), None, None))
+                b.iter(|| transformer.transform_with_raw(black_box(v.clone()), None, None));
             },
         );
     }
@@ -181,7 +181,7 @@ fn bench_end_to_end(c: &mut Criterion) {
 
                     // Step 3: Transform
                     transformer.transform_with_raw(value, None, None)
-                })
+                });
             },
         );
     }
@@ -210,7 +210,7 @@ fn bench_batch_processing(c: &mut Criterion) {
             }
 
             results
-        })
+        });
     });
 }
 

@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: FSL-1.1-ALv2
 // Copyright (c) 2026 HYPERI PTY LIMITED
 
-//! dfe-loader: High-performance Kafka to ClickHouse data loader
+//! dfe-loader: High-performance Kafka to `ClickHouse` data loader
 //!
 //! This library provides a pipeline for consuming JSON/MessagePack events from Kafka,
-//! transforming them, and inserting into ClickHouse with high throughput.
+//! transforming them, and inserting into `ClickHouse` with high throughput.
 
 pub mod buffer;
 pub mod clickhouse;

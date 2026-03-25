@@ -3,7 +3,7 @@
 
 //! Payload parsing with auto-detection
 //!
-//! Parses JSON or MessagePack into a common Value type.
+//! Parses JSON or `MessagePack` into a common Value type.
 //!
 //! ## On-Demand Field Access
 //!
@@ -19,10 +19,10 @@ use sonic_rs::{JsonValueTrait, LazyValue, get_from_slice};
 use crate::Result;
 use crate::payload::{PayloadFormat, detect_format};
 
-/// Parse a payload into a serde_json::Value.
+/// Parse a payload into a `serde_json::Value`.
 ///
-/// Auto-detects format (JSON or MessagePack) and parses accordingly.
-/// Both formats are normalized to serde_json::Value for downstream processing.
+/// Auto-detects format (JSON or `MessagePack`) and parses accordingly.
+/// Both formats are normalized to `serde_json::Value` for downstream processing.
 #[inline]
 pub fn parse_payload(payload: &[u8]) -> Result<serde_json::Value> {
     let format = detect_format(payload).ok_or_else(|| {
@@ -39,21 +39,20 @@ pub fn parse_payload(payload: &[u8]) -> Result<serde_json::Value> {
 /// Parse JSON using sonic-rs (SIMD-accelerated)
 ///
 /// sonic-rs uses SIMD instructions for fast JSON parsing. The result is directly
-/// deserialized to serde_json::Value for compatibility with downstream processing.
+/// deserialized to `serde_json::Value` for compatibility with downstream processing.
 #[inline]
 fn parse_json(payload: &[u8]) -> Result<serde_json::Value> {
     // Use sonic-rs's SIMD-accelerated parsing directly to serde_json::Value
     // This is efficient because sonic_rs::from_slice can deserialize into any
     // type implementing serde::Deserialize, including serde_json::Value
-    sonic_rs::from_slice(payload)
-        .map_err(|e| crate::Error::Json(format!("JSON parse error: {}", e)))
+    sonic_rs::from_slice(payload).map_err(|e| crate::Error::Json(format!("JSON parse error: {e}")))
 }
 
-/// Parse MessagePack using rmp-serde
+/// Parse `MessagePack` using rmp-serde
 #[inline]
 fn parse_msgpack(payload: &[u8]) -> Result<serde_json::Value> {
     rmp_serde::from_slice(payload)
-        .map_err(|e| crate::Error::Json(format!("MessagePack parse error: {}", e)))
+        .map_err(|e| crate::Error::Json(format!("MessagePack parse error: {e}")))
 }
 
 /// On-demand field extraction from JSON without full DOM parse.
@@ -74,10 +73,10 @@ pub fn extract_field_json(payload: &[u8], field: &str) -> Option<String> {
     let lazy: LazyValue = get_from_slice(payload, &[field]).ok()?;
 
     // Extract string value from lazy wrapper
-    lazy.as_str().map(|s| s.to_string())
+    lazy.as_str().map(std::string::ToString::to_string)
 }
 
-/// On-demand nested field extraction using dot notation (e.g., "tags.event_category")
+/// On-demand nested field extraction using dot notation (e.g., "`tags.event_category`")
 ///
 /// Uses sonic-rs's SIMD-accelerated path navigation without building full DOM.
 /// This is 4-7x faster than full DOM parsing for deeply nested field extraction.
@@ -101,7 +100,7 @@ pub fn extract_nested_field_json(payload: &[u8], path: &str) -> Option<String> {
     // This navigates directly to the nested field without building a full DOM tree
     let lazy: LazyValue = get_from_slice(payload, &parts).ok()?;
 
-    lazy.as_str().map(|s| s.to_string())
+    lazy.as_str().map(std::string::ToString::to_string)
 }
 
 /// Zero-copy field extraction from JSON - returns Cow for true zero-copy.

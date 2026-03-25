@@ -123,9 +123,7 @@ impl HeaderExtractor {
 
             // Determine source field path(s) for extraction.
             // Priority: @renamed directive > per-column defaults > column name.
-            let found = if !directives.renamed.is_empty() {
-                lookup_first(parsed, &directives.renamed, name, &mut map)
-            } else {
+            let found = if directives.renamed.is_empty() {
                 match name.as_str() {
                     "_org_id" => lookup_one(parsed, &self.org_id_field, name, &mut map),
                     "_source" if self.capture_source && self.metadata_enabled => {
@@ -138,6 +136,8 @@ impl HeaderExtractor {
                     }
                     _ => lookup_one(parsed, name, name, &mut map),
                 }
+            } else {
+                lookup_first(parsed, &directives.renamed, name, &mut map)
             };
 
             // Apply column default when all source fields were absent.
@@ -276,7 +276,7 @@ mod tests {
     #[test]
     fn test_injects_timestamp_received() {
         let extractor = default_extractor();
-        let raw = br#"{}"#;
+        let raw = br"{}";
         let schema = make_schema(&["_timestamp_received"]);
         let col_meta = empty_col_meta();
 

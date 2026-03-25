@@ -4,7 +4,7 @@
 //! Routes messages to destination db.table based on event data
 //!
 //! Routing happens PRE-flattening using dot notation for nested field access.
-//! db is extracted from first matching field in priority list (default: org_id)
+//! db is extracted from first matching field in priority list (default: `org_id`)
 //! table is extracted from first matching field in priority list (default: _source)
 //!
 //! ## Performance
@@ -63,18 +63,18 @@ pub struct Router {
     /// Pre-compiled CEL routing rules (top-to-bottom, first match wins)
     compiled_rules: Vec<CompiledRoutingRule>,
     /// Fields to check for database name (first match wins)
-    /// Empty = always use default_db (shared schema)
+    /// Empty = always use `default_db` (shared schema)
     db_fields: Vec<String>,
     /// Fields to check for table name (first match wins)
     table_fields: Vec<String>,
-    /// Default database if no db_field matches (or db_fields empty), or if
-    /// the org is not listed in org_routes.
+    /// Default database if no `db_field` matches (or `db_fields` empty), or if
+    /// the org is not listed in `org_routes`.
     default_db: String,
-    /// Default table if no table_field matches
+    /// Default table if no `table_field` matches
     default_table: String,
-    /// Field to extract for _org_id column (for RLS)
+    /// Field to extract for _`org_id` column (for RLS)
     org_id_field: Option<String>,
-    /// Per-org database routing: org_id → effective database name.
+    /// Per-org database routing: `org_id` → effective database name.
     /// Only orgs listed here get their own database.
     org_routes: FxHashMap<String, String>,
     /// Source value to table name mapping
@@ -95,9 +95,9 @@ impl Router {
 
     /// Create a new router from routing and metadata config
     ///
-    /// Metadata config provides source_fields for _source extraction.
-    /// When compat_v2_source is enabled, event_category/tags.event_category
-    /// are prepended to both source_fields and table_fields.
+    /// Metadata config provides `source_fields` for _source extraction.
+    /// When `compat_v2_source` is enabled, `event_category/tags.event_category`
+    /// are prepended to both `source_fields` and `table_fields`.
     pub fn with_metadata(config: &RoutingConfig, metadata: &MetadataConfig) -> Self {
         // Convert HashMap to FxHashMap for faster lookups
         let source_to_table: FxHashMap<String, String> = config
@@ -214,7 +214,7 @@ impl Router {
         self.default_db.clone()
     }
 
-    /// Extract a single field from payload (helper for org_id_field)
+    /// Extract a single field from payload (helper for `org_id_field`)
     #[inline]
     fn extract_single_field(&self, payload: &[u8], field: &str) -> Option<String> {
         if field.contains('.') {
@@ -270,9 +270,9 @@ impl Router {
 
     /// Zero-copy extract db from raw payload.
     ///
-    /// Returns Cow::Borrowed for non-escaped strings (zero-copy from payload),
-    /// Cow::Owned for escaped strings or when using default.
-    /// Uses same logic as extract_db() for consistency.
+    /// Returns `Cow::Borrowed` for non-escaped strings (zero-copy from payload),
+    /// `Cow::Owned` for escaped strings or when using default.
+    /// Uses same logic as `extract_db()` for consistency.
     #[inline]
     fn extract_db_cow<'a>(&'a self, payload: &'a [u8]) -> Cow<'a, str> {
         // db_fields empty = always use default (shared schema)
@@ -293,8 +293,8 @@ impl Router {
 
     /// Zero-copy extract table from raw payload.
     ///
-    /// Returns Cow::Borrowed for non-escaped strings (zero-copy from payload),
-    /// Cow::Owned for escaped strings or when using default/mapping.
+    /// Returns `Cow::Borrowed` for non-escaped strings (zero-copy from payload),
+    /// `Cow::Owned` for escaped strings or when using default/mapping.
     #[inline]
     fn extract_table_cow<'a>(&'a self, payload: &'a [u8]) -> Cow<'a, str> {
         let table_cow = self.extract_first_match_cow(payload, &self.table_fields);
@@ -314,7 +314,7 @@ impl Router {
 
     /// Zero-copy field extraction from raw bytes.
     ///
-    /// Returns Cow::Borrowed for non-escaped strings, Cow::Owned for escaped.
+    /// Returns `Cow::Borrowed` for non-escaped strings, `Cow::Owned` for escaped.
     #[inline]
     fn extract_first_match_cow<'a>(
         &self,
@@ -378,20 +378,16 @@ impl Router {
         };
 
         for rule in &self.compiled_rules {
-            match rule.program.execute(&context) {
-                Ok(cel_interpreter::Value::Bool(true)) => {
-                    let db = rule.db.as_deref().unwrap_or(&self.default_db);
-                    return Some(RouteResult::Table(build_db_table_string(db, &rule.target)));
-                }
-                // Non-true (false, error, wrong type) → try next rule
-                _ => continue,
+            if let Ok(cel_interpreter::Value::Bool(true)) = rule.program.execute(&context) {
+                let db = rule.db.as_deref().unwrap_or(&self.default_db);
+                return Some(RouteResult::Table(build_db_table_string(db, &rule.target)));
             }
         }
 
         None
     }
 
-    /// Build RouteResult from db and table strings
+    /// Build `RouteResult` from db and table strings
     ///
     /// Uses pre-allocated String with exact capacity to avoid format!() overhead.
     #[inline]
@@ -417,7 +413,7 @@ impl Router {
     /// Extract db from an already-parsed Value (avoids re-parsing)
     ///
     /// Returns borrowed reference when using default, owned when from payload.
-    /// Uses same logic as extract_db() for consistency.
+    /// Uses same logic as `extract_db()` for consistency.
     #[inline]
     fn extract_db_from_value<'a>(&'a self, value: &'a Value) -> Cow<'a, str> {
         // db_fields empty = always use default (shared schema)
@@ -472,7 +468,7 @@ impl Router {
         None
     }
 
-    /// Get a nested field from a Value using dot notation (e.g., "tags.event_category")
+    /// Get a nested field from a Value using dot notation (e.g., "`tags.event_category`")
     ///
     /// Fast path for simple (non-nested) field names to avoid iterator allocation.
     #[inline]
@@ -506,7 +502,7 @@ impl Router {
 
     /// Extract _source value from parsed JSON Value
     ///
-    /// Checks source_fields in order (first match wins).
+    /// Checks `source_fields` in order (first match wins).
     /// Returns None if no field matches — caller should fall back to topic derivation.
     #[inline]
     pub fn extract_source_from_value<'a>(&self, value: &'a Value) -> Option<&'a str> {
@@ -515,8 +511,8 @@ impl Router {
 
     /// Derive _source from Kafka topic name by stripping configured suffixes
     ///
-    /// Strips the first matching suffix from topic_suffixes.
-    /// Example: topic "auth_land" with suffix "_land" → "auth"
+    /// Strips the first matching suffix from `topic_suffixes`.
+    /// Example: topic "`auth_land`" with suffix "_land" → "auth"
     /// If no suffix matches, returns the full topic name.
     #[inline]
     pub fn derive_source_from_topic(&self, topic: &str) -> String {
@@ -528,27 +524,27 @@ impl Router {
         topic.to_string()
     }
 
-    /// Extract org_id for _org_id field (from parsed Value)
+    /// Extract `org_id` for _`org_id` field (from parsed Value)
     ///
-    /// Used by transformer to populate _org_id column for row-level security.
-    /// Returns None if org_id_field not configured or field not found.
+    /// Used by transformer to populate _`org_id` column for row-level security.
+    /// Returns None if `org_id_field` not configured or field not found.
     #[inline]
     pub fn extract_org_id_from_value<'a>(&self, value: &'a Value) -> Option<&'a str> {
         let field = self.org_id_field.as_ref()?;
         self.get_nested_field(value, field)?.as_str()
     }
 
-    /// Extract org_id for _org_id field (from raw bytes)
+    /// Extract `org_id` for _`org_id` field (from raw bytes)
     ///
-    /// Used by transformer to populate _org_id column for row-level security.
-    /// Returns None if org_id_field not configured or field not found.
+    /// Used by transformer to populate _`org_id` column for row-level security.
+    /// Returns None if `org_id_field` not configured or field not found.
     #[inline]
     pub fn extract_org_id(&self, payload: &[u8]) -> Option<String> {
         let field = self.org_id_field.as_ref()?;
         self.extract_single_field(payload, field)
     }
 
-    /// Get the configured org_id field name (if any)
+    /// Get the configured `org_id` field name (if any)
     pub fn org_id_field(&self) -> Option<&str> {
         self.org_id_field.as_deref()
     }
@@ -556,7 +552,7 @@ impl Router {
 
 /// Build "db.table" string efficiently with pre-allocated capacity.
 ///
-/// Avoids format!() macro overhead by using push_str directly.
+/// Avoids format!() macro overhead by using `push_str` directly.
 #[inline]
 fn build_db_table_string(db: &str, table: &str) -> String {
     let mut result = String::with_capacity(db.len() + 1 + table.len());

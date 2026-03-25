@@ -3,7 +3,7 @@
 
 //! Full pipeline E2E tests
 //!
-//! These tests require both Kafka and ClickHouse to be available
+//! These tests require both Kafka and `ClickHouse` to be available
 
 use std::env;
 

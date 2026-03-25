@@ -5,9 +5,9 @@
 //!
 //! Validates timestamps and corrects known bad values.
 //!
-//! ## ClickHouse DateTime64 Bounds
+//! ## `ClickHouse` `DateTime64` Bounds
 //!
-//! ClickHouse DateTime64 has absolute limits:
+//! `ClickHouse` `DateTime64` has absolute limits:
 //! - Minimum: 1900-01-01 00:00:00 UTC
 //! - Maximum: 2299-12-31 23:59:59 UTC (precision 8), or 2262-04-11 for precision 9
 //!
@@ -15,18 +15,18 @@
 
 use chrono::{DateTime, NaiveDateTime, TimeZone, Utc};
 
-/// Minimum timestamp for ClickHouse DateTime64 (1900-01-01 00:00:00 UTC)
+/// Minimum timestamp for `ClickHouse` `DateTime64` (1900-01-01 00:00:00 UTC)
 pub const MIN_DATETIME64_MS: i64 = -2_208_988_800_000;
 
-/// Maximum timestamp for ClickHouse DateTime64 precision 8 (2299-12-31 23:59:59 UTC)
+/// Maximum timestamp for `ClickHouse` `DateTime64` precision 8 (2299-12-31 23:59:59 UTC)
 pub const MAX_DATETIME64_MS: i64 = 10_413_791_999_000;
 
-/// Maximum timestamp for ClickHouse DateTime64 precision 9 (2262-04-11 23:47:16 UTC)
+/// Maximum timestamp for `ClickHouse` `DateTime64` precision 9 (2262-04-11 23:47:16 UTC)
 pub const MAX_DATETIME64_NANO_MS: i64 = 9_223_339_708_000;
 
-/// Clamp a millisecond timestamp to ClickHouse DateTime64 bounds.
+/// Clamp a millisecond timestamp to `ClickHouse` `DateTime64` bounds.
 ///
-/// This is a cheap operation (~2ns) that prevents DateTime64 overflow errors.
+/// This is a cheap operation (~2ns) that prevents `DateTime64` overflow errors.
 #[inline]
 pub fn clamp_timestamp_ms(ts_ms: i64) -> i64 {
     ts_ms.clamp(MIN_DATETIME64_MS, MAX_DATETIME64_MS)
@@ -38,7 +38,7 @@ pub fn clamp_timestamp_ms_nano(ts_ms: i64) -> i64 {
     ts_ms.clamp(MIN_DATETIME64_MS, MAX_DATETIME64_NANO_MS)
 }
 
-/// Check if a millisecond timestamp is within ClickHouse DateTime64 bounds.
+/// Check if a millisecond timestamp is within `ClickHouse` `DateTime64` bounds.
 #[inline]
 pub fn is_valid_datetime64_ms(ts_ms: i64) -> bool {
     (MIN_DATETIME64_MS..=MAX_DATETIME64_MS).contains(&ts_ms)
@@ -84,20 +84,16 @@ impl TimestampValidator {
         // Try to parse as various formats
         let parsed = self.parse_timestamp(ts);
 
-        match parsed {
-            Some(dt) => self.check_bounds_with_now(dt, now),
-            None => {
-                // Check for known bad formats
-                if self.correct_known_bad
-                    && let Some(corrected) = self.correct_known_bad_format(ts)
-                {
-                    return TimestampResult::Corrected(
-                        corrected,
-                        format!("Corrected from: {}", ts),
-                    );
-                }
-                TimestampResult::Invalid(format!("Failed to parse: {}", ts))
+        if let Some(dt) = parsed {
+            self.check_bounds_with_now(dt, now)
+        } else {
+            // Check for known bad formats
+            if self.correct_known_bad
+                && let Some(corrected) = self.correct_known_bad_format(ts)
+            {
+                return TimestampResult::Corrected(corrected, format!("Corrected from: {ts}"));
             }
+            TimestampResult::Invalid(format!("Failed to parse: {ts}"))
         }
     }
 
@@ -120,7 +116,7 @@ impl TimestampValidator {
 
         match dt {
             Some(dt) => self.check_bounds_with_now(dt, now),
-            None => TimestampResult::Invalid(format!("Invalid Unix timestamp: {}", ts)),
+            None => TimestampResult::Invalid(format!("Invalid Unix timestamp: {ts}")),
         }
     }
 
@@ -242,7 +238,7 @@ mod tests {
         let validator = TimestampValidator::default();
         match validator.validate(ts) {
             TimestampResult::Valid(_) | TimestampResult::Corrected(_, _) => {}
-            TimestampResult::Invalid(e) => panic!("Expected valid: {}", e),
+            TimestampResult::Invalid(e) => panic!("Expected valid: {e}"),
         }
     }
 
@@ -252,7 +248,7 @@ mod tests {
         let result = validator.validate_unix(1703412600000); // Dec 24, 2024
         match result {
             TimestampResult::Valid(_) | TimestampResult::Corrected(_, _) => {}
-            TimestampResult::Invalid(e) => panic!("Expected valid: {}", e),
+            TimestampResult::Invalid(e) => panic!("Expected valid: {e}"),
         }
     }
 
@@ -262,7 +258,7 @@ mod tests {
         let result = validator.validate_unix(1703412600);
         match result {
             TimestampResult::Valid(_) | TimestampResult::Corrected(_, _) => {}
-            TimestampResult::Invalid(e) => panic!("Expected valid: {}", e),
+            TimestampResult::Invalid(e) => panic!("Expected valid: {e}"),
         }
     }
 
@@ -310,7 +306,7 @@ mod tests {
         let result = validator.validate("2024-12-24 10:30:00Z");
         match result {
             TimestampResult::Valid(_) | TimestampResult::Corrected(_, _) => {}
-            TimestampResult::Invalid(e) => panic!("Expected valid or corrected: {}", e),
+            TimestampResult::Invalid(e) => panic!("Expected valid or corrected: {e}"),
         }
     }
 

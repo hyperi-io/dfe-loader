@@ -5,14 +5,15 @@
 //!
 //! Configuration cascade (highest to lowest priority):
 //!   1. CLI args (--config, --log-level, etc.)
-//!   2. Explicit flat env overrides (DFE_LOADER_KAFKA_BROKERS, etc.)
-//!   3. Figment env vars with __ nesting (DFE_LOADER_KAFKA__BROKERS, etc.)
+//!   2. Explicit flat env overrides (`DFE_LOADER_KAFKA_BROKERS`, etc.)
+//!   3. Figment env vars with __ nesting (`DFE_LOADER_KAFKA__BROKERS`, etc.)
 //!   4. .env file (via dotenvy)
-//!   5. Config file specified by --config or DFE_LOADER_CONFIG
+//!   5. Config file specified by --config or `DFE_LOADER_CONFIG`
 //!   6. Hard-coded defaults
 
 use std::path::Path;
 
+use hyperi_rustlib::config::sensitive::SensitiveString;
 use serde::{Deserialize, Serialize};
 
 use crate::Result;
@@ -39,7 +40,7 @@ pub use super::pipeline::*;
 /// - `transport` — transport type (kafka/grpc) bound at startup
 /// - `kafka.*` — Kafka consumer created at startup
 /// - `grpc.*` — gRPC server binds at startup
-/// - `clickhouse.*` — HTTP client + clickhouse::Client created at startup
+/// - `clickhouse.*` — HTTP client + `clickhouse::Client` created at startup
 /// - `payload.format` — format detection set at startup
 /// - `metrics.*` — HTTP metrics server binds at startup
 /// - `logging.*` — tracing subscriber installed at startup
@@ -61,7 +62,7 @@ pub struct Config {
     pub kafka: KafkaConfig,
     /// gRPC transport config. **Restart required.**
     pub grpc: GrpcConfig,
-    /// ClickHouse connection config. **Restart required.**
+    /// `ClickHouse` connection config. **Restart required.**
     pub clickhouse: ClickHouseConfig,
     /// Payload format detection. **Restart required.**
     pub payload: PayloadConfig,
@@ -71,7 +72,7 @@ pub struct Config {
     pub logging: LoggingConfig,
     /// Schema cache config. **Restart required.**
     pub schema: SchemaConfig,
-    /// GeoIP enrichment (MMDB readers). **Restart required.**
+    /// `GeoIP` enrichment (MMDB readers). **Restart required.**
     pub geoip: GeoIpConfig,
     /// Computed columns cache. **Restart required.**
     pub computed_columns: ComputedColumnsConfig,
@@ -119,7 +120,7 @@ pub struct ClickHouseConfig {
     pub hosts: Vec<String>,
     pub database: String,
     pub username: String,
-    pub password: String,
+    pub password: SensitiveString,
     pub protocol: String,
     pub tables: Vec<String>,
     pub tls: Option<TlsConfig>,
@@ -131,7 +132,7 @@ impl Default for ClickHouseConfig {
             hosts: vec!["localhost:9000".to_string()],
             database: "default".to_string(),
             username: "default".to_string(),
-            password: String::new(),
+            password: SensitiveString::default(),
             protocol: "native".to_string(),
             tables: Vec::new(),
             tls: None,
@@ -153,7 +154,7 @@ impl From<&ClickHouseConfig> for crate::clickhouse::ClickHouseConfig {
             insert_format: crate::clickhouse::InsertFormat::default(),
             database: cfg.database.clone(),
             username: cfg.username.clone(),
-            password: cfg.password.clone(),
+            password: cfg.password.expose().to_string(),
             tls,
             connect_timeout_ms: 5000,  // Default timeout
             request_timeout_ms: 30000, // Default timeout
@@ -172,7 +173,7 @@ const ENV_PREFIX: &str = "DFE_LOADER";
 use hyperi_rustlib::config::flat_env::{self, ApplyFlatEnv, Normalize};
 
 impl ApplyFlatEnv for Config {
-    /// Apply flat DFE_LOADER_* env var overrides.
+    /// Apply flat `DFE_LOADER`_* env var overrides.
     ///
     /// These are K8s-friendly single-underscore vars. Same names as before — contract
     /// with dfe-engine. For nested config use `__` nesting via figment.
@@ -200,7 +201,7 @@ impl ApplyFlatEnv for Config {
         }
         if let Some(v) = flat_env::flat_env_string_sensitive(prefix, "KAFKA_SASL_PASSWORD") {
             let sasl = self.kafka.sasl.get_or_insert_with(SaslConfig::default);
-            sasl.password = v;
+            sasl.password = SensitiveString::from(v);
         }
         if let Some(v) = flat_env::flat_env_string(prefix, "KAFKA_SECURITY_PROTOCOL") {
             let proto = v.to_uppercase();
@@ -221,7 +222,7 @@ impl ApplyFlatEnv for Config {
             self.clickhouse.username = v;
         }
         if let Some(v) = flat_env::flat_env_string_sensitive(prefix, "CLICKHOUSE_PASSWORD") {
-            self.clickhouse.password = v;
+            self.clickhouse.password = SensitiveString::from(v);
         }
 
         // Buffer
@@ -284,21 +285,21 @@ impl Normalize for Config {
     /// Side-effects: credentials present → enable auth, protocol → enable TLS.
     fn normalize(&mut self) {
         // SASL credentials present → auto-enable
-        if let Some(ref sasl) = self.kafka.sasl {
-            if !sasl.username.is_empty() || !sasl.password.is_empty() || !sasl.mechanism.is_empty()
-            {
-                if let Some(ref mut sasl) = self.kafka.sasl {
-                    sasl.enabled = true;
-                }
-            }
+        if let Some(ref sasl) = self.kafka.sasl
+            && (!sasl.username.is_empty()
+                || !sasl.password.expose().is_empty()
+                || !sasl.mechanism.is_empty())
+            && let Some(ref mut sasl) = self.kafka.sasl
+        {
+            sasl.enabled = true;
         }
     }
 }
 
 /// Apply figment env vars with __ (double underscore) nesting.
 ///
-/// Supports arbitrary nesting: DFE_LOADER_KAFKA__SASL__USERNAME → kafka.sasl.username
-/// Lists require bracket syntax: DFE_LOADER_KAFKA__BROKERS=[a, b, c]
+/// Supports arbitrary nesting: `DFE_LOADER_KAFKA__SASL__USERNAME` → kafka.sasl.username
+/// Lists require bracket syntax: `DFE_LOADER_KAFKA__BROKERS`=[a, b, c]
 fn apply_figment_env(config: &mut Config) -> Result<()> {
     use figment::Figment;
     use figment::providers::{Env, Serialized};
@@ -359,7 +360,29 @@ impl Config {
         // 5. Side-effects: credentials → enable auth, etc.
         config.normalize();
 
+        // 6. Register all config sections in the global registry (enables /config endpoint
+        // and change notifications). SensitiveString fields are auto-redacted on dump.
+        config.register_sections();
+
         Ok(config)
+    }
+
+    /// Register all config sections in the global config registry.
+    ///
+    /// Enables `/config` endpoint dump (with redaction) and change notifications.
+    /// Called after load and after hot-reload.
+    pub fn register_sections(&self) {
+        use hyperi_rustlib::config::registry;
+        registry::register("kafka", &self.kafka);
+        registry::register("clickhouse", &self.clickhouse);
+        registry::register("routing", &self.routing);
+        registry::register("buffer", &self.buffer);
+        registry::register("metadata", &self.metadata);
+        registry::register("metrics", &self.metrics);
+        registry::register("logging", &self.logging);
+        registry::register("payload", &self.payload);
+        registry::register("coercion", &self.coercion);
+        registry::register("enrichment", &self.enrichment);
     }
 
     /// Validate the configuration
@@ -671,7 +694,7 @@ mod tests {
             enabled: false,
             mechanism: "scram_sha_512".to_string(),
             username: String::new(), // Empty but OK because disabled
-            password: String::new(),
+            password: SensitiveString::default(),
             ..Default::default()
         };
         assert!(config.validate().is_ok());
@@ -683,7 +706,7 @@ mod tests {
             enabled: true,
             mechanism: "none".to_string(),
             username: String::new(),
-            password: String::new(),
+            password: SensitiveString::default(),
             ..Default::default()
         };
         assert!(config.validate().is_ok());
@@ -695,7 +718,7 @@ mod tests {
             enabled: true,
             mechanism: "scram_sha_512".to_string(),
             username: String::new(),
-            password: "secret".to_string(),
+            password: SensitiveString::from("secret"),
             ..Default::default()
         };
         let result = config.validate();
@@ -709,7 +732,7 @@ mod tests {
             enabled: true,
             mechanism: "scram_sha_512".to_string(),
             username: "user".to_string(),
-            password: String::new(),
+            password: SensitiveString::default(),
             ..Default::default()
         };
         let result = config.validate();
@@ -723,7 +746,7 @@ mod tests {
             enabled: true,
             mechanism: "scram_sha_512".to_string(),
             username: "user".to_string(),
-            password: "secret".to_string(),
+            password: SensitiveString::from("secret"),
             ..Default::default()
         };
         assert!(config.validate().is_ok());
@@ -735,7 +758,7 @@ mod tests {
             enabled: true,
             mechanism: "plain".to_string(),
             username: "user".to_string(),
-            password: "secret".to_string(),
+            password: SensitiveString::from("secret"),
             ..Default::default()
         };
         assert!(config.validate().is_ok());
@@ -776,7 +799,7 @@ mod tests {
             mechanism: "oauthbearer".to_string(),
             oauth_token_endpoint: Some("https://auth.example.com/token".to_string()),
             oauth_client_id: Some("my-client".to_string()),
-            oauth_client_secret: Some("secret".to_string()),
+            oauth_client_secret: Some(SensitiveString::from("secret")),
             oauth_scope: Some("kafka".to_string()),
             ..Default::default()
         };
@@ -815,7 +838,9 @@ mod tests {
             mechanism: "aws_msk_iam".to_string(),
             aws_region: Some("ap-southeast-2".to_string()),
             aws_access_key_id: Some("AKIAIOSFODNN7EXAMPLE".to_string()),
-            aws_secret_access_key: Some("wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY".to_string()),
+            aws_secret_access_key: Some(SensitiveString::from(
+                "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+            )),
             ..Default::default()
         };
         assert!(config.validate().is_ok());
@@ -947,7 +972,7 @@ mod tests {
             let config_path = dir.path().join("test_config.yaml");
             std::fs::write(
                 &config_path,
-                r#"
+                r"
 kafka:
   brokers:
     - yaml-broker:9092
@@ -959,7 +984,7 @@ clickhouse:
     - yaml-ch:9000
 buffer:
   flush_rows: 99999
-"#,
+",
             )
             .unwrap();
 
@@ -975,7 +1000,7 @@ buffer:
             let config_path = dir.path().join("test_config.yaml");
             std::fs::write(
                 &config_path,
-                r#"
+                r"
 kafka:
   brokers:
     - yaml-broker:9092
@@ -985,7 +1010,7 @@ kafka:
 clickhouse:
   hosts:
     - yaml-ch:9000
-"#,
+",
             )
             .unwrap();
 

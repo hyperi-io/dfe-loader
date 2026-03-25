@@ -3,7 +3,7 @@
 
 //! Enrichment module benchmarks
 //!
-//! Measures CPU cost per operation for GeoIP, Reputation, and Risk scoring.
+//! Measures CPU cost per operation for `GeoIP`, Reputation, and Risk scoring.
 
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use dfe_loader::enrich::geoip::{GeoIpEnricher, GeoIpResult};
@@ -42,7 +42,7 @@ fn bench_geoip_private_ip_fast_path(c: &mut Criterion) {
             for ip in PRIVATE_IPS {
                 black_box(enricher.lookup(ip));
             }
-        })
+        });
     });
 }
 
@@ -59,7 +59,7 @@ fn bench_geoip_cache_hit(c: &mut Criterion) {
             for ip in SAMPLE_IPS {
                 black_box(enricher.lookup(ip));
             }
-        })
+        });
     });
 }
 
@@ -71,7 +71,7 @@ fn bench_geoip_cache_miss_no_db(c: &mut Criterion) {
             for ip in SAMPLE_IPS {
                 black_box(enricher.lookup(ip));
             }
-        })
+        });
     });
 }
 
@@ -83,7 +83,7 @@ fn bench_reputation_empty(c: &mut Criterion) {
             for ip in SAMPLE_IPS {
                 black_box(enricher.lookup(ip));
             }
-        })
+        });
     });
 }
 
@@ -107,7 +107,7 @@ fn bench_reputation_cache_hit(c: &mut Criterion) {
             for ip in SAMPLE_IPS {
                 black_box(enricher.lookup(ip));
             }
-        })
+        });
     });
 }
 
@@ -120,7 +120,7 @@ fn bench_reputation_with_blocklist(c: &mut Criterion) {
         enricher.add_ip(ip, ThreatType::Botnet, ThreatSource::AbuseCh);
     }
     for i in 0..100u8 {
-        let prefix: IpAddr = format!("10.{}.0.0", i).parse().unwrap();
+        let prefix: IpAddr = format!("10.{i}.0.0").parse().unwrap();
         enricher.add_prefix(prefix, 16, ThreatType::Datacenter, ThreatSource::Custom);
     }
 
@@ -129,7 +129,7 @@ fn bench_reputation_with_blocklist(c: &mut Criterion) {
             for ip in SAMPLE_IPS {
                 black_box(enricher.lookup(ip));
             }
-        })
+        });
     });
 }
 
@@ -155,7 +155,7 @@ fn bench_reputation_prefix_match(c: &mut Criterion) {
             for ip in SAMPLE_IPS {
                 black_box(enricher.lookup(ip));
             }
-        })
+        });
     });
 }
 
@@ -166,7 +166,7 @@ fn bench_risk_minimal(c: &mut Criterion) {
         b.iter(|| {
             let input = RiskInput::default();
             black_box(scorer.score(&input))
-        })
+        });
     });
 }
 
@@ -185,7 +185,7 @@ fn bench_risk_full_input(c: &mut Criterion) {
                 ..Default::default()
             };
             black_box(scorer.score(&input))
-        })
+        });
     });
 }
 
@@ -200,7 +200,7 @@ fn bench_risk_with_preset(c: &mut Criterion) {
                 ..Default::default()
             };
             black_box(scorer.score(&input))
-        })
+        });
     });
 }
 
@@ -228,7 +228,7 @@ fn bench_risk_from_enrichment(c: &mut Criterion) {
         b.iter(|| {
             let input = RiskInput::from_enrichment(Some(&geo_result), Some(&rep_result));
             black_box(scorer.score(&input))
-        })
+        });
     });
 }
 
@@ -262,7 +262,7 @@ fn bench_full_enrichment_pipeline(c: &mut Criterion) {
 
                 black_box((&geo, &rep, &_risk));
             }
-        })
+        });
     });
 
     group.finish();

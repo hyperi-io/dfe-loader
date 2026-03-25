@@ -5,7 +5,7 @@
 
 //! Testcontainers infrastructure for isolated integration testing
 //!
-//! Provides Docker-based ClickHouse and Kafka containers for tests.
+//! Provides Docker-based `ClickHouse` and Kafka containers for tests.
 //! Only available with `--features testcontainers`.
 
 #[cfg(feature = "testcontainers")]
@@ -55,7 +55,7 @@ mod testcontainers_impl {
                 hosts: vec![format!("{}:{}", host, native_port)],
                 database: "default".to_string(),
                 username: "default".to_string(),
-                password: String::new(),
+                password: hyperi_rustlib::config::sensitive::SensitiveString::default(),
                 protocol: "native".to_string(),
                 tables: Vec::new(),
                 tls: None,

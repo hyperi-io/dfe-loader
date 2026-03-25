@@ -96,7 +96,10 @@ pub(crate) fn apply_load_over_land(topics: Vec<String>) -> Vec<String> {
     // Use owned Strings so the borrow does not outlive `topics`.
     let load_sources: FxHashSet<String> = topics
         .iter()
-        .filter_map(|t| t.strip_suffix("_load").map(|s| s.to_string()))
+        .filter_map(|t| {
+            t.strip_suffix("_load")
+                .map(std::string::ToString::to_string)
+        })
         .collect();
 
     topics

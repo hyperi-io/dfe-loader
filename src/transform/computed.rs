@@ -4,13 +4,13 @@
 //! Computed columns — CEL expressions that produce column values at insert time.
 //!
 //! Expressions are sourced from:
-//! 1. ClickHouse column comments (`@computed: <expr>` directive)
+//! 1. `ClickHouse` column comments (`@computed: <expr>` directive)
 //! 2. Config cascade overrides (`computed_columns` section)
 //!
 //! Precedence (highest wins):
 //! 1. Config per-table override (`overrides."db.table".column`)
 //! 2. Config global (`columns.column`)
-//! 3. ClickHouse column COMMENT `@computed:` directive
+//! 3. `ClickHouse` column COMMENT `@computed:` directive
 
 use std::collections::HashMap;
 
@@ -22,7 +22,7 @@ use crate::config::ComputedColumnsConfig;
 /// Origin of a computed column definition (for precedence).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ComputedOrigin {
-    /// From ClickHouse column COMMENT `@computed:` directive (lowest)
+    /// From `ClickHouse` column COMMENT `@computed:` directive (lowest)
     ColumnComment,
     /// From config global `computed_columns.columns` section
     ConfigGlobal,
@@ -71,16 +71,13 @@ impl TableComputedColumns {
                 continue;
             }
 
-            match col.program.execute(&context) {
-                Ok(value) => {
-                    let json_val = cel_to_json(&value);
-                    if !json_val.is_null() {
-                        data.insert(col.destination.clone(), json_val);
-                    }
+            if let Ok(value) = col.program.execute(&context) {
+                let json_val = cel_to_json(&value);
+                if !json_val.is_null() {
+                    data.insert(col.destination.clone(), json_val);
                 }
-                Err(_) => {
-                    // Evaluation failure → skip column silently
-                }
+            } else {
+                // Evaluation failure → skip column silently
             }
         }
     }
@@ -205,7 +202,7 @@ impl ComputedColumnCache {
 // Directive Parser
 // ============================================================================
 
-/// Parse a `@computed:` directive from a ClickHouse column COMMENT.
+/// Parse a `@computed:` directive from a `ClickHouse` column COMMENT.
 ///
 /// Returns the CEL expression string if found.
 ///
@@ -260,7 +257,7 @@ pub fn parse_computed_directive(comment: &str) -> Option<String> {
 // CEL Value → JSON Conversion
 // ============================================================================
 
-/// Convert a CEL evaluation result to a serde_json::Value.
+/// Convert a CEL evaluation result to a `serde_json::Value`.
 fn cel_to_json(value: &cel_interpreter::Value) -> serde_json::Value {
     match value {
         cel_interpreter::Value::Bool(b) => serde_json::Value::Bool(*b),

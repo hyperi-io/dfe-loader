@@ -13,7 +13,7 @@
 //! - **gRPC** (always compiled): Receives Push RPCs from dfe-receiver (server mode)
 //! - **Memory** (feature `transport-memory`): In-process channels for unit tests
 //!
-//! ## TransportBackend
+//! ## `TransportBackend`
 //!
 //! The `TransportBackend` enum provides a unified interface over all compiled transports.
 //! The orchestrator uses this to be transport-agnostic.
@@ -31,7 +31,7 @@ use crate::config::KafkaConfig;
 use super::KafkaMessage;
 use super::topic_resolver::resolver_from_config;
 
-/// Adapter that wraps hyperi-rustlib KafkaTransport for local use.
+/// Adapter that wraps hyperi-rustlib `KafkaTransport` for local use.
 ///
 /// Provides the same interface as the old Consumer but uses the transport abstraction
 /// underneath. This allows swapping to Memory transports for dev/test.
@@ -40,7 +40,7 @@ pub struct TransportAdapter {
 }
 
 impl TransportAdapter {
-    /// Create a new transport adapter from local KafkaConfig.
+    /// Create a new transport adapter from local `KafkaConfig`.
     ///
     /// If `config.topics` is empty, runs topic auto-discovery via `TopicResolver`
     /// before creating the transport.
@@ -66,7 +66,7 @@ impl TransportAdapter {
         Ok(Self { transport })
     }
 
-    /// Convert local KafkaConfig to hyperi-rustlib TransportKafkaConfig.
+    /// Convert local `KafkaConfig` to hyperi-rustlib `TransportKafkaConfig`.
     pub fn convert_config(config: &KafkaConfig) -> TransportKafkaConfig {
         let mut transport_config = TransportKafkaConfig {
             brokers: config.brokers.clone(),
@@ -85,7 +85,7 @@ impl TransportAdapter {
             transport_config.sasl_mechanism =
                 sasl.mechanism().as_rdkafka_mechanism().map(String::from);
             transport_config.sasl_username = Some(sasl.username.clone());
-            transport_config.sasl_password = Some(sasl.password.clone());
+            transport_config.sasl_password = Some(sasl.password.expose().to_string());
 
             // Set security protocol based on TLS
             if config.tls.as_ref().is_some_and(|t| t.enabled) {
@@ -137,7 +137,7 @@ impl TransportAdapter {
 
     /// Commit offsets for processed messages.
     ///
-    /// Converts local KafkaOffset to KafkaToken for commit.
+    /// Converts local `KafkaOffset` to `KafkaToken` for commit.
     pub async fn commit(&self, offsets: &[KafkaOffset]) -> Result<()> {
         if offsets.is_empty() {
             return Ok(());
@@ -187,7 +187,7 @@ impl From<TransportError> for crate::Error {
 // GrpcTransportAdapter - Receives Push RPCs from dfe-receiver
 // ============================================================================
 
-/// Adapter that wraps hyperi-rustlib GrpcTransport for receiving mode.
+/// Adapter that wraps hyperi-rustlib `GrpcTransport` for receiving mode.
 ///
 /// dfe-loader acts as a gRPC server: remote senders (e.g. dfe-receiver) call
 /// the `Push` RPC to deliver messages. The adapter converts those into the
@@ -292,9 +292,9 @@ mod memory_adapter {
 
     use super::super::KafkaMessage;
 
-    /// Adapter that wraps hyperi-rustlib MemoryTransport for local testing.
+    /// Adapter that wraps hyperi-rustlib `MemoryTransport` for local testing.
     ///
-    /// Same interface as TransportAdapter but uses in-memory channels.
+    /// Same interface as `TransportAdapter` but uses in-memory channels.
     /// Perfect for unit tests - no Kafka required.
     pub struct MemoryTransportAdapter {
         transport: Arc<MemoryTransport>,
@@ -344,7 +344,7 @@ mod memory_adapter {
 
         /// Receive up to `max` messages.
         ///
-        /// Converts to local KafkaMessage type for compatibility with pipeline.
+        /// Converts to local `KafkaMessage` type for compatibility with pipeline.
         pub async fn recv(&self, max: usize) -> Result<Vec<KafkaMessage>> {
             let messages = self
                 .transport

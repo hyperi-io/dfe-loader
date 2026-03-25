@@ -9,14 +9,14 @@
 // License:   FSL-1.1-ALv2
 // Copyright: (c) 2026 HyperI
 
-//! Schema projection - filter JSON fields to match ClickHouse schema
+//! Schema projection - filter JSON fields to match `ClickHouse` schema
 //!
 //! Projection ensures only columns present in the destination table schema
 //! are included in the insert. Fields not in the schema are dropped.
 //!
 //! ## Use Cases
 //!
-//! 1. **Schema enforcement**: Reject fields not in ClickHouse schema
+//! 1. **Schema enforcement**: Reject fields not in `ClickHouse` schema
 //! 2. **Bandwidth reduction**: Don't send unnecessary fields
 //! 3. **Error prevention**: Avoid schema mismatch errors on insert
 //!
@@ -68,10 +68,10 @@ impl ProjectedData {
     }
 }
 
-/// Projects flattened JSON to match a ClickHouse schema
+/// Projects flattened JSON to match a `ClickHouse` schema
 ///
 /// Only fields present in the schema are retained.
-/// Uses FxHashSet for O(1) column name lookups.
+/// Uses `FxHashSet` for O(1) column name lookups.
 pub struct Projector {
     /// Set of column names for fast lookup
     column_set: FxHashSet<String>,
@@ -94,7 +94,7 @@ impl Projector {
 
     /// Create a projector from a list of column names
     ///
-    /// Useful when you don't have a full TableSchema available.
+    /// Useful when you don't have a full `TableSchema` available.
     pub fn from_columns(columns: &[&str]) -> Self {
         let column_set: FxHashSet<String> = columns.iter().map(|s| (*s).to_string()).collect();
         let column_names: Vec<String> = columns.iter().map(|s| (*s).to_string()).collect();
@@ -145,7 +145,7 @@ impl Projector {
     pub fn project_ref<'a>(&self, data: &'a Map<String, Value>) -> Vec<&'a str> {
         data.keys()
             .filter(|k| self.column_set.contains(*k))
-            .map(|k| k.as_str())
+            .map(std::string::String::as_str)
             .collect()
     }
 

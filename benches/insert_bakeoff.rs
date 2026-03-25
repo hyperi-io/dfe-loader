@@ -9,9 +9,9 @@
 // License:   FSL-1.1-ALv2
 // Copyright: (c) 2026 HYPERI PTY LIMITED
 
-//! Insert Bakeoff: JSONEachRow (HttpClickHouseClient) vs RowBinary (clickhouse crate)
+//! Insert Bakeoff: `JSONEachRow` (`HttpClickHouseClient`) vs `RowBinary` (clickhouse crate)
 //!
-//! **Requires a running ClickHouse instance.** Set env vars:
+//! **Requires a running `ClickHouse` instance.** Set env vars:
 //!
 //! ```bash
 //! CLICKHOUSE_HOST=clickhouse.devex.hyperi.io
@@ -25,10 +25,10 @@
 //!
 //! Two insert paths plus parse-only benchmarks:
 //!
-//! 1. **simd_jsoneachrow_http**: sonic-rs → Map<String, Value> → JSONEachRow (production path)
-//! 2. **simd_rowbinary_http**: structs → RowBinary → clickhouse crate HTTP (comparison)
+//! 1. **`simd_jsoneachrow_http`**: sonic-rs → Map<String, Value> → `JSONEachRow` (production path)
+//! 2. **`simd_rowbinary_http`**: structs → `RowBinary` → clickhouse crate HTTP (comparison)
 //!
-//! Batch sizes: 100, 1_000, 10_000, 20_000
+//! Batch sizes: 100, `1_000`, `10_000`, `20_000`
 //!
 //! Run with: `cargo bench --bench insert_bakeoff`
 
@@ -207,14 +207,14 @@ async fn truncate_table(env: &BenchEnv, table: &str) {
 // Insert implementations
 // =============================================================================
 
-/// JSONEachRow insert — production path via HttpClickHouseClient.
+/// `JSONEachRow` insert — production path via `HttpClickHouseClient`.
 async fn insert_jsoneachrow(
     client: &HttpClickHouseClient,
     db: &str,
     table: &str,
     rows: &[Map<String, Value>],
 ) -> usize {
-    let full_table = format!("{}.{}", db, table);
+    let full_table = format!("{db}.{table}");
     client
         .insert_json_rows(&full_table, rows, &[])
         .await
@@ -222,7 +222,7 @@ async fn insert_jsoneachrow(
     rows.len()
 }
 
-/// RowBinary insert via the official clickhouse crate (comparison path).
+/// `RowBinary` insert via the official clickhouse crate (comparison path).
 async fn insert_rowbinary_http(env: &BenchEnv, table: &str, rows: &[BenchRow]) -> usize {
     let client = clickhouse::Client::default()
         .with_url(env.http_url())
@@ -245,14 +245,13 @@ async fn insert_rowbinary_http(env: &BenchEnv, table: &str, rows: &[BenchRow]) -
 // =============================================================================
 
 fn bench_insert(c: &mut Criterion) {
-    let bench_env = match BenchEnv::from_env() {
-        Some(env) => Arc::new(env),
-        None => {
-            eprintln!("Skipping insert_bakeoff: CLICKHOUSE_HOST not set");
-            eprintln!("  Set CLICKHOUSE_HOST, CLICKHOUSE_HTTP_PORT, CLICKHOUSE_USER,");
-            eprintln!("  CLICKHOUSE_PASSWORD, CLICKHOUSE_DATABASE");
-            return;
-        }
+    let bench_env = if let Some(env) = BenchEnv::from_env() {
+        Arc::new(env)
+    } else {
+        eprintln!("Skipping insert_bakeoff: CLICKHOUSE_HOST not set");
+        eprintln!("  Set CLICKHOUSE_HOST, CLICKHOUSE_HTTP_PORT, CLICKHOUSE_USER,");
+        eprintln!("  CLICKHOUSE_PASSWORD, CLICKHOUSE_DATABASE");
+        return;
     };
 
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");

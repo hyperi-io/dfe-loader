@@ -9,7 +9,7 @@
 // License:   FSL-1.1-ALv2
 // Copyright: (c) 2026 HYPERI PTY LIMITED
 
-//! Per-table row buffer management for JSONEachRow inserts.
+//! Per-table row buffer management for `JSONEachRow` inserts.
 //!
 //! Each destination table (db.table) has its own row buffer to ensure
 //! schema uniformity per batch.

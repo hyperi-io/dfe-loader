@@ -60,6 +60,10 @@ export CARGO_BUILD_JOBS=2
 You may READ code at `/projects/hyperi-rustlib` for reference, but Cargo.toml must ALWAYS
 point to crates.io. No `path = ` overrides, no `[patch.crates-io]` for rustlib. Ever.
 
+**Read access to `/projects/hyperi-rustlib` is ALWAYS permitted** for code lookups, API
+discovery, changelog review, and understanding new features. This is how we discover
+what rustlib provides before wiring it in. The restriction is Cargo.toml only.
+
 ```toml
 # ✅ CORRECT - crates.io (default registry, no registry key needed)
 hyperi-rustlib = { version = ">=1.17.0", features = ["transport-kafka"] }
@@ -383,17 +387,18 @@ Located at `clickhouse.devex.hyperi.io` (3-node replicated cluster, Keeper-manag
 
 ```
 main (upstream v0.14.2)
-├── hyperi/native-transport — Native TCP SELECT + INSERT, full type coverage
-│   └── hyperi/connection-pooling — Deadpool pool, cursor drain, health checks
-│       └── hyperi/lc-insert — LowCardinality INSERT + LC(Nullable) reader fix
-│           └── hyperi/async-inserter — AsyncInserter (HTTP + native), TableBatcher
-│               └── hyperi/optimise-1 — DynamicInsert, ParsedType, schema recovery (NEW)
-└── hyperi/batching — HTTP TableBatcher (independent, mergeable to upstream)
+├── hyperi/native-transport -> connection-pooling -> lc-insert -> async-inserter
+│   └── hyperi/optimise-1 -> hyperi/unified-client (ACTIVE)
+│       └── hyperi/explain-mirror (novel parallel EXPLAIN)
+├── hyperi/batching (independent)
+├── hyperi/remediation-deps -> hyperi/remediation-polonius (for upstream PR)
 ```
 
-**Merge order:** native-transport -> connection-pooling -> lc-insert -> async-inserter -> optimise-1
-**Swap mechanism:** `[patch.crates-io]` in Cargo.toml — zero change to `[dependencies]`
-**Design spec:** `docs/specs/2026-03-18-clickhouse-rs-fork-swap.md`
+**Active branch:** `hyperi/unified-client` -- UnifiedClient, native TLS,
+observability callbacks, per-query settings, multi-host failover, query
+cancellation. dfe-loader points here via `[patch.crates-io]`.
+
+**Swap mechanism:** `[patch.crates-io]` in Cargo.toml -- zero change to `[dependencies]`
 
 ### Fork Migration Phases (dfe-loader)
 
@@ -402,6 +407,11 @@ main (upstream v0.14.2)
 3. ~~**Remove duplication**~~ — DONE. Loader's `ParsedType` replaced with re-export from fork (-298 lines).
 4. **PR to upstream** — open PRs from hyperi/* branches
 5. **Swap back** — remove `[patch.crates-io]`, bump version to upstream release
+
+**Upcoming fork enhancements (track for integration):**
+- Native TCP transport (merge `hyperi/native-transport` chain → `optimise-1`)
+- Fork-emitted metrics (connection pool stats, insert latency, schema cache hits) — wire into loader's `MetricsManager` once available
+- Native-only mode: all operations (DDL, queries, inserts) over port 9000 without HTTP
 
 ---
 

@@ -49,7 +49,7 @@ fn test_error_invalid_json() {
                 }
             }
             Err(e) => {
-                eprintln!("Format detection error (expected): {:?}", e);
+                eprintln!("Format detection error (expected): {e:?}");
             }
         }
     }
@@ -72,8 +72,8 @@ fn test_error_missing_routing_fields() {
     let routing_config = RoutingConfig {
         db_fields: vec!["org_id".to_string()],
         table_fields: vec!["category".to_string()],
-        default_db: "".to_string(),
-        default_table: "".to_string(),
+        default_db: String::new(),
+        default_table: String::new(),
         org_id_field: Some("org_id".to_string()),
         org_routes: vec![],
         source_to_table: Default::default(),
@@ -95,10 +95,10 @@ fn test_error_missing_routing_fields() {
     let result = router.route_value(&msg);
     match result {
         RouteResult::Dlq(reason) => {
-            eprintln!("✓ DLQ routing for missing fields: {}", reason);
+            eprintln!("✓ DLQ routing for missing fields: {reason}");
         }
         RouteResult::Table(t) => {
-            eprintln!("Routed to empty/invalid: '{}'", t);
+            eprintln!("Routed to empty/invalid: '{t}'");
         }
     }
 }
@@ -132,10 +132,10 @@ fn test_error_null_routing_fields() {
     match result {
         RouteResult::Table(t) => {
             assert_eq!(t, "default.common");
-            eprintln!("✓ Null fields use defaults: {}", t);
+            eprintln!("✓ Null fields use defaults: {t}");
         }
         RouteResult::Dlq(reason) => {
-            eprintln!("DLQ due to null: {}", reason);
+            eprintln!("DLQ due to null: {reason}");
         }
     }
 }
@@ -168,10 +168,10 @@ fn test_error_non_string_routing_fields() {
     let result = router.route_value(&msg);
     match result {
         RouteResult::Table(t) => {
-            eprintln!("✓ Non-string fields handled: {}", t);
+            eprintln!("✓ Non-string fields handled: {t}");
         }
         RouteResult::Dlq(reason) => {
-            eprintln!("DLQ due to type: {}", reason);
+            eprintln!("DLQ due to type: {reason}");
         }
     }
 }
@@ -318,11 +318,10 @@ async fn test_error_insert_schema_mismatch() {
     let table_name = unique_table_name("error_mismatch");
     let oc = crate::common::on_cluster_clause();
     let ddl = format!(
-        "CREATE TABLE {}{oc} (
+        "CREATE TABLE {table_name}{oc} (
             id UInt64,
             name String
-        ) ENGINE = MergeTree() ORDER BY tuple()",
-        table_name
+        ) ENGINE = MergeTree() ORDER BY tuple()"
     );
     client.execute(&ddl).await.expect("Failed to create table");
 
@@ -333,8 +332,8 @@ async fn test_error_insert_schema_mismatch() {
     let result = client.insert_json_rows(&table_name, &rows, &[]).await;
     // ClickHouse coerces float to string in JSONEachRow
     match result {
-        Ok(n) => eprintln!("Insert succeeded with coercion: {} rows", n),
-        Err(e) => eprintln!("✓ Schema mismatch error (expected): {}", e),
+        Ok(n) => eprintln!("Insert succeeded with coercion: {n} rows"),
+        Err(e) => eprintln!("✓ Schema mismatch error (expected): {e}"),
     }
 
     drop_http_test_table(&client, &table_name).await;
@@ -355,11 +354,10 @@ async fn test_error_insert_missing_column() {
     let table_name = unique_table_name("error_missing_col");
     let oc = crate::common::on_cluster_clause();
     let ddl = format!(
-        "CREATE TABLE {}{oc} (
+        "CREATE TABLE {table_name}{oc} (
             id UInt64,
             required_field String
-        ) ENGINE = MergeTree() ORDER BY tuple()",
-        table_name
+        ) ENGINE = MergeTree() ORDER BY tuple()"
     );
     client.execute(&ddl).await.expect("Failed to create table");
 
@@ -369,8 +367,8 @@ async fn test_error_insert_missing_column() {
 
     let result = client.insert_json_rows(&table_name, &rows, &[]).await;
     match result {
-        Ok(n) => eprintln!("Insert succeeded with default fill: {} rows", n),
-        Err(e) => eprintln!("✓ Missing column error: {}", e),
+        Ok(n) => eprintln!("Insert succeeded with default fill: {n} rows"),
+        Err(e) => eprintln!("✓ Missing column error: {e}"),
     }
 
     drop_http_test_table(&client, &table_name).await;
@@ -391,10 +389,9 @@ async fn test_error_insert_extra_column() {
     let table_name = unique_table_name("error_extra_col");
     let oc = crate::common::on_cluster_clause();
     let ddl = format!(
-        "CREATE TABLE {}{oc} (
+        "CREATE TABLE {table_name}{oc} (
             id UInt64
-        ) ENGINE = MergeTree() ORDER BY tuple()",
-        table_name
+        ) ENGINE = MergeTree() ORDER BY tuple()"
     );
     client.execute(&ddl).await.expect("Failed to create table");
 
@@ -408,8 +405,8 @@ async fn test_error_insert_extra_column() {
 
     let result = client.insert_json_rows(&table_name, &rows, &[]).await;
     match result {
-        Ok(n) => eprintln!("Insert succeeded (extra column ignored): {} rows", n),
-        Err(e) => eprintln!("✓ Extra column error: {}", e),
+        Ok(n) => eprintln!("Insert succeeded (extra column ignored): {n} rows"),
+        Err(e) => eprintln!("✓ Extra column error: {e}"),
     }
 
     drop_http_test_table(&client, &table_name).await;
@@ -430,10 +427,9 @@ async fn test_error_empty_batch_insert() {
     let table_name = unique_table_name("error_empty");
     let oc = crate::common::on_cluster_clause();
     let ddl = format!(
-        "CREATE TABLE {}{oc} (
+        "CREATE TABLE {table_name}{oc} (
             id UInt64
-        ) ENGINE = MergeTree() ORDER BY tuple()",
-        table_name
+        ) ENGINE = MergeTree() ORDER BY tuple()"
     );
     client.execute(&ddl).await.expect("Failed to create table");
 
@@ -446,7 +442,7 @@ async fn test_error_empty_batch_insert() {
             assert_eq!(n, 0);
             eprintln!("✓ Empty batch handled: 0 rows inserted");
         }
-        Err(e) => eprintln!("Empty batch error: {}", e),
+        Err(e) => eprintln!("Empty batch error: {e}"),
     }
 
     drop_http_test_table(&client, &table_name).await;
@@ -460,7 +456,7 @@ async fn test_error_invalid_clickhouse_host() {
         hosts: vec!["invalid-host-12345.example.com:8123".to_string()],
         database: "default".to_string(),
         username: "default".to_string(),
-        password: "".to_string(),
+        password: String::new(),
         ..Default::default()
     };
 
@@ -516,11 +512,10 @@ fn test_edge_very_long_strings() {
     let data_len = output
         .data
         .get("long_data")
-        .map(|v| v.as_str().map(|s| s.len()).unwrap_or(0))
-        .unwrap_or(0);
+        .map_or(0, |v| v.as_str().map_or(0, str::len));
 
     assert_eq!(data_len, 100_000);
-    eprintln!("✓ Long strings handled: {} chars", data_len);
+    eprintln!("✓ Long strings handled: {data_len} chars");
 }
 
 #[test]

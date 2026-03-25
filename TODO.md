@@ -139,9 +139,28 @@ Remove or comment out the `[patch]` section to revert to upstream.
 **Step B ✓ COMPLETE:** v1.14.4 GA released (GH Release + R2 binaries, JFrog container + helm).
   amd64 + arm64 binaries published. Ready for internal testing.
 
-**Step C:** Migrate to clickhouse-rs fork — done LOCK-STEP with dfe-loader.
+**Step C:** Migrate to clickhouse-rs fork -- done LOCK-STEP with dfe-loader.
 
 Phases 1-3 complete (fork activated, InsertFormat dispatch wired, ParsedType deduplicated).
+
+**Step D (IN PROGRESS):** Unified client migration (`hyperi/unified-client` branch).
+
+`HttpClickHouseClient` and `Inserter` now use `clickhouse::UnifiedClient` for
+runtime transport dispatch. Native TCP or HTTP selected from config at startup.
+
+Done:
+- [x] Cargo.toml: patch points to `hyperi/unified-client`, native-transport + native-tls-rustls enabled
+- [x] `HttpClickHouseClient::new()`: builds `UnifiedClient` from `Transport::Http` or `Transport::Native`
+- [x] `Inserter`: uses `UnifiedClient` for RowBinary inserts (both transports)
+- [x] JSONEachRow path: uses `as_http()` fallback (HTTP-only, errors on native)
+- [x] Compiles clean
+
+Remaining:
+- [ ] Integration test: native transport insert against devex cluster
+- [ ] Integration test: HTTP transport insert (regression check)
+- [ ] Rename `HttpClickHouseClient` to `ClickHouseQueryClient` (no longer HTTP-specific)
+- [ ] End-to-end test: Kafka -> native TCP -> ClickHouse pipeline
+- [ ] Update .env.example with CLICKHOUSE_PROTOCOL=native option
 Fork `hyperi/optimise-1` branch has `src/dynamic/` module: ParsedType, DynamicSchema,
 SchemaCache, RowBinary encoder, DynamicInsert, DynamicBatcher.
 
@@ -507,3 +526,15 @@ Not a direct dep of dfe-loader — lives in the clickhouse-rs fork's dependency 
 ---
 
 **Last Updated:** 2026-03-19
+
+## From dfe-receiver Audit (2026-03-25)
+
+- [x] Rename MetricsManager namespace from `loader` to `dfe_loader` (per dfe-metrics standard)
+- [x] Wire transport labels on all metric call sites (already done: `"clickhouse"` on transport metrics)
+- [x] Wire `DfeMetrics::register()` for standard `dfe_*` dual-emit (already done)
+- [x] Wire metric groups: AppMetrics, BufferMetrics, SinkMetrics, CircuitBreakerMetrics (all 8 groups wired)
+- [x] Wire `log_state_change()`, `log_sampled()`, `log_debounced()` for log spam prevention (already done)
+- [x] Wire security event logging where applicable (config_changed on reload — already done)
+- [x] Adopt `ConfigReloader` from rustlib (ConfigWatcher wraps it — already done)
+- [x] Review for lazy shims / pass-through functions over rustlib (none found)
+- [x] Bump rustlib to >=1.19.6, wire Config Registry, adopt SensitiveString for auth fields

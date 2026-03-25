@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: FSL-1.1-ALv2
 // Copyright (c) 2026 HYPERI PTY LIMITED
 
-//! GeoIP enrichment with LRU caching
+//! `GeoIP` enrichment with LRU caching
 //!
-//! High-performance IP geolocation using MaxMind MMDB databases.
+//! High-performance IP geolocation using `MaxMind` MMDB databases.
 //!
 //! ## Hot Path Optimizations
 //!
@@ -23,7 +23,7 @@ use tracing::{debug, info, warn};
 
 use crate::config::GeoIpConfig;
 
-/// GeoIP lookup result with all available fields
+/// `GeoIP` lookup result with all available fields
 #[derive(Debug, Clone, Default)]
 pub struct GeoIpResult {
     /// Continent code (e.g., "NA", "EU", "AS")
@@ -40,7 +40,7 @@ pub struct GeoIpResult {
     pub latitude: Option<f64>,
     /// Longitude coordinate
     pub longitude: Option<f64>,
-    /// Timezone (IANA format, e.g., "America/New_York")
+    /// Timezone (IANA format, e.g., "`America/New_York`")
     pub timezone: Option<String>,
     /// Postal/ZIP code
     pub postal_code: Option<String>,
@@ -183,7 +183,7 @@ struct CacheEntry {
     access_order: u64,
 }
 
-/// GeoIP enricher with LRU caching
+/// `GeoIP` enricher with LRU caching
 pub struct GeoIpEnricher {
     /// City database reader (optional)
     city_reader: Option<Reader<Vec<u8>>>,
@@ -202,7 +202,7 @@ pub struct GeoIpEnricher {
 }
 
 impl GeoIpEnricher {
-    /// Create a new GeoIP enricher (no databases loaded)
+    /// Create a new `GeoIP` enricher (no databases loaded)
     pub fn new() -> Self {
         Self {
             city_reader: None,
@@ -261,12 +261,11 @@ impl GeoIpEnricher {
         }
 
         // Parse IP address
-        let addr: IpAddr = match ip.parse() {
-            Ok(a) => a,
-            Err(_) => {
-                debug!(ip = %ip, "Invalid IP address");
-                return None;
-            }
+        let addr: IpAddr = if let Ok(a) = ip.parse() {
+            a
+        } else {
+            debug!(ip = %ip, "Invalid IP address");
+            return None;
         };
 
         // Fast path: private IP addresses (no MMDB lookup needed)
@@ -369,29 +368,44 @@ impl GeoIpEnricher {
                 found = true;
 
                 // Continent data
-                result.continent_code = city.continent.code.map(|s| s.to_string());
-                result.continent_name = city.continent.names.english.map(|s| s.to_string());
+                result.continent_code = city.continent.code.map(std::string::ToString::to_string);
+                result.continent_name = city
+                    .continent
+                    .names
+                    .english
+                    .map(std::string::ToString::to_string);
 
                 // Country data - new API has flat access
-                result.country_code = city.country.iso_code.map(|s| s.to_string());
-                result.country_name = city.country.names.english.map(|s| s.to_string());
+                result.country_code = city.country.iso_code.map(std::string::ToString::to_string);
+                result.country_name = city
+                    .country
+                    .names
+                    .english
+                    .map(std::string::ToString::to_string);
 
                 // City data
-                result.city = city.city.names.english.map(|s| s.to_string());
+                result.city = city
+                    .city
+                    .names
+                    .english
+                    .map(std::string::ToString::to_string);
 
                 // Location data
                 result.latitude = city.location.latitude;
                 result.longitude = city.location.longitude;
-                result.timezone = city.location.time_zone.map(|s| s.to_string());
+                result.timezone = city
+                    .location
+                    .time_zone
+                    .map(std::string::ToString::to_string);
                 result.accuracy_radius = city.location.accuracy_radius;
 
                 // Postal data
-                result.postal_code = city.postal.code.map(|s| s.to_string());
+                result.postal_code = city.postal.code.map(std::string::ToString::to_string);
 
                 // Subdivision data (first subdivision = state/province)
                 if let Some(first) = city.subdivisions.first() {
-                    result.subdivision_code = first.iso_code.map(|s| s.to_string());
-                    result.subdivision = first.names.english.map(|s| s.to_string());
+                    result.subdivision_code = first.iso_code.map(std::string::ToString::to_string);
+                    result.subdivision = first.names.english.map(std::string::ToString::to_string);
                 }
             }
         }
@@ -403,7 +417,9 @@ impl GeoIpEnricher {
         {
             found = true;
             result.asn = asn.autonomous_system_number;
-            result.asn_org = asn.autonomous_system_organization.map(|s| s.to_string());
+            result.asn_org = asn
+                .autonomous_system_organization
+                .map(std::string::ToString::to_string);
         }
 
         if found { Some(result) } else { None }
@@ -542,14 +558,14 @@ fn is_private_ipv6(addr: &Ipv6Addr) -> bool {
         || is_link_local_ipv6(addr)
 }
 
-/// Check if IPv6 is unique local (fc00::/7)
+/// Check if IPv6 is unique local (`fc00::/7`)
 #[inline]
 fn is_unique_local_ipv6(addr: &Ipv6Addr) -> bool {
     let segments = addr.segments();
     (segments[0] & 0xFE00) == 0xFC00
 }
 
-/// Check if IPv6 is link-local (fe80::/10)
+/// Check if IPv6 is link-local (`fe80::/10`)
 #[inline]
 fn is_link_local_ipv6(addr: &Ipv6Addr) -> bool {
     let segments = addr.segments();

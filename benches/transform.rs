@@ -71,7 +71,7 @@ fn wide_shallow() -> Value {
     // 50 top-level fields
     let mut map = serde_json::Map::new();
     for i in 0..50 {
-        map.insert(format!("field_{}", i), json!(format!("value_{}", i)));
+        map.insert(format!("field_{i}"), json!(format!("value_{}", i)));
     }
     Value::Object(map)
 }
@@ -86,19 +86,19 @@ fn bench_flatten_depth(c: &mut Criterion) {
     let wide = wide_shallow();
 
     group.bench_function("shallow_3_fields", |b| {
-        b.iter(|| flatten_value_owned(black_box(shallow.clone())))
+        b.iter(|| flatten_value_owned(black_box(shallow.clone())));
     });
 
     group.bench_function("medium_nested", |b| {
-        b.iter(|| flatten_value_owned(black_box(medium.clone())))
+        b.iter(|| flatten_value_owned(black_box(medium.clone())));
     });
 
     group.bench_function("deep_6_levels", |b| {
-        b.iter(|| flatten_value_owned(black_box(deep.clone())))
+        b.iter(|| flatten_value_owned(black_box(deep.clone())));
     });
 
     group.bench_function("wide_50_fields", |b| {
-        b.iter(|| flatten_value_owned(black_box(wide.clone())))
+        b.iter(|| flatten_value_owned(black_box(wide.clone())));
     });
 
     group.finish();
@@ -112,25 +112,25 @@ fn bench_timestamp_validation(c: &mut Criterion) {
     // Valid ISO 8601 timestamp
     let valid_iso = "2025-12-24T12:00:00Z";
     group.bench_function("validate_iso8601", |b| {
-        b.iter(|| validator.validate(black_box(valid_iso)))
+        b.iter(|| validator.validate(black_box(valid_iso)));
     });
 
     // Unix timestamp (seconds)
     let unix_secs: i64 = 1735041600;
     group.bench_function("validate_unix_secs", |b| {
-        b.iter(|| validator.validate_unix(black_box(unix_secs)))
+        b.iter(|| validator.validate_unix(black_box(unix_secs)));
     });
 
     // Unix timestamp (milliseconds)
     let unix_ms: i64 = 1735041600000;
     group.bench_function("validate_unix_ms", |b| {
-        b.iter(|| validator.validate_unix(black_box(unix_ms)))
+        b.iter(|| validator.validate_unix(black_box(unix_ms)));
     });
 
     // Invalid timestamp
     let invalid = "not a timestamp";
     group.bench_function("validate_invalid", |b| {
-        b.iter(|| validator.validate(black_box(invalid)))
+        b.iter(|| validator.validate(black_box(invalid)));
     });
 
     group.finish();
@@ -163,7 +163,7 @@ fn bench_map_batch_builder(c: &mut Criterion) {
                         batch.push(create_sample_row(i));
                     }
                     black_box(batch)
-                })
+                });
             },
         );
     }
@@ -194,7 +194,7 @@ fn bench_batch_flatten(c: &mut Criterion) {
                         .into_iter()
                         .map(|v| flatten_value_owned(black_box(v)))
                         .collect::<Vec<_>>()
-                })
+                });
             },
         );
 
@@ -206,7 +206,7 @@ fn bench_batch_flatten(c: &mut Criterion) {
                 b.iter(|| {
                     let batch: Vec<Value> = (0..batch_size).map(|_| medium_nested()).collect();
                     flattener.flatten_batch(black_box(batch))
-                })
+                });
             },
         );
     }
@@ -226,7 +226,7 @@ fn bench_allocation_patterns(c: &mut Criterion) {
             use dfe_loader::payload::parse::extract_field_json;
             let _ = extract_field_json(black_box(payload), "org_id");
             let _ = extract_field_json(black_box(payload), "event_category");
-        })
+        });
     });
 
     group.finish();

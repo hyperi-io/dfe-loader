@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 
+use hyperi_rustlib::config::sensitive::SensitiveString;
 use serde::{Deserialize, Serialize};
 
 // ============================================================================
@@ -117,7 +118,7 @@ impl Default for GrpcConfig {
 
 /// SASL authentication mechanism
 ///
-/// Config file values (case-insensitive): none, plain, scram_sha_256, scram_sha_512, oauthbearer, aws_msk_iam
+/// Config file values (case-insensitive): none, plain, `scram_sha_256`, `scram_sha_512`, oauthbearer, `aws_msk_iam`
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[allow(clippy::upper_case_acronyms)]
 pub enum SaslMechanism {
@@ -186,13 +187,13 @@ impl std::fmt::Display for SaslMechanism {
 pub struct SaslConfig {
     /// Enable SASL authentication
     pub enabled: bool,
-    /// SASL mechanism (none, plain, scram_sha_256, scram_sha_512, oauthbearer, aws_msk_iam)
+    /// SASL mechanism (none, plain, `scram_sha_256`, `scram_sha_512`, oauthbearer, `aws_msk_iam`)
     #[serde(default = "default_mechanism_string")]
     pub mechanism: String,
 
     // --- Username/Password auth (PLAIN, SCRAM-*) ---
     pub username: String,
-    pub password: String,
+    pub password: SensitiveString,
 
     // --- OAuth 2.0 / OIDC auth (OAUTHBEARER) ---
     /// OAuth token endpoint URL
@@ -200,7 +201,7 @@ pub struct SaslConfig {
     /// OAuth client ID
     pub oauth_client_id: Option<String>,
     /// OAuth client secret
-    pub oauth_client_secret: Option<String>,
+    pub oauth_client_secret: Option<SensitiveString>,
     /// OAuth scope (space-separated)
     pub oauth_scope: Option<String>,
     /// OAuth extensions (key=value pairs)
@@ -212,9 +213,9 @@ pub struct SaslConfig {
     /// AWS access key ID (optional - can use instance profile/environment)
     pub aws_access_key_id: Option<String>,
     /// AWS secret access key
-    pub aws_secret_access_key: Option<String>,
+    pub aws_secret_access_key: Option<SensitiveString>,
     /// AWS session token (for temporary credentials)
-    pub aws_session_token: Option<String>,
+    pub aws_session_token: Option<SensitiveString>,
     /// AWS profile name (alternative to explicit credentials)
     pub aws_profile: Option<String>,
 }
@@ -229,7 +230,7 @@ impl Default for SaslConfig {
             enabled: false,
             mechanism: default_mechanism_string(),
             username: String::new(),
-            password: String::new(),
+            password: SensitiveString::default(),
             oauth_token_endpoint: None,
             oauth_client_id: None,
             oauth_client_secret: None,
@@ -245,7 +246,7 @@ impl Default for SaslConfig {
 }
 
 impl SaslConfig {
-    /// Parse the mechanism string into a SaslMechanism enum
+    /// Parse the mechanism string into a `SaslMechanism` enum
     pub fn mechanism(&self) -> SaslMechanism {
         match self.mechanism.to_lowercase().replace('-', "_").as_str() {
             "none" => SaslMechanism::None,
@@ -271,10 +272,10 @@ impl SaslConfig {
             }
             SaslMechanism::Plain | SaslMechanism::ScramSha256 | SaslMechanism::ScramSha512 => {
                 if self.username.is_empty() {
-                    return Err(format!("{} requires username", mech));
+                    return Err(format!("{mech} requires username"));
                 }
-                if self.password.is_empty() {
-                    return Err(format!("{} requires password", mech));
+                if self.password.expose().is_empty() {
+                    return Err(format!("{mech} requires password"));
                 }
             }
             SaslMechanism::OAuthBearer => {

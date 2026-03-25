@@ -142,7 +142,7 @@ proptest! {
         // Check that deeply nested value is accessible via flattened key
         let expected_key = (0..depth)
             .rev()
-            .map(|i| format!("level_{}", i))
+            .map(|i| format!("level_{i}"))
             .collect::<Vec<_>>()
             .join(".");
 
@@ -234,7 +234,7 @@ proptest! {
 
         // Push to multiple tables
         for table_idx in 0..table_count {
-            let table = format!("test.table_{}", table_idx);
+            let table = format!("test.table_{table_idx}");
 
             for row_idx in 0..rows_per_table {
                 let data = json!({

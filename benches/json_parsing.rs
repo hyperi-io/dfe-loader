@@ -13,7 +13,7 @@ fn bench_sonic_rs_parse(c: &mut Criterion) {
     c.bench_function("sonic_rs_parse", |b| {
         b.iter(|| {
             let _: sonic_rs::Value = sonic_rs::from_str(black_box(json)).unwrap();
-        })
+        });
     });
 }
 
@@ -24,7 +24,7 @@ fn bench_sonic_rs_get_unchecked(c: &mut Criterion) {
         b.iter(|| {
             let value: sonic_rs::Value = sonic_rs::from_str(black_box(json)).unwrap();
             let _ = value.get("event_category");
-        })
+        });
     });
 }
 

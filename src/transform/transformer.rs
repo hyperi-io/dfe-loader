@@ -23,8 +23,8 @@ static TIMESTAMP_OUTPUT_FIELD: &str = "_timestamp";
 static TIMESTAMP_RECEIVED_OUTPUT_FIELD: &str = "_timestamp_received";
 static TIMESTAMP_COLLECTOR_FIELD: &str = "_timestamp_collector";
 
-/// Format a DateTime for ClickHouse DateTime64(3) insertion via JSONEachRow.
-/// Uses space separator and no timezone suffix — ClickHouse's JSONEachRow parser
+/// Format a `DateTime` for `ClickHouse` DateTime64(3) insertion via `JSONEachRow`.
+/// Uses space separator and no timezone suffix — `ClickHouse`'s `JSONEachRow` parser
 /// doesn't support RFC3339 'Z' or '+00:00' suffixes in datetime strings.
 #[inline]
 pub(crate) fn fmt_ts(dt: &DateTime<Utc>) -> String {
@@ -182,7 +182,7 @@ impl Transformer {
     /// ## Parameters
     ///
     /// - `value`: Parsed JSON object to transform
-    /// - `org_id`: Optional org_id value for _org_id field (RLS)
+    /// - `org_id`: Optional `org_id` value for _`org_id` field (RLS)
     /// - `source`: Optional _source value (destination table identifier)
     pub fn transform_with_raw(
         &self,
@@ -322,12 +322,12 @@ impl Transformer {
 
     /// Transform a parsed JSON value (takes ownership to avoid cloning)
     ///
-    /// Legacy method - use transform_with_raw for Common Header v2 features.
+    /// Legacy method - use `transform_with_raw` for Common Header v2 features.
     pub fn transform(&self, value: Value) -> Result<TransformResult> {
         self.transform_with_raw(value, None, None)
     }
 
-    /// Extract tags from the first matching field in tags_fields
+    /// Extract tags from the first matching field in `tags_fields`
     ///
     /// Returns the extracted value (preserves nested structure).
     /// Uses dot notation for nested field access.
@@ -365,8 +365,8 @@ impl Transformer {
 
     /// Remove routing fields from the data map
     ///
-    /// Removes both db_fields and table_fields used for routing.
-    /// Only removes top-level fields (flattened keys like "tags.event_category").
+    /// Removes both `db_fields` and `table_fields` used for routing.
+    /// Only removes top-level fields (flattened keys like "`tags.event_category`").
     fn remove_routing_fields_from(&self, data: &mut Map<String, Value>) {
         // Remove db fields
         for field in &self.routing_db_fields {
@@ -386,7 +386,7 @@ impl Transformer {
         self.strip_at_prefix || self.collapse_underscores || self.trim_underscores
     }
 
-    /// Sanitize field names for ClickHouse compatibility
+    /// Sanitize field names for `ClickHouse` compatibility
     ///
     /// Fast path: returns input unchanged if no sanitization is enabled.
     /// Uses owned key sanitization to avoid cloning keys that don't need changes.
@@ -485,12 +485,12 @@ impl Transformer {
     /// Transform raw JSON bytes
     pub fn transform_bytes(&self, json: &[u8]) -> Result<Vec<u8>> {
         let value: Value = sonic_rs::from_slice(json)
-            .map_err(|e| crate::Error::Json(format!("Parse error: {}", e)))?;
+            .map_err(|e| crate::Error::Json(format!("Parse error: {e}")))?;
 
         let result = self.transform_with_raw(value, None, None)?;
 
         serde_json::to_vec(&Value::Object(result.data))
-            .map_err(|e| crate::Error::Json(format!("Serialize error: {}", e)))
+            .map_err(|e| crate::Error::Json(format!("Serialize error: {e}")))
     }
 }
 

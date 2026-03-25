@@ -9,11 +9,11 @@
 // License:   FSL-1.1-ALv2
 // Copyright: (c) 2026 HYPERI PTY LIMITED
 
-//! ClickHouse connection configuration.
+//! `ClickHouse` connection configuration.
 
 use serde::{Deserialize, Serialize};
 
-/// Transport protocol for ClickHouse connections.
+/// Transport protocol for `ClickHouse` connections.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Transport {
@@ -27,7 +27,7 @@ pub enum Transport {
     /// HTTP protocol (port 8123).
     ///
     /// Better compatibility with proxies, load balancers, and firewalls.
-    /// Uses JSONEachRow format for dynamic schema inserts.
+    /// Uses `JSONEachRow` format for dynamic schema inserts.
     Http,
 }
 
@@ -42,28 +42,28 @@ impl std::fmt::Display for Transport {
 
 /// Insert format for data writes.
 ///
-/// Controls how rows are encoded and sent to ClickHouse. `RowBinary` is the
+/// Controls how rows are encoded and sent to `ClickHouse`. `RowBinary` is the
 /// default — it uses schema reflection to encode `Map<String, Value>` directly
-/// to binary, so ClickHouse skips JSON parsing entirely. This significantly
-/// reduces CPU load on the ClickHouse cluster at scale.
+/// to binary, so `ClickHouse` skips JSON parsing entirely. This significantly
+/// reduces CPU load on the `ClickHouse` cluster at scale.
 ///
-/// `JsonEachRow` is the fallback — simpler, self-describing, but the ClickHouse
+/// `JsonEachRow` is the fallback — simpler, self-describing, but the `ClickHouse`
 /// server pays the cost of parsing every JSON row on ingest.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum InsertFormat {
-    /// Schema-reflected RowBinary (default).
+    /// Schema-reflected `RowBinary` (default).
     ///
     /// Fetches schema from `system.columns`, encodes values to binary client-side.
-    /// ClickHouse receives pre-columnarised data — zero server-side parsing.
-    /// Total CPU (client + cluster) is significantly lower than JSONEachRow.
+    /// `ClickHouse` receives pre-columnarised data — zero server-side parsing.
+    /// Total CPU (client + cluster) is significantly lower than `JSONEachRow`.
     #[default]
     #[serde(alias = "rowbinary", alias = "native", alias = "binary")]
     RowBinary,
 
-    /// JSONEachRow over HTTP.
+    /// `JSONEachRow` over HTTP.
     ///
-    /// Self-describing format — ClickHouse coerces types server-side.
+    /// Self-describing format — `ClickHouse` coerces types server-side.
     /// Simpler but the cluster pays the JSON parsing cost on every row.
     #[serde(alias = "json", alias = "json_each_row")]
     JsonEachRow,
@@ -78,7 +78,7 @@ impl std::fmt::Display for InsertFormat {
     }
 }
 
-/// ClickHouse connection configuration.
+/// `ClickHouse` connection configuration.
 ///
 /// Supports multiple hosts for high availability, with credentials and timeouts.
 /// Configurable transport protocol (native TCP or HTTP).
@@ -122,10 +122,10 @@ pub struct ClickHouseConfig {
 
     /// Insert format — how rows are encoded for INSERT.
     ///
-    /// `RowBinary` (default): schema-reflected binary encoding. ClickHouse
+    /// `RowBinary` (default): schema-reflected binary encoding. `ClickHouse`
     /// skips JSON parsing. Lower total CPU across client + cluster.
     ///
-    /// `JsonEachRow`: JSON text via HTTP. Self-describing, ClickHouse coerces
+    /// `JsonEachRow`: JSON text via HTTP. Self-describing, `ClickHouse` coerces
     /// types server-side. Higher cluster CPU but simpler.
     #[serde(default)]
     pub insert_format: InsertFormat,
@@ -256,6 +256,45 @@ impl ClickHouseConfig {
         }
     }
 
+    /// Validate the config for known misconfigurations.
+    ///
+    /// Returns warnings for issues that can be worked around, errors for
+    /// configs that will definitely fail at runtime.
+    pub fn validate(&self) -> Result<Vec<String>, String> {
+        let mut warnings = Vec::new();
+
+        // Detect port/transport mismatch
+        if let Some(host) = self.hosts.first()
+            && let Some(port_str) = host.rsplit(':').next()
+            && let Ok(port) = port_str.parse::<u16>()
+        {
+            match (self.transport, port) {
+                (Transport::Native, 8123) => {
+                    warnings.push(format!(
+                        "Transport is 'native' but host {host} uses HTTP port 8123. \
+                                 Did you mean port 9000?"
+                    ));
+                }
+                (Transport::Http, 9000 | 9440) => {
+                    return Err(format!(
+                        "Transport is 'http' but host {host} uses native port {port}. \
+                                 Use port 8123 for HTTP or set protocol to 'native'."
+                    ));
+                }
+                (Transport::Native, 9000 | 9440) => {
+                    return Err(format!(
+                        "Native transport (port {port}) is not yet supported. \
+                                 Use HTTP: set hosts to port 8123 and protocol to 'http'. \
+                                 See https://github.com/hyperi-io/dfe-loader/issues/6"
+                    ));
+                }
+                _ => {}
+            }
+        }
+
+        Ok(warnings)
+    }
+
     /// Get the primary host with default port if not specified.
     #[must_use]
     pub fn primary_endpoint(&self) -> Option<String> {
@@ -372,5 +411,55 @@ mod tests {
         assert_eq!(je, InsertFormat::JsonEachRow);
         let je: InsertFormat = serde_json::from_str(r#""json_each_row""#).unwrap();
         assert_eq!(je, InsertFormat::JsonEachRow);
+    }
+
+    #[test]
+    fn test_validate_native_port_9000_rejected() {
+        let config = ClickHouseConfig {
+            hosts: vec!["clickhouse:9000".to_string()],
+            transport: Transport::Native,
+            ..Default::default()
+        };
+        let result = config.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not yet supported"));
+    }
+
+    #[test]
+    fn test_validate_http_port_9000_rejected() {
+        let config = ClickHouseConfig {
+            hosts: vec!["clickhouse:9000".to_string()],
+            transport: Transport::Http,
+            ..Default::default()
+        };
+        let result = config.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("native port"));
+    }
+
+    #[test]
+    fn test_validate_http_port_8123_ok() {
+        let config = ClickHouseConfig {
+            hosts: vec!["clickhouse:8123".to_string()],
+            transport: Transport::Http,
+            ..Default::default()
+        };
+        let result = config.validate();
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_validate_native_port_8123_warns() {
+        let config = ClickHouseConfig {
+            hosts: vec!["clickhouse:8123".to_string()],
+            transport: Transport::Native,
+            ..Default::default()
+        };
+        let result = config.validate();
+        assert!(result.is_ok());
+        let warnings = result.unwrap();
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("HTTP port 8123"));
     }
 }

@@ -5,7 +5,7 @@
 //! and filtering against the destination schema.
 //!
 //! Precedence (highest wins for same destination):
-//! 1. ClickHouse column comments (`@renamed` directives)
+//! 1. `ClickHouse` column comments (`@renamed` directives)
 //! 2. Config per-field overrides
 //! 3. External remap files (later files override earlier)
 //! 4. Built-in presets
@@ -67,8 +67,7 @@ impl MappingBuilder {
                 }
                 Err(e) => {
                     return Err(crate::Error::Config(format!(
-                        "Failed to load remap file '{}': {}",
-                        path, e
+                        "Failed to load remap file '{path}': {e}"
                     )));
                 }
             }

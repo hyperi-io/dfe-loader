@@ -9,7 +9,7 @@
 // License:   FSL-1.1-ALv2
 // Copyright: (c) 2026 HYPERI PTY LIMITED
 
-//! Schema caching for ClickHouse tables
+//! Schema caching for `ClickHouse` tables
 //!
 //! Provides TTL-based caching of table schemas to avoid repeated
 //! system.columns queries. Following the Go pattern:
@@ -17,7 +17,7 @@
 //! - Manual invalidation on insert errors
 //! - Automatic invalidation on schema mismatch errors
 //! - Optional background refresh task
-//! - Thread-safe via parking_lot RwLock
+//! - Thread-safe via `parking_lot` `RwLock`
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -135,10 +135,7 @@ impl SchemaCache {
     /// Insert or update a schema in the cache
     pub fn insert(&self, table: String, schema: TableSchema) {
         let mut schemas = self.schemas.write();
-        let refresh_count = schemas
-            .get(&table)
-            .map(|c| c.refresh_count + 1)
-            .unwrap_or(0);
+        let refresh_count = schemas.get(&table).map_or(0, |c| c.refresh_count + 1);
 
         schemas.insert(
             table.clone(),
