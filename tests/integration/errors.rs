@@ -454,6 +454,7 @@ async fn test_error_invalid_clickhouse_host() {
 
     let ch_config = ClickHouseConfig {
         hosts: vec!["invalid-host-12345.example.com:8123".to_string()],
+        transport: dfe_loader::clickhouse::Transport::Http,
         database: "default".to_string(),
         username: "default".to_string(),
         password: String::new(),
