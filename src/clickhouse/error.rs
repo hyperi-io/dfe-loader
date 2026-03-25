@@ -24,7 +24,7 @@
 
 use thiserror::Error;
 
-/// Errors from ClickHouse operations.
+/// Errors from `ClickHouse` operations.
 #[derive(Error, Debug)]
 pub enum ClickHouseError {
     /// Connection error.

@@ -3,53 +3,46 @@
 
 // Project:   dfe-loader
 // File:      src/clickhouse/client_http.rs
-// Purpose:   ClickHouse HTTP client with JSONEachRow inserts for dynamic schemas
+// Purpose:   ClickHouse HTTP client for DDL, schema queries, and health checks
 // Language:  Rust
 //
 // License:   FSL-1.1-ALv2
 // Copyright: (c) 2026 HYPERI PTY LIMITED
 
-//! ClickHouse HTTP client for dynamic schema inserts.
+//! `ClickHouse` client for DDL, schema queries, and health checks.
 //!
-//! Uses two underlying clients:
-//! - `clickhouse::Client` for DDL, schema queries, and health checks (static Row types)
-//! - `reqwest::Client` for data inserts via JSONEachRow (dynamic `Map<String, Value>`)
+//! Uses `clickhouse::UnifiedClient` (from the `HyperI` fork) for runtime
+//! transport dispatch -- HTTP or native TCP based on config. Data inserts
+//! go through `DynamicInsert` (`RowBinary`) or `InsertFormatted` (`JSONEachRow`)
+//! -- see `Inserter` for insert dispatch.
 //!
-//! JSONEachRow avoids the `clickhouse::Row` trait's compile-time schema requirement.
-//! Performance is equivalent to RowBinary for inserts (network-dominated, 40-75ms).
+//! This client handles:
+//! - DDL execution (CREATE, ALTER, DROP)
+//! - Schema fetching from `system.columns`
+//! - Table existence checks
+//! - Health checks (ping)
 
 use std::sync::Arc;
 
-use reqwest::header::{CONTENT_TYPE, HeaderValue};
 use rustc_hash::FxHashMap;
 use serde::Deserialize;
-use serde_json::{Map, Value};
-use tracing::debug;
 
 use super::config::ClickHouseConfig;
 use super::error::ClickHouseError;
 use super::types::{ColumnInfo, ParsedType, TableSchema};
 
-/// Result type for ClickHouse operations.
+/// Result type for `ClickHouse` operations.
 pub type Result<T> = std::result::Result<T, ClickHouseError>;
 
-/// ClickHouse HTTP client supporting dynamic schema inserts.
+/// `ClickHouse` client for DDL, schema queries, and health checks.
 ///
-/// Uses `clickhouse::Client` for DDL/queries and `reqwest::Client` for
-/// JSONEachRow data inserts. This avoids the `clickhouse::Row` trait
-/// which requires compile-time schema knowledge.
+/// Wraps `clickhouse::UnifiedClient` for runtime transport dispatch.
+/// Data inserts are handled by `Inserter` via `DynamicInsert` or `InsertFormatted`.
 pub struct HttpClickHouseClient {
-    /// Official crate client for DDL and schema queries.
-    ch_client: clickhouse::Client,
-    /// HTTP client for JSONEachRow data inserts.
-    http_client: reqwest::Client,
-    /// Base URL for direct HTTP requests (e.g., "http://host:8123").
-    base_url: String,
+    /// Unified client -- dispatches to HTTP or native TCP based on config.
+    ch_client: clickhouse::UnifiedClient,
     /// Database name.
     database: String,
-    /// Auth credentials for HTTP requests.
-    username: String,
-    password: String,
 }
 
 /// Row type for system.columns queries.
@@ -84,41 +77,47 @@ struct CountRow {
 }
 
 impl HttpClickHouseClient {
-    /// Create a new HTTP client from config.
+    /// Create a new client from config, dispatching to HTTP or native TCP.
     ///
     /// # Errors
     ///
     /// Returns an error if the config has no hosts.
     pub fn new(config: &ClickHouseConfig) -> Result<Self> {
+        use super::config::Transport;
+
         let endpoint = config
             .primary_endpoint()
             .ok_or_else(|| ClickHouseError::Connection("No ClickHouse hosts configured".into()))?;
 
-        let base_url = if config.tls {
-            format!("https://{endpoint}")
-        } else {
-            format!("http://{endpoint}")
+        let ch_client = match config.transport {
+            Transport::Http => {
+                let scheme = if config.tls { "https" } else { "http" };
+                clickhouse::UnifiedClient::http()
+                    .with_url(format!("{scheme}://{endpoint}"))
+                    .with_user(&config.username)
+                    .with_password(&config.password)
+                    .with_database(&config.database)
+                    .build()
+            }
+            Transport::Native => {
+                let mut builder = clickhouse::UnifiedClient::native()
+                    .with_addr(&*endpoint)
+                    .with_user(&config.username)
+                    .with_password(&config.password)
+                    .with_database(&config.database)
+                    .with_lz4();
+                if config.tls {
+                    // Extract hostname for SNI (strip port if present).
+                    let host = endpoint.split(':').next().unwrap_or(&endpoint);
+                    builder = builder.with_tls(host);
+                }
+                builder.build()
+            }
         };
-
-        let ch_client = clickhouse::Client::default()
-            .with_url(&base_url)
-            .with_user(&config.username)
-            .with_password(&config.password)
-            .with_database(&config.database);
-
-        let http_client = reqwest::Client::builder()
-            .connect_timeout(std::time::Duration::from_millis(config.connect_timeout_ms))
-            .timeout(std::time::Duration::from_millis(config.request_timeout_ms))
-            .build()
-            .map_err(|e| ClickHouseError::Connection(format!("HTTP client build error: {e}")))?;
 
         Ok(Self {
             ch_client,
-            http_client,
-            base_url,
             database: config.database.clone(),
-            username: config.username.clone(),
-            password: config.password.clone(),
         })
     }
 
@@ -136,112 +135,10 @@ impl HttpClickHouseClient {
         Ok(())
     }
 
-    /// Insert rows into a table using JSONEachRow format.
-    ///
-    /// Each row is a `Map<String, Value>` serialised as a JSON line.
-    /// ClickHouse handles type coercion from JSON values to column types.
-    ///
-    /// When `raw_payloads` is non-empty (parallel to `rows`), each raw payload
-    /// is spliced as `_json` at serialisation time — zero-copy for the fast path
-    /// (raw bytes appended directly). When empty, rows are serialised as-is
-    /// (legacy flatten path).
-    ///
-    /// # Arguments
-    ///
-    /// * `table` - Table name (may include "db.table" format)
-    /// * `rows` - Promoted schema columns (each is a JSON object)
-    /// * `raw_payloads` - Original Kafka bytes parallel to `rows`, or empty slice
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the insert fails.
-    pub async fn insert_json_rows(
-        &self,
-        table: &str,
-        rows: &[Map<String, Value>],
-        raw_payloads: &[Arc<[u8]>],
-    ) -> Result<usize> {
-        if rows.is_empty() {
-            return Ok(0);
-        }
-
-        let (db, tbl) = parse_db_table(table, &self.database);
-
-        // Serialise rows as NDJSON — sonic_rs for SIMD-accelerated encoding.
-        // json_primary path: splice `_json` from raw_payloads (zero-copy fast path).
-        // Legacy path: serialise promoted map directly (raw_payloads is empty).
-        let estimated_size = rows.len() * 256;
-        let mut body = Vec::with_capacity(estimated_size);
-        if raw_payloads.is_empty() {
-            for row in rows {
-                sonic_rs::to_writer(&mut body, row).map_err(|e| {
-                    ClickHouseError::Insert(format!("JSON serialisation error: {e}"))
-                })?;
-                body.push(b'\n');
-            }
-        } else {
-            for (row, raw) in rows.iter().zip(raw_payloads.iter()) {
-                write_row_with_json(&mut body, row, raw)?;
-            }
-        }
-
-        let url = format!(
-            "{}/?database={}&query=INSERT+INTO+{}.{}+FORMAT+JSONEachRow",
-            self.base_url, db, db, tbl,
-        );
-
-        // Retry on UNKNOWN_TABLE to handle DDL propagation delay in clustered setups.
-        // Code 60 = UNKNOWN_TABLE in ClickHouse error responses.
-        const MAX_RETRIES: usize = 3;
-        const RETRY_DELAY_MS: u64 = 300;
-
-        let mut last_error = String::new();
-        for attempt in 0..=MAX_RETRIES {
-            if attempt > 0 {
-                debug!(table = %table, attempt, "Retrying insert after DDL propagation delay");
-                tokio::time::sleep(std::time::Duration::from_millis(RETRY_DELAY_MS)).await;
-            }
-
-            let resp = self
-                .http_client
-                .post(&url)
-                .basic_auth(&self.username, Some(&self.password))
-                .header(CONTENT_TYPE, HeaderValue::from_static("application/json"))
-                .body(body.clone())
-                .send()
-                .await
-                .map_err(|e| ClickHouseError::Connection(format!("HTTP request error: {e}")))?;
-
-            if resp.status().is_success() {
-                debug!(table = %table, rows = rows.len(), "JSONEachRow insert successful");
-                return Ok(rows.len());
-            }
-
-            let status = resp.status();
-            let error_text = resp
-                .text()
-                .await
-                .unwrap_or_else(|_| "Failed to read error body".to_string());
-
-            // Retry only on UNKNOWN_TABLE (Code: 60) — DDL propagation delay in clusters.
-            // All other errors are non-retriable.
-            if error_text.contains("Code: 60") || error_text.contains("UNKNOWN_TABLE") {
-                last_error = format!("HTTP {status}: {error_text}");
-                continue;
-            }
-
-            return Err(ClickHouseError::Insert(format!(
-                "HTTP {status}: {error_text}"
-            )));
-        }
-
-        Err(ClickHouseError::Insert(last_error))
-    }
-
     /// Fetch table schema from system.columns.
     ///
-    /// Queries ClickHouse directly for column metadata, which gives us
-    /// actual ClickHouse type strings (better than reverse-engineering from Arrow).
+    /// Queries `ClickHouse` directly for column metadata, which gives us
+    /// actual `ClickHouse` type strings (better than reverse-engineering from Arrow).
     ///
     /// # Errors
     ///
@@ -253,9 +150,8 @@ impl HttpClickHouseClient {
             "SELECT name, type, position, default_kind, default_expression, comment, \
              is_in_primary_key, is_in_sorting_key \
              FROM system.columns \
-             WHERE database = '{}' AND table = '{}' \
-             ORDER BY position",
-            db, tbl
+             WHERE database = '{db}' AND table = '{tbl}' \
+             ORDER BY position"
         );
 
         let rows: Vec<SystemColumn> =
@@ -300,8 +196,7 @@ impl HttpClickHouseClient {
     pub async fn fetch_table_comment(&self, table: &str) -> Result<String> {
         let (db, tbl) = parse_db_table(table, &self.database);
         let sql = format!(
-            "SELECT comment AS value FROM system.tables WHERE database = '{}' AND name = '{}'",
-            db, tbl
+            "SELECT comment AS value FROM system.tables WHERE database = '{db}' AND name = '{tbl}'"
         );
 
         let rows: Vec<SingleString> =
@@ -314,14 +209,13 @@ impl HttpClickHouseClient {
 
     /// Fetch column comments for a table.
     ///
-    /// Returns a map of column_name -> comment for columns with non-empty comments.
+    /// Returns a map of `column_name` -> comment for columns with non-empty comments.
     pub async fn fetch_column_comments(&self, table: &str) -> Result<FxHashMap<String, String>> {
         let (db, tbl) = parse_db_table(table, &self.database);
         let sql = format!(
             "SELECT name, comment FROM system.columns \
-             WHERE database = '{}' AND table = '{}' AND comment != '' \
-             ORDER BY position",
-            db, tbl
+             WHERE database = '{db}' AND table = '{tbl}' AND comment != '' \
+             ORDER BY position"
         );
 
         // The clickhouse crate requires a Row type for fetch_all.
@@ -406,35 +300,55 @@ impl HttpClickHouseClient {
     pub fn database(&self) -> &str {
         &self.database
     }
-}
 
-/// Serialise one promoted-column row extended with a `_json` field.
-///
-/// Splices the raw payload bytes directly as the `_json` value — zero-copy for
-/// the fast path. No parsing of `raw` is required: ClickHouse receives the raw
-/// JSON bytes verbatim and ingests them into the native JSON column.
-///
-/// Handles the empty-map edge case: `{}` + splice → `{"_json": raw}`.
-/// Non-empty maps: strip trailing `}`, append `,"_json": raw}`.
-fn write_row_with_json(body: &mut Vec<u8>, row: &Map<String, Value>, raw: &[u8]) -> Result<()> {
-    if row.is_empty() {
-        body.extend_from_slice(b"{\"_json\":");
-        body.extend_from_slice(raw);
-        body.push(b'}');
-    } else {
-        sonic_rs::to_writer(&mut *body, row)
-            .map_err(|e| ClickHouseError::Insert(format!("JSON serialisation error: {e}")))?;
-        // sonic_rs always closes a JSON object with '}'. Replace it with ','
-        // to continue the object, then append _json.
-        let last = body.len() - 1;
-        debug_assert_eq!(body[last], b'}', "sonic_rs must produce a closing brace");
-        body[last] = b',';
-        body.extend_from_slice(b"\"_json\":");
-        body.extend_from_slice(raw);
-        body.push(b'}');
+    /// Insert rows as `JSONEachRow` via HTTP.
+    ///
+    /// Convenience method for tests and ad-hoc data injection. Production inserts
+    /// go through `Inserter` which uses `DynamicInsert` (`RowBinary`) by default.
+    ///
+    /// The `_raw_payloads` parameter is ignored — kept for backward compatibility
+    /// with test call sites.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the insert fails (HTTP-only — errors on native transport).
+    pub async fn insert_json_rows(
+        &self,
+        table: &str,
+        rows: &[serde_json::Map<String, serde_json::Value>],
+        _raw_payloads: &[std::sync::Arc<[u8]>],
+    ) -> Result<usize> {
+        if rows.is_empty() {
+            return Ok(0);
+        }
+
+        let (db, tbl) = parse_db_table(table, &self.database);
+
+        // Build NDJSON body
+        let mut body = Vec::with_capacity(rows.len() * 256);
+        for row in rows {
+            serde_json::to_writer(&mut body, row)
+                .map_err(|e| ClickHouseError::Query(format!("JSON serialise: {e}")))?;
+            body.push(b'\n');
+        }
+
+        // Use InsertFormatted for JSONEachRow via HTTP
+        let sql = format!("INSERT INTO {db}.{tbl} FORMAT JSONEachRow");
+        let mut insert = self
+            .ch_client
+            .insert_formatted_with(sql)
+            .map_err(|e| ClickHouseError::Insert(format!("{e}")))?
+            .buffered();
+
+        insert.write_buffered(&body);
+
+        insert
+            .end()
+            .await
+            .map_err(|e| ClickHouseError::Insert(format!("{e}")))?;
+
+        Ok(rows.len())
     }
-    body.push(b'\n');
-    Ok(())
 }
 
 /// Parse "db.table" format, falling back to default database.
@@ -446,7 +360,7 @@ fn parse_db_table(table: &str, default_db: &str) -> (String, String) {
     }
 }
 
-/// Thread-safe reference to HTTP ClickHouse client.
+/// Thread-safe reference to HTTP `ClickHouse` client.
 pub type SharedHttpClient = Arc<HttpClickHouseClient>;
 
 #[cfg(test)]

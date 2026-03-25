@@ -4,7 +4,7 @@
 //! Startup smoke tests — catch init panics before they reach production.
 //!
 //! These tests verify the full startup sequence without requiring external
-//! services (Kafka, ClickHouse). They use `Config::load(None)` which falls
+//! services (Kafka, `ClickHouse`). They use `Config::load(None)` which falls
 //! back to compiled defaults, and construct the Orchestrator just far enough
 //! to prove it won't panic during init.
 //!
@@ -19,7 +19,7 @@ use dfe_loader::metrics::{Metrics, ServerState};
 use dfe_loader::pipeline::Orchestrator;
 use hyperi_rustlib::metrics::MetricsManager;
 
-/// Shared MetricsManager for all smoke tests (recorder installed once).
+/// Shared `MetricsManager` for all smoke tests (recorder installed once).
 fn shared_manager() -> &'static MetricsManager {
     static MANAGER: OnceLock<MetricsManager> = OnceLock::new();
     MANAGER.get_or_init(|| MetricsManager::new("smoke"))
@@ -48,7 +48,7 @@ fn smoke_metrics_struct_creates() {
     metrics.record_received(); // Exercises counter registration
 }
 
-/// Full init sequence: Config -> Metrics -> SharedConfig -> Orchestrator.
+/// Full init sequence: Config -> Metrics -> `SharedConfig` -> Orchestrator.
 /// Verifies construction doesn't panic. Does NOT start the pipeline
 /// (that would require Kafka).
 #[tokio::test]
@@ -95,7 +95,7 @@ async fn smoke_orchestrator_immediate_shutdown() {
     );
 }
 
-/// ServerState readiness transitions work correctly.
+/// `ServerState` readiness transitions work correctly.
 #[test]
 fn smoke_server_state_readiness() {
     let metrics = Metrics::new(shared_manager());

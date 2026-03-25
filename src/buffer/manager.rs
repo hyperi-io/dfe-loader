@@ -9,11 +9,11 @@
 // License:   FSL-1.1-ALv2
 // Copyright: (c) 2026 HYPERI PTY LIMITED
 
-//! Per-table row buffer manager for JSONEachRow inserts.
+//! Per-table row buffer manager for `JSONEachRow` inserts.
 //!
 //! Each destination table (db.table) has its own row buffer for schema uniformity.
-//! Rows are accumulated as `Map<String, Value>` and flushed to ClickHouse via
-//! JSONEachRow format when thresholds are reached.
+//! Rows are accumulated as `Map<String, Value>` and flushed to `ClickHouse` via
+//! `JSONEachRow` format when thresholds are reached.
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -60,7 +60,7 @@ impl KafkaOffset {
     }
 }
 
-/// Data ready to be flushed to ClickHouse (JSONEachRow).
+/// Data ready to be flushed to `ClickHouse` (`JSONEachRow`).
 ///
 /// Uses `CompactString` for table names (stack-allocated for ≤24 bytes).
 /// Typical "db.table" names fit in ~20 bytes, avoiding heap allocation.
@@ -232,7 +232,7 @@ impl BufferManager {
         let flush_age_secs = self.flush_age_secs;
         let mut flush_batches = Vec::new();
 
-        for (table, buffer) in self.buffers.iter_mut() {
+        for (table, buffer) in &mut self.buffers {
             if buffer.is_ready(flush_rows, flush_age_secs)
                 && let Some((rows, offsets, raw_payloads)) = buffer.build()
             {
@@ -253,7 +253,7 @@ impl BufferManager {
     pub fn flush_all(&mut self) -> Vec<FlushBatch> {
         let mut flush_batches = Vec::with_capacity(self.buffers.len());
 
-        for (table, buffer) in self.buffers.iter_mut() {
+        for (table, buffer) in &mut self.buffers {
             if let Some((rows, offsets, raw_payloads)) = buffer.build() {
                 flush_batches.push(FlushBatch {
                     table: CompactString::from(table.as_str()),
@@ -277,7 +277,7 @@ impl BufferManager {
         for buffer in self.buffers.values() {
             let rows = buffer.len();
             stats.pending_rows += rows;
-            stats.pending_chunks += if buffer.is_empty() { 0 } else { 1 };
+            stats.pending_chunks += usize::from(!buffer.is_empty());
             stats.pending_bytes += rows * 200;
         }
 
@@ -299,7 +299,7 @@ impl BufferManager {
 
     /// Get total pending row count
     pub fn pending_rows(&self) -> usize {
-        self.buffers.values().map(|b| b.len()).sum()
+        self.buffers.values().map(TableBuffer::len).sum()
     }
 
     /// Get pending bytes (estimate)

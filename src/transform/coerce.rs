@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: FSL-1.1-ALv2
 // Copyright (c) 2026 HYPERI PTY LIMITED
 
-//! Type coercion to match ClickHouse schema
+//! Type coercion to match `ClickHouse` schema
 //!
 //! Following the Go clickhouse-loader pattern:
-//! - ClickHouse is the Single Source of Truth (SSOT)
+//! - `ClickHouse` is the Single Source of Truth (SSOT)
 //! - Type mappings are config-driven for extensibility
 //! - Registry-based coercer lookup by type category
 
@@ -23,11 +23,11 @@ use crate::config::{CoercionConfig, NullHandling};
 /// Coercion mode — controls which type coercions are applied.
 ///
 /// `Full` applies all coercions (for non-JSONEachRow insert paths).
-/// `Delta` applies only the 4 coercions that ClickHouse JSONEachRow cannot
+/// `Delta` applies only the 4 coercions that `ClickHouse` `JSONEachRow` cannot
 /// perform server-side — suitable for the schema-guided hot path.
 ///
 /// Delta coercions:
-/// - Epoch ms/μs/ns → DateTime64 ISO string (magnitude detection)
+/// - Epoch ms/μs/ns → `DateTime64` ISO string (magnitude detection)
 /// - ISO 8601 T separator → space (default `basic` parser rejects T)
 /// - UUID without hyphens → RFC 4122 format
 /// - IPv4 integer → dotted-decimal string
@@ -36,7 +36,7 @@ pub enum CoercionMode {
     /// Apply all coercions (default — safe for any insert path)
     #[default]
     Full,
-    /// Apply only coercions not handled by ClickHouse JSONEachRow server-side
+    /// Apply only coercions not handled by `ClickHouse` `JSONEachRow` server-side
     Delta,
 }
 
@@ -121,7 +121,7 @@ impl Coercer {
 
     /// Coerce a single value to match the target type.
     ///
-    /// In `Delta` mode only the 4 coercions JSONEachRow cannot do server-side are applied;
+    /// In `Delta` mode only the 4 coercions `JSONEachRow` cannot do server-side are applied;
     /// all other types pass through unchanged. This is O(1) per type check.
     pub fn coerce_value(&self, value: &Value, target: &ParsedType) -> Result<Value> {
         // Handle null values first (both modes — null handling is always needed)
@@ -134,8 +134,7 @@ impl Coercer {
             .config
             .type_mappings
             .get(&target.base)
-            .map(|s| s.as_str())
-            .unwrap_or_else(|| target.coercer_category());
+            .map_or_else(|| target.coercer_category(), std::string::String::as_str);
 
         // Delta mode: pass through all types that JSONEachRow handles server-side.
         // Only dispatch to specific coercers for the 4 delta cases + Bool + Array(DateTime64).
@@ -239,7 +238,7 @@ impl Coercer {
                     u.to_string()
                 } else if let Some(f) = n.as_f64() {
                     if f.fract() == 0.0 && f.abs() < i64::MAX as f64 {
-                        format!("{:.0}", f)
+                        format!("{f:.0}")
                     } else {
                         f.to_string()
                     }
@@ -284,7 +283,7 @@ impl Coercer {
     fn coerce_decimal(&self, value: &Value, target: &ParsedType) -> Result<Value> {
         let f = self.to_f64(value)?;
         let scale = target.scale.unwrap_or(0) as usize;
-        let s = format!("{:.prec$}", f, prec = scale);
+        let s = format!("{f:.scale$}");
         Ok(Value::String(s))
     }
 
@@ -323,7 +322,7 @@ impl Coercer {
                 if let Ok(ts) = s.parse::<i64>() {
                     return Ok(Value::String(self.epoch_to_date(ts)));
                 }
-                Err(crate::Error::Coercion(format!("Invalid date: {}", s)))
+                Err(crate::Error::Coercion(format!("Invalid date: {s}")))
             }
             Value::Number(n) => {
                 let ts = n.as_i64().ok_or_else(|| {
@@ -335,7 +334,7 @@ impl Coercer {
         }
     }
 
-    /// Coerce to DateTime (YYYY-MM-DD HH:MM:SS)
+    /// Coerce to `DateTime` (YYYY-MM-DD HH:MM:SS)
     fn coerce_datetime(&self, value: &Value) -> Result<Value> {
         match value {
             Value::String(s) => {
@@ -350,7 +349,7 @@ impl Coercer {
                 if let Ok(ts) = s.parse::<i64>() {
                     return Ok(Value::String(self.epoch_to_datetime(ts)));
                 }
-                Err(crate::Error::Coercion(format!("Invalid datetime: {}", s)))
+                Err(crate::Error::Coercion(format!("Invalid datetime: {s}")))
             }
             Value::Number(n) => {
                 let ts = n.as_i64().ok_or_else(|| {
@@ -364,7 +363,7 @@ impl Coercer {
         }
     }
 
-    /// Coerce to DateTime64 (with sub-second precision)
+    /// Coerce to `DateTime64` (with sub-second precision)
     fn coerce_datetime64(&self, value: &Value, target: &ParsedType) -> Result<Value> {
         let precision = target.precision.unwrap_or(3) as usize;
 
@@ -418,7 +417,7 @@ impl Coercer {
         match value {
             Value::String(s) => Ipv4Addr::from_str(s)
                 .map(|_| value.clone())
-                .map_err(|e| crate::Error::Coercion(format!("Invalid IPv4: {}", e))),
+                .map_err(|e| crate::Error::Coercion(format!("Invalid IPv4: {e}"))),
             Value::Number(n) => {
                 let num = n.as_u64().ok_or_else(|| {
                     crate::Error::Coercion("Cannot convert number to IPv4".to_string())
@@ -435,7 +434,7 @@ impl Coercer {
         match value {
             Value::String(s) => Ipv6Addr::from_str(s)
                 .map(|_| value.clone())
-                .map_err(|e| crate::Error::Coercion(format!("Invalid IPv6: {}", e))),
+                .map_err(|e| crate::Error::Coercion(format!("Invalid IPv6: {e}"))),
             _ => Err(crate::Error::Coercion("Cannot convert to IPv6".to_string())),
         }
     }
@@ -446,7 +445,7 @@ impl Coercer {
             Value::Array(arr) => arr,
             Value::String(s) if s.starts_with('[') => {
                 let parsed: Value = serde_json::from_str(s)
-                    .map_err(|e| crate::Error::Coercion(format!("Invalid array JSON: {}", e)))?;
+                    .map_err(|e| crate::Error::Coercion(format!("Invalid array JSON: {e}")))?;
                 return self.coerce_array(&parsed, target);
             }
             _ => {
@@ -471,7 +470,7 @@ impl Coercer {
             Value::Object(obj) => obj,
             Value::String(s) if s.starts_with('{') => {
                 let parsed: Value = serde_json::from_str(s)
-                    .map_err(|e| crate::Error::Coercion(format!("Invalid map JSON: {}", e)))?;
+                    .map_err(|e| crate::Error::Coercion(format!("Invalid map JSON: {e}")))?;
                 return self.coerce_map(&parsed, target);
             }
             _ => return Err(crate::Error::Coercion("Cannot convert to map".to_string())),
@@ -491,12 +490,12 @@ impl Coercer {
 
     /// Coerce to JSON
     ///
-    /// Strings are parsed into their actual JSON value — ClickHouse JSON type
+    /// Strings are parsed into their actual JSON value — `ClickHouse` JSON type
     /// requires a real object, not a string containing JSON.
     fn coerce_json(&self, value: &Value) -> Result<Value> {
         if let Value::String(s) = value {
             let parsed: Value = serde_json::from_str(s)
-                .map_err(|e| crate::Error::Coercion(format!("Invalid JSON: {}", e)))?;
+                .map_err(|e| crate::Error::Coercion(format!("Invalid JSON: {e}")))?;
             return Ok(parsed);
         }
         Ok(value.clone())
@@ -554,11 +553,10 @@ impl Coercer {
                     return Ok(f as i64);
                 }
                 Err(crate::Error::Coercion(format!(
-                    "Cannot parse '{}' as integer",
-                    s
+                    "Cannot parse '{s}' as integer"
                 )))
             }
-            Value::Bool(b) => Ok(if *b { 1 } else { 0 }),
+            Value::Bool(b) => Ok(i64::from(*b)),
             _ => Err(crate::Error::Coercion(
                 "Cannot convert to integer".to_string(),
             )),
@@ -602,11 +600,10 @@ impl Coercer {
                     return Ok(f as u64);
                 }
                 Err(crate::Error::Coercion(format!(
-                    "Cannot parse '{}' as unsigned integer",
-                    s
+                    "Cannot parse '{s}' as unsigned integer"
                 )))
             }
-            Value::Bool(b) => Ok(if *b { 1 } else { 0 }),
+            Value::Bool(b) => Ok(u64::from(*b)),
             _ => Err(crate::Error::Coercion(
                 "Cannot convert to unsigned integer".to_string(),
             )),
@@ -621,7 +618,7 @@ impl Coercer {
             Value::String(s) => s
                 .trim()
                 .parse::<f64>()
-                .map_err(|_| crate::Error::Coercion(format!("Cannot parse '{}' as float", s))),
+                .map_err(|_| crate::Error::Coercion(format!("Cannot parse '{s}' as float"))),
             Value::Bool(b) => Ok(if *b { 1.0 } else { 0.0 }),
             _ => Err(crate::Error::Coercion(
                 "Cannot convert to float".to_string(),
@@ -674,7 +671,7 @@ impl Coercer {
         let minutes = (time_of_day % 3600) / 60;
         let seconds = time_of_day % 60;
 
-        format!("{} {:02}:{:02}:{:02}", date, hours, minutes, seconds)
+        format!("{date} {hours:02}:{minutes:02}:{seconds:02}")
     }
 
     fn epoch_to_datetime64(&self, ts: f64, precision: usize) -> String {
@@ -695,9 +692,9 @@ impl Coercer {
         };
 
         let base = self.epoch_to_datetime(secs);
-        let frac_str = format!("{:.prec$}", frac, prec = precision);
+        let frac_str = format!("{frac:.precision$}");
         let frac_digits = &frac_str[2..];
-        format!("{}.{}", base, frac_digits)
+        format!("{base}.{frac_digits}")
     }
 
     fn days_to_date(&self, days: i32) -> String {
@@ -712,7 +709,7 @@ impl Coercer {
         let m = if mp < 10 { mp + 3 } else { mp - 9 };
         let y = if m <= 2 { y + 1 } else { y };
 
-        format!("{:04}-{:02}-{:02}", y, m, d)
+        format!("{y:04}-{m:02}-{d:02}")
     }
 
     fn normalize_uuid(&self, s: &str) -> Result<String> {
@@ -722,7 +719,7 @@ impl Coercer {
             .trim_end_matches('}')
             .trim_start_matches("urn:uuid:");
 
-        let hex: String = s.chars().filter(|c| c.is_ascii_hexdigit()).collect();
+        let hex: String = s.chars().filter(char::is_ascii_hexdigit).collect();
 
         if hex.len() != 32 {
             return Err(crate::Error::Coercion(format!(

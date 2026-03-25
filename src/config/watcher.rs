@@ -126,7 +126,7 @@ impl ConfigWatcher {
 
     /// Start watching the config file in the background
     ///
-    /// Returns a JoinHandle that can be used to abort the watcher.
+    /// Returns a `JoinHandle` that can be used to abort the watcher.
     pub fn start(self) -> JoinHandle<()> {
         self.reloader.start()
     }
@@ -159,7 +159,7 @@ mod tests {
 
     fn create_test_config(dir: &TempDir) -> PathBuf {
         let config_path = dir.path().join("config.yaml");
-        let config_content = r#"
+        let config_content = r"
 kafka:
   brokers:
     - localhost:9092
@@ -173,7 +173,7 @@ clickhouse:
 
 buffer:
   flush_rows: 1000
-"#;
+";
         fs::write(&config_path, config_content).unwrap();
         config_path
     }

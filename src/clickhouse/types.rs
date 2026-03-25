@@ -9,7 +9,7 @@
 // License:   FSL-1.1-ALv2
 // Copyright: (c) 2026 HYPERI PTY LIMITED
 
-//! ClickHouse type system - runtime parsed, not compiled.
+//! `ClickHouse` type system - runtime parsed, not compiled.
 //!
 //! `ParsedType` is re-exported from the clickhouse-rs fork's `dynamic` module.
 //! The fork owns the type parser — it's generic and useful to any clickhouse-rs user.
@@ -17,7 +17,7 @@
 //! This module adds `coercer_category()` as a DFE-specific alias for the fork's
 //! `category()` method, plus DFE-specific types (`ColumnInfo`, `TableSchema`).
 
-/// Re-export ParsedType from clickhouse-rs fork.
+/// Re-export `ParsedType` from clickhouse-rs fork.
 ///
 /// The fork's `dynamic::ParsedType` is the canonical type parser.
 /// Use `ParsedTypeExt::coercer_category()` for the DFE coercion category.
@@ -38,12 +38,12 @@ impl ParsedTypeExt for ParsedType {
     }
 }
 
-/// Column information from ClickHouse system.columns.
+/// Column information from `ClickHouse` system.columns.
 #[derive(Debug, Clone)]
 pub struct ColumnInfo {
     /// Column name.
     pub name: String,
-    /// Raw type string from ClickHouse.
+    /// Raw type string from `ClickHouse`.
     pub type_name: String,
     /// Parsed type information.
     pub parsed_type: ParsedType,
@@ -108,10 +108,10 @@ impl TableSchema {
     }
 }
 
-/// Default values for ClickHouse types (used when handling nulls).
+/// Default values for `ClickHouse` types (used when handling nulls).
 ///
-/// These are safe zero values that avoid NULL in ClickHouse
-/// (following ClickHouse best practices to avoid Nullable overhead).
+/// These are safe zero values that avoid NULL in `ClickHouse`
+/// (following `ClickHouse` best practices to avoid Nullable overhead).
 #[must_use]
 pub fn default_value_for_category(category: &str) -> &'static str {
     match category {

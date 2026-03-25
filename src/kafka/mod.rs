@@ -20,7 +20,7 @@ pub use transport::MemoryTransportAdapter;
 
 /// Kafka message with metadata
 ///
-/// Uses `Arc<str>` for topic to enable zero-cost sharing with KafkaOffset.
+/// Uses `Arc<str>` for topic to enable zero-cost sharing with `KafkaOffset`.
 #[derive(Debug)]
 pub struct KafkaMessage {
     pub payload: Vec<u8>,

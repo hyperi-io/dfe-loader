@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 
+use hyperi_rustlib::config::sensitive::SensitiveString;
 use serde::{Deserialize, Serialize};
 
 // ============================================================================
@@ -48,7 +49,7 @@ impl Default for PayloadConfig {
 /// route to the specified `target` table (and optionally `db` database).
 ///
 /// Rules are evaluated top-to-bottom, first match wins. If no rule matches,
-/// falls through to field-extraction routing (db_fields/table_fields).
+/// falls through to field-extraction routing (`db_fields/table_fields`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RoutingRule {
     /// CEL expression that must evaluate to true for this rule to match
@@ -57,7 +58,7 @@ pub struct RoutingRule {
     /// Target table name
     pub target: String,
 
-    /// Target database (optional — uses default_db if omitted)
+    /// Target database (optional — uses `default_db` if omitted)
     #[serde(default)]
     pub db: Option<String>,
 }
@@ -69,10 +70,10 @@ pub struct RoutingRule {
 /// listed always go to `default_db`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OrgRoute {
-    /// Organisation identifier (matched against org_id_field value)
+    /// Organisation identifier (matched against `org_id_field` value)
     pub org_id: String,
 
-    /// Target database. If omitted, the org_id itself is used as the database name.
+    /// Target database. If omitted, the `org_id` itself is used as the database name.
     #[serde(default)]
     pub database: Option<String>,
 }
@@ -93,31 +94,31 @@ pub struct RoutingConfig {
     pub rules: Vec<RoutingRule>,
 
     /// Fields to check for database name (first match wins, dot notation for nested)
-    /// Example: ["org_id", "tenant.id"]
-    /// NOTE: Leave empty to always use default_db (recommended for shared schema)
+    /// Example: ["`org_id`", "tenant.id"]
+    /// NOTE: Leave empty to always use `default_db` (recommended for shared schema)
     pub db_fields: Vec<String>,
 
     /// Fields to check for table name (first match wins, dot notation for nested)
     /// Default: ["_source"] — aligned with _source field extraction
     pub table_fields: Vec<String>,
 
-    /// Default database if no db_field matches (or db_fields is empty), or if the
-    /// org is not listed in org_routes.
+    /// Default database if no `db_field` matches (or `db_fields` is empty), or if the
+    /// org is not listed in `org_routes`.
     /// Default: "dfe" (shared multi-tenant schema)
     pub default_db: String,
 
-    /// Default table if no table_field matches
+    /// Default table if no `table_field` matches
     /// Default: "dfe"
     pub default_table: String,
 
-    /// Field to extract for _org_id column (stored in data for RLS)
-    /// Example: "org_id" or "tenant.id"
-    /// This field is extracted and stored as _org_id, regardless of routing behaviour
+    /// Field to extract for _`org_id` column (stored in data for RLS)
+    /// Example: "`org_id`" or "tenant.id"
+    /// This field is extracted and stored as _`org_id`, regardless of routing behaviour
     pub org_id_field: Option<String>,
 
     /// Per-organisation database routing. Only orgs explicitly listed here receive
-    /// their own database — all other orgs always go to default_db.
-    /// Example: [{org_id: "acme"}, {org_id: "bigcorp", database: "bigcorp_dfe"}]
+    /// their own database — all other orgs always go to `default_db`.
+    /// Example: [{`org_id`: "acme"}, {`org_id`: "bigcorp", database: "`bigcorp_dfe`"}]
     #[serde(default)]
     pub org_routes: Vec<OrgRoute>,
 
@@ -129,11 +130,11 @@ pub struct RoutingConfig {
     pub mapping_file: Option<String>,
 
     /// Topic suffixes to strip when deriving _source from Kafka topic name
-    /// Example: topic "auth_land" with suffix "_land" → _source = "auth"
+    /// Example: topic "`auth_land`" with suffix "_land" → _source = "auth"
     pub topic_suffixes: Vec<String>,
 
-    /// Pre-DFE 2.2 compatibility: prepend event_category/tags.event_category to
-    /// source_fields and table_fields for backwards compatibility with older data formats
+    /// Pre-DFE 2.2 compatibility: prepend `event_category/tags.event_category` to
+    /// `source_fields` and `table_fields` for backwards compatibility with older data formats
     pub compat_v2_source: bool,
 
     /// DLQ configuration
@@ -170,12 +171,12 @@ impl Default for RoutingConfig {
 /// Config cascade overrides for computed columns.
 ///
 /// CEL expressions that produce column values at insert time.
-/// Expressions are also read from ClickHouse column comments (`@computed:` directive).
+/// Expressions are also read from `ClickHouse` column comments (`@computed:` directive).
 ///
 /// Precedence (highest wins):
 /// 1. Config per-table override (`overrides."db.table".column`)
 /// 2. Config global (`columns.column`)
-/// 3. ClickHouse column COMMENT `@computed:` directive
+/// 3. `ClickHouse` column COMMENT `@computed:` directive
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ComputedColumnsConfig {
@@ -200,18 +201,18 @@ impl Default for ComputedColumnsConfig {
 // GeoIP Configuration
 // ============================================================================
 
-/// GeoIP enrichment provider
+/// `GeoIP` enrichment provider
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum GeoIpProvider {
     /// DB-IP Lite — free, anonymous download, city-level, CC BY 4.0
     #[default]
     DbIpLite,
-    /// MaxMind GeoLite2 — free account required (account_id + license_key)
+    /// `MaxMind` `GeoLite2` — free account required (`account_id` + `license_key`)
     MaxMindGeoLite2,
     /// IPLocate.io — free, anonymous, country + ASN only
     IpLocate,
-    /// IPinfo Lite — free token required, country + ASN only
+    /// `IPinfo` Lite — free token required, country + ASN only
     IpInfoLite,
     /// sapics/ip-location-db — free CC0, country + ASN only
     Sapics,
@@ -219,7 +220,7 @@ pub enum GeoIpProvider {
     Custom,
 }
 
-/// Auto-download settings for GeoIP databases
+/// Auto-download settings for `GeoIP` databases
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AutoDownloadConfig {
@@ -229,14 +230,14 @@ pub struct AutoDownloadConfig {
     /// Directory to store downloaded MMDB files
     pub data_dir: String,
 
-    /// MaxMind account ID (required for max_mind_geo_lite2 provider)
+    /// `MaxMind` account ID (required for `max_mind_geo_lite2` provider)
     pub maxmind_account_id: Option<String>,
 
-    /// MaxMind license key (required for max_mind_geo_lite2 provider)
+    /// `MaxMind` license key (required for `max_mind_geo_lite2` provider)
     pub maxmind_license_key: Option<String>,
 
-    /// IPinfo token (required for ip_info_lite provider)
-    pub ipinfo_token: Option<String>,
+    /// `IPinfo` token (required for `ip_info_lite` provider)
+    pub ipinfo_token: Option<SensitiveString>,
 
     /// Max age in days before re-downloading (default: 30)
     pub max_age_days: u32,
@@ -255,14 +256,14 @@ impl Default for AutoDownloadConfig {
     }
 }
 
-/// GeoIP enrichment configuration
+/// `GeoIP` enrichment configuration
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GeoIpConfig {
-    /// Enable GeoIP enrichment
+    /// Enable `GeoIP` enrichment
     pub enabled: bool,
 
-    /// GeoIP database provider
+    /// `GeoIP` database provider
     pub provider: GeoIpProvider,
 
     /// Explicit path to city MMDB file (overrides auto-download)
@@ -295,13 +296,13 @@ impl Default for GeoIpConfig {
 // Enrichment Configuration
 // ============================================================================
 
-/// IP enrichment pipeline configuration (GeoIP + reputation + risk scoring)
+/// IP enrichment pipeline configuration (`GeoIP` + reputation + risk scoring)
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct EnrichmentConfig {
     /// Fields to check for IP addresses (first match wins, order matters)
     ///
-    /// Common field names to try: ["src_ip", "client_ip", "ip", "source_ip"]
+    /// Common field names to try: ["`src_ip`", "`client_ip`", "ip", "`source_ip`"]
     pub ip_fields: Vec<String>,
 
     /// IP reputation enrichment (VPN, Tor, proxy, botnet detection)
@@ -354,13 +355,13 @@ impl Default for ReputationEnrichmentConfig {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RiskScoringConfig {
-    /// Enable risk scoring (requires at least GeoIP or reputation to be useful)
+    /// Enable risk scoring (requires at least `GeoIP` or reputation to be useful)
     pub enabled: bool,
 
     /// Risk preset to use for country risk tables
     ///
-    /// Options: "global" (default), "us_enterprise", "eu_enterprise",
-    ///          "apac_enterprise", "high_security"
+    /// Options: "global" (default), "`us_enterprise`", "`eu_enterprise`",
+    ///          "`apac_enterprise`", "`high_security`"
     pub preset: String,
 }
 
@@ -379,7 +380,7 @@ impl Default for RiskScoringConfig {
 #[serde(default)]
 pub struct DlqConfig {
     pub enabled: bool,
-    /// Backend mode: cascade (default), fan_out, file_only, kafka_only
+    /// Backend mode: cascade (default), `fan_out`, `file_only`, `kafka_only`
     pub mode: String,
     pub topic_suffix: String,
     /// File backend settings
@@ -403,7 +404,7 @@ impl Default for DlqConfig {
 }
 
 impl DlqConfig {
-    /// Convert to rustlib DlqConfig for the unified DLQ module.
+    /// Convert to rustlib `DlqConfig` for the unified DLQ module.
     pub fn to_rustlib_config(&self) -> hyperi_rustlib::dlq::DlqConfig {
         use hyperi_rustlib::dlq::{DlqMode, FileDlqConfig};
 
@@ -578,7 +579,7 @@ impl Default for FieldSanitizationConfig {
 #[serde(default)]
 pub struct MetadataConfig {
     /// Master switch for common header field injection (default: true)
-    /// When false, no common header fields (_timestamp, _org_id, _raw, _json, _tags, _source)
+    /// When false, no common header fields (_timestamp, _`org_id`, _raw, _json, _tags, _source)
     /// are injected. Flattening and sanitization still apply.
     pub enabled: bool,
 
@@ -684,10 +685,10 @@ impl Default for MetadataConfig {
 
 /// KEDA autoscaling thresholds (deployment-level config).
 ///
-/// These values are the SSoT for the Helm chart's KEDA ScaledObject.
+/// These values are the `SSoT` for the Helm chart's KEDA `ScaledObject`.
 /// The contract sync test validates that chart/values.yaml matches these
 /// defaults. Override at runtime via env vars:
-///   DFE_LOADER__KEDA__KAFKA_LAG_THRESHOLD=5000
+///   `DFE_LOADER__KEDA__KAFKA_LAG_THRESHOLD=5000`
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct KedaConfig {
@@ -734,14 +735,14 @@ impl Default for KedaConfig {
 /// weighted application signals with two hard gates (circuit breaker, memory).
 ///
 /// Override weights at runtime via env vars:
-///   DFE_LOADER__SCALING__WEIGHT_KAFKA_LAG=0.45
-///   DFE_LOADER__SCALING__SATURATION_BUFFER_DEPTH=20000
+///   `DFE_LOADER__SCALING__WEIGHT_KAFKA_LAG=0.45`
+///   `DFE_LOADER__SCALING__SATURATION_BUFFER_DEPTH=20000`
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ScalingConfig {
     /// Enable scaling pressure calculation.
     pub enabled: bool,
-    /// Memory usage ratio (0.0-1.0) that forces scaling_pressure to 100.
+    /// Memory usage ratio (0.0-1.0) that forces `scaling_pressure` to 100.
     pub memory_gate_threshold: f64,
     // Component weights (should sum to ~1.0)
     pub weight_kafka_lag: f64,
@@ -836,7 +837,7 @@ pub enum NullHandling {
     Default,
     /// Return error for null in non-nullable column
     Error,
-    /// Pass null through (may cause ClickHouse errors)
+    /// Pass null through (may cause `ClickHouse` errors)
     Passthrough,
 }
 
@@ -913,8 +914,7 @@ impl CoercionConfig {
     pub fn get_coercer_category(&self, type_name: &str) -> &str {
         self.type_mappings
             .get(type_name)
-            .map(|s| s.as_str())
-            .unwrap_or(&self.unknown_type_fallback)
+            .map_or(&self.unknown_type_fallback, std::string::String::as_str)
     }
 }
 
@@ -951,7 +951,7 @@ impl Default for SchemaConfig {
 /// **Safe to hot-reload:** buffer thresholds, routing, metadata, field
 /// sanitisation, timestamp DQ, coercion settings.
 ///
-/// **Requires restart:** Kafka brokers/topics/auth, ClickHouse hosts/auth,
+/// **Requires restart:** Kafka brokers/topics/auth, `ClickHouse` hosts/auth,
 /// payload format, transport type.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -984,7 +984,7 @@ impl Default for HotReloadConfig {
 ///
 /// Supports renaming or copying fields from source to destination names.
 /// Rules come from two sources with clear precedence:
-/// 1. ClickHouse column comments (`@renamed` directives) — highest priority
+/// 1. `ClickHouse` column comments (`@renamed` directives) — highest priority
 /// 2. External remap files (CSV/YAML/JSON) and built-in presets — lower priority
 ///
 /// CSV files are compatible with the elastic/ecs-mapper format:

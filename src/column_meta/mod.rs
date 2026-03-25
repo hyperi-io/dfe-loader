@@ -3,7 +3,7 @@
 
 //! Unified column directive framework.
 //!
-//! Every directive available as a ClickHouse column COMMENT annotation has an
+//! Every directive available as a `ClickHouse` column COMMENT annotation has an
 //! exact equivalent in the config cascade. Config always wins over DDL comments.
 //!
 //! **Supported directives:**
@@ -19,7 +19,7 @@
 //! **Resolution order (highest → lowest priority):**
 //! 1. Config `column_directives.tables."db.table"."col"` — per-table per-column
 //! 2. Config `column_directives.global."col"` — global per-column name
-//! 3. ClickHouse column COMMENT `@directive` annotations — DDL layer
+//! 3. `ClickHouse` column COMMENT `@directive` annotations — DDL layer
 //!
 //! **Usage example:**
 //!
@@ -60,7 +60,7 @@ pub struct ColumnDirectives {
     pub renamed: Vec<String>,
     /// CEL expression that produces this column's value.
     pub computed: Option<String>,
-    /// Override type category for coercion (e.g. "DateTime64", "IPv4").
+    /// Override type category for coercion (e.g. "`DateTime64`", "IPv4").
     pub coerce: Option<String>,
 }
 
@@ -82,7 +82,7 @@ pub struct ColumnDirectivesEntry {
 
 /// Config section for all column-level directives.
 ///
-/// The config equivalent of ClickHouse column COMMENT annotations.
+/// The config equivalent of `ClickHouse` column COMMENT annotations.
 /// Config always wins — DDL annotations only fill gaps not covered by config.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct ColumnDirectivesConfig {

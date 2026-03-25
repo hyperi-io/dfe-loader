@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: FSL-1.1-ALv2
 // Copyright (c) 2026 HYPERI PTY LIMITED
 
-//! Metrics via hyperi-rustlib MetricsManager + DFE metric groups.
+//! Metrics via hyperi-rustlib `MetricsManager` + DFE metric groups.
 //!
 //! Three layers:
 //! 1. `DfeMetrics` — platform `dfe_*` metrics (records, transport, scaling)
@@ -22,7 +22,7 @@ use hyperi_rustlib::metrics::dfe_groups::{
 };
 use hyperi_rustlib::metrics::{DfeMetrics, MetricsManager};
 
-/// Application metrics backed by rustlib MetricsManager.
+/// Application metrics backed by rustlib `MetricsManager`.
 ///
 /// Registers metrics at three layers:
 /// - `dfe_*` platform metrics via `DfeMetrics`
@@ -58,7 +58,7 @@ pub struct Metrics {
 }
 
 impl Metrics {
-    /// Create metrics using a pre-built MetricsManager.
+    /// Create metrics using a pre-built `MetricsManager`.
     ///
     /// The manager must already have installed the global recorder
     /// (via `MetricsManager::new` or `MetricsManager::with_config`).
@@ -202,7 +202,7 @@ impl Metrics {
         self.dfe.scaling_pressure(pressure);
     }
 
-    /// Update memory usage from MemoryGuard.
+    /// Update memory usage from `MemoryGuard`.
     pub fn set_memory_usage(&self, current_bytes: u64, limit_bytes: u64) {
         self.memory_used.set(current_bytes as f64);
         self.app.set_memory(current_bytes, limit_bytes);

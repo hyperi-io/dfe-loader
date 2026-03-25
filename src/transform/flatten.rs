@@ -59,7 +59,7 @@ fn flatten_recursive(value: &Value, prefix: String, result: &mut Map<String, Val
                 let new_key = if prefix.is_empty() {
                     key.clone()
                 } else {
-                    format!("{}.{}", prefix, key)
+                    format!("{prefix}.{key}")
                 };
                 flatten_recursive(val, new_key, result);
             }
@@ -144,11 +144,11 @@ fn flatten_recursive_owned_buffered(
 /// Flatten JSON bytes, returning flattened JSON bytes.
 pub fn flatten(json: &[u8]) -> crate::Result<Vec<u8>> {
     let value: Value = sonic_rs::from_slice(json)
-        .map_err(|e| crate::Error::Json(format!("Failed to parse JSON for flattening: {}", e)))?;
+        .map_err(|e| crate::Error::Json(format!("Failed to parse JSON for flattening: {e}")))?;
 
     let flattened = flatten_value(&value);
     let result = serde_json::to_vec(&Value::Object(flattened))
-        .map_err(|e| crate::Error::Json(format!("Failed to serialize flattened JSON: {}", e)))?;
+        .map_err(|e| crate::Error::Json(format!("Failed to serialize flattened JSON: {e}")))?;
 
     Ok(result)
 }
@@ -525,7 +525,7 @@ mod tests {
         assert_eq!(results.len(), 5);
         for (i, result) in results.iter().enumerate() {
             assert_eq!(result.get("id").unwrap(), i);
-            assert_eq!(result.get("value").unwrap(), &format!("v{}", i));
+            assert_eq!(result.get("value").unwrap(), &format!("v{i}"));
         }
     }
 

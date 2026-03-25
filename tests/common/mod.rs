@@ -57,7 +57,7 @@ impl std::fmt::Display for TestMode {
 // ClickHouse Test Config
 // ============================================================================
 
-/// Mode-aware ClickHouse connection config for tests.
+/// Mode-aware `ClickHouse` connection config for tests.
 pub struct ClickHouseTestConfig {
     pub host: String,
     pub http_port: u16,
@@ -204,7 +204,7 @@ impl KafkaTestConfig {
 // Docker Lifecycle (convenience)
 // ============================================================================
 
-/// Start dfe-docker infra profile if TEST_MODE=docker and containers aren't running.
+/// Start dfe-docker infra profile if `TEST_MODE=docker` and containers aren't running.
 ///
 /// Looks for dfe-docker at:
 ///   1. `DFE_DOCKER_PATH` env var
@@ -282,7 +282,7 @@ macro_rules! skip_if_no_env {
     };
 }
 
-/// Skip test if ClickHouse is not reachable in current mode
+/// Skip test if `ClickHouse` is not reachable in current mode
 #[macro_export]
 macro_rules! skip_if_no_clickhouse {
     () => {
@@ -329,7 +329,7 @@ pub fn has_external_env() -> bool {
     env::var("CLICKHOUSE_HOST").is_ok() && env::var("KAFKA_BROKERS").is_ok()
 }
 
-/// Check if ClickHouse is available
+/// Check if `ClickHouse` is available
 pub fn has_clickhouse() -> bool {
     ClickHouseTestConfig::from_env().is_reachable()
 }
@@ -348,7 +348,7 @@ pub fn has_docker() -> bool {
         .unwrap_or(false)
 }
 
-/// Check if ClickHouse is reachable via TCP (backward compat)
+/// Check if `ClickHouse` is reachable via TCP (backward compat)
 pub fn check_clickhouse_reachable() -> bool {
     ClickHouseTestConfig::from_env().is_reachable()
 }
@@ -358,21 +358,21 @@ pub fn check_kafka_reachable() -> bool {
     KafkaTestConfig::from_env().is_reachable()
 }
 
-/// Get ClickHouse test configuration (backward compat — returns loader's ClickHouseConfig)
+/// Get `ClickHouse` test configuration (backward compat — returns loader's `ClickHouseConfig`)
 pub fn get_clickhouse_config() -> ClickHouseConfig {
     let ch = ClickHouseTestConfig::from_env();
     ClickHouseConfig {
         hosts: vec![ch.native_addr()],
         database: ch.database,
         username: ch.user,
-        password: ch.password,
+        password: hyperi_rustlib::config::sensitive::SensitiveString::from(ch.password),
         protocol: "native".to_string(),
         tables: Vec::new(),
         tls: None,
     }
 }
 
-/// Get Kafka test configuration (backward compat — returns loader's KafkaConfig)
+/// Get Kafka test configuration (backward compat — returns loader's `KafkaConfig`)
 pub fn get_kafka_config() -> KafkaConfig {
     let kf = KafkaTestConfig::from_env();
 
@@ -387,7 +387,9 @@ pub fn get_kafka_config() -> KafkaConfig {
             enabled: true,
             mechanism: mechanism.to_string(),
             username: kf.sasl_user.unwrap_or_default(),
-            password: kf.sasl_password.unwrap_or_default(),
+            password: hyperi_rustlib::config::sensitive::SensitiveString::from(
+                kf.sasl_password.unwrap_or_default(),
+            ),
             ..Default::default()
         })
     } else {
@@ -395,7 +397,11 @@ pub fn get_kafka_config() -> KafkaConfig {
     };
 
     KafkaConfig {
-        brokers: kf.brokers.split(',').map(|s| s.to_string()).collect(),
+        brokers: kf
+            .brokers
+            .split(',')
+            .map(std::string::ToString::to_string)
+            .collect(),
         topics: vec!["test-events".to_string()],
         group: env::var("KAFKA_GROUP").unwrap_or_else(|_| "integration-test-group".to_string()),
         topic_regex: None,
@@ -406,7 +412,7 @@ pub fn get_kafka_config() -> KafkaConfig {
     }
 }
 
-/// Helper to create HTTP ClickHouse client for tests
+/// Helper to create HTTP `ClickHouse` client for tests
 pub fn create_http_test_client() -> Option<dfe_loader::clickhouse::HttpClickHouseClient> {
     let ch = ClickHouseTestConfig::from_env();
     if !ch.is_reachable() {
@@ -423,6 +429,29 @@ pub fn create_http_test_client() -> Option<dfe_loader::clickhouse::HttpClickHous
         ..Default::default()
     };
     dfe_loader::clickhouse::HttpClickHouseClient::new(&ch_config).ok()
+}
+
+/// Create a clickhouse-rs fork `UnifiedClient` for integration tests.
+///
+/// Used by `Inserter` tests that need `DynamicInsert` or `InsertFormatted`.
+/// Defaults to HTTP transport for test compatibility.
+pub fn create_ch_test_client() -> Option<clickhouse::UnifiedClient> {
+    let ch = ClickHouseTestConfig::from_env();
+    if !ch.is_reachable() {
+        return None;
+    }
+
+    let scheme = if ch.tls { "https" } else { "http" };
+    let url = format!("{scheme}://{}:{}", ch.host, ch.http_port);
+
+    Some(
+        clickhouse::UnifiedClient::http()
+            .with_url(&url)
+            .with_user(&ch.user)
+            .with_password(&ch.password)
+            .with_database(&ch.database)
+            .build(),
+    )
 }
 
 /// Drop a test table — uses ON CLUSTER for remote cluster, plain for Docker.
@@ -485,6 +514,5 @@ fn tcp_reachable(addr: &str) -> bool {
     addr.to_socket_addrs()
         .ok()
         .and_then(|mut addrs| addrs.next())
-        .map(|a| std::net::TcpStream::connect_timeout(&a, Duration::from_secs(3)).is_ok())
-        .unwrap_or(false)
+        .is_some_and(|a| std::net::TcpStream::connect_timeout(&a, Duration::from_secs(3)).is_ok())
 }

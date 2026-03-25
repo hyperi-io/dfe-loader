@@ -14,7 +14,7 @@
 //! Measures the CPU cost of the hot path:
 //!
 //! - **Input**: `Vec<&[u8]>` (raw JSON bytes from Kafka)
-//! - **Output**: `Vec<Map<String, Value>>` (ready for JSONEachRow insertion)
+//! - **Output**: `Vec<Map<String, Value>>` (ready for `JSONEachRow` insertion)
 //!
 //! ## Test Matrix
 //!
@@ -69,8 +69,8 @@ fn parse_and_route(messages: &[&[u8]], router: &Router) -> Vec<(String, Value)> 
             let value: Value = sonic_rs::from_slice(payload).expect("parse");
             let route = router.route_value(&value);
             let destination = match &route {
-                RouteResult::Table(t) => t.to_string(),
-                RouteResult::Dlq(r) => r.to_string(),
+                RouteResult::Table(t) => t.clone(),
+                RouteResult::Dlq(r) => r.clone(),
             };
             (destination, value)
         })
@@ -89,8 +89,8 @@ fn full_pipeline(
             let value: Value = sonic_rs::from_slice(payload).expect("parse");
             let route = router.route_value(&value);
             let destination = match &route {
-                RouteResult::Table(t) => t.to_string(),
-                RouteResult::Dlq(r) => r.to_string(),
+                RouteResult::Table(t) => t.clone(),
+                RouteResult::Dlq(r) => r.clone(),
             };
             let result = transformer
                 .transform_with_raw(value, None, None)
@@ -117,7 +117,7 @@ fn bench_event_type(
     for &batch_size in batch_sizes {
         let batch: Vec<&[u8]> = (0..batch_size).map(|_| event.as_slice()).collect();
 
-        let mut group = c.benchmark_group(format!("{}/batch_{}", group_name, batch_size));
+        let mut group = c.benchmark_group(format!("{group_name}/batch_{batch_size}"));
         group.throughput(Throughput::Elements(batch_size as u64));
         group.sampling_mode(SamplingMode::Flat);
         if batch_size >= 10_000 {
@@ -127,11 +127,11 @@ fn bench_event_type(
         }
 
         group.bench_function("parse_route", |b| {
-            b.iter(|| parse_and_route(black_box(&batch), &router))
+            b.iter(|| parse_and_route(black_box(&batch), &router));
         });
 
         group.bench_function("full_pipeline", |b| {
-            b.iter(|| full_pipeline(black_box(&batch), &router, &transformer))
+            b.iter(|| full_pipeline(black_box(&batch), &router, &transformer));
         });
 
         group.finish();
@@ -170,15 +170,15 @@ fn bench_single_message(c: &mut Criterion) {
         let event = event_fn();
         let batch: Vec<&[u8]> = vec![event.as_slice()];
 
-        let mut group = c.benchmark_group(format!("bakeoff/single/{}", name));
+        let mut group = c.benchmark_group(format!("bakeoff/single/{name}"));
         group.throughput(Throughput::Elements(1));
 
         group.bench_function("parse_route", |b| {
-            b.iter(|| parse_and_route(black_box(&batch), &router))
+            b.iter(|| parse_and_route(black_box(&batch), &router));
         });
 
         group.bench_function("full_pipeline", |b| {
-            b.iter(|| full_pipeline(black_box(&batch), &router, &transformer))
+            b.iter(|| full_pipeline(black_box(&batch), &router, &transformer));
         });
 
         group.finish();
@@ -195,11 +195,11 @@ fn bench_allocation_pressure(c: &mut Criterion) {
     group.throughput(Throughput::Elements(1_000));
 
     group.bench_function("parse_route_1000", |b| {
-        b.iter(|| parse_and_route(black_box(&batch), &router))
+        b.iter(|| parse_and_route(black_box(&batch), &router));
     });
 
     group.bench_function("full_pipeline_1000", |b| {
-        b.iter(|| full_pipeline(black_box(&batch), &router, &transformer))
+        b.iter(|| full_pipeline(black_box(&batch), &router, &transformer));
     });
 
     group.finish();

@@ -56,11 +56,11 @@ struct App {
 impl DfeApp for App {
     type Config = Config;
 
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "dfe-loader"
     }
 
-    fn env_prefix(&self) -> &str {
+    fn env_prefix(&self) -> &'static str {
         "DFE_LOADER"
     }
 
@@ -102,7 +102,7 @@ impl DfeApp for App {
         );
 
         // Initialise metrics via rustlib MetricsManager
-        let mut manager = MetricsManager::new("loader");
+        let mut manager = MetricsManager::new("dfe_loader");
 
         // Wire readiness check — MetricsManager serves /readyz
         let scaling = Arc::new(config.scaling.build_pressure());

@@ -129,7 +129,7 @@ fn test_schema_cache_stats() {
     assert!(stats.hits >= 3);
     // Note: misses are only counted for expired entries, not non-existent ones
 
-    eprintln!("✓ Schema cache stats: {:?}", stats);
+    eprintln!("✓ Schema cache stats: {stats:?}");
 }
 
 #[test]
@@ -219,15 +219,14 @@ async fn test_schema_introspection_from_clickhouse() {
 
     // Create test table with various types
     let ddl = format!(
-        "CREATE TABLE {}{oc} (
+        "CREATE TABLE {table_name}{oc} (
             id UInt64,
             name String,
             score Float64,
             created DateTime64(3),
             active Bool,
             tags Array(String)
-        ) ENGINE = MergeTree() ORDER BY tuple()",
-        table_name
+        ) ENGINE = MergeTree() ORDER BY tuple()"
     );
     client.execute(&ddl).await.expect("Failed to create table");
 
@@ -268,11 +267,10 @@ async fn test_schema_cache_with_clickhouse() {
 
     // Create test table
     let ddl = format!(
-        "CREATE TABLE {}{oc} (
+        "CREATE TABLE {table_name}{oc} (
             id UInt64,
             data String
-        ) ENGINE = MergeTree() ORDER BY tuple()",
-        table_name
+        ) ENGINE = MergeTree() ORDER BY tuple()"
     );
     client.execute(&ddl).await.expect("Failed to create table");
 

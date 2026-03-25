@@ -95,23 +95,23 @@ impl MetricsSnapshot {
 
     /// Save snapshot to JSON file
     pub fn save<P: AsRef<Path>>(&self, path: P) -> Result<(), String> {
-        let json = serde_json::to_string_pretty(self)
-            .map_err(|e| format!("Failed to serialize: {}", e))?;
+        let json =
+            serde_json::to_string_pretty(self).map_err(|e| format!("Failed to serialize: {e}"))?;
 
         if let Some(parent) = path.as_ref().parent() {
-            fs::create_dir_all(parent).map_err(|e| format!("Failed to create directory: {}", e))?;
+            fs::create_dir_all(parent).map_err(|e| format!("Failed to create directory: {e}"))?;
         }
 
-        fs::write(path, json).map_err(|e| format!("Failed to write file: {}", e))?;
+        fs::write(path, json).map_err(|e| format!("Failed to write file: {e}"))?;
 
         Ok(())
     }
 
     /// Load snapshot from JSON file
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self, String> {
-        let json = fs::read_to_string(path).map_err(|e| format!("Failed to read file: {}", e))?;
+        let json = fs::read_to_string(path).map_err(|e| format!("Failed to read file: {e}"))?;
 
-        serde_json::from_str(&json).map_err(|e| format!("Failed to deserialize: {}", e))
+        serde_json::from_str(&json).map_err(|e| format!("Failed to deserialize: {e}"))
     }
 
     /// Compare this snapshot with another (self is current, other is baseline)
@@ -286,10 +286,10 @@ impl MetricsComparison {
         md.push_str(&format!("- **Unchanged:** {}\n", self.unchanged.len()));
 
         if let Some(parent) = path.as_ref().parent() {
-            fs::create_dir_all(parent).map_err(|e| format!("Failed to create directory: {}", e))?;
+            fs::create_dir_all(parent).map_err(|e| format!("Failed to create directory: {e}"))?;
         }
 
-        fs::write(path, md).map_err(|e| format!("Failed to write markdown: {}", e))
+        fs::write(path, md).map_err(|e| format!("Failed to write markdown: {e}"))
     }
 }
 
@@ -340,10 +340,10 @@ mod tests {
 
     #[test]
     fn test_metrics_snapshot_from_text() {
-        let text = r#"# HELP test_counter A test counter
+        let text = r"# HELP test_counter A test counter
 # TYPE test_counter counter
 test_counter 100
-"#;
+";
         let snapshot = MetricsSnapshot::from_text(text, "test");
 
         assert_eq!(snapshot.test_name, "test");

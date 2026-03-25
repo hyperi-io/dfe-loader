@@ -4,7 +4,7 @@
 //! Kafka integration tests
 //!
 //! Tests run against the configured Kafka cluster via .env settings.
-//! Uses rustlib TransportAdapter (not legacy direct-rdkafka consumer).
+//! Uses rustlib `TransportAdapter` (not legacy direct-rdkafka consumer).
 
 use std::env;
 
@@ -26,7 +26,7 @@ fn skip_if_no_kafka() -> bool {
     }
 
     let first_broker = brokers.split(',').next().unwrap_or(&brokers);
-    eprintln!("Checking Kafka at {}...", first_broker);
+    eprintln!("Checking Kafka at {first_broker}...");
 
     use std::net::ToSocketAddrs;
     match first_broker.to_socket_addrs() {
@@ -37,21 +37,21 @@ fn skip_if_no_kafka() -> bool {
                     std::time::Duration::from_secs(3),
                 ) {
                     Ok(_) => {
-                        eprintln!("Kafka reachable at {} ({})", first_broker, socket_addr);
+                        eprintln!("Kafka reachable at {first_broker} ({socket_addr})");
                         false
                     }
                     Err(e) => {
-                        eprintln!("Kafka not reachable at {}: {}", first_broker, e);
+                        eprintln!("Kafka not reachable at {first_broker}: {e}");
                         true
                     }
                 }
             } else {
-                eprintln!("Could not resolve {}", first_broker);
+                eprintln!("Could not resolve {first_broker}");
                 true
             }
         }
         Err(e) => {
-            eprintln!("DNS resolution failed for {}: {}", first_broker, e);
+            eprintln!("DNS resolution failed for {first_broker}: {e}");
             true
         }
     }
@@ -92,7 +92,9 @@ fn get_test_config() -> KafkaConfig {
             enabled: true,
             mechanism: mechanism_to_string(mechanism),
             username: env::var("KAFKA_SASL_USER").unwrap_or_default(),
-            password: env::var("KAFKA_SASL_PASSWORD").unwrap_or_default(),
+            password: hyperi_rustlib::config::sensitive::SensitiveString::from(
+                env::var("KAFKA_SASL_PASSWORD").unwrap_or_default(),
+            ),
             ..Default::default()
         })
     } else {
@@ -107,7 +109,10 @@ fn get_test_config() -> KafkaConfig {
     );
 
     KafkaConfig {
-        brokers: brokers.split(',').map(|s| s.to_string()).collect(),
+        brokers: brokers
+            .split(',')
+            .map(std::string::ToString::to_string)
+            .collect(),
         topics: vec!["test-events".to_string()],
         group,
         topic_regex: None,
@@ -132,14 +137,14 @@ async fn test_kafka_transport_creation() {
     match result {
         Ok(transport) => {
             let elapsed = start.elapsed();
-            eprintln!("Created Kafka transport in {:?}", elapsed);
+            eprintln!("Created Kafka transport in {elapsed:?}");
             eprintln!("  Brokers: {:?}", config.brokers);
             eprintln!("  Group: {}", config.group);
             eprintln!("  SASL: {}", config.sasl.is_some());
             assert!(transport.is_healthy());
         }
         Err(e) => {
-            eprintln!("Kafka transport creation failed: {}", e);
+            eprintln!("Kafka transport creation failed: {e}");
             panic!("Transport should be created when Kafka is reachable");
         }
     }
@@ -179,7 +184,7 @@ async fn test_kafka_sasl_config() {
             enabled: true,
             mechanism: "scram_sha_256".to_string(),
             username: "testuser".to_string(),
-            password: "testpass".to_string(),
+            password: hyperi_rustlib::config::sensitive::SensitiveString::from("testpass"),
             ..Default::default()
         }),
         tls: None,

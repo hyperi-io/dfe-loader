@@ -4,7 +4,7 @@
 //! Integration tests for the field mapping feature.
 //!
 //! Tests cover: apply semantics, builder schema filtering, builtin preset
-//! smoke tests, cache lifecycle, and ClickHouse `@renamed` comment parsing.
+//! smoke tests, cache lifecycle, and `ClickHouse` `@renamed` comment parsing.
 
 use std::collections::HashMap;
 
@@ -24,7 +24,7 @@ use dfe_loader::transform::{
 // Helpers
 // ============================================================================
 
-/// Build a test TableSchema with String columns.
+/// Build a test `TableSchema` with String columns.
 fn make_schema(columns: &[&str]) -> TableSchema {
     TableSchema {
         database: "test_db".to_string(),
@@ -51,7 +51,10 @@ fn make_schema(columns: &[&str]) -> TableSchema {
 /// Build a single rename rule.
 fn rename_rule(sources: &[&str], destination: &str) -> FieldMappingRule {
     FieldMappingRule {
-        source_fields: sources.iter().map(|s| s.to_string()).collect(),
+        source_fields: sources
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect(),
         destination: destination.to_string(),
         action: MappingAction::Rename,
         origin: RuleOrigin::Builtin("test".to_string()),
@@ -61,14 +64,17 @@ fn rename_rule(sources: &[&str], destination: &str) -> FieldMappingRule {
 /// Build a single copy rule.
 fn copy_rule(sources: &[&str], destination: &str) -> FieldMappingRule {
     FieldMappingRule {
-        source_fields: sources.iter().map(|s| s.to_string()).collect(),
+        source_fields: sources
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect(),
         destination: destination.to_string(),
         action: MappingAction::Copy,
         origin: RuleOrigin::Builtin("test".to_string()),
     }
 }
 
-/// Build a FieldMappingConfig with ECS preset enabled.
+/// Build a `FieldMappingConfig` with ECS preset enabled.
 fn ecs_config() -> FieldMappingConfig {
     FieldMappingConfig {
         enabled: true,
@@ -621,27 +627,25 @@ mod clickhouse_tests {
     #[tokio::test]
     async fn test_fetch_column_comments_with_renamed() {
         load_dotenv();
-        let client = match create_http_test_client() {
-            Some(c) => c,
-            None => {
-                eprintln!("Skipping: ClickHouse not reachable");
-                return;
-            }
+        let client = if let Some(c) = create_http_test_client() {
+            c
+        } else {
+            eprintln!("Skipping: ClickHouse not reachable");
+            return;
         };
 
         let table_name = unique_table_name("fm_comments");
         let oc = crate::common::on_cluster_clause();
-        let full_name = format!("default.{}", table_name);
+        let full_name = format!("default.{table_name}");
 
         // Create table with @renamed directives in column comments
         let ddl = format!(
-            "CREATE TABLE default.{}{oc} (\
+            "CREATE TABLE default.{table_name}{oc} (\
                 _timestamp DateTime64(3),\
                 source_ip String COMMENT '@renamed: first(src_ip/srcip)',\
                 dest_ip String COMMENT '@renamed: dst_ip',\
                 user_name String\
-            ) ENGINE = MergeTree() ORDER BY tuple()",
-            table_name
+            ) ENGINE = MergeTree() ORDER BY tuple()"
         );
         client.execute(&ddl).await.expect("DDL failed");
 

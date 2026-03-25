@@ -85,9 +85,8 @@ pub fn load_file(
     path: &str,
     default_action: MappingAction,
 ) -> crate::Result<Vec<FieldMappingRule>> {
-    let content = std::fs::read_to_string(path).map_err(|e| {
-        crate::Error::Config(format!("Failed to read remap file '{}': {}", path, e))
-    })?;
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| crate::Error::Config(format!("Failed to read remap file '{path}': {e}")))?;
 
     let ext = Path::new(path)
         .extension()
@@ -99,8 +98,7 @@ pub fn load_file(
         "yaml" | "yml" => load_yaml_str(&content, default_action, path),
         "json" => load_json_str(&content, default_action, path),
         _ => Err(crate::Error::Config(format!(
-            "Unsupported remap file format '{}' for '{}'. Use .csv, .yaml, .yml, or .json",
-            ext, path
+            "Unsupported remap file format '{ext}' for '{path}'. Use .csv, .yaml, .yml, or .json"
         ))),
     }
 }
@@ -121,7 +119,7 @@ struct CsvRow {
 /// Load rules from CSV string (ecs-mapper format).
 ///
 /// Columns: `source_field`, `destination_field`, `copy_action` (optional).
-/// Multiple rows with the same destination create a multi-source rule (first() semantics).
+/// Multiple rows with the same destination create a multi-source rule (`first()` semantics).
 fn load_csv_str(
     content: &str,
     default_action: MappingAction,
@@ -140,7 +138,7 @@ fn load_csv_str(
 
     for result in reader.deserialize() {
         let row: CsvRow = result
-            .map_err(|e| crate::Error::Config(format!("CSV parse error in '{}': {}", origin, e)))?;
+            .map_err(|e| crate::Error::Config(format!("CSV parse error in '{origin}': {e}")))?;
 
         // Skip rows with empty source or destination
         if row.source_field.trim().is_empty() || row.destination_field.trim().is_empty() {
@@ -150,8 +148,7 @@ fn load_csv_str(
         let action = row
             .copy_action
             .as_deref()
-            .map(MappingAction::parse)
-            .unwrap_or(default_action);
+            .map_or(default_action, MappingAction::parse);
 
         let dest = row.destination_field.trim().to_string();
         let source = row.source_field.trim().to_string();
@@ -206,7 +203,7 @@ fn load_yaml_str(
     origin: &str,
 ) -> crate::Result<Vec<FieldMappingRule>> {
     let file: YamlRemapFile = serde_yaml_ng::from_str(content)
-        .map_err(|e| crate::Error::Config(format!("YAML parse error in '{}': {}", origin, e)))?;
+        .map_err(|e| crate::Error::Config(format!("YAML parse error in '{origin}': {e}")))?;
 
     let rules = file
         .mappings
@@ -217,8 +214,7 @@ fn load_yaml_str(
             action: entry
                 .action
                 .as_deref()
-                .map(MappingAction::parse)
-                .unwrap_or(default_action),
+                .map_or(default_action, MappingAction::parse),
             origin: RuleOrigin::ExternalFile(origin.to_string()),
         })
         .collect();
@@ -237,7 +233,7 @@ fn load_json_str(
     origin: &str,
 ) -> crate::Result<Vec<FieldMappingRule>> {
     let file: YamlRemapFile = serde_json::from_str(content)
-        .map_err(|e| crate::Error::Config(format!("JSON parse error in '{}': {}", origin, e)))?;
+        .map_err(|e| crate::Error::Config(format!("JSON parse error in '{origin}': {e}")))?;
 
     let rules = file
         .mappings
@@ -248,8 +244,7 @@ fn load_json_str(
             action: entry
                 .action
                 .as_deref()
-                .map(MappingAction::parse)
-                .unwrap_or(default_action),
+                .map_or(default_action, MappingAction::parse),
             origin: RuleOrigin::ExternalFile(origin.to_string()),
         })
         .collect();
@@ -311,14 +306,14 @@ src_ip,source.ip,rename
 
     #[test]
     fn test_load_yaml_format() {
-        let yaml = r#"
+        let yaml = r"
 mappings:
   source.ip:
     sources: [src_ip, srcip, source_ip]
     action: rename
   destination.ip:
     sources: [dst_ip, dstip]
-"#;
+";
         let rules = load_yaml_str(yaml, MappingAction::Rename, "test.yaml").unwrap();
         assert_eq!(rules.len(), 2);
 

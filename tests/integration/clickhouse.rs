@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: FSL-1.1-ALv2
 // Copyright (c) 2026 HYPERI PTY LIMITED
 
-//! ClickHouse integration tests
+//! `ClickHouse` integration tests
 //!
 //! Tests run against k8s.tyrell.com.au cluster via .env settings
-//! Uses HTTP client with JSONEachRow for all ClickHouse operations
+//! Uses HTTP client with `JSONEachRow` for all `ClickHouse` operations
 
 use serde_json::json;
 
@@ -33,12 +33,11 @@ async fn test_clickhouse_connect() {
         return;
     }
 
-    let client = match create_http_test_client() {
-        Some(c) => c,
-        None => {
-            eprintln!("Could not create HTTP client");
-            return;
-        }
+    let client = if let Some(c) = create_http_test_client() {
+        c
+    } else {
+        eprintln!("Could not create HTTP client");
+        return;
     };
 
     let start = std::time::Instant::now();
@@ -46,7 +45,7 @@ async fn test_clickhouse_connect() {
     let elapsed = start.elapsed();
 
     assert!(result.is_ok(), "Health check failed: {:?}", result.err());
-    eprintln!("✓ Connected to ClickHouse in {:?}", elapsed);
+    eprintln!("✓ Connected to ClickHouse in {elapsed:?}");
     assert!(!client.database().is_empty());
 }
 
@@ -65,13 +64,12 @@ async fn test_clickhouse_insert_json() {
     let table_name = unique_table_name("test_insert");
     let oc = crate::common::on_cluster_clause();
     let create_sql = format!(
-        "CREATE TABLE IF NOT EXISTS {}{oc} (
+        "CREATE TABLE IF NOT EXISTS {table_name}{oc} (
             id UInt64,
             event String,
             category String,
             value Float64
-        ) ENGINE = MergeTree() ORDER BY tuple()",
-        table_name
+        ) ENGINE = MergeTree() ORDER BY tuple()"
     );
 
     let start = std::time::Instant::now();
@@ -98,7 +96,7 @@ async fn test_clickhouse_insert_json() {
     let elapsed = start.elapsed();
     assert!(result.is_ok(), "Insert failed: {:?}", result.err());
     assert_eq!(result.unwrap(), 2);
-    eprintln!("✓ Inserted 2 rows via JSONEachRow in {:?}", elapsed);
+    eprintln!("✓ Inserted 2 rows via JSONEachRow in {elapsed:?}");
 
     // Insert larger batch (1000 rows)
     let categories_list = ["auth", "api", "web", "mobile"];
@@ -179,7 +177,7 @@ async fn test_clickhouse_table_exists() {
     };
 
     let result = client.table_exists("tables").await;
-    eprintln!("table_exists result: {:?}", result);
+    eprintln!("table_exists result: {result:?}");
     assert!(result.is_ok());
 }
 
@@ -199,24 +197,20 @@ async fn test_clickhouse_variant_type_support() {
     let oc = crate::common::on_cluster_clause();
 
     let create_sql = format!(
-        "CREATE TABLE IF NOT EXISTS {}{oc} (
+        "CREATE TABLE IF NOT EXISTS {table_name}{oc} (
             id UInt64,
             data Variant(String, Int64, Float64)
         ) ENGINE = MergeTree() ORDER BY tuple()
-        SETTINGS allow_experimental_variant_type = 1",
-        table_name
+        SETTINGS allow_experimental_variant_type = 1"
     );
 
     let result = client.execute(&create_sql).await;
     match result {
         Ok(()) => {
-            eprintln!("✓ Created table with Variant type: {}", table_name);
+            eprintln!("✓ Created table with Variant type: {table_name}");
         }
         Err(e) => {
-            eprintln!(
-                "✗ Failed to create Variant table (ClickHouse may be < 24.x): {}",
-                e
-            );
+            eprintln!("✗ Failed to create Variant table (ClickHouse may be < 24.x): {e}");
             return;
         }
     }

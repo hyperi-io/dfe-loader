@@ -31,7 +31,7 @@ impl MappingAction {
 /// Where a mapping rule originated (for precedence and debugging).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuleOrigin {
-    /// From ClickHouse column comment (`@renamed` directive) — highest precedence.
+    /// From `ClickHouse` column comment (`@renamed` directive) — highest precedence.
     ColumnComment,
     /// From an external remap file (path stored for diagnostics).
     ExternalFile(String),
@@ -49,7 +49,7 @@ pub enum RuleOrigin {
 pub struct FieldMappingRule {
     /// Source field names to try in order (first present wins).
     pub source_fields: Vec<String>,
-    /// Destination field name (must exist in ClickHouse table schema).
+    /// Destination field name (must exist in `ClickHouse` table schema).
     pub destination: String,
     /// Action: rename (remove source) or copy (keep source).
     pub action: MappingAction,
@@ -136,7 +136,7 @@ impl TableFieldMapping {
     }
 }
 
-/// Parse `@renamed` directives from a ClickHouse column comment string.
+/// Parse `@renamed` directives from a `ClickHouse` column comment string.
 ///
 /// Supported formats:
 /// - `@renamed: field_name`

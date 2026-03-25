@@ -3,7 +3,7 @@
 
 //! Config hot-reload integration tests
 //!
-//! Tests for SharedConfig and ConfigWatcher
+//! Tests for `SharedConfig` and `ConfigWatcher`
 
 use std::fs;
 use std::io::Write;
@@ -112,7 +112,7 @@ async fn test_shared_config_async_subscribe() {
 
 fn create_test_config_file(dir: &TempDir) -> PathBuf {
     let config_path = dir.path().join("config.yaml");
-    let content = r#"
+    let content = r"
 kafka:
   brokers:
     - localhost:9092
@@ -128,7 +128,7 @@ buffer:
   flush_rows: 1000
   flush_bytes: 1048576
   flush_age_secs: 5
-"#;
+";
     fs::write(&config_path, content).unwrap();
     config_path
 }
@@ -181,7 +181,7 @@ async fn test_watcher_detects_changes() {
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     // Modify the config file
-    let new_content = r#"
+    let new_content = r"
 kafka:
   brokers:
     - new-broker:9092
@@ -197,7 +197,7 @@ buffer:
   flush_rows: 2000
   flush_bytes: 2097152
   flush_age_secs: 10
-"#;
+";
 
     // Write new content
     {
@@ -220,8 +220,7 @@ buffer:
             "Version should increment after config change"
         );
         eprintln!(
-            "✓ ConfigWatcher detected file change (version {} -> {})",
-            initial_version, new_version
+            "✓ ConfigWatcher detected file change (version {initial_version} -> {new_version})"
         );
     } else {
         // Polling might not have caught it in time - this is acceptable in tests
@@ -250,7 +249,7 @@ async fn test_watcher_validates_config() {
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     // Write invalid config (empty brokers)
-    let invalid_content = r#"
+    let invalid_content = r"
 kafka:
   brokers: []
   group: test-group
@@ -263,7 +262,7 @@ clickhouse:
 
 buffer:
   flush_rows: 1000
-"#;
+";
 
     fs::write(&config_path, invalid_content).unwrap();
 
@@ -309,7 +308,7 @@ async fn test_hot_reload_full_cycle() {
     // Initial config
     fs::write(
         &config_path,
-        r#"
+        r"
 kafka:
   brokers:
     - initial-broker:9092
@@ -323,7 +322,7 @@ buffer:
   flush_rows: 1000
   flush_bytes: 1048576
   flush_age_secs: 5
-"#,
+",
     )
     .unwrap();
 
@@ -352,7 +351,7 @@ buffer:
     // Modify config file — change brokers and flush_rows
     fs::write(
         &config_path,
-        r#"
+        r"
 kafka:
   brokers:
     - updated-broker:9092
@@ -366,7 +365,7 @@ buffer:
   flush_rows: 5000
   flush_bytes: 2097152
   flush_age_secs: 10
-"#,
+",
     )
     .unwrap();
 
@@ -398,7 +397,7 @@ async fn test_hot_reload_preserves_valid_config_on_bad_update() {
     // Start with valid config
     fs::write(
         &config_path,
-        r#"
+        r"
 kafka:
   brokers:
     - good-broker:9092
@@ -412,7 +411,7 @@ buffer:
   flush_rows: 1000
   flush_bytes: 1048576
   flush_age_secs: 5
-"#,
+",
     )
     .unwrap();
 

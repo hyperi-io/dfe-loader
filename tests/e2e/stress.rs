@@ -81,13 +81,12 @@ async fn test_stress_10k_single_batch() {
     let oc = crate::common::on_cluster_clause();
     let table_name = unique_table_name("stress_10k");
     let ddl = format!(
-        "CREATE TABLE {}{oc} (
+        "CREATE TABLE {table_name}{oc} (
             id UInt64,
             event String,
             value Float64
         ) ENGINE = MergeTree()
-        ORDER BY id",
-        table_name
+        ORDER BY id"
     );
     client.execute(&ddl).await.expect("Failed to create table");
 
@@ -103,10 +102,7 @@ async fn test_stress_10k_single_batch() {
     assert_eq!(inserted, row_count);
 
     let rows_per_sec = row_count as f64 / elapsed.as_secs_f64();
-    eprintln!(
-        "✓ Stress 10k: {} rows in {:?} ({:.0} rows/sec)",
-        inserted, elapsed, rows_per_sec
-    );
+    eprintln!("✓ Stress 10k: {inserted} rows in {elapsed:?} ({rows_per_sec:.0} rows/sec)");
 
     drop_http_test_table(&client, &table_name).await;
 }
@@ -127,13 +123,12 @@ async fn test_stress_50k_single_batch() {
     let oc = crate::common::on_cluster_clause();
     let table_name = unique_table_name("stress_50k");
     let ddl = format!(
-        "CREATE TABLE {}{oc} (
+        "CREATE TABLE {table_name}{oc} (
             id UInt64,
             category String,
             value Float64
         ) ENGINE = MergeTree()
-        ORDER BY id",
-        table_name
+        ORDER BY id"
     );
     client.execute(&ddl).await.expect("Failed to create table");
 
@@ -149,10 +144,7 @@ async fn test_stress_50k_single_batch() {
     assert_eq!(inserted, row_count);
 
     let rows_per_sec = row_count as f64 / elapsed.as_secs_f64();
-    eprintln!(
-        "✓ Stress 50k: {} rows in {:?} ({:.0} rows/sec)",
-        inserted, elapsed, rows_per_sec
-    );
+    eprintln!("✓ Stress 50k: {inserted} rows in {elapsed:?} ({rows_per_sec:.0} rows/sec)");
 
     drop_http_test_table(&client, &table_name).await;
 }
@@ -173,13 +165,12 @@ async fn test_stress_multiple_batches() {
     let oc = crate::common::on_cluster_clause();
     let table_name = unique_table_name("stress_multi");
     let ddl = format!(
-        "CREATE TABLE {}{oc} (
+        "CREATE TABLE {table_name}{oc} (
             id UInt64,
             batch_id UInt64,
             data String
         ) ENGINE = MergeTree()
-        ORDER BY (batch_id, id)",
-        table_name
+        ORDER BY (batch_id, id)"
     );
     client.execute(&ddl).await.expect("Failed to create table");
 
@@ -204,7 +195,7 @@ async fn test_stress_multiple_batches() {
             .collect();
 
         let result = client.insert_json_rows(&table_name, &rows, &[]).await;
-        assert!(result.is_ok(), "Batch {} insert failed", batch_id);
+        assert!(result.is_ok(), "Batch {batch_id} insert failed");
         total_inserted += result.unwrap();
     }
 
@@ -212,8 +203,7 @@ async fn test_stress_multiple_batches() {
     let rows_per_sec = total_inserted as f64 / elapsed.as_secs_f64();
 
     eprintln!(
-        "✓ Stress multi-batch: {} rows in {} batches, {:?} ({:.0} rows/sec)",
-        total_inserted, batch_count, elapsed, rows_per_sec
+        "✓ Stress multi-batch: {total_inserted} rows in {batch_count} batches, {elapsed:?} ({rows_per_sec:.0} rows/sec)"
     );
 
     assert_eq!(total_inserted, (batch_count as usize) * rows_per_batch);
@@ -237,13 +227,12 @@ async fn test_stress_concurrent_inserts() {
     let oc = crate::common::on_cluster_clause();
     let table_name = unique_table_name("stress_concurrent");
     let ddl = format!(
-        "CREATE TABLE {}{oc} (
+        "CREATE TABLE {table_name}{oc} (
             id UInt64,
             thread_id UInt64,
             value Float64
         ) ENGINE = MergeTree()
-        ORDER BY (thread_id, id)",
-        table_name
+        ORDER BY (thread_id, id)"
     );
     client.execute(&ddl).await.expect("Failed to create table");
 
@@ -288,8 +277,7 @@ async fn test_stress_concurrent_inserts() {
     let rows_per_sec = total_inserted as f64 / elapsed.as_secs_f64();
 
     eprintln!(
-        "✓ Stress concurrent: {} rows from {} tasks in {:?} ({:.0} rows/sec)",
-        total_inserted, concurrent_count, elapsed, rows_per_sec
+        "✓ Stress concurrent: {total_inserted} rows from {concurrent_count} tasks in {elapsed:?} ({rows_per_sec:.0} rows/sec)"
     );
 
     assert_eq!(total_inserted, (concurrent_count as usize) * rows_per_task);
@@ -343,8 +331,7 @@ fn test_stress_buffer_high_volume() {
     let msgs_per_sec = message_count as f64 / elapsed.as_secs_f64();
 
     eprintln!(
-        "✓ Buffer stress: {} messages → {} rows in {:?} ({:.0} msg/sec)",
-        message_count, total_rows, elapsed, msgs_per_sec
+        "✓ Buffer stress: {message_count} messages → {total_rows} rows in {elapsed:?} ({msgs_per_sec:.0} msg/sec)"
     );
 }
 
@@ -364,7 +351,7 @@ fn test_stress_buffer_multi_table() {
 
     for i in 0..message_count {
         let table = tables[i % tables.len()];
-        let destination = format!("default.{}", table);
+        let destination = format!("default.{table}");
 
         let data = json!({
             "id": i,
@@ -434,8 +421,7 @@ fn test_stress_offset_tracking() {
 
     let msgs_per_sec = message_count as f64 / elapsed.as_secs_f64();
     eprintln!(
-        "✓ Offset tracking stress: {} messages, {} partitions in {:?} ({:.0} msg/sec)",
-        message_count, partition_count, elapsed, msgs_per_sec
+        "✓ Offset tracking stress: {message_count} messages, {partition_count} partitions in {elapsed:?} ({msgs_per_sec:.0} msg/sec)"
     );
 }
 
@@ -528,14 +514,11 @@ fn test_stress_rapid_flush_cycles() {
     let cycles_per_sec = cycle_count as f64 / elapsed.as_secs_f64();
 
     eprintln!(
-        "✓ Rapid flush stress: {} cycles, {} batches in {:?} ({:.0} cycles/sec)",
-        cycle_count, total_batches, elapsed, cycles_per_sec
+        "✓ Rapid flush stress: {cycle_count} cycles, {total_batches} batches in {elapsed:?} ({cycles_per_sec:.0} cycles/sec)"
     );
 
     assert!(
         total_batches >= cycle_count as usize * 9 / 10,
-        "Expected ~{} batches, got {}",
-        cycle_count,
-        total_batches
+        "Expected ~{cycle_count} batches, got {total_batches}"
     );
 }
