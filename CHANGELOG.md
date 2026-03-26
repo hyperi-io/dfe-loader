@@ -1,3 +1,10 @@
+# [1.15.0-dev.7](https://github.com/hyperi-io/dfe-loader/compare/v1.15.0-dev.6...v1.15.0-dev.7) (2026-03-26)
+
+
+### Bug Fixes
+
+* bump rustlib 1.19.7, pin reqwest <0.13, gRPC transport metrics ([10d4800](https://github.com/hyperi-io/dfe-loader/commit/10d4800d58b79abd13b65dcb4cb92497a208ad73))
+
 # [1.15.0-dev.6](https://github.com/hyperi-io/dfe-loader/compare/v1.15.0-dev.5...v1.15.0-dev.6) (2026-03-26)
 
 
