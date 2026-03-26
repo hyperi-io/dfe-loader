@@ -20,7 +20,7 @@
 
 use hyperi_rustlib::transport::{
     GrpcConfig as TransportGrpcConfig, GrpcTransport, KafkaConfig as TransportKafkaConfig,
-    KafkaToken, KafkaTransport, Transport, TransportError,
+    KafkaToken, KafkaTransport, TransportBase, TransportReceiver, TransportError,
 };
 use tracing::info;
 
@@ -284,7 +284,7 @@ pub use memory_adapter::MemoryTransportAdapter;
 
 #[cfg(feature = "transport-memory")]
 mod memory_adapter {
-    use hyperi_rustlib::transport::{MemoryConfig, MemoryTransport, Transport};
+    use hyperi_rustlib::transport::{MemoryConfig, MemoryTransport, TransportBase, TransportReceiver, TransportSender};
     use std::sync::Arc;
 
     use crate::Result;
