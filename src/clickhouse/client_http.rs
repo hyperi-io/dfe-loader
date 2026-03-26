@@ -92,20 +92,24 @@ impl HttpClickHouseClient {
         let ch_client = match config.transport {
             Transport::Http => {
                 let scheme = if config.tls { "https" } else { "http" };
-                clickhouse::UnifiedClient::http()
+                let mut builder = clickhouse::UnifiedClient::http()
                     .with_url(format!("{scheme}://{endpoint}"))
                     .with_user(&config.username)
-                    .with_password(&config.password)
-                    .with_database(&config.database)
-                    .build()
+                    .with_database(&config.database);
+                if !config.password.is_empty() {
+                    builder = builder.with_password(&config.password);
+                }
+                builder.build()
             }
             Transport::Native => {
                 let mut builder = clickhouse::UnifiedClient::native()
                     .with_addr(&*endpoint)
                     .with_user(&config.username)
-                    .with_password(&config.password)
                     .with_database(&config.database)
                     .with_lz4();
+                if !config.password.is_empty() {
+                    builder = builder.with_password(&config.password);
+                }
                 if config.tls {
                     // Extract hostname for SNI (strip port if present).
                     let host = endpoint.split(':').next().unwrap_or(&endpoint);
