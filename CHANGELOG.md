@@ -1,3 +1,10 @@
+# [1.15.0-dev.6](https://github.com/hyperi-io/dfe-loader/compare/v1.15.0-dev.5...v1.15.0-dev.6) (2026-03-26)
+
+
+### Bug Fixes
+
+* add ClickHouse pool stats, insert bytes, and EPS metrics ([c7c7b2e](https://github.com/hyperi-io/dfe-loader/commit/c7c7b2e3f040abf4be05410da2791944c5e10910))
+
 # [1.15.0-dev.5](https://github.com/hyperi-io/dfe-loader/compare/v1.15.0-dev.4...v1.15.0-dev.5) (2026-03-25)
 
 
