@@ -1,3 +1,10 @@
+# [1.15.0-dev.8](https://github.com/hyperi-io/dfe-loader/compare/v1.15.0-dev.7...v1.15.0-dev.8) (2026-03-26)
+
+
+### Bug Fixes
+
+* update clickhouse-rs fork — encode hot path optimisations ([2a06ef7](https://github.com/hyperi-io/dfe-loader/commit/2a06ef7ccc63ca42f2c8a827b428fe3d71b25330))
+
 # [1.15.0-dev.7](https://github.com/hyperi-io/dfe-loader/compare/v1.15.0-dev.6...v1.15.0-dev.7) (2026-03-26)
 
 
