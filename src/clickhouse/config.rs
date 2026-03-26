@@ -11,7 +11,17 @@
 
 //! `ClickHouse` connection configuration.
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
+
+/// Deserialise a string that may be YAML null, missing, or empty.
+/// All resolve to empty string (no password).
+fn deserialize_optional_string<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let opt: Option<String> = Option::deserialize(deserializer)?;
+    Ok(opt.unwrap_or_default())
+}
 
 /// Transport protocol for `ClickHouse` connections.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -136,8 +146,10 @@ pub struct ClickHouseConfig {
     /// Username for authentication.
     pub username: String,
 
-    /// Password for authentication.
-    #[serde(default)]
+    /// Password for authentication. Empty string means no password
+    /// (valid for ClickHouse default user). Accepts YAML null, empty string,
+    /// or omitted field — all resolve to empty (no auth header sent).
+    #[serde(default, deserialize_with = "deserialize_optional_string")]
     pub password: String,
 
     /// Enable TLS/SSL for connections.
@@ -411,6 +423,29 @@ mod tests {
         assert_eq!(je, InsertFormat::JsonEachRow);
         let je: InsertFormat = serde_json::from_str(r#""json_each_row""#).unwrap();
         assert_eq!(je, InsertFormat::JsonEachRow);
+    }
+
+    #[test]
+    fn test_password_empty_string() {
+        let json =
+            r#"{"hosts":["localhost:8123"],"database":"db","username":"default","password":""}"#;
+        let config: ClickHouseConfig = serde_json::from_str(json).unwrap();
+        assert!(config.password.is_empty());
+    }
+
+    #[test]
+    fn test_password_null() {
+        let json =
+            r#"{"hosts":["localhost:8123"],"database":"db","username":"default","password":null}"#;
+        let config: ClickHouseConfig = serde_json::from_str(json).unwrap();
+        assert!(config.password.is_empty());
+    }
+
+    #[test]
+    fn test_password_missing() {
+        let json = r#"{"hosts":["localhost:8123"],"database":"db","username":"default"}"#;
+        let config: ClickHouseConfig = serde_json::from_str(json).unwrap();
+        assert!(config.password.is_empty());
     }
 
     #[test]
