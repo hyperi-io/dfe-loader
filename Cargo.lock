@@ -651,7 +651,7 @@ checksum = "3a822ea5bc7590f9d40f1ba12c0dc3c2760f3482c6984db1573ad11031420831"
 [[package]]
 name = "clickhouse"
 version = "0.14.2"
-source = "git+https://github.com/hyperi-io/clickhouse-rs.git?branch=hyperi%2Funified-client#bfaac9a81f84918de16b26a7ae83a5546bb7f75f"
+source = "git+https://github.com/hyperi-io/clickhouse-rs.git?branch=hyperi%2Funified-client#802beb101d7c01ddd944c997eac9217390a2a692"
 dependencies = [
  "bnum",
  "bstr",
@@ -685,7 +685,7 @@ dependencies = [
 [[package]]
 name = "clickhouse-macros"
 version = "0.3.0"
-source = "git+https://github.com/hyperi-io/clickhouse-rs.git?branch=hyperi%2Funified-client#bfaac9a81f84918de16b26a7ae83a5546bb7f75f"
+source = "git+https://github.com/hyperi-io/clickhouse-rs.git?branch=hyperi%2Funified-client#802beb101d7c01ddd944c997eac9217390a2a692"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -696,7 +696,7 @@ dependencies = [
 [[package]]
 name = "clickhouse-types"
 version = "0.1.1"
-source = "git+https://github.com/hyperi-io/clickhouse-rs.git?branch=hyperi%2Funified-client#bfaac9a81f84918de16b26a7ae83a5546bb7f75f"
+source = "git+https://github.com/hyperi-io/clickhouse-rs.git?branch=hyperi%2Funified-client#802beb101d7c01ddd944c997eac9217390a2a692"
 dependencies = [
  "bytes",
  "thiserror 2.0.18",
@@ -1847,9 +1847,9 @@ dependencies = [
 
 [[package]]
 name = "hyperi-rustlib"
-version = "1.20.0"
+version = "1.20.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1a54577845290fd66fb742bae18f01706c9d00825edbc57321dbf644287434bf"
+checksum = "4b8dc89125f702eb17fae7ab778ea34888432cc0ed719b6da31f4c036ad1a7ae"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -3223,7 +3223,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "343d3bd7056eda839b03204e68deff7d1b13aba7af2b2fd16890697274262ee7"
 dependencies = [
  "heck",
- "itertools 0.14.0",
+ "itertools 0.13.0",
  "log",
  "multimap",
  "petgraph",
@@ -3244,7 +3244,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "27c6023962132f4b30eb4c172c91ce92d933da334c59c23cddee82358ddafb0b"
 dependencies = [
  "anyhow",
- "itertools 0.14.0",
+ "itertools 0.13.0",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
