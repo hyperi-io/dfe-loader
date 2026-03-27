@@ -1,3 +1,11 @@
+## [1.15.2](https://github.com/hyperi-io/dfe-loader/compare/v1.15.1...v1.15.2) (2026-03-27)
+
+
+### Bug Fixes
+
+* trigger CI after runner infrastructure fix ([a45bdd8](https://github.com/hyperi-io/dfe-loader/commit/a45bdd8c2a0424405dd9b34f8118562f3f9e15ad))
+* update hyperi-rustlib 1.20.1 and clickhouse-rs fork ([d668ab9](https://github.com/hyperi-io/dfe-loader/commit/d668ab9f00ba21b7c6350181f68fbc2d9907ff99))
+
 # [1.15.0-dev.8](https://github.com/hyperi-io/dfe-loader/compare/v1.15.0-dev.7...v1.15.0-dev.8) (2026-03-26)
 
 
