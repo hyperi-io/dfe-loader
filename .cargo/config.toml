@@ -10,7 +10,7 @@
 # aarch64: NEON (baseline for all ARM64)
 
 [target.x86_64-unknown-linux-gnu]
-rustflags = ["-C", "target-cpu=x86-64-v3"]  # AVX2, BMI1/2, FMA (Haswell+)
+rustflags = ["-C", "target-cpu=x86-64-v3", "-C", "link-arg=-fuse-ld=mold"]  # AVX2, BMI1/2, FMA (Haswell+)
 
 [target.aarch64-unknown-linux-gnu]
 linker = "aarch64-linux-gnu-gcc"
@@ -21,4 +21,3 @@ rustflags = ["-C", "target-cpu=generic"]    # NEON is baseline for ARM64
 rustflags = ["-C", "target-cpu=native"]
 
 # Limit parallel jobs to reduce CPU/memory usage (prevents killing other processes)
-jobs = 2
