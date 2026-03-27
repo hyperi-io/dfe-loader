@@ -525,7 +525,24 @@ Not a direct dep of dfe-loader — lives in the clickhouse-rs fork's dependency 
 
 ---
 
-**Last Updated:** 2026-03-19
+**Last Updated:** 2026-03-27
+
+### Single Versioning Migration + rustlib v1.20 + Release (2026-03-27)
+
+- [x] Update hyperi-ai submodule
+- [x] Migrate .releaserc.json → .releaserc.yaml (branches: [main], all commit types)
+- [x] Update ci.yml (workflow_dispatch with tag input)
+- [x] Fix VERSION + Cargo.toml to v1.15.1 (latest GA)
+- [x] Add .githooks/commit-msg
+- [x] Bump hyperi-rustlib to >=1.20.0 (transport trait split already fixed in 0e47584)
+- [ ] Fix duplicate comment in Cargo.toml
+- [ ] Run clippy + tests (verify compilation)
+- [ ] Code review (/review skill)
+- [ ] Commit: `fix: migrate to single versioning on main`
+- [ ] Push + force-tag v1.15.1 to HEAD
+- [ ] Wait for CI green
+- [ ] Delete release branch
+- [ ] Release
 
 ## From dfe-receiver Audit (2026-03-25)
 

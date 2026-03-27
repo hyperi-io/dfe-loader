@@ -1098,7 +1098,7 @@ dependencies = [
 
 [[package]]
 name = "dfe-loader"
-version = "1.15.0-dev.6"
+version = "1.15.1"
 dependencies = [
  "anyhow",
  "bytes",
@@ -1847,9 +1847,9 @@ dependencies = [
 
 [[package]]
 name = "hyperi-rustlib"
-version = "1.19.7"
+version = "1.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "43056e0e323b17b67ee734ca2267c06b199fce77a43ccea04c2011e0c6494279"
+checksum = "1a54577845290fd66fb742bae18f01706c9d00825edbc57321dbf644287434bf"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -1877,6 +1877,7 @@ dependencies = [
  "sysinfo",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-util",
  "toml 1.0.3+spec-1.1.0",
  "tonic",
  "tonic-prost",
@@ -3222,7 +3223,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "343d3bd7056eda839b03204e68deff7d1b13aba7af2b2fd16890697274262ee7"
 dependencies = [
  "heck",
- "itertools 0.13.0",
+ "itertools 0.14.0",
  "log",
  "multimap",
  "petgraph",
@@ -3243,7 +3244,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "27c6023962132f4b30eb4c172c91ce92d933da334c59c23cddee82358ddafb0b"
 dependencies = [
  "anyhow",
- "itertools 0.13.0",
+ "itertools 0.14.0",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
