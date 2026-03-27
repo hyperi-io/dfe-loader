@@ -535,14 +535,18 @@ Not a direct dep of dfe-loader — lives in the clickhouse-rs fork's dependency 
 - [x] Fix VERSION + Cargo.toml to v1.15.1 (latest GA)
 - [x] Add .githooks/commit-msg
 - [x] Bump hyperi-rustlib to >=1.20.0 (transport trait split already fixed in 0e47584)
-- [ ] Fix duplicate comment in Cargo.toml
-- [ ] Run clippy + tests (verify compilation)
-- [ ] Code review (/review skill)
-- [ ] Commit: `fix: migrate to single versioning on main`
-- [ ] Push + force-tag v1.15.1 to HEAD
-- [ ] Wait for CI green
-- [ ] Delete release branch
-- [ ] Release
+- [x] Fix duplicate comment in Cargo.toml
+- [x] Run clippy + tests (verify compilation — 391 pass, clippy clean)
+- [x] Code review (staged diff reviewed against migration guide)
+- [x] Commit: `fix: migrate to single versioning on main`
+- [x] Push + force-tag v1.15.1 to HEAD
+- [x] Fix ARC runner rustup cross-device link (emptyDir + init-rustup, deployed to all 8 runners)
+- [x] Fix import formatting in transport module
+- [x] Update hyperi-rustlib 1.20.0 → 1.20.1
+- [x] Update clickhouse-rs fork (802beb1: SQL injection fix, stale test DB race, array/map offset)
+- [x] CI green (quality 5m11s, test 3m48s, build amd64 4m47s, arm64 8m33s)
+- [x] Delete release branch + stale merge branch
+- [x] v1.15.2 published (GH Release + R2 binaries at downloads.hyperi.io/dfe-loader/v1.15.2/)
 
 ## From dfe-receiver Audit (2026-03-25)
 
