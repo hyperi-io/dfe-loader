@@ -1,3 +1,10 @@
+## [1.15.3](https://github.com/hyperi-io/dfe-loader/compare/v1.15.2...v1.15.3) (2026-03-29)
+
+
+### Bug Fixes
+
+* security hardening and clickhouse-rs fork alignment ([53ebc48](https://github.com/hyperi-io/dfe-loader/commit/53ebc488375d1502bcc1be8d8072320092939f55))
+
 ## [1.15.2](https://github.com/hyperi-io/dfe-loader/compare/v1.15.1...v1.15.2) (2026-03-27)
 
 
