@@ -45,7 +45,7 @@ use crate::buffer::{FlushBatch, KafkaOffset};
 use crate::clickhouse::circuit_breaker::CircuitBreaker;
 use crate::clickhouse::config::InsertFormat;
 use crate::clickhouse::error::{ClickHouseError, ErrorCategory};
-use crate::clickhouse::{HttpClickHouseClient, SchemaCache};
+use crate::clickhouse::{ClickHouseQueryClient, SchemaCache};
 use crate::transform::Coercer;
 
 /// Split "db.table" into (db, table). Panics if no dot — callers always
@@ -146,7 +146,7 @@ pub struct FailedRow {
 #[derive(Clone)]
 pub struct Inserter {
     /// HTTP client for DDL and schema queries only (no inserts)
-    http_client: Arc<HttpClickHouseClient>,
+    http_client: Arc<ClickHouseQueryClient>,
     /// clickhouse-rs unified client -- dispatches to HTTP or native TCP.
     /// `RowBinary` inserts work on both transports. `JSONEachRow` is HTTP-only.
     ch_client: clickhouse::UnifiedClient,
@@ -174,7 +174,7 @@ impl Inserter {
     /// `JSONEachRow` via `InsertFormatted`. The `http_client` is used only for
     /// DDL and schema queries.
     pub fn new(
-        http_client: Arc<HttpClickHouseClient>,
+        http_client: Arc<ClickHouseQueryClient>,
         ch_client: clickhouse::UnifiedClient,
         config: InserterConfig,
     ) -> Self {
@@ -285,7 +285,7 @@ impl Inserter {
     ///
     /// Dispatches based on `insert_format`:
     /// - `RowBinary`: schema-reflected binary via `DynamicInsert` (fork)
-    /// - `JsonEachRow`: HTTP `JSONEachRow` via `HttpClickHouseClient`
+    /// - `JsonEachRow`: HTTP `JSONEachRow` via `ClickHouseQueryClient`
     ///
     /// - **Transient errors**: Geometric backoff retry up to `max_retries`
     /// - **Data errors**: Returns immediately (caller should salvage)
@@ -327,9 +327,12 @@ impl Inserter {
             let mut write_failed = false;
             for row in rows {
                 if let Err(e) = insert.write_map(row).await {
-                    // Schema mismatch — invalidate and retry
+                    // Schema mismatch — invalidate both fork and loader caches, then retry
                     if matches!(e, clickhouse::dynamic::DynamicError::SchemaMismatch { .. }) {
                         insert.invalidate_schema();
+                        if let Some(cache) = &self.schema_cache {
+                            cache.invalidate(table);
+                        }
                         last_error =
                             Some(crate::Error::ClickHouse(format!("Schema mismatch: {e}")));
                         write_failed = true;
@@ -360,6 +363,10 @@ impl Inserter {
                     return Ok(count as usize);
                 }
                 Err(clickhouse::dynamic::DynamicError::SchemaMismatch { .. }) => {
+                    // Invalidate loader's schema cache alongside the fork's
+                    if let Some(cache) = &self.schema_cache {
+                        cache.invalidate(table);
+                    }
                     if attempt < self.max_retries {
                         let delay = self.backoff_delay(attempt);
                         warn!(
@@ -425,10 +432,14 @@ impl Inserter {
         let mut last_error = None;
         for attempt in 0..=self.max_retries {
             // JSONEachRow is HTTP-only. Get the underlying HTTP client.
-            let http = self
-                .ch_client
-                .as_http()
-                .expect("JSONEachRow inserts require HTTP transport");
+            let http = self.ch_client.as_http().ok_or_else(|| {
+                crate::Error::ClickHouse(
+                    "JSONEachRow insert format requires HTTP transport, \
+                     but native transport is configured. Set transport = 'http' \
+                     or use insert_format = 'rowbinary'."
+                        .into(),
+                )
+            })?;
             let mut insert = http.insert_formatted_with(sql.clone());
 
             if let Err(e) = insert.send(body.clone()).await {

@@ -185,7 +185,7 @@ The extractor extracts:
 struct SchemaCache {
     entries: DashMap<String, SchemaCacheEntry>,
     ttl: Duration,
-    client: Arc<HttpClickHouseClient>,
+    client: Arc<ClickHouseQueryClient>,
 }
 
 impl SchemaCache {
@@ -254,7 +254,7 @@ enum InsertFormat {
 **Client architecture:**
 
 ```rust
-struct HttpClickHouseClient {
+struct ClickHouseQueryClient {
     // Official clickhouse crate — DDL, queries, schema introspection, RowBinary inserts
     ch_client: clickhouse::Client,
     // reqwest — JSONEachRow fallback inserts only

@@ -12,14 +12,14 @@
 //! `ClickHouse` client abstraction.
 //!
 //! Uses two `clickhouse::Client` instances (from the fork):
-//! - `HttpClickHouseClient` wraps one for DDL, schema queries, and health checks
+//! - `ClickHouseQueryClient` wraps one for DDL, schema queries, and health checks
 //! - `Inserter` uses another for all data inserts (`RowBinary` via `DynamicInsert`,
 //!   `JSONEachRow` via `InsertFormatted`)
 //!
 //! ## Architecture
 //!
 //! Core client and types:
-//! - `HttpClickHouseClient` - DDL + schema queries (no inserts)
+//! - `ClickHouseQueryClient` - DDL + schema queries (no inserts)
 //! - `ParsedType`, `ColumnInfo`, `TableSchema` - Type system
 //! - `ClickHouseConfig` - Connection configuration
 //!
@@ -40,7 +40,7 @@ pub mod inserter;
 pub mod schema;
 
 // Re-export core types
-pub use client_http::{HttpClickHouseClient, SharedHttpClient};
+pub use client_http::{ClickHouseQueryClient, SharedQueryClient};
 pub use config::{ClickHouseConfig, InsertFormat, Transport};
 pub use error::{ClickHouseError, ErrorCategory};
 pub use types::{

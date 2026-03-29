@@ -27,7 +27,7 @@ use parking_lot::RwLock;
 use rustc_hash::FxHashMap;
 use tracing::{debug, error, info, warn};
 
-use crate::clickhouse::{HttpClickHouseClient, TableSchema};
+use crate::clickhouse::{ClickHouseQueryClient, TableSchema};
 
 /// Cached schema with timestamp and metadata
 struct CachedSchema {
@@ -265,7 +265,7 @@ impl SchemaCache {
     /// Returns a handle that can be used to cancel the task.
     pub fn start_background_refresh(
         self: &Arc<Self>,
-        client: Arc<HttpClickHouseClient>,
+        client: Arc<ClickHouseQueryClient>,
     ) -> tokio::task::JoinHandle<()> {
         let cache = Arc::clone(self);
         let interval = Duration::from_secs(cache.config.refresh_interval_secs);

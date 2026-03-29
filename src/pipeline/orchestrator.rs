@@ -30,7 +30,7 @@ use hyperi_rustlib::memory::{MemoryGuard, MemoryGuardConfig};
 use crate::Result;
 use crate::buffer::{BufferManager, FlushBatch, KafkaOffset};
 use crate::clickhouse::{
-    HttpClickHouseClient, Inserter, InserterConfig, SchemaCache, SharedSchemaCache,
+    ClickHouseQueryClient, Inserter, InserterConfig, SchemaCache, SharedSchemaCache,
 };
 use crate::column_meta::{ColumnMetaCache, parse_directives};
 use crate::config::{Config, MetadataConfig, SharedConfig, TableCaptureConfig};
@@ -334,7 +334,7 @@ impl Orchestrator {
 
         // Create HTTP client for DDL/schema queries
         let http_client = Arc::new(
-            HttpClickHouseClient::new(&ch_config)
+            ClickHouseQueryClient::new(&ch_config)
                 .map_err(|e| crate::Error::ClickHouse(e.to_string()))?,
         );
 

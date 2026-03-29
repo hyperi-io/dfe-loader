@@ -413,7 +413,7 @@ pub fn get_kafka_config() -> KafkaConfig {
 }
 
 /// Helper to create HTTP `ClickHouse` client for tests
-pub fn create_http_test_client() -> Option<dfe_loader::clickhouse::HttpClickHouseClient> {
+pub fn create_http_test_client() -> Option<dfe_loader::clickhouse::ClickHouseQueryClient> {
     let ch = ClickHouseTestConfig::from_env();
     if !ch.is_reachable() {
         return None;
@@ -428,7 +428,7 @@ pub fn create_http_test_client() -> Option<dfe_loader::clickhouse::HttpClickHous
         tls: ch.tls,
         ..Default::default()
     };
-    dfe_loader::clickhouse::HttpClickHouseClient::new(&ch_config).ok()
+    dfe_loader::clickhouse::ClickHouseQueryClient::new(&ch_config).ok()
 }
 
 /// Create a clickhouse-rs fork `UnifiedClient` for integration tests.
@@ -456,7 +456,7 @@ pub fn create_ch_test_client() -> Option<clickhouse::UnifiedClient> {
 
 /// Drop a test table — uses ON CLUSTER for remote cluster, plain for Docker.
 pub async fn drop_http_test_table(
-    client: &dfe_loader::clickhouse::HttpClickHouseClient,
+    client: &dfe_loader::clickhouse::ClickHouseQueryClient,
     table_name: &str,
 ) {
     let ch = ClickHouseTestConfig::from_env();

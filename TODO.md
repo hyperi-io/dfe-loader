@@ -145,36 +145,22 @@ Phases 1-3 complete (fork activated, InsertFormat dispatch wired, ParsedType ded
 
 **Step D (IN PROGRESS):** Unified client migration (`hyperi/unified-client` branch).
 
-`HttpClickHouseClient` and `Inserter` now use `clickhouse::UnifiedClient` for
+`ClickHouseQueryClient` and `Inserter` now use `clickhouse::UnifiedClient` for
 runtime transport dispatch. Native TCP or HTTP selected from config at startup.
 
 Done:
 - [x] Cargo.toml: patch points to `hyperi/unified-client`, native-transport + native-tls-rustls enabled
-- [x] `HttpClickHouseClient::new()`: builds `UnifiedClient` from `Transport::Http` or `Transport::Native`
+- [x] `ClickHouseQueryClient::new()`: builds `UnifiedClient` from `Transport::Http` or `Transport::Native`
 - [x] `Inserter`: uses `UnifiedClient` for RowBinary inserts (both transports)
 - [x] JSONEachRow path: uses `as_http()` fallback (HTTP-only, errors on native)
 - [x] Compiles clean
 
-Remaining:
-- [ ] Integration test: native transport insert against devex cluster
-- [ ] Integration test: HTTP transport insert (regression check)
-- [ ] Rename `HttpClickHouseClient` to `ClickHouseQueryClient` (no longer HTTP-specific)
-- [ ] End-to-end test: Kafka -> native TCP -> ClickHouse pipeline
+Remaining (dfe-loader side only — fork work tracked in clickhouse-rs):
+- [x] Rename `HttpClickHouseClient` to `ClickHouseQueryClient` (no longer HTTP-specific)
 - [ ] Update .env.example with CLICKHOUSE_PROTOCOL=native option
-Fork `hyperi/optimise-1` branch has `src/dynamic/` module: ParsedType, DynamicSchema,
-SchemaCache, RowBinary encoder, DynamicInsert, DynamicBatcher.
-
-Remaining tasks:
-- [x] Activate fork via `[patch.crates-io]`
-- [x] Wire `InsertFormat` dispatch (RowBinary default, JSONEachRow fallback)
-- [x] Replace loader `ParsedType` with re-export from fork
-- [ ] Integration test DynamicInsert RowBinary path against devex cluster
-- [ ] Merge fork branch chain to main (batching → native → pooling → lc-insert → optimise-1)
-- [ ] Publish merged fork to crates.io as a pre-release (`0.14.x-hyperi.1`)
-- [ ] Update `Cargo.toml` to use published pre-release (remove `[patch]`)
+- [ ] Update `Cargo.toml` to use published pre-release when available (remove `[patch]`)
 - [ ] Confirm JSON type (GA v25.3) insert/query works end-to-end
 - [ ] Confirm full type support: Variant, Dynamic, Nested, BFloat16, Time, AggregateFunction
-- [ ] Once stable, open PR to upstream `clickhouse-rs`
 
 ### Consume hyperi-rustlib v1.16.0 (Dynamic Linking) ✓ COMPLETE
 
@@ -219,14 +205,7 @@ rustlib v1.14.0+ switches rdkafka to dynamic-linking against system librdkafka
 Released with: MemoryGuard, DFE metrics groups, Kafka transport consolidation,
 clickhouse-rs fork activation, security events, dual-mode test infra, security fixes.
 
-### Renovate Remediation
-
-- [ ] Verify Renovate is running (check Dependency Dashboard issue on GitHub)
-- [ ] If still broken: deep web research on Mend Renovate GitHub App resolution issues
-- [ ] Confirm at least one automated dependency PR has been created
-- [ ] Remove `schedule` workarounds once confirmed working
-
-### Test Coverage Review
+### Test Coverage + Integration Tests
 
 - [ ] Review existing tests for variety and gaps (unit, integration, e2e)
 - [ ] Add full startup smoke test to catch init panics (config load, transport init, schema cache, metrics bind)
@@ -234,6 +213,10 @@ clickhouse-rs fork activation, security events, dual-mode test infra, security f
 - [ ] Add negative tests for hot-reload (invalid config, restart-required field change)
 - [ ] Verify MemoryGuard triggers consumer pause under simulated pressure
 - [ ] Add circuit breaker state transition integration test (closed → open → half-open → closed)
+- [ ] Integration test: native transport insert against devex cluster
+- [ ] Integration test: HTTP transport insert (regression check)
+- [ ] Integration test: DynamicInsert RowBinary path against devex cluster
+- [ ] End-to-end test: Kafka → native TCP → ClickHouse pipeline
 
 ### Documentation Review
 
@@ -345,21 +328,6 @@ Each is a new file implementing `DlqBackend` trait + feature flag. No changes to
 
 ---
 
-## Backlog: Migrate `paste` → `pastey` in clickhouse-rs fork
-
-RUSTSEC-2024-0436: `paste` crate unmaintained. Transitive dependency via
-`polonius-the-crab` → `higher-kinded-types` → `macro_rules_attribute`.
-`pastey` is the recommended drop-in replacement fork.
-
-Not a direct dep of dfe-loader — lives in the clickhouse-rs fork's dependency chain.
-`cel-interpreter` also depends on `paste` (via hyperi-rustlib) — upstream fix needed.
-
-- [ ] Replace `paste` with `pastey` in clickhouse-rs fork (if `polonius-the-crab` migrates)
-- [ ] Track `cel-interpreter` upstream migration
-- [ ] Remove `RUSTSEC-2024-0436` ignore from `deny.toml` once resolved
-
----
-
 ## Deferred
 
 - [ ] Receiver WAL — required for at-least-once with gRPC mesh
@@ -390,12 +358,12 @@ Not a direct dep of dfe-loader — lives in the clickhouse-rs fork's dependency 
 - [x] Decision: Drop Arrow/clickhouse-arrow, use `clickhouse` crate (HTTP, JSONEachRow)
 - [x] Decision: JSONEachRow via reqwest (no DynamicRow — serde overhead negligible)
 - [x] Phase 0: Mison deleted (3,436 lines), archive branch created
-- [x] Phase 1: `HttpClickHouseClient` created (clickhouse + reqwest dual-client)
+- [x] Phase 1: `ClickHouseQueryClient` created (clickhouse + reqwest dual-client)
 - [x] Phase 2: Buffer layer migrated to `Vec<Map<String, Value>>` — `FlushBatch`, `BufferManager`
 - [x] Phase 3: Arrow dependencies removed (`clickhouse-arrow`, `arrow`, `arrow-json`, `futures-util`)
   - Deleted `src/clickhouse/client.rs` (ArrowClickHouseClient, 644 lines)
   - Deleted `src/transform/arrow.rs`, `src/buffer/arrow.rs`, `src/mison/` (6 files)
-- [x] Phase 4: Inserter updated for `Vec<Map<String, Value>>` + `HttpClickHouseClient`
+- [x] Phase 4: Inserter updated for `Vec<Map<String, Value>>` + `ClickHouseQueryClient`
 - [x] Phase 5: Pipeline wired, integration tests migrated, benchmarks rewritten
   - 520 tests passing, all bench files compile clean
 

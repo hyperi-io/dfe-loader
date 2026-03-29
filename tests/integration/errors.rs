@@ -450,7 +450,7 @@ async fn test_error_empty_batch_insert() {
 
 #[tokio::test]
 async fn test_error_invalid_clickhouse_host() {
-    use dfe_loader::clickhouse::{ClickHouseConfig, HttpClickHouseClient};
+    use dfe_loader::clickhouse::{ClickHouseConfig, ClickHouseQueryClient};
 
     let ch_config = ClickHouseConfig {
         hosts: vec!["invalid-host-12345.example.com:8123".to_string()],
@@ -460,7 +460,7 @@ async fn test_error_invalid_clickhouse_host() {
         ..Default::default()
     };
 
-    let client = HttpClickHouseClient::new(&ch_config);
+    let client = ClickHouseQueryClient::new(&ch_config);
     assert!(
         client.is_ok(),
         "Client creation should succeed (lazy connect)"

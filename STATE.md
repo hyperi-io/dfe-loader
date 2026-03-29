@@ -42,11 +42,6 @@ See [LICENSE](LICENSE), [COMMERCIAL.md](COMMERCIAL.md), and [CONTRIBUTING.md](CO
 
 ## Build Settings
 
-```bash
-# Limit Cargo resource consumption (optional)
-export CARGO_BUILD_JOBS=2
-```
-
 **SIMD Flags:** `.cargo/config.toml` configures `-C target-cpu=native` for sonic-rs SIMD optimizations.
 
 ---
@@ -314,7 +309,7 @@ Per-table failure detection (`src/clickhouse/circuit_breaker.rs`):
 ### Schema Cache
 
 TTL-based with background refresh (`src/clickhouse/schema.rs`):
-- Fetches from `system.columns` via `HttpClickHouseClient`
+- Fetches from `system.columns` via `ClickHouseQueryClient`
 - Background refresh task via `start_background_refresh()`
 - Error-based invalidation on schema mismatch
 
@@ -495,7 +490,6 @@ Start a fresh session after any changes to this file.
 |----------|-----------|
 | FSL-1.1-ALv2 licensing | Source-available with Apache 2.0 conversion after 2 years |
 | JFrog domain stays `hypersec.jfrog.io` | Account-level, not user-facing; repo names updated to `hyperi-*` |
-| Parallel cargo jobs = 2 | Prevents CPU starvation on local builds and CI |
 | HyperI casing | Capital H, capital I for brand; HYPERI for legal entity |
 | crates.io over git deps | hyperi-rustlib is public on crates.io — no private registry needed |
 | settings.local.json broad permissions | Prevents Claude Code blocking on approval during AFK CI monitoring sessions |
