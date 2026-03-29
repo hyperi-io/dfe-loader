@@ -38,7 +38,7 @@ pub type Result<T> = std::result::Result<T, ClickHouseError>;
 ///
 /// Wraps `clickhouse::UnifiedClient` for runtime transport dispatch.
 /// Data inserts are handled by `Inserter` via `DynamicInsert` or `InsertFormatted`.
-pub struct HttpClickHouseClient {
+pub struct ClickHouseQueryClient {
     /// Unified client -- dispatches to HTTP or native TCP based on config.
     ch_client: clickhouse::UnifiedClient,
     /// Database name.
@@ -76,7 +76,7 @@ struct CountRow {
     count: u64,
 }
 
-impl HttpClickHouseClient {
+impl ClickHouseQueryClient {
     /// Create a new client from config, dispatching to HTTP or native TCP.
     ///
     /// # Errors
@@ -114,6 +114,21 @@ impl HttpClickHouseClient {
                     // Extract hostname for SNI (strip port if present).
                     let host = endpoint.split(':').next().unwrap_or(&endpoint);
                     builder = builder.with_tls(host);
+                }
+                // Wire additional hosts for failover (native transport supports
+                // multi-host via with_addrs — reconnects to next host on failure).
+                if config.hosts.len() > 1 {
+                    let addrs: Vec<std::net::SocketAddr> = config
+                        .hosts
+                        .iter()
+                        .filter_map(|h| {
+                            use std::net::ToSocketAddrs;
+                            h.to_socket_addrs().ok()?.next()
+                        })
+                        .collect();
+                    if addrs.len() > 1 {
+                        builder = builder.with_addrs(addrs);
+                    }
                 }
                 builder.build()
             }
@@ -154,8 +169,10 @@ impl HttpClickHouseClient {
             "SELECT name, type, position, default_kind, default_expression, comment, \
              is_in_primary_key, is_in_sorting_key \
              FROM system.columns \
-             WHERE database = '{db}' AND table = '{tbl}' \
-             ORDER BY position"
+             WHERE database = {} AND table = {} \
+             ORDER BY position",
+            escape_string(&db),
+            escape_string(&tbl)
         );
 
         let rows: Vec<SystemColumn> =
@@ -200,7 +217,9 @@ impl HttpClickHouseClient {
     pub async fn fetch_table_comment(&self, table: &str) -> Result<String> {
         let (db, tbl) = parse_db_table(table, &self.database);
         let sql = format!(
-            "SELECT comment AS value FROM system.tables WHERE database = '{db}' AND name = '{tbl}'"
+            "SELECT comment AS value FROM system.tables WHERE database = {} AND name = {}",
+            escape_string(&db),
+            escape_string(&tbl)
         );
 
         let rows: Vec<SingleString> =
@@ -218,8 +237,10 @@ impl HttpClickHouseClient {
         let (db, tbl) = parse_db_table(table, &self.database);
         let sql = format!(
             "SELECT name, comment FROM system.columns \
-             WHERE database = '{db}' AND table = '{tbl}' AND comment != '' \
-             ORDER BY position"
+             WHERE database = {} AND table = {} AND comment != '' \
+             ORDER BY position",
+            escape_string(&db),
+            escape_string(&tbl)
         );
 
         // The clickhouse crate requires a Row type for fetch_all.
@@ -253,8 +274,8 @@ impl HttpClickHouseClient {
     /// List all tables in the database.
     pub async fn list_tables(&self) -> Result<Vec<String>> {
         let sql = format!(
-            "SELECT name AS name FROM system.tables WHERE database = '{}'",
-            self.database
+            "SELECT name AS name FROM system.tables WHERE database = {}",
+            escape_string(&self.database)
         );
 
         let rows: Vec<TableName> = self
@@ -274,9 +295,11 @@ impl HttpClickHouseClient {
     /// * `table` - Table name (may include "db.table" format)
     /// * `where_clause` - Optional WHERE condition (without "WHERE" keyword)
     pub async fn query_count(&self, table: &str, where_clause: Option<&str>) -> Result<usize> {
+        let (db, tbl) = parse_db_table(table, &self.database);
+        let fq_table = format!("{}.{}", escape_identifier(&db), escape_identifier(&tbl));
         let sql = match where_clause {
-            Some(w) => format!("SELECT COUNT(*) AS count FROM {table} WHERE {w}"),
-            None => format!("SELECT COUNT(*) AS count FROM {table}"),
+            Some(w) => format!("SELECT COUNT(*) AS count FROM {fq_table} WHERE {w}"),
+            None => format!("SELECT COUNT(*) AS count FROM {fq_table}"),
         };
 
         let row: CountRow = self
@@ -337,7 +360,11 @@ impl HttpClickHouseClient {
         }
 
         // Use InsertFormatted for JSONEachRow via HTTP
-        let sql = format!("INSERT INTO {db}.{tbl} FORMAT JSONEachRow");
+        let sql = format!(
+            "INSERT INTO {}.{} FORMAT JSONEachRow",
+            escape_identifier(&db),
+            escape_identifier(&tbl)
+        );
         let mut insert = self
             .ch_client
             .insert_formatted_with(sql)
@@ -364,8 +391,48 @@ fn parse_db_table(table: &str, default_db: &str) -> (String, String) {
     }
 }
 
+/// Escape a ClickHouse identifier (database, table, column name) with backticks.
+///
+/// Escapes backslashes, single quotes, backticks, tabs, and newlines inside
+/// the identifier. Mirrors the fork's `sql::escape::identifier()`.
+fn escape_identifier(name: &str) -> String {
+    let mut out = String::with_capacity(name.len() + 2);
+    out.push('`');
+    for ch in name.chars() {
+        match ch {
+            '\\' | '\'' | '`' | '\t' | '\n' => {
+                out.push('\\');
+                out.push(ch);
+            }
+            _ => out.push(ch),
+        }
+    }
+    out.push('`');
+    out
+}
+
+/// Escape a ClickHouse string value with single quotes.
+///
+/// Escapes backslashes, single quotes, backticks, tabs, and newlines inside
+/// the value. Mirrors the fork's `sql::escape::string()`.
+fn escape_string(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('\'');
+    for ch in value.chars() {
+        match ch {
+            '\\' | '\'' | '`' | '\t' | '\n' => {
+                out.push('\\');
+                out.push(ch);
+            }
+            _ => out.push(ch),
+        }
+    }
+    out.push('\'');
+    out
+}
+
 /// Thread-safe reference to HTTP `ClickHouse` client.
-pub type SharedHttpClient = Arc<HttpClickHouseClient>;
+pub type SharedQueryClient = Arc<ClickHouseQueryClient>;
 
 #[cfg(test)]
 mod tests {
@@ -390,19 +457,37 @@ mod tests {
     }
 
     #[test]
+    fn test_escape_identifier() {
+        assert_eq!(escape_identifier("events"), "`events`");
+        assert_eq!(escape_identifier("my`table"), "`my\\`table`");
+        assert_eq!(escape_identifier("back\\slash"), "`back\\\\slash`");
+        // Tab character should be escaped
+        assert_eq!(escape_identifier("tab\there"), "`tab\\\there`");
+    }
+
+    #[test]
+    fn test_escape_string() {
+        assert_eq!(escape_string("hello"), "'hello'");
+        assert_eq!(escape_string("it's"), "'it\\'s'");
+        assert_eq!(escape_string("back\\slash"), "'back\\\\slash'");
+        // Newline character should be escaped
+        assert_eq!(escape_string("new\nline"), "'new\\\nline'");
+    }
+
+    #[test]
     fn test_client_new_no_hosts() {
         let config = ClickHouseConfig {
             hosts: vec![],
             ..Default::default()
         };
-        let result = HttpClickHouseClient::new(&config);
+        let result = ClickHouseQueryClient::new(&config);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_client_new_with_defaults() {
         let config = ClickHouseConfig::default();
-        let client = HttpClickHouseClient::new(&config);
+        let client = ClickHouseQueryClient::new(&config);
         assert!(client.is_ok());
         let client = client.unwrap();
         assert_eq!(client.database(), "default");

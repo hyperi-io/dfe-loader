@@ -284,7 +284,7 @@ and passes existing tests.
 
 ### Phase 2: Switch to DynamicInsert
 
-Replace `HttpClickHouseClient` insert methods with `client.dynamic_insert()`.
+Replace `ClickHouseQueryClient` insert methods with `client.dynamic_insert()`.
 Drop `reqwest` as a direct dependency for data inserts. Keep for health checks
 if needed, or migrate those to the fork's `Client::query()`.
 

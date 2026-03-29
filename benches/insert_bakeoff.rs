@@ -9,7 +9,7 @@
 // License:   FSL-1.1-ALv2
 // Copyright: (c) 2026 HYPERI PTY LIMITED
 
-//! Insert Bakeoff: `JSONEachRow` (`HttpClickHouseClient`) vs `RowBinary` (clickhouse crate)
+//! Insert Bakeoff: `JSONEachRow` (`ClickHouseQueryClient`) vs `RowBinary` (clickhouse crate)
 //!
 //! **Requires a running `ClickHouse` instance.** Set env vars:
 //!
@@ -40,7 +40,7 @@ use criterion::{BenchmarkId, Criterion, SamplingMode, criterion_group, criterion
 use serde::Serialize;
 use serde_json::{Map, Value};
 
-use dfe_loader::clickhouse::{ClickHouseConfig, HttpClickHouseClient, Transport};
+use dfe_loader::clickhouse::{ClickHouseConfig, ClickHouseQueryClient, Transport};
 
 // =============================================================================
 // ClickHouse Row struct for official crate (RowBinary path)
@@ -144,7 +144,7 @@ impl BenchEnv {
             .with_database(&self.database)
     }
 
-    fn http_ch_client(&self) -> HttpClickHouseClient {
+    fn http_ch_client(&self) -> ClickHouseQueryClient {
         let config = ClickHouseConfig {
             hosts: vec![format!("{}:{}", self.host, self.http_port)],
             transport: Transport::Http,
@@ -153,7 +153,7 @@ impl BenchEnv {
             password: self.password.clone(),
             ..Default::default()
         };
-        HttpClickHouseClient::new(&config).expect("http client")
+        ClickHouseQueryClient::new(&config).expect("http client")
     }
 }
 
@@ -207,9 +207,9 @@ async fn truncate_table(env: &BenchEnv, table: &str) {
 // Insert implementations
 // =============================================================================
 
-/// `JSONEachRow` insert — production path via `HttpClickHouseClient`.
+/// `JSONEachRow` insert — production path via `ClickHouseQueryClient`.
 async fn insert_jsoneachrow(
-    client: &HttpClickHouseClient,
+    client: &ClickHouseQueryClient,
     db: &str,
     table: &str,
     rows: &[Map<String, Value>],

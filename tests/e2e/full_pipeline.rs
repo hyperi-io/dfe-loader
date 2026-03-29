@@ -151,7 +151,7 @@ async fn test_full_pipeline_e2e() {
 
     assert_eq!(buffer_manager.pending_rows(), 3);
 
-    // Insert using JSONEachRow via HttpClickHouseClient
+    // Insert using JSONEachRow via ClickHouseQueryClient
     let rows: Vec<serde_json::Map<String, serde_json::Value>> = vec![
         json!({"id": 1, "action": "login", "user_id": 100, "user_name": "alice", "value": 1.5, "category": &table_name}).as_object().unwrap().clone(),
         json!({"id": 2, "action": "purchase", "user_id": 200, "user_name": "bob", "value": 25.99, "category": &table_name}).as_object().unwrap().clone(),

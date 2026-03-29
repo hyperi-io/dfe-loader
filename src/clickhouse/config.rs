@@ -290,14 +290,7 @@ impl ClickHouseConfig {
                 (Transport::Http, 9000 | 9440) => {
                     return Err(format!(
                         "Transport is 'http' but host {host} uses native port {port}. \
-                                 Use port 8123 for HTTP or set protocol to 'native'."
-                    ));
-                }
-                (Transport::Native, 9000 | 9440) => {
-                    return Err(format!(
-                        "Native transport (port {port}) is not yet supported. \
-                                 Use HTTP: set hosts to port 8123 and protocol to 'http'. \
-                                 See https://github.com/hyperi-io/dfe-loader/issues/6"
+                                 Use port 8123 for HTTP or set transport to 'native'."
                     ));
                 }
                 _ => {}
@@ -449,15 +442,15 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_native_port_9000_rejected() {
+    fn test_validate_native_port_9000_ok() {
         let config = ClickHouseConfig {
             hosts: vec!["clickhouse:9000".to_string()],
             transport: Transport::Native,
             ..Default::default()
         };
         let result = config.validate();
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("not yet supported"));
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_empty());
     }
 
     #[test]
