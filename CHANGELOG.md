@@ -1,3 +1,10 @@
+## [1.15.4](https://github.com/hyperi-io/dfe-loader/compare/v1.15.3...v1.15.4) (2026-03-30)
+
+
+### Bug Fixes
+
+* update clickhouse-rs fork for DateTime64 RowBinary encoding ([5b61b0a](https://github.com/hyperi-io/dfe-loader/commit/5b61b0a79fcaee59e40b2de0e6deed32952adafc)), closes [#18](https://github.com/hyperi-io/dfe-loader/issues/18)
+
 ## [1.15.3](https://github.com/hyperi-io/dfe-loader/compare/v1.15.2...v1.15.3) (2026-03-29)
 
 
