@@ -651,7 +651,7 @@ checksum = "3a822ea5bc7590f9d40f1ba12c0dc3c2760f3482c6984db1573ad11031420831"
 [[package]]
 name = "clickhouse"
 version = "0.14.2"
-source = "git+https://github.com/hyperi-io/clickhouse-rs.git?branch=hyperi%2Funified-client#59719ee28822fe6a68039bfe56220cc0dafc9396"
+source = "git+https://github.com/hyperi-io/clickhouse-rs.git?branch=hyperi%2Funified-client#01667ca741835a0eb1f859bb43465bba67005e3c"
 dependencies = [
  "bnum",
  "bstr",
@@ -685,7 +685,7 @@ dependencies = [
 [[package]]
 name = "clickhouse-macros"
 version = "0.3.0"
-source = "git+https://github.com/hyperi-io/clickhouse-rs.git?branch=hyperi%2Funified-client#59719ee28822fe6a68039bfe56220cc0dafc9396"
+source = "git+https://github.com/hyperi-io/clickhouse-rs.git?branch=hyperi%2Funified-client#01667ca741835a0eb1f859bb43465bba67005e3c"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -696,7 +696,7 @@ dependencies = [
 [[package]]
 name = "clickhouse-types"
 version = "0.1.1"
-source = "git+https://github.com/hyperi-io/clickhouse-rs.git?branch=hyperi%2Funified-client#59719ee28822fe6a68039bfe56220cc0dafc9396"
+source = "git+https://github.com/hyperi-io/clickhouse-rs.git?branch=hyperi%2Funified-client#01667ca741835a0eb1f859bb43465bba67005e3c"
 dependencies = [
  "bytes",
  "thiserror 2.0.18",
@@ -1098,7 +1098,7 @@ dependencies = [
 
 [[package]]
 name = "dfe-loader"
-version = "1.15.3"
+version = "1.15.4"
 dependencies = [
  "anyhow",
  "bytes",
