@@ -1,3 +1,11 @@
+## [1.15.6](https://github.com/hyperi-io/dfe-loader/compare/v1.15.5...v1.15.6) (2026-03-30)
+
+
+### Bug Fixes
+
+* restore .into() for SensitiveString, update fork with JSON RowBinary support ([d1c9619](https://github.com/hyperi-io/dfe-loader/commit/d1c9619997ac6a7186c498a69bc58427a7152f9b)), closes [#18](https://github.com/hyperi-io/dfe-loader/issues/18)
+* update fork with Decimal(P,S) resolution and all 22 integration tests passing ([51604de](https://github.com/hyperi-io/dfe-loader/commit/51604de6ff06d2ea2a516d872ee0b0b0ada7a00b)), closes [#18](https://github.com/hyperi-io/dfe-loader/issues/18)
+
 ## [1.15.5](https://github.com/hyperi-io/dfe-loader/compare/v1.15.4...v1.15.5) (2026-03-30)
 
 
