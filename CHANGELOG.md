@@ -1,3 +1,12 @@
+## [1.15.5](https://github.com/hyperi-io/dfe-loader/compare/v1.15.4...v1.15.5) (2026-03-30)
+
+
+### Bug Fixes
+
+* clippy useless .into() and update clickhouse-rs fork ([b5fe600](https://github.com/hyperi-io/dfe-loader/commit/b5fe6008a13b0fd9f79dc4cd3bc293d2a9586c61)), closes [#18](https://github.com/hyperi-io/dfe-loader/issues/18)
+* Mismatched type error ([fdd968a](https://github.com/hyperi-io/dfe-loader/commit/fdd968a0543fba2e593caafff6ac437e3a16c109))
+* update clickhouse-rs fork for JSON encoding and Bool coercion ([aa3450d](https://github.com/hyperi-io/dfe-loader/commit/aa3450dd813e3b537d67f2ca46302deca87824d1)), closes [#18](https://github.com/hyperi-io/dfe-loader/issues/18)
+
 ## [1.15.4](https://github.com/hyperi-io/dfe-loader/compare/v1.15.3...v1.15.4) (2026-03-30)
 
 
