@@ -85,7 +85,10 @@ impl TransportAdapter {
             transport_config.sasl_mechanism =
                 sasl.mechanism().as_rdkafka_mechanism().map(String::from);
             transport_config.sasl_username = Some(sasl.username.clone());
-            transport_config.sasl_password = Some(sasl.password.expose().to_string());
+            #[allow(clippy::useless_conversion)] // String→SensitiveString via Into
+            {
+                transport_config.sasl_password = Some(sasl.password.expose().to_string().into());
+            }
 
             // Set security protocol based on TLS
             if config.tls.as_ref().is_some_and(|t| t.enabled) {
