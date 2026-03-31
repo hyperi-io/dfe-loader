@@ -662,7 +662,8 @@ impl Orchestrator {
                             // Update stats from coordinator outcome
                             self.stats.messages_processed += outcome.processed;
                             self.stats.messages_dlq += outcome.errors;
-                            self.stats.errors += outcome.errors;
+                            // stats.errors tracks ClickHouse insert failures only (in flush_batches_transport),
+                            // NOT per-message processing failures. Do not increment here.
 
                             // Update buffer stats (once per batch, not per message)
                             let buf_stats = buffer_manager.stats();

@@ -128,11 +128,6 @@ impl DfeApp for App {
             Ok(pool) => {
                 let pool = Arc::new(pool);
                 pool.register_metrics(&manager);
-                pool.set_memory_guard(Arc::clone(&Arc::new(
-                    hyperi_rustlib::memory::MemoryGuard::new(
-                        hyperi_rustlib::memory::MemoryGuardConfig::from_env("DFE_LOADER"),
-                    ),
-                )));
                 pool.set_scaling_pressure(Arc::clone(&scaling));
                 info!(
                     max_threads = pool.max_threads(),
@@ -157,8 +152,9 @@ impl DfeApp for App {
 
         let shutdown_token = orchestrator.shutdown_token();
 
-        // Start worker pool scaling loop (if pool exists)
+        // Wire worker pool to orchestrator's memory guard (single instance, shared state)
         if let Some(ref pool) = worker_pool {
+            pool.set_memory_guard(Arc::clone(orchestrator.memory_guard()));
             pool.start_scaling_loop(shutdown_token.clone());
         }
 
