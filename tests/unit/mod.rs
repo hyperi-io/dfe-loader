@@ -8,3 +8,5 @@
 
 #[cfg(feature = "transport-memory")]
 mod transport;
+
+mod parallel_test;
