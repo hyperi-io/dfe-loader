@@ -19,7 +19,7 @@ use crate::config::{MetadataConfig, TableCaptureConfig};
 use crate::schema::TableTags;
 
 /// Per-table capture override resolution cache.
-pub(crate) struct CaptureOverrides {
+pub struct CaptureOverrides {
     /// Resolved per-table configs (populated by `ensure_cached` or `update_from_comment`).
     configs: FxHashMap<String, TableCaptureConfig>,
     /// Tables with `_json` disabled (from config, O(1) lookup).
