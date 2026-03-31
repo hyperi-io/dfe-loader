@@ -265,6 +265,7 @@ pub struct Orchestrator {
     metrics: Option<Metrics>,
     scaling: Option<Arc<ScalingPressure>>,
     memory_guard: Arc<MemoryGuard>,
+    worker_pool: Option<Arc<hyperi_rustlib::worker::AdaptiveWorkerPool>>,
 }
 
 impl Orchestrator {
@@ -279,6 +280,7 @@ impl Orchestrator {
             metrics: None,
             scaling: None,
             memory_guard,
+            worker_pool: None,
         }
     }
 
@@ -293,6 +295,7 @@ impl Orchestrator {
             metrics: Some(metrics),
             scaling: None,
             memory_guard,
+            worker_pool: None,
         }
     }
 
@@ -306,6 +309,20 @@ impl Orchestrator {
     pub fn with_scaling(mut self, scaling: Arc<ScalingPressure>) -> Self {
         self.scaling = Some(scaling);
         self
+    }
+
+    /// Set the adaptive worker pool for parallel message processing.
+    pub fn with_worker_pool(
+        mut self,
+        pool: Arc<hyperi_rustlib::worker::AdaptiveWorkerPool>,
+    ) -> Self {
+        self.worker_pool = Some(pool);
+        self
+    }
+
+    /// Access the memory guard (for worker pool integration in main.rs).
+    pub fn memory_guard(&self) -> &Arc<MemoryGuard> {
+        &self.memory_guard
     }
 
     /// Get the shutdown token for external shutdown requests
@@ -788,91 +805,61 @@ impl Orchestrator {
 
                     match messages {
                         Ok(batch) if !batch.is_empty() => {
-                            // Process batch of messages
-                            for kafka_msg in batch {
-                                // Track memory for backpressure
-                                self.memory_guard.add_bytes(kafka_msg.payload.len() as u64);
-
-                                self.stats.messages_received += 1;
-                                if let Some(ref m) = self.metrics {
+                            // Track memory for backpressure (pre-loop)
+                            for msg in &batch {
+                                self.memory_guard.add_bytes(msg.payload.len() as u64);
+                            }
+                            self.stats.messages_received += batch.len() as u64;
+                            if let Some(ref m) = self.metrics {
+                                for _ in 0..batch.len() {
                                     m.record_received();
                                 }
-
-                                // Hot path: process_message uses sonic-rs directly on payload bytes
-                                // No intermediate copies - payload bytes go straight to parser
-                                match self.process_message(
-                                    &kafka_msg,
-                                    json_primary_mode,
-                                    &format_detector,
-                                    &router,
-                                    &transformer,
-                                    &extractor,
-                                    &schema_cache,
-                                    &col_meta_cache,
-                                    &enrichment,
-                                    &mut buffer_manager,
-                                    &mut capture_overrides,
-                                    &mut field_mapping_cache,
-                                    &mut computed_column_cache,
-                                ) {
-                                    Ok(table) => {
-                                        self.stats.messages_processed += 1;
-                                        if let Some(ref m) = self.metrics {
-                                            m.record_processed(&table);
-                                        }
-                                    }
-                                    Err(e) => {
-                                        self.stats.messages_dlq += 1;
-                                        if let Some(ref m) = self.metrics {
-                                            m.record_dlq();
-                                        }
-
-                                        // Send to DLQ if available (bounded channel, non-blocking)
-                                        if dlq.is_some() {
-                                            let entry = DlqEntry::new(
-                                                "loader",
-                                                e.to_string(),
-                                                kafka_msg.payload.clone(),
-                                            )
-                                            .with_source(DlqSource::kafka(
-                                                kafka_msg.topic.to_string(),
-                                                kafka_msg.partition,
-                                                kafka_msg.offset,
-                                            ));
-
-                                            match dlq_tx.try_send(entry) {
-                                                Ok(()) => {
-                                                    hyperi_rustlib::logger::security::record_dlq(
-                                                        "processing",
-                                                        &e.to_string(),
-                                                        Some(&format!(
-                                                            "topic: {}, partition: {}, offset: {}",
-                                                            kafka_msg.topic,
-                                                            kafka_msg.partition,
-                                                            kafka_msg.offset
-                                                        )),
-                                                    );
-                                                    debug!(error = %e, "Message queued for DLQ");
-                                                }
-                                                Err(mpsc::error::TrySendError::Full(_)) => {
-                                                    static DLQ_FULL_TS: AtomicU64 = AtomicU64::new(0);
-                                                    if hyperi_rustlib::logger::log_debounced(&DLQ_FULL_TS, 5000) {
-                                                        warn!(error = %e, "DLQ channel full, messages dropped (max 1 per 5s)");
-                                                    }
-                                                }
-                                                Err(mpsc::error::TrySendError::Closed(_)) => {
-                                                    static DLQ_CLOSED_TS: AtomicU64 = AtomicU64::new(0);
-                                                    if hyperi_rustlib::logger::log_debounced(&DLQ_CLOSED_TS, 5000) {
-                                                        warn!(error = %e, "DLQ channel closed (max 1 per 5s)");
-                                                    }
-                                                }
-                                            }
-                                        } else {
-                                            warn!(error = %e, "Message processing failed, DLQ disabled");
-                                        }
-                                    }
-                                }
                             }
+
+                            // === PARALLEL PHASE ===
+                            // Create immutable processor (borrows caches as &)
+                            let processor = super::processor::MessageProcessor {
+                                config: &self.config,
+                                router: &router,
+                                transformer: &transformer,
+                                extractor: &extractor,
+                                format_detector: &format_detector,
+                                json_primary_mode,
+                                enrichment: &enrichment,
+                                schema_cache: &schema_cache,
+                                col_meta_cache: &col_meta_cache,
+                                field_mapping_cache: field_mapping_cache.as_ref(),
+                                computed_column_cache: &computed_column_cache,
+                                capture_overrides: &capture_overrides,
+                            };
+
+                            // Process batch — parallel via rayon if worker pool available,
+                            // otherwise sequential (graceful degradation).
+                            let results: Vec<crate::Result<super::types::ProcessedMessage>> =
+                                if let Some(ref pool) = self.worker_pool {
+                                    pool.process_batch(&batch, |msg| processor.process(msg))
+                                } else {
+                                    batch.iter().map(|msg| processor.process(msg)).collect()
+                                };
+                            // Processor dropped here — immutable borrows released
+
+                            // === SEQUENTIAL PHASE ===
+                            let mut coordinator = super::coordinator::BatchCoordinator {
+                                buffer_manager: &mut buffer_manager,
+                                capture_overrides: &mut capture_overrides,
+                                field_mapping_cache: &mut field_mapping_cache,
+                                computed_column_cache: &mut computed_column_cache,
+                                metrics: &self.metrics,
+                                dlq_tx: &dlq_tx,
+                                dlq_enabled: dlq.is_some(),
+                                memory_guard: &self.memory_guard,
+                            };
+                            let outcome = coordinator.apply_results(results, &batch);
+
+                            // Update stats from coordinator outcome
+                            self.stats.messages_processed += outcome.processed;
+                            self.stats.messages_dlq += outcome.errors;
+                            self.stats.errors += outcome.errors;
 
                             // Update buffer stats (once per batch, not per message)
                             let buf_stats = buffer_manager.stats();

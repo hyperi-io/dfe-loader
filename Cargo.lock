@@ -1098,7 +1098,7 @@ dependencies = [
 
 [[package]]
 name = "dfe-loader"
-version = "1.15.5"
+version = "1.15.6"
 dependencies = [
  "anyhow",
  "bytes",
@@ -1847,9 +1847,9 @@ dependencies = [
 
 [[package]]
 name = "hyperi-rustlib"
-version = "1.20.1"
+version = "2.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4b8dc89125f702eb17fae7ab778ea34888432cc0ed719b6da31f4c036ad1a7ae"
+checksum = "b5ad1e61f6aceb53433b0cfca459fd1d59a7f769931c7056cc7120ceeb1527f1"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -1868,6 +1868,7 @@ dependencies = [
  "prost-build",
  "prost-types",
  "ratatui",
+ "rayon",
  "rdkafka",
  "reqwest 0.12.28",
  "rmp-serde",
@@ -3223,7 +3224,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "343d3bd7056eda839b03204e68deff7d1b13aba7af2b2fd16890697274262ee7"
 dependencies = [
  "heck",
- "itertools 0.13.0",
+ "itertools 0.14.0",
  "log",
  "multimap",
  "petgraph",
@@ -3244,7 +3245,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "27c6023962132f4b30eb4c172c91ce92d933da334c59c23cddee82358ddafb0b"
 dependencies = [
  "anyhow",
- "itertools 0.13.0",
+ "itertools 0.14.0",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
