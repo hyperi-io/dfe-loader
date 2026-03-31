@@ -25,6 +25,33 @@ Stage 1 ships first, Stage 2 is a drop-in upgrade — same API, better protocol.
 
 ## Active
 
+### Phase 6: Pipeline Parallelisation (rustlib v2.x AdaptiveWorkerPool)
+
+Refactor the sequential `for msg in batch` loop into a parallel-then-sequential
+architecture using rustlib's `AdaptiveWorkerPool` (rayon + tokio hybrid).
+
+**Design spec:** `docs/superpowers/specs/2026-03-31-pipeline-parallelisation-design.md`
+
+**Extracted modules (compiling, committed):**
+- [x] `src/pipeline/types.rs` — `ProcessedMessage`, `TableResolutionResult`
+- [x] `src/pipeline/capture.rs` — `CaptureOverrides` with pure `derive_config()`
+- [x] `src/pipeline/enrichment.rs` — `EnrichmentPipeline` with `enrich(&self)`
+- [x] `src/pipeline/processor.rs` — `MessageProcessor` (pure `&self`, rayon-safe)
+- [x] `src/pipeline/coordinator.rs` — `BatchCoordinator` (sequential state mutation)
+- [x] Delete old duplicated code from `orchestrator.rs` (CaptureOverrides, EnrichmentPipeline, process_message, inject helpers)
+- [x] Replace batch loop with processor + coordinator in `orchestrator.rs`
+
+**Remaining:**
+- [ ] Update `src/main.rs` to create `AdaptiveWorkerPool` and pass via `.with_worker_pool()`
+- [ ] Fix existing tests for refactored modules
+- [ ] Add parallel execution tests (prove multi-thread via thread IDs or timing)
+- [ ] Run clippy clean + full test suite
+- [ ] Code review (`/review`)
+- [ ] Security review (`/security-review`)
+- [ ] Run `./binary generate-artefacts --output-dir docs/` and commit artefacts
+- [ ] Write `docs/PARALLELISE-REMEDIATION.md` — playbook for remaining 5 DFE projects
+- [ ] Push + release
+
 ### Phase 5.7: Schema-Guided Extraction + Zero-Copy _json ✓ COMPLETE
 
 Complete architectural overhaul of the hot path for SIMD efficiency and CPU reduction.
