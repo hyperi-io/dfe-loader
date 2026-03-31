@@ -81,7 +81,7 @@ impl Metrics {
     /// The manager must already have installed the global recorder
     /// (via `MetricsManager::new` or `MetricsManager::with_config`).
     pub fn new(manager: &MetricsManager) -> Self {
-        let dfe = Arc::new(DfeMetrics::register(manager));
+        let dfe = Arc::new(DfeMetrics::register());
 
         Self {
             dfe,
