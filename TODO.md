@@ -41,16 +41,19 @@ architecture using rustlib's `AdaptiveWorkerPool` (rayon + tokio hybrid).
 - [x] Delete old duplicated code from `orchestrator.rs` (CaptureOverrides, EnrichmentPipeline, process_message, inject helpers)
 - [x] Replace batch loop with processor + coordinator in `orchestrator.rs`
 
+**Completed:**
+- [x] Update `src/main.rs` — AdaptiveWorkerPool with shared MemoryGuard
+- [x] Fix existing tests for refactored modules (393 lib tests pass)
+- [x] Add parallel execution tests (3 tests: thread diversity, semaphore throttle, derive_config safety)
+- [x] Run clippy clean + full test suite (396 total, zero warnings)
+- [x] Code review — 3 critical + 2 important issues found and fixed
+- [x] Write `docs/PARALLELISE-REMEDIATION.md` — playbook for remaining 5 DFE projects
+- [x] Push + CI green + v1.16.0 publish dispatched
+
 **Remaining:**
-- [ ] Update `src/main.rs` to create `AdaptiveWorkerPool` and pass via `.with_worker_pool()`
-- [ ] Fix existing tests for refactored modules
-- [ ] Add parallel execution tests (prove multi-thread via thread IDs or timing)
-- [ ] Run clippy clean + full test suite
-- [ ] Code review (`/review`)
 - [ ] Security review (`/security-review`)
 - [ ] Run `./binary generate-artefacts --output-dir docs/` and commit artefacts
-- [ ] Write `docs/PARALLELISE-REMEDIATION.md` — playbook for remaining 5 DFE projects
-- [ ] Push + release
+- [ ] Verify v1.16.0 on GH Releases + JFrog
 
 ### Phase 5.7: Schema-Guided Extraction + Zero-Copy _json ✓ COMPLETE
 
