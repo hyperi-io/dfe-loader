@@ -20,7 +20,7 @@ use crate::enrich::risk::{RiskInput, RiskOutput, RiskPreset, RiskScorer};
 /// Active enrichment pipeline (GeoIP + reputation + risk scoring).
 ///
 /// All components are optional. Lookups are `&self` — safe for parallel processing.
-pub struct EnrichmentPipeline {
+pub(crate) struct EnrichmentPipeline {
     /// IP field names to check in event data (first match wins).
     pub ip_fields: Vec<String>,
     /// GeoIP lookup (city + ASN).
@@ -122,8 +122,8 @@ impl EnrichmentPipeline {
             None => return,
         };
 
-        let geo_result = self.geoip.as_ref().and_then(|g| g.lookup(&ip));
-        let rep_result = self.reputation.as_ref().and_then(|r| r.lookup(&ip));
+        let geo_result = self.geoip.as_ref().and_then(|g| g.lookup(ip));
+        let rep_result = self.reputation.as_ref().and_then(|r| r.lookup(ip));
 
         if let Some(ref geo) = geo_result {
             inject_geo(data, geo);
@@ -146,15 +146,15 @@ impl EnrichmentPipeline {
 // =============================================================================
 
 /// Extract the first IP string found in `data` by checking `ip_fields` in order.
-fn extract_enrich_ip(
-    data: &serde_json::Map<String, Value>,
+fn extract_enrich_ip<'a>(
+    data: &'a serde_json::Map<String, Value>,
     ip_fields: &[String],
-) -> Option<String> {
+) -> Option<&'a str> {
     for field in ip_fields {
         if let Some(Value::String(s)) = data.get(field.as_str())
             && !s.is_empty()
         {
-            return Some(s.clone());
+            return Some(s.as_str());
         }
     }
     None

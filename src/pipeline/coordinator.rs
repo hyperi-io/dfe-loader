@@ -34,7 +34,7 @@ pub struct BatchOutcome {
 /// Created per-batch in the orchestrator event loop. Holds `&mut` references
 /// to caches, buffers, and stats. The borrow checker ensures this is only
 /// constructed after the parallel phase completes (processor dropped).
-pub struct BatchCoordinator<'a> {
+pub(crate) struct BatchCoordinator<'a> {
     pub buffer_manager: &'a mut BufferManager,
     pub capture_overrides: &'a mut CaptureOverrides,
     pub field_mapping_cache: &'a mut Option<FieldMappingCache>,
@@ -62,9 +62,11 @@ impl BatchCoordinator<'_> {
         for (msg, result) in messages.iter().zip(results) {
             match result {
                 Ok(processed) => {
-                    // Ensure cache entry so mark_pending doesn't re-add this table
-                    self.capture_overrides.ensure_cached(&processed.table);
+                    // mark_pending BEFORE ensure_cached — new tables must be queued
+                    // for DDL tag resolution before their config-list defaults are cached.
+                    // Reversing this order would silently break DDL tag application.
                     self.capture_overrides.mark_pending(&processed.table);
+                    self.capture_overrides.ensure_cached(&processed.table);
                     if let Some(fm) = self.field_mapping_cache.as_mut() {
                         fm.mark_pending(&processed.table);
                     }

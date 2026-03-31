@@ -33,7 +33,7 @@ use super::types::ProcessedMessage;
 /// All fields are `&` references to `Sync` types. Created per-batch,
 /// dropped before the sequential phase. The borrow checker enforces
 /// that no mutable access to these dependencies occurs during processing.
-pub struct MessageProcessor<'a> {
+pub(crate) struct MessageProcessor<'a> {
     pub config: &'a Config,
     pub router: &'a Router,
     pub transformer: &'a Transformer,
