@@ -121,11 +121,46 @@ impl DfeApp for App {
         // Create shared config for hot-reload
         let shared_config = SharedConfig::new(config.clone());
 
+        // Create adaptive worker pool for parallel message processing
+        let worker_pool = match hyperi_rustlib::worker::AdaptiveWorkerPool::from_cascade(
+            "worker_pool",
+        ) {
+            Ok(pool) => {
+                let pool = Arc::new(pool);
+                pool.register_metrics(&manager);
+                pool.set_memory_guard(Arc::clone(&Arc::new(
+                    hyperi_rustlib::memory::MemoryGuard::new(
+                        hyperi_rustlib::memory::MemoryGuardConfig::from_env("DFE_LOADER"),
+                    ),
+                )));
+                pool.set_scaling_pressure(Arc::clone(&scaling));
+                info!(
+                    max_threads = pool.max_threads(),
+                    "Adaptive worker pool enabled"
+                );
+                Some(pool)
+            }
+            Err(e) => {
+                warn!(error = %e, "Worker pool not configured, falling back to sequential processing");
+                None
+            }
+        };
+
         // Create orchestrator with hot-reload support and scaling pressure
         let mut orchestrator = Orchestrator::with_metrics(config.clone(), metrics)
             .with_shared_config(shared_config.clone())
             .with_scaling(Arc::clone(&scaling));
+
+        if let Some(ref pool) = worker_pool {
+            orchestrator = orchestrator.with_worker_pool(Arc::clone(pool));
+        }
+
         let shutdown_token = orchestrator.shutdown_token();
+
+        // Start worker pool scaling loop (if pool exists)
+        if let Some(ref pool) = worker_pool {
+            pool.start_scaling_loop(shutdown_token.clone());
+        }
 
         // Start config watcher if hot-reload is enabled
         if config.hot_reload.enabled {
