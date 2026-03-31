@@ -1,3 +1,25 @@
+# [1.16.0](https://github.com/hyperi-io/dfe-loader/compare/v1.15.6...v1.16.0) (2026-03-31)
+
+
+### Bug Fixes
+
+* add worker pool field to orchestrator (wip — rewrite in progress) ([afc3fe2](https://github.com/hyperi-io/dfe-loader/commit/afc3fe2098264817a3bb232b1d6c7a425c804a7a))
+* address code review findings (3 critical, 2 important) ([65efa9a](https://github.com/hyperi-io/dfe-loader/commit/65efa9a65ebe7e2e97e08467bf0ded0c33ecda93))
+* extract pipeline modules for parallel processing ([3292279](https://github.com/hyperi-io/dfe-loader/commit/329227965f46dd085642fdff81ae5332dc0a2956))
+* **metrics:** remove incorrect manager argument to DfeMetrics::register() ([0190b2b](https://github.com/hyperi-io/dfe-loader/commit/0190b2b8c42461d9767ee91e9d1698d26eabb8ea))
+* restore pub visibility on CaptureOverrides for integration tests ([e8fffd7](https://github.com/hyperi-io/dfe-loader/commit/e8fffd74efefcf1759fc783ad0c4a10c104921fd))
+* update DfeMetrics::register() to pass &MetricsManager for manifest ([f331bfa](https://github.com/hyperi-io/dfe-loader/commit/f331bfa80d7afa20017ab11f579b12415b049f4b))
+
+
+### Features
+
+* parallel message processing via AdaptiveWorkerPool ([3ec678a](https://github.com/hyperi-io/dfe-loader/commit/3ec678aae0a01ce2a64908e47d2901bf72468541))
+
+
+### Reverts
+
+* Revert "fix(metrics): remove incorrect manager argument to DfeMetrics::register()" ([4c7c88c](https://github.com/hyperi-io/dfe-loader/commit/4c7c88c645cc26b80ed40c74edbf9c95f58db874))
+
 ## [1.15.6](https://github.com/hyperi-io/dfe-loader/compare/v1.15.5...v1.15.6) (2026-03-30)
 
 
