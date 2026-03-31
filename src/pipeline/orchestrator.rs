@@ -12,7 +12,7 @@
 //! `JSONEachRow` HTTP inserts to `ClickHouse`.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::AtomicU64;
 use std::time::Duration;
 
 use serde_json::Value;
@@ -48,80 +48,8 @@ use crate::transform::Transformer;
 use crate::transform::{ComputedColumnCache, FieldMappingCache, HeaderExtractor, MappingBuilder};
 
 /// Pipeline statistics
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct PipelineStats {
-    pub messages_received: AtomicU64,
-    pub messages_processed: AtomicU64,
-    pub messages_dlq: AtomicU64,
-    pub batches_flushed: AtomicU64,
-    pub rows_inserted: AtomicU64,
-    pub errors: AtomicU64,
-}
-
-impl PipelineStats {
-    /// Create a new statistics tracker.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Increment messages received count.
-    #[inline]
-    pub fn incr_received(&self) {
-        self.messages_received.fetch_add(1, Ordering::Relaxed);
-    }
-
-    /// Increment messages processed count.
-    #[inline]
-    pub fn incr_processed(&self) {
-        self.messages_processed.fetch_add(1, Ordering::Relaxed);
-    }
-
-    /// Increment messages sent to DLQ count.
-    #[inline]
-    pub fn incr_dlq(&self) {
-        self.messages_dlq.fetch_add(1, Ordering::Relaxed);
-    }
-
-    /// Increment error count.
-    #[inline]
-    pub fn incr_errors(&self) {
-        self.errors.fetch_add(1, Ordering::Relaxed);
-    }
-
-    /// Add to rows inserted count.
-    #[inline]
-    pub fn add_rows(&self, count: u64) {
-        self.rows_inserted.fetch_add(count, Ordering::Relaxed);
-    }
-
-    /// Increment batches flushed count.
-    #[inline]
-    pub fn incr_batches(&self) {
-        self.batches_flushed.fetch_add(1, Ordering::Relaxed);
-    }
-
-    /// Increment batches flushed by count.
-    #[inline]
-    pub fn add_batches(&self, count: u64) {
-        self.batches_flushed.fetch_add(count, Ordering::Relaxed);
-    }
-
-    /// Get snapshot of current stats (atomic reads with Relaxed ordering).
-    pub fn snapshot(&self) -> PipelineStatsSnapshot {
-        PipelineStatsSnapshot {
-            messages_received: self.messages_received.load(Ordering::Relaxed),
-            messages_processed: self.messages_processed.load(Ordering::Relaxed),
-            messages_dlq: self.messages_dlq.load(Ordering::Relaxed),
-            batches_flushed: self.batches_flushed.load(Ordering::Relaxed),
-            rows_inserted: self.rows_inserted.load(Ordering::Relaxed),
-            errors: self.errors.load(Ordering::Relaxed),
-        }
-    }
-}
-
-/// Snapshot of pipeline statistics (immutable, safe to pass around).
-#[derive(Debug, Clone, Copy)]
-pub struct PipelineStatsSnapshot {
     pub messages_received: u64,
     pub messages_processed: u64,
     pub messages_dlq: u64,
@@ -865,7 +793,7 @@ impl Orchestrator {
                                 // Track memory for backpressure
                                 self.memory_guard.add_bytes(kafka_msg.payload.len() as u64);
 
-                                self.stats.incr_received();
+                                self.stats.messages_received += 1;
                                 if let Some(ref m) = self.metrics {
                                     m.record_received();
                                 }
@@ -888,13 +816,13 @@ impl Orchestrator {
                                     &mut computed_column_cache,
                                 ) {
                                     Ok(table) => {
-                                        self.stats.incr_processed();
+                                        self.stats.messages_processed += 1;
                                         if let Some(ref m) = self.metrics {
                                             m.record_processed(&table);
                                         }
                                     }
                                     Err(e) => {
-                                        self.stats.incr_dlq();
+                                        self.stats.messages_dlq += 1;
                                         if let Some(ref m) = self.metrics {
                                             m.record_dlq();
                                         }
@@ -977,7 +905,7 @@ impl Orchestrator {
                             // Update scaling pressure components
                             if let Some(ref scaling) = self.scaling {
                                 scaling.set_component("buffer_depth", buf_stats.pending_rows as f64);
-                                scaling.set_component("errors", self.stats.errors.load(Ordering::Relaxed) as f64);
+                                scaling.set_component("errors", self.stats.errors as f64);
                             }
 
                             // Dispatch pending schema resolution tasks off the event loop.
@@ -1048,13 +976,12 @@ impl Orchestrator {
             warn!(error = %e, "Error closing transport");
         }
 
-        let stats = self.stats.snapshot();
         info!(
-            messages_received = stats.messages_received,
-            messages_processed = stats.messages_processed,
-            messages_dlq = stats.messages_dlq,
-            batches_flushed = stats.batches_flushed,
-            rows_inserted = stats.rows_inserted,
+            messages_received = self.stats.messages_received,
+            messages_processed = self.stats.messages_processed,
+            messages_dlq = self.stats.messages_dlq,
+            batches_flushed = self.stats.batches_flushed,
+            rows_inserted = self.stats.rows_inserted,
             "Pipeline stopped"
         );
 
@@ -1285,7 +1212,7 @@ impl Orchestrator {
 
             match result {
                 Ok(count) => {
-                    self.stats.add_rows(count as u64);
+                    self.stats.rows_inserted += count as u64;
                     if let Some(ref m) = self.metrics {
                         m.record_flush(count, latency);
                         m.record_insert_quantities(batch_bytes, 1);
@@ -1310,7 +1237,7 @@ impl Orchestrator {
                 }
                 Err(e) => {
                     error!(error = %e, "Batch insert failed — offsets withheld, messages will re-deliver");
-                    self.stats.incr_errors();
+                    self.stats.errors += 1;
                     if let Some(ref m) = self.metrics {
                         m.record_error();
                     }
@@ -1318,13 +1245,12 @@ impl Orchestrator {
             }
         }
 
-        self.stats.add_batches(batch_count as u64);
+        self.stats.batches_flushed += batch_count as u64;
     }
 
     /// Get current statistics
-    /// Get a snapshot of current pipeline statistics.
-    pub fn stats(&self) -> PipelineStatsSnapshot {
-        self.stats.snapshot()
+    pub fn stats(&self) -> &PipelineStats {
+        &self.stats
     }
 }
 
@@ -1569,8 +1495,8 @@ mod tests {
     #[test]
     fn test_pipeline_stats_default() {
         let stats = PipelineStats::default();
-        assert_eq!(stats.messages_received.load(Ordering::Relaxed), 0);
-        assert_eq!(stats.rows_inserted.load(Ordering::Relaxed), 0);
+        assert_eq!(stats.messages_received, 0);
+        assert_eq!(stats.rows_inserted, 0);
     }
 
     #[test]
