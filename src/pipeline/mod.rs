@@ -1,8 +1,18 @@
 // SPDX-License-Identifier: FSL-1.1-ALv2
 // Copyright (c) 2026 HYPERI PTY LIMITED
 
-//! Pipeline orchestration
+//! Pipeline orchestration with parallel message processing.
+//!
+//! Architecture:
+//! - [`processor::MessageProcessor`] — pure, parallel-safe computation (rayon)
+//! - [`coordinator::BatchCoordinator`] — sequential state mutation (buffer, DLQ)
+//! - [`orchestrator::Orchestrator`] — thin event loop coordinator
 
+pub mod capture;
+pub mod coordinator;
+pub mod enrichment;
 pub mod orchestrator;
+pub mod processor;
+pub mod types;
 
 pub use orchestrator::{Orchestrator, PipelineStats};
