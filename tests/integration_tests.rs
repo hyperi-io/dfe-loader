@@ -6,6 +6,4 @@
 mod common;
 mod e2e;
 mod integration;
-
-#[cfg(feature = "transport-memory")]
-mod unit;
+mod unit; // parallel tests don't need transport-memory
