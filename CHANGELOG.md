@@ -1,3 +1,10 @@
+## [1.16.1](https://github.com/hyperi-io/dfe-loader/compare/v1.16.0...v1.16.1) (2026-04-01)
+
+
+### Bug Fixes
+
+* update rustlib to v2.3.0 — fixes [#19](https://github.com/hyperi-io/dfe-loader/issues/19) startup panic ([9b3972e](https://github.com/hyperi-io/dfe-loader/commit/9b3972e2a6dda0e5cff9713d0c4a9bd0bc34eb95))
+
 # [1.16.0](https://github.com/hyperi-io/dfe-loader/compare/v1.15.6...v1.16.0) (2026-03-31)
 
 
