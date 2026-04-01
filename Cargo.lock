@@ -1098,7 +1098,7 @@ dependencies = [
 
 [[package]]
 name = "dfe-loader"
-version = "1.15.6"
+version = "1.16.0"
 dependencies = [
  "anyhow",
  "bytes",
@@ -1847,9 +1847,9 @@ dependencies = [
 
 [[package]]
 name = "hyperi-rustlib"
-version = "2.1.0"
+version = "2.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b5ad1e61f6aceb53433b0cfca459fd1d59a7f769931c7056cc7120ceeb1527f1"
+checksum = "e963fd1a5f723f60a749429094ba18bd02d3ab76ff5a088df14394dcf8e0d444"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
