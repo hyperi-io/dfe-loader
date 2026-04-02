@@ -1,3 +1,10 @@
+## [1.16.3](https://github.com/hyperi-io/dfe-loader/compare/v1.16.2...v1.16.3) (2026-04-02)
+
+
+### Bug Fixes
+
+* add debug and trace logging for batch processing, routing, schema, inserts ([e0f6eff](https://github.com/hyperi-io/dfe-loader/commit/e0f6eff5a1a2b92be1e5f0b393749b45cf03136a))
+
 ## [1.16.2](https://github.com/hyperi-io/dfe-loader/compare/v1.16.1...v1.16.2) (2026-04-02)
 
 
