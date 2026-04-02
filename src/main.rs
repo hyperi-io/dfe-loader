@@ -24,7 +24,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use clap::Parser;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use dfe_loader::config::{Config, ConfigWatcher, SharedConfig, WatcherConfig};
 use dfe_loader::metrics::{Metrics, ServerState};
@@ -106,6 +106,18 @@ impl DfeApp for App {
                 clickhouse_hosts = ?config.clickhouse.hosts,
                 payload_format = %config.payload.format,
                 "Starting dfe-loader"
+            );
+
+            debug!(
+                brokers = ?config.kafka.brokers,
+                group = %config.kafka.group,
+                topics = ?config.kafka.topics,
+                clickhouse = ?config.clickhouse.hosts,
+                transport = %config.transport,
+                flush_rows = config.buffer.flush_rows,
+                flush_bytes = config.buffer.flush_bytes,
+                flush_age_secs = config.buffer.flush_age_secs,
+                "Resolved configuration"
             );
 
             // Build loader-specific scaling pressure (custom components)

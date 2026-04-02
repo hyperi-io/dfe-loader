@@ -14,7 +14,7 @@
 use std::sync::Arc;
 
 use serde_json::Value;
-use tracing::debug;
+use tracing::{debug, trace};
 
 use crate::buffer::KafkaOffset;
 use crate::clickhouse::SharedSchemaCache;
@@ -64,6 +64,16 @@ impl MessageProcessor<'_> {
     /// 7. Evaluate computed columns / CEL expressions (read-only)
     /// 8. Enrichment (GeoIP + reputation + risk, in-memory lookups)
     pub fn process(&self, msg: &crate::kafka::KafkaMessage) -> crate::Result<ProcessedMessage> {
+        if tracing::enabled!(tracing::Level::TRACE) {
+            trace!(
+                msg_size = msg.payload.len(),
+                topic = %msg.topic,
+                partition = msg.partition,
+                offset = msg.offset,
+                "Processing message"
+            );
+        }
+
         // Step 1: Check/detect format
         let format = match self.format_detector.check_and_detect(&msg.payload) {
             Ok(fmt) => fmt,
@@ -90,7 +100,12 @@ impl MessageProcessor<'_> {
 
         // Step 3: Route to table (db.table)
         let table = match self.router.route_value(&value) {
-            RouteResult::Table(t) => t,
+            RouteResult::Table(t) => {
+                if tracing::enabled!(tracing::Level::TRACE) {
+                    trace!(table = %t, "Message routed");
+                }
+                t
+            }
             RouteResult::Dlq(reason) => {
                 debug!(reason = %reason, "Routing to DLQ");
                 return Err(crate::Error::Json(format!("DLQ: {reason}")));
@@ -170,13 +185,24 @@ impl MessageProcessor<'_> {
         }
 
         // Step 7: Enrichment (GeoIP + reputation + risk, in-memory)
+        let fields_before = data.len();
         self.enrichment.enrich(&mut data);
+        if tracing::enabled!(tracing::Level::TRACE) {
+            let enrichments_added = data.len().saturating_sub(fields_before);
+            if enrichments_added > 0 {
+                trace!(
+                    table = %table,
+                    enrichments_added = enrichments_added,
+                    "Message enriched"
+                );
+            }
+        }
 
         // Build offset for commit tracking
         let kafka_offset =
             KafkaOffset::with_shared_topic(msg.topic.clone(), msg.partition, msg.offset);
 
-        debug!(table = %table, "Message processed");
+        debug!(table = %table, fields = data.len(), "Message processed");
         Ok(ProcessedMessage {
             table,
             data,

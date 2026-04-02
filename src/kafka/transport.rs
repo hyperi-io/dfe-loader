@@ -25,6 +25,7 @@ use hyperi_rustlib::transport::{
     GrpcConfig as TransportGrpcConfig, GrpcTransport, KafkaConfig as TransportKafkaConfig,
     KafkaToken, KafkaTransport, TransportBase, TransportError, TransportReceiver,
 };
+use tracing::{debug, trace};
 
 use super::KafkaMessage;
 
@@ -110,17 +111,43 @@ impl TransportAdapter {
             .await
             .map_err(|e| crate::Error::Kafka(format!("Recv error: {e}")))?;
 
-        Ok(messages
+        let converted: Vec<KafkaMessage> = messages
             .into_iter()
-            .map(|msg| KafkaMessage {
-                payload: msg.payload,
-                topic: msg.token.topic.clone(), // Arc<str> clone is cheap
-                partition: msg.token.partition,
-                offset: msg.token.offset,
-                key: None, // Transport doesn't preserve key - OK for our use case
-                timestamp_ms: msg.timestamp_ms,
+            .map(|msg| {
+                if tracing::enabled!(tracing::Level::TRACE) {
+                    trace!(
+                        topic = %msg.token.topic,
+                        partition = msg.token.partition,
+                        offset = msg.token.offset,
+                        payload_bytes = msg.payload.len(),
+                        "Message received"
+                    );
+                }
+                KafkaMessage {
+                    payload: msg.payload,
+                    topic: msg.token.topic.clone(), // Arc<str> clone is cheap
+                    partition: msg.token.partition,
+                    offset: msg.token.offset,
+                    key: None, // Transport doesn't preserve key - OK for our use case
+                    timestamp_ms: msg.timestamp_ms,
+                }
             })
-            .collect())
+            .collect();
+
+        if !converted.is_empty() {
+            // Collect unique topics for the batch debug log
+            let mut topics: rustc_hash::FxHashSet<&str> = rustc_hash::FxHashSet::default();
+            for msg in &converted {
+                topics.insert(&msg.topic);
+            }
+            debug!(
+                count = converted.len(),
+                topics = ?topics.into_iter().collect::<Vec<_>>(),
+                "Kafka batch received"
+            );
+        }
+
+        Ok(converted)
     }
 
     /// Commit offsets for processed messages.
@@ -135,6 +162,8 @@ impl TransportAdapter {
             .iter()
             .map(|off| KafkaToken::new(off.topic.clone(), off.partition, off.offset))
             .collect();
+
+        debug!(count = tokens.len(), "Committing Kafka offsets");
 
         self.transport
             .commit(&tokens)
