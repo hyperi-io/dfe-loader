@@ -260,7 +260,7 @@ float_cmp = "allow"
 # Design spec: docs/specs/2026-03-18-clickhouse-rs-fork-swap.md
 #
 [patch.crates-io]
-clickhouse = { git = "https://github.com/hyperi-io/clickhouse-rs.git", branch = "hyperi/unified-client" }
+clickhouse = { git = "https://github.com/hyperi-io/clickhouse-rs.git", branch = "hyperi/schema-cache-strong" }
 #
 # To revert: comment out or remove the [patch.crates-io] section above.
 # =============================================================================
