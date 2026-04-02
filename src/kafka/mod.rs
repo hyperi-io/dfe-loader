@@ -7,12 +7,10 @@
 //! The legacy direct-rdkafka consumer has been removed — all Kafka
 //! interaction goes through the transport abstraction.
 
-pub mod topic_resolver;
 pub mod transport;
 
 use std::sync::Arc;
 
-pub use topic_resolver::{TopicResolver, resolver_from_config};
 pub use transport::{TransportAdapter, TransportBackend};
 
 #[cfg(feature = "transport-memory")]

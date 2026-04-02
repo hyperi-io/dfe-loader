@@ -18,18 +18,15 @@
 //! The `TransportBackend` enum provides a unified interface over all compiled transports.
 //! The orchestrator uses this to be transport-agnostic.
 
+use crate::Result;
+use crate::buffer::KafkaOffset;
+use crate::config::KafkaConfig;
 use hyperi_rustlib::transport::{
     GrpcConfig as TransportGrpcConfig, GrpcTransport, KafkaConfig as TransportKafkaConfig,
     KafkaToken, KafkaTransport, TransportBase, TransportError, TransportReceiver,
 };
-use tracing::info;
-
-use crate::Result;
-use crate::buffer::KafkaOffset;
-use crate::config::KafkaConfig;
 
 use super::KafkaMessage;
-use super::topic_resolver::resolver_from_config;
 
 /// Adapter that wraps hyperi-rustlib `KafkaTransport` for local use.
 ///
@@ -42,22 +39,10 @@ pub struct TransportAdapter {
 impl TransportAdapter {
     /// Create a new transport adapter from local `KafkaConfig`.
     ///
-    /// If `config.topics` is empty, runs topic auto-discovery via `TopicResolver`
-    /// before creating the transport.
+    /// Rustlib's `KafkaTransport::new()` handles auto-discovery when
+    /// `config.topics` is empty — no app-side resolver needed.
     pub async fn new(config: &KafkaConfig) -> Result<Self> {
-        let mut transport_config = Self::convert_config(config);
-
-        if config.topics.is_empty() {
-            info!("topics not configured — auto-discovering *_load/*_land topics from broker");
-            let resolver = resolver_from_config(config)?;
-            let resolved = resolver.resolve()?;
-            if resolved.is_empty() {
-                return Err(crate::Error::Config(
-                    "Topic auto-discovery found no *_load or *_land topics on the broker".into(),
-                ));
-            }
-            transport_config.topics = resolved;
-        }
+        let transport_config = Self::convert_config(config);
 
         let transport = KafkaTransport::new(&transport_config)
             .await
