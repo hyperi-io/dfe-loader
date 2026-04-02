@@ -1,3 +1,11 @@
+## [1.16.4](https://github.com/hyperi-io/dfe-loader/compare/v1.16.3...v1.16.4) (2026-04-02)
+
+
+### Bug Fixes
+
+* update clickhouse-rs — Nullable(JSON) RowBinary insert fix ([8780a90](https://github.com/hyperi-io/dfe-loader/commit/8780a908e792d37e1e0abf198cea6dddc99beb11)), closes [#20](https://github.com/hyperi-io/dfe-loader/issues/20)
+* update clickhouse-rs — Nullable(JSON) RowBinary insert fix ([ea8db1a](https://github.com/hyperi-io/dfe-loader/commit/ea8db1a50d3795813e69af62100b2fabc1f0c04b)), closes [#20](https://github.com/hyperi-io/dfe-loader/issues/20)
+
 ## [1.16.3](https://github.com/hyperi-io/dfe-loader/compare/v1.16.2...v1.16.3) (2026-04-02)
 
 
