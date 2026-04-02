@@ -143,6 +143,11 @@ impl DfeApp for App {
                 orchestrator = orchestrator.with_worker_pool(Arc::clone(pool));
             }
 
+            // Use runtime batch engine if available (SIMD parse, pre-route, parallel transform)
+            if let Some(ref engine) = runtime.batch_engine {
+                orchestrator = orchestrator.with_batch_engine(Arc::clone(engine));
+            }
+
             let shutdown_token = orchestrator.shutdown_token();
 
             // Connect runtime shutdown to orchestrator's shutdown token

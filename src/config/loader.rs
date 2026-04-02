@@ -84,6 +84,9 @@ pub struct Config {
     pub keda: KedaConfig,
     /// Scaling pressure config. **Restart required.**
     pub scaling: ScalingConfig,
+    /// Batch processing engine config (SIMD parse, pre-route, parallelism). **Restart required.**
+    #[serde(default)]
+    pub batch_processing: hyperi_rustlib::worker::BatchProcessingConfig,
 
     // --- Hot-reloaded (takes effect on next batch) ---
     /// Routing rules and table mapping. **Hot-reloaded.**

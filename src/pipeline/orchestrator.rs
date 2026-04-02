@@ -69,6 +69,7 @@ pub struct Orchestrator {
     scaling: Option<Arc<ScalingPressure>>,
     memory_guard: Arc<MemoryGuard>,
     worker_pool: Option<Arc<hyperi_rustlib::worker::AdaptiveWorkerPool>>,
+    batch_engine: Option<Arc<hyperi_rustlib::worker::BatchEngine>>,
 }
 
 impl Orchestrator {
@@ -84,6 +85,7 @@ impl Orchestrator {
             scaling: None,
             memory_guard,
             worker_pool: None,
+            batch_engine: None,
         }
     }
 
@@ -99,6 +101,7 @@ impl Orchestrator {
             scaling: None,
             memory_guard,
             worker_pool: None,
+            batch_engine: None,
         }
     }
 
@@ -120,6 +123,12 @@ impl Orchestrator {
         pool: Arc<hyperi_rustlib::worker::AdaptiveWorkerPool>,
     ) -> Self {
         self.worker_pool = Some(pool);
+        self
+    }
+
+    /// Set the batch processing engine (SIMD parse, pre-route, parallel transform).
+    pub fn with_batch_engine(mut self, engine: Arc<hyperi_rustlib::worker::BatchEngine>) -> Self {
+        self.batch_engine = Some(engine);
         self
     }
 
@@ -561,6 +570,76 @@ impl Orchestrator {
 
                             let batch_start = std::time::Instant::now();
 
+                            // === PRE-ROUTE PHASE (engine SIMD filter) ===
+                            // When batch engine is available, use SIMD pre-route to
+                            // skip full parse for messages that will be filtered/DLQ'd.
+                            // Messages that pass pre-route are processed by MessageProcessor.
+                            let pre_route_filtered = if let Some(ref engine) = self.batch_engine
+                                && let Some(ref field) = engine.config().routing_field
+                            {
+                                use hyperi_rustlib::worker::engine::pre_route::{
+                                    PreRouteOutcome, apply_filters, extract_routing_field,
+                                    filters_from_config,
+                                };
+                                let filters = filters_from_config(&engine.config().pre_route_filters);
+                                let mut pass_indices: Vec<usize> = Vec::with_capacity(batch.len());
+                                let mut filtered_count: u64 = 0;
+                                let mut dlq_entries: Vec<(usize, String)> = Vec::new();
+
+                                for (idx, msg) in batch.iter().enumerate() {
+                                    let extraction = extract_routing_field(&msg.payload, field);
+                                    let outcome = apply_filters(&extraction, &filters);
+                                    match outcome {
+                                        PreRouteOutcome::Continue => pass_indices.push(idx),
+                                        PreRouteOutcome::Filtered => {
+                                            filtered_count += 1;
+                                            // Release memory for filtered messages
+                                            self.memory_guard.release(msg.payload.len() as u64);
+                                        }
+                                        PreRouteOutcome::Dlq(reason) => {
+                                            dlq_entries.push((idx, reason));
+                                        }
+                                    }
+                                }
+
+                                if filtered_count > 0 {
+                                    debug!(filtered = filtered_count, "Pre-route filtered messages (SIMD)");
+                                    self.stats.messages_processed += filtered_count;
+                                }
+
+                                // Send DLQ entries for pre-route failures
+                                for (idx, reason) in &dlq_entries {
+                                    let msg = &batch[*idx];
+                                    if dlq.is_some() {
+                                        let entry = DlqEntry::new("loader", reason.clone(), msg.payload.clone())
+                                            .with_source(hyperi_rustlib::dlq::DlqSource::kafka(
+                                                msg.topic.to_string(),
+                                                msg.partition,
+                                                msg.offset,
+                                            ));
+                                        if dlq_tx.try_send(entry).is_ok() {
+                                            self.stats.messages_dlq += 1;
+                                            hyperi_rustlib::logger::security::record_dlq(
+                                                "pre_route",
+                                                reason,
+                                                Some(&format!(
+                                                    "topic: {}, partition: {}, offset: {}",
+                                                    msg.topic, msg.partition, msg.offset
+                                                )),
+                                            );
+                                        }
+                                    }
+                                    self.memory_guard.release(msg.payload.len() as u64);
+                                    if let Some(ref m) = self.metrics {
+                                        m.record_dlq();
+                                    }
+                                }
+
+                                Some(pass_indices)
+                            } else {
+                                None // No pre-route — process all messages
+                            };
+
                             // === PARALLEL PHASE ===
                             // Create immutable processor (borrows caches as &)
                             let processor = super::processor::MessageProcessor {
@@ -578,13 +657,32 @@ impl Orchestrator {
                                 capture_overrides: &capture_overrides,
                             };
 
-                            // Process batch — parallel via rayon if worker pool available,
-                            // otherwise sequential (graceful degradation).
+                            // Process batch — engine pool preferred, then worker pool,
+                            // then sequential. Pre-route indices filter which messages
+                            // get processed (filtered/DLQ'd messages are skipped).
+                            let pool = self.batch_engine.as_ref().map(|e| e.pool())
+                                .or(self.worker_pool.as_ref());
+
                             let results: Vec<crate::Result<super::types::ProcessedMessage>> =
-                                if let Some(ref pool) = self.worker_pool {
-                                    pool.process_batch(&batch, |msg| processor.process(msg))
-                                } else {
-                                    batch.iter().map(|msg| processor.process(msg)).collect()
+                                match (&pre_route_filtered, pool) {
+                                    // Pre-route active + pool: process only passing messages in parallel
+                                    (Some(indices), Some(pool)) => {
+                                        let msgs_to_process: Vec<&crate::kafka::KafkaMessage> =
+                                            indices.iter().map(|&i| &batch[i]).collect();
+                                        pool.process_batch(&msgs_to_process, |msg| processor.process(msg))
+                                    }
+                                    // Pre-route active, no pool: process only passing messages sequentially
+                                    (Some(indices), None) => {
+                                        indices.iter().map(|&i| processor.process(&batch[i])).collect()
+                                    }
+                                    // No pre-route + pool: process all in parallel (original path)
+                                    (None, Some(pool)) => {
+                                        pool.process_batch(&batch, |msg| processor.process(msg))
+                                    }
+                                    // No pre-route, no pool: sequential fallback
+                                    (None, None) => {
+                                        batch.iter().map(|msg| processor.process(msg)).collect()
+                                    }
                                 };
                             // Processor dropped here — immutable borrows released
 
@@ -599,7 +697,15 @@ impl Orchestrator {
                                 dlq_enabled: dlq.is_some(),
                                 memory_guard: &self.memory_guard,
                             };
-                            let outcome = coordinator.apply_results(results, &batch);
+                            // When pre-route is active, results only contain passing
+                            // messages — build the matching message slice.
+                            let outcome = if let Some(ref indices) = pre_route_filtered {
+                                let filtered_batch: Vec<&crate::kafka::KafkaMessage> =
+                                    indices.iter().map(|&i| &batch[i]).collect();
+                                coordinator.apply_results_refs(results, &filtered_batch)
+                            } else {
+                                coordinator.apply_results(results, &batch)
+                            };
 
                             let batch_elapsed = batch_start.elapsed();
                             debug!(

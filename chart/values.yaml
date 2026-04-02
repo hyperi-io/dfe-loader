@@ -55,7 +55,7 @@ config:
     sasl_mechanism: SCRAM-SHA-512
     security_protocol: SASL_PLAINTEXT
     topics:
-    - dfe.default
+    - default_land
   metrics:
     address: 0.0.0.0:9090
     enabled: true
