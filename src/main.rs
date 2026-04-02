@@ -24,14 +24,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use clap::Parser;
-use tokio::signal;
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
 use dfe_loader::config::{Config, ConfigWatcher, SharedConfig, WatcherConfig};
 use dfe_loader::metrics::{Metrics, ServerState};
 use dfe_loader::pipeline::Orchestrator;
-use hyperi_rustlib::cli::{CliError, CommonArgs, DfeApp, StandardCommand, VersionInfo, run_app};
-use hyperi_rustlib::metrics::MetricsManager;
+use hyperi_rustlib::cli::{
+    CliError, CommonArgs, DfeApp, ServiceRuntime, StandardCommand, VersionInfo, run_app,
+};
 
 #[derive(Parser, Debug)]
 #[command(name = "dfe-loader")]
@@ -84,133 +84,110 @@ impl DfeApp for App {
         Ok(config)
     }
 
-    async fn run_service(&self, config: Self::Config) -> Result<(), CliError> {
-        // Fire-and-forget version check
-        hyperi_rustlib::VersionCheck::new(hyperi_rustlib::VersionCheckConfig {
-            product: "dfe-loader".into(),
-            current_version: env!("CARGO_PKG_VERSION").into(),
-            ..Default::default()
-        })
-        .check_on_startup();
+    fn run_service(
+        &self,
+        config: Self::Config,
+        mut runtime: ServiceRuntime,
+    ) -> impl std::future::Future<Output = Result<(), CliError>> + Send {
+        let config_path = self.common_args().config.as_deref().map(String::from);
 
-        info!(
-            version = env!("CARGO_PKG_VERSION"),
-            kafka_brokers = ?config.kafka.brokers,
-            clickhouse_hosts = ?config.clickhouse.hosts,
-            payload_format = %config.payload.format,
-            "Starting dfe-loader"
-        );
+        async move {
+            // Fire-and-forget version check
+            hyperi_rustlib::VersionCheck::new(hyperi_rustlib::VersionCheckConfig {
+                product: "dfe-loader".into(),
+                current_version: env!("CARGO_PKG_VERSION").into(),
+                ..Default::default()
+            })
+            .check_on_startup();
 
-        // Initialise metrics via rustlib MetricsManager
-        let mut manager = MetricsManager::new("dfe_loader");
+            info!(
+                version = env!("CARGO_PKG_VERSION"),
+                kafka_brokers = ?config.kafka.brokers,
+                clickhouse_hosts = ?config.clickhouse.hosts,
+                payload_format = %config.payload.format,
+                "Starting dfe-loader"
+            );
 
-        // Wire readiness check — MetricsManager serves /readyz
-        let scaling = Arc::new(config.scaling.build_pressure());
-        let metrics = Metrics::new(&manager);
-        let server_state = Arc::new(ServerState::new(metrics.clone(), Arc::clone(&scaling)));
+            // Build loader-specific scaling pressure (custom components)
+            let scaling = Arc::new(config.scaling.build_pressure());
 
-        let readiness_state = Arc::clone(&server_state);
-        manager.set_readiness_check(move || readiness_state.is_ready());
+            // Register loader-specific metrics using runtime's MetricsManager
+            let metrics = Metrics::new(&runtime.metrics);
+            let server_state = Arc::new(ServerState::new(metrics.clone(), Arc::clone(&scaling)));
 
-        // Start metrics server (serves /metrics, /healthz, /readyz)
-        let metrics_addr = self.common_args().metrics_addr.as_str();
-        if let Err(e) = manager.start_server(metrics_addr).await {
-            error!(error = %e, addr = metrics_addr, "Failed to start metrics server");
-        }
+            let readiness_state = Arc::clone(&server_state);
+            runtime.set_readiness_check(move || readiness_state.is_ready());
 
-        // Create shared config for hot-reload
-        let shared_config = SharedConfig::new(config.clone());
+            // Create shared config for hot-reload
+            let shared_config = SharedConfig::new(config.clone());
 
-        // Create adaptive worker pool for parallel message processing
-        let worker_pool = match hyperi_rustlib::worker::AdaptiveWorkerPool::from_cascade(
-            "worker_pool",
-        ) {
-            Ok(pool) => {
-                let pool = Arc::new(pool);
-                pool.register_metrics(&manager);
-                pool.set_scaling_pressure(Arc::clone(&scaling));
-                info!(
-                    max_threads = pool.max_threads(),
-                    "Adaptive worker pool enabled"
-                );
-                Some(pool)
+            // Create orchestrator with hot-reload support and scaling pressure
+            let mut orchestrator = Orchestrator::with_metrics(config.clone(), metrics)
+                .with_shared_config(shared_config.clone())
+                .with_scaling(Arc::clone(&scaling));
+
+            // Use runtime worker pool if available
+            if let Some(ref pool) = runtime.worker_pool {
+                orchestrator = orchestrator.with_worker_pool(Arc::clone(pool));
             }
-            Err(e) => {
-                warn!(error = %e, "Worker pool not configured, falling back to sequential processing");
-                None
+
+            let shutdown_token = orchestrator.shutdown_token();
+
+            // Connect runtime shutdown to orchestrator's shutdown token
+            let runtime_shutdown = runtime.shutdown.clone();
+            let orch_shutdown = shutdown_token.clone();
+            tokio::spawn(async move {
+                runtime_shutdown.cancelled().await;
+                orch_shutdown.cancel();
+            });
+
+            // Wire worker pool to orchestrator's memory guard (single instance, shared state)
+            if let Some(ref pool) = runtime.worker_pool {
+                pool.set_memory_guard(Arc::clone(orchestrator.memory_guard()));
             }
-        };
 
-        // Create orchestrator with hot-reload support and scaling pressure
-        let mut orchestrator = Orchestrator::with_metrics(config.clone(), metrics)
-            .with_shared_config(shared_config.clone())
-            .with_scaling(Arc::clone(&scaling));
+            // Start config watcher if hot-reload is enabled
+            if config.hot_reload.enabled {
+                if let Some(config_path) = config_path.as_deref() {
+                    let watcher_config = WatcherConfig {
+                        config_path: PathBuf::from(config_path),
+                        poll_interval: Duration::from_secs(config.hot_reload.poll_interval_secs),
+                        debounce: Duration::from_millis(config.hot_reload.debounce_ms),
+                        enabled: true,
+                    };
 
-        if let Some(ref pool) = worker_pool {
-            orchestrator = orchestrator.with_worker_pool(Arc::clone(pool));
-        }
-
-        let shutdown_token = orchestrator.shutdown_token();
-
-        // Wire worker pool to orchestrator's memory guard (single instance, shared state)
-        if let Some(ref pool) = worker_pool {
-            pool.set_memory_guard(Arc::clone(orchestrator.memory_guard()));
-            pool.start_scaling_loop(shutdown_token.clone());
-        }
-
-        // Start config watcher if hot-reload is enabled
-        if config.hot_reload.enabled {
-            if let Some(config_path) = self.common_args().config.as_deref() {
-                let watcher_config = WatcherConfig {
-                    config_path: PathBuf::from(config_path),
-                    poll_interval: Duration::from_secs(config.hot_reload.poll_interval_secs),
-                    debounce: Duration::from_millis(config.hot_reload.debounce_ms),
-                    enabled: true,
-                };
-
-                match ConfigWatcher::new(watcher_config, shared_config.clone()) {
-                    Ok(watcher) => {
-                        let _handle = watcher.start();
-                        info!(
-                            path = config_path,
-                            poll_secs = config.hot_reload.poll_interval_secs,
-                            "Config hot-reload enabled"
-                        );
+                    match ConfigWatcher::new(watcher_config, shared_config.clone()) {
+                        Ok(watcher) => {
+                            let _handle = watcher.start();
+                            info!(
+                                path = config_path,
+                                poll_secs = config.hot_reload.poll_interval_secs,
+                                "Config hot-reload enabled"
+                            );
+                        }
+                        Err(e) => {
+                            warn!(error = %e, "Failed to start config watcher, hot-reload disabled");
+                        }
                     }
-                    Err(e) => {
-                        warn!(error = %e, "Failed to start config watcher, hot-reload disabled");
-                    }
+                } else {
+                    warn!(
+                        "Hot-reload enabled but no config file path provided (--config), skipping"
+                    );
                 }
-            } else {
-                warn!("Hot-reload enabled but no config file path provided (--config), skipping");
             }
+
+            // Mark as ready
+            server_state.set_ready(true);
+
+            // Run the pipeline
+            orchestrator
+                .run()
+                .await
+                .map_err(|e| CliError::Service(e.to_string()))?;
+
+            info!("Shutdown complete");
+            Ok(())
         }
-
-        // Spawn signal handler
-        let signal_shutdown = shutdown_token.clone();
-        tokio::spawn(async move {
-            match signal::ctrl_c().await {
-                Ok(()) => {
-                    info!("Received SIGINT, initiating shutdown");
-                    signal_shutdown.cancel();
-                }
-                Err(e) => {
-                    warn!(error = %e, "Failed to listen for SIGINT");
-                }
-            }
-        });
-
-        // Mark as ready
-        server_state.set_ready(true);
-
-        // Run the pipeline
-        orchestrator
-            .run()
-            .await
-            .map_err(|e| CliError::Service(e.to_string()))?;
-
-        info!("Shutdown complete");
-        Ok(())
     }
 }
 
