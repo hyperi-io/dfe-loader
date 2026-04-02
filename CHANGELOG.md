@@ -1,3 +1,10 @@
+## [1.16.5](https://github.com/hyperi-io/dfe-loader/compare/v1.16.4...v1.16.5) (2026-04-02)
+
+
+### Bug Fixes
+
+* integrate BatchEngine pre-route filtering, SOC2 audit logging ([2c08111](https://github.com/hyperi-io/dfe-loader/commit/2c081115b6e80e997d9bc4fef408e05f345e2d4c))
+
 ## [1.16.4](https://github.com/hyperi-io/dfe-loader/compare/v1.16.3...v1.16.4) (2026-04-02)
 
 
