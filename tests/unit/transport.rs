@@ -81,7 +81,7 @@ async fn test_memory_adapter_batch_recv() {
     // Inject 100 messages
     for i in 0..100 {
         adapter
-            .inject(format!("msg-{}", i).into_bytes())
+            .inject(format!("msg-{i}").into_bytes())
             .await
             .unwrap();
     }
@@ -321,7 +321,10 @@ async fn test_transform_flattens_nested() {
 
     // Nested fields should be flattened with "." separator
     let data = result.data;
-    assert_eq!(data.get("user.id").and_then(|v| v.as_i64()), Some(123));
+    assert_eq!(
+        data.get("user.id").and_then(serde_json::Value::as_i64),
+        Some(123)
+    );
     assert_eq!(
         data.get("user.name").and_then(|v| v.as_str()),
         Some("Alice")
@@ -418,7 +421,7 @@ async fn test_buffer_accumulates_messages() {
 
     // Process messages through the pipeline
     let messages = adapter.recv(10).await.unwrap();
-    for msg in messages.iter() {
+    for msg in &messages {
         let value: serde_json::Value = sonic_rs::from_slice(&msg.payload).unwrap();
 
         let route = match router.route_value(&value) {
@@ -592,7 +595,7 @@ async fn test_full_message_flow_without_clickhouse() {
         // Route
         let table = match router.route_value(&value) {
             RouteResult::Table(t) => t,
-            RouteResult::Dlq(reason) => panic!("Unexpected DLQ: {}", reason),
+            RouteResult::Dlq(reason) => panic!("Unexpected DLQ: {reason}"),
         };
         routed_tables.push(table.clone());
 

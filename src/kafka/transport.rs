@@ -302,7 +302,7 @@ pub use memory_adapter::MemoryTransportAdapter;
 #[cfg(feature = "transport-memory")]
 mod memory_adapter {
     use hyperi_rustlib::transport::{
-        MemoryConfig, MemoryTransport, TransportBase, TransportReceiver, TransportSender,
+        MemoryConfig, MemoryTransport, TransportBase, TransportReceiver,
     };
     use std::sync::Arc;
 

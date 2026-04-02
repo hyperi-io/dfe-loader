@@ -53,6 +53,18 @@ memory:
   limit_bytes: 67108864    # 64MB fixed cap
   pressure_threshold: 0.8
 
+# Batch processing engine (SIMD parse, pre-route, parallelism)
+# Defaults are sensible — only override if tuning.
+batch_processing:
+  routing_field: "_table"        # SIMD pre-route: extract _table before full parse
+  max_chunk_size: 10000          # Messages per rayon chunk
+  parse_error_action: dlq        # dlq | skip | fail_batch
+  known_fields:                  # Fields to pre-extract for fast routing
+    - "_table"
+    - "_timestamp"
+    - "host"
+    - "source_type"
+
 metrics:
   enabled: true
   address: "0.0.0.0:9090"

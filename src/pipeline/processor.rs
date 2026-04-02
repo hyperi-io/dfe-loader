@@ -89,11 +89,28 @@ impl MessageProcessor<'_> {
 
         // Step 2: Parse payload to JSON Value
         let value: Value = match format {
-            PayloadFormat::Json => sonic_rs::from_slice(&msg.payload)
-                .map_err(|e| crate::Error::Json(format!("JSON parse error: {e}")))?,
-            PayloadFormat::MessagePack => rmp_serde::from_slice(&msg.payload)
-                .map_err(|e| crate::Error::Json(format!("MessagePack parse error: {e}")))?,
+            PayloadFormat::Json => sonic_rs::from_slice(&msg.payload).map_err(|e| {
+                hyperi_rustlib::logger::security::input_validation_failure(
+                    "json_parse",
+                    "invalid JSON payload",
+                    None,
+                );
+                crate::Error::Json(format!("JSON parse error: {e}"))
+            })?,
+            PayloadFormat::MessagePack => rmp_serde::from_slice(&msg.payload).map_err(|e| {
+                hyperi_rustlib::logger::security::input_validation_failure(
+                    "msgpack_parse",
+                    "invalid MessagePack payload",
+                    None,
+                );
+                crate::Error::Json(format!("MessagePack parse error: {e}"))
+            })?,
             PayloadFormat::Unknown => {
+                hyperi_rustlib::logger::security::input_validation_failure(
+                    "format_check",
+                    "unknown payload format",
+                    None,
+                );
                 return Err(crate::Error::Json("Unknown format".into()));
             }
         };
@@ -108,6 +125,9 @@ impl MessageProcessor<'_> {
             }
             RouteResult::Dlq(reason) => {
                 debug!(reason = %reason, "Routing to DLQ");
+                hyperi_rustlib::logger::security::input_validation_failure(
+                    "routing", &reason, None,
+                );
                 return Err(crate::Error::Json(format!("DLQ: {reason}")));
             }
         };

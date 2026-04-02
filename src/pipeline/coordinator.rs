@@ -57,9 +57,26 @@ impl BatchCoordinator<'_> {
         results: Vec<crate::Result<ProcessedMessage>>,
         messages: &[KafkaMessage],
     ) -> BatchOutcome {
+        self.apply_results_inner(results, messages.iter())
+    }
+
+    /// Apply results when the batch was pre-route filtered (references to original messages).
+    pub fn apply_results_refs(
+        &mut self,
+        results: Vec<crate::Result<ProcessedMessage>>,
+        messages: &[&KafkaMessage],
+    ) -> BatchOutcome {
+        self.apply_results_inner(results, messages.iter().copied())
+    }
+
+    fn apply_results_inner<'a>(
+        &mut self,
+        results: Vec<crate::Result<ProcessedMessage>>,
+        messages: impl Iterator<Item = &'a KafkaMessage>,
+    ) -> BatchOutcome {
         let mut outcome = BatchOutcome::default();
 
-        for (msg, result) in messages.iter().zip(results) {
+        for (msg, result) in messages.zip(results) {
             match result {
                 Ok(processed) => {
                     // mark_pending BEFORE ensure_cached — new tables must be queued
