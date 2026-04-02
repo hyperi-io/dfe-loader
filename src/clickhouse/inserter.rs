@@ -44,7 +44,7 @@ use crate::Result;
 use crate::buffer::{FlushBatch, KafkaOffset};
 use crate::clickhouse::circuit_breaker::CircuitBreaker;
 use crate::clickhouse::config::InsertFormat;
-use crate::clickhouse::error::{ClickHouseError, ErrorCategory};
+use crate::clickhouse::error::{ClickHouseError, ErrorCategory, is_schema_drift_error};
 use crate::clickhouse::{ClickHouseQueryClient, SchemaCache};
 use crate::transform::Coercer;
 
@@ -210,6 +210,17 @@ impl Inserter {
         self
     }
 
+    /// Set the schema cache for cache invalidation on schema-drift errors.
+    ///
+    /// When set, the inserter invalidates this cache on data errors that
+    /// suggest the RowBinary encoding used a stale schema (e.g., "Cannot
+    /// parse JSON", "type mismatch", "INCORRECT_DATA"). This forces a
+    /// fresh schema fetch on the next insert attempt.
+    pub fn with_schema_cache(mut self, schema_cache: Arc<SchemaCache>) -> Self {
+        self.schema_cache = Some(schema_cache);
+        self
+    }
+
     /// Enable schema-driven type coercion before each insert.
     ///
     /// When enabled, the inserter fetches the table schema (from cache or live)
@@ -338,6 +349,18 @@ impl Inserter {
                         write_failed = true;
                         break;
                     }
+                    // Check for schema-drift-indicative errors beyond SchemaMismatch
+                    if is_schema_drift_error(&e.to_string()) {
+                        insert.invalidate_schema();
+                        if let Some(cache) = &self.schema_cache {
+                            cache.invalidate(table);
+                        }
+                        last_error = Some(crate::Error::ClickHouse(format!(
+                            "Schema drift in write: {e}"
+                        )));
+                        write_failed = true;
+                        break;
+                    }
                     return Err(crate::Error::ClickHouse(format!("RowBinary encode: {e}")));
                 }
             }
@@ -349,7 +372,7 @@ impl Inserter {
                         table = %table,
                         attempt,
                         delay_ms = delay.as_millis(),
-                        "Schema mismatch, re-fetching and retrying"
+                        "Schema issue during write, re-fetching and retrying"
                     );
                     sleep(delay).await;
                     continue;
@@ -386,6 +409,20 @@ impl Inserter {
                     ));
                 }
                 Err(e) => {
+                    // insert.end() consumed the DynamicInsert, so we cannot
+                    // call invalidate_schema() on it. Invalidate the loader's
+                    // schema cache so the NEXT batch re-fetches fresh schema.
+                    // The current batch is returned as an error (salvage/DLQ).
+                    if is_schema_drift_error(&e.to_string()) {
+                        if let Some(cache) = &self.schema_cache {
+                            cache.invalidate(table);
+                        }
+                        warn!(
+                            table = %table,
+                            error = %e,
+                            "Data error suggests schema drift, invalidated loader schema cache"
+                        );
+                    }
                     return Err(crate::Error::ClickHouse(format!("RowBinary insert: {e}")));
                 }
             }

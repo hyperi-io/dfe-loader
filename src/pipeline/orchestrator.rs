@@ -195,8 +195,9 @@ impl Orchestrator {
         let insert_format = ch_config.insert_format;
         info!(format = %insert_format, "Insert format configured");
 
-        // Inserter dispatches based on insert_format — single client handles all inserts
-        let inserter = Inserter::new(
+        // Inserter dispatches based on insert_format — single client handles all inserts.
+        // Schema cache is wired below (after creation) for drift-error invalidation.
+        let mut inserter = Inserter::new(
             Arc::clone(&http_client),
             ch_client,
             InserterConfig::default(),
@@ -257,6 +258,11 @@ impl Orchestrator {
         // Background resolver populates it; orchestrator reads it in process_message.
         let schema_cache: SharedSchemaCache =
             Arc::new(SchemaCache::new(self.config.schema.cache_ttl_secs));
+
+        // Wire schema cache into inserter for drift-error invalidation (fixes #20).
+        // RowBinary inserts that fail with data errors (e.g. "Cannot parse JSON",
+        // "type mismatch") now invalidate the schema cache and retry with fresh schema.
+        inserter = inserter.with_schema_cache(Arc::clone(&schema_cache));
 
         // Column directive cache — unified framework for skip/default/renamed/computed/coerce.
         // Config layer is fixed at construction; DDL layer populated by background resolver.
