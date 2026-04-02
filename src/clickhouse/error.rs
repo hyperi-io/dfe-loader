@@ -98,6 +98,21 @@ impl ClickHouseError {
     }
 }
 
+/// Returns true if the error message suggests the RowBinary schema may be stale.
+///
+/// These are errors where ClickHouse rejected data because the encoding
+/// doesn't match the current table schema — different from `SchemaMismatch`
+/// which the fork detects locally during `write_map()`.
+pub fn is_schema_drift_error(err: &str) -> bool {
+    let lower = err.to_lowercase();
+    lower.contains("cannot parse")
+        || lower.contains("type mismatch")
+        || lower.contains("incorrect_data")
+        || lower.contains("incorrect data")
+        || lower.contains("unknown column")
+        || lower.contains("no such column")
+}
+
 /// Classify error from HTTP response message.
 fn classify_from_message(msg: &str) -> ErrorCategory {
     let msg_lower = msg.to_lowercase();
@@ -187,6 +202,24 @@ mod tests {
     fn test_classify_from_message_unknown_table() {
         let err = ClickHouseError::Insert("Unknown table 'foo.bar'".into());
         assert!(err.is_fatal());
+    }
+
+    #[test]
+    fn test_is_schema_drift_error() {
+        assert!(super::is_schema_drift_error(
+            "Cannot parse JSON object here"
+        ));
+        assert!(super::is_schema_drift_error(
+            "DB::Exception: INCORRECT_DATA"
+        ));
+        assert!(super::is_schema_drift_error(
+            "Type mismatch for column 'foo'"
+        ));
+        assert!(super::is_schema_drift_error("Unknown column 'bar'"));
+        assert!(super::is_schema_drift_error("No such column 'baz'"));
+        assert!(!super::is_schema_drift_error("Network timeout"));
+        assert!(!super::is_schema_drift_error("Authentication failed"));
+        assert!(!super::is_schema_drift_error("Server overloaded"));
     }
 
     #[test]
