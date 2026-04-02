@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 
 use parking_lot::RwLock;
 use rustc_hash::FxHashMap;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, trace, warn};
 
 use crate::clickhouse::{ClickHouseQueryClient, TableSchema};
 
@@ -111,9 +111,11 @@ impl SchemaCache {
         schemas.get(table).and_then(|cached| {
             if cached.cached_at.elapsed() < self.ttl {
                 self.hits.fetch_add(1, Ordering::Relaxed);
+                debug!(table = %table, "Schema cache hit");
                 Some(cached.schema.clone())
             } else {
                 self.misses.fetch_add(1, Ordering::Relaxed);
+                debug!(table = %table, "Schema cache miss (expired)");
                 None
             }
         })
@@ -134,8 +136,26 @@ impl SchemaCache {
 
     /// Insert or update a schema in the cache
     pub fn insert(&self, table: String, schema: TableSchema) {
+        let columns = schema.columns.len();
         let mut schemas = self.schemas.write();
         let refresh_count = schemas.get(&table).map_or(0, |c| c.refresh_count + 1);
+
+        if tracing::enabled!(tracing::Level::TRACE) {
+            let column_names_and_types: Vec<(&str, &str)> = schema
+                .columns
+                .iter()
+                .map(|c| (c.name.as_str(), c.type_name.as_str()))
+                .collect();
+            trace!(
+                table = %table,
+                columns = ?column_names_and_types,
+                "Schema columns"
+            );
+        }
+
+        if refresh_count == 0 {
+            debug!(table = %table, columns = columns, "Schema fetched from ClickHouse");
+        }
 
         schemas.insert(
             table.clone(),
@@ -148,7 +168,7 @@ impl SchemaCache {
 
         if refresh_count > 0 {
             self.refreshes.fetch_add(1, Ordering::Relaxed);
-            debug!(table = %table, refresh_count = refresh_count, "Schema refreshed");
+            debug!(table = %table, refresh_count = refresh_count, columns = columns, "Schema refreshed");
         }
     }
 

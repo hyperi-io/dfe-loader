@@ -38,7 +38,7 @@ use bytes::Bytes;
 use serde_json::{Map, Value};
 use tokio::sync::Semaphore;
 use tokio::time::sleep;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, trace, warn};
 
 use crate::Result;
 use crate::buffer::{FlushBatch, KafkaOffset};
@@ -329,6 +329,15 @@ impl Inserter {
             return Ok(0);
         }
 
+        debug!(
+            table = %table,
+            rows = rows.len(),
+            format = "RowBinary",
+            "Insert started"
+        );
+
+        let insert_start = std::time::Instant::now();
+
         let (db, tbl) = parse_db_table(table);
 
         let mut last_error = None;
@@ -336,7 +345,15 @@ impl Inserter {
             let mut insert = self.ch_client.dynamic_insert(db, tbl);
 
             let mut write_failed = false;
-            for row in rows {
+            for (i, row) in rows.iter().enumerate() {
+                if tracing::enabled!(tracing::Level::TRACE) {
+                    trace!(
+                        table = %table,
+                        row_index = i,
+                        columns = row.len(),
+                        "Encoding row"
+                    );
+                }
                 if let Err(e) = insert.write_map(row).await {
                     // Schema mismatch — invalidate both fork and loader caches, then retry
                     if matches!(e, clickhouse::dynamic::DynamicError::SchemaMismatch { .. }) {
@@ -368,6 +385,12 @@ impl Inserter {
             if write_failed {
                 if attempt < self.max_retries {
                     let delay = self.backoff_delay(attempt);
+                    debug!(
+                        table = %table,
+                        attempt = attempt,
+                        delay_ms = delay.as_millis(),
+                        "Insert retry"
+                    );
                     warn!(
                         table = %table,
                         attempt,
@@ -382,7 +405,12 @@ impl Inserter {
 
             match insert.end().await {
                 Ok(count) => {
-                    debug!(table = %table, rows = count, "RowBinary insert successful");
+                    debug!(
+                        table = %table,
+                        rows = count,
+                        duration_ms = insert_start.elapsed().as_millis(),
+                        "Insert completed"
+                    );
                     return Ok(count as usize);
                 }
                 Err(clickhouse::dynamic::DynamicError::SchemaMismatch { .. }) => {
@@ -445,6 +473,15 @@ impl Inserter {
             return Ok(0);
         }
 
+        debug!(
+            table = %table,
+            rows = rows.len(),
+            format = "JSONEachRow",
+            "Insert started"
+        );
+
+        let insert_start = std::time::Instant::now();
+
         let (db, tbl) = parse_db_table(table);
 
         // Serialise rows as NDJSON — sonic_rs for SIMD-accelerated encoding.
@@ -488,6 +525,13 @@ impl Inserter {
                     ErrorCategory::Transient | ErrorCategory::Unknown => {
                         if attempt < self.max_retries {
                             let delay = self.backoff_delay(attempt);
+                            debug!(
+                                table = %table,
+                                attempt = attempt,
+                                delay_ms = delay.as_millis(),
+                                error = %e,
+                                "Insert retry"
+                            );
                             warn!(
                                 table = %table,
                                 attempt = attempt,
@@ -522,13 +566,25 @@ impl Inserter {
             // send() succeeded, now end the insert
             match insert.end().await {
                 Ok(()) => {
-                    debug!(table = %table, rows = rows.len(), "JSONEachRow insert successful");
+                    debug!(
+                        table = %table,
+                        rows = rows.len(),
+                        duration_ms = insert_start.elapsed().as_millis(),
+                        "Insert completed"
+                    );
                     return Ok(rows.len());
                 }
                 Err(e) => {
                     let ch_err = ClickHouseError::Insert(format!("{e}"));
                     if attempt < self.max_retries {
                         let delay = self.backoff_delay(attempt);
+                        debug!(
+                            table = %table,
+                            attempt = attempt,
+                            delay_ms = delay.as_millis(),
+                            error = %e,
+                            "Insert retry"
+                        );
                         warn!(table = %table, attempt, error = %e, "Insert end() failed, retrying");
                         sleep(delay).await;
                         last_error = Some(ch_err);

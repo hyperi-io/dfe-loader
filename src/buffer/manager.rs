@@ -233,16 +233,30 @@ impl BufferManager {
         let mut flush_batches = Vec::new();
 
         for (table, buffer) in &mut self.buffers {
-            if buffer.is_ready(flush_rows, flush_age_secs)
-                && let Some((rows, offsets, raw_payloads)) = buffer.build()
-            {
-                debug!(table = %table, rows = rows.len(), "Flushing buffer");
-                flush_batches.push(FlushBatch {
-                    table: CompactString::from(table.as_str()),
-                    rows,
-                    offsets,
-                    raw_payloads,
-                });
+            if buffer.is_ready(flush_rows, flush_age_secs) {
+                // Determine trigger reason before consuming buffer
+                let trigger = if buffer.len() >= flush_rows {
+                    "records"
+                } else {
+                    "age"
+                };
+                if let Some((rows, offsets, raw_payloads)) = buffer.build() {
+                    let row_count = rows.len();
+                    let byte_estimate = row_count * 200;
+                    debug!(
+                        table = %table,
+                        rows = row_count,
+                        bytes = byte_estimate,
+                        trigger = trigger,
+                        "Buffer flush triggered"
+                    );
+                    flush_batches.push(FlushBatch {
+                        table: CompactString::from(table.as_str()),
+                        rows,
+                        offsets,
+                        raw_payloads,
+                    });
+                }
             }
         }
 

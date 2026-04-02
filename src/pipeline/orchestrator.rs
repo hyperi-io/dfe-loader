@@ -18,7 +18,7 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::time::interval;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, trace, warn};
 
 use rustc_hash::FxHashSet;
 
@@ -543,6 +543,11 @@ impl Orchestrator {
 
                     match messages {
                         Ok(batch) if !batch.is_empty() => {
+                            debug!(
+                                batch_size = batch.len(),
+                                "Batch received from transport"
+                            );
+
                             // Track memory for backpressure (pre-loop)
                             for msg in &batch {
                                 self.memory_guard.add_bytes(msg.payload.len() as u64);
@@ -553,6 +558,8 @@ impl Orchestrator {
                                     m.record_received();
                                 }
                             }
+
+                            let batch_start = std::time::Instant::now();
 
                             // === PARALLEL PHASE ===
                             // Create immutable processor (borrows caches as &)
@@ -593,6 +600,28 @@ impl Orchestrator {
                                 memory_guard: &self.memory_guard,
                             };
                             let outcome = coordinator.apply_results(results, &batch);
+
+                            let batch_elapsed = batch_start.elapsed();
+                            debug!(
+                                batch_size = batch.len(),
+                                duration_ms = batch_elapsed.as_millis(),
+                                processed = outcome.processed,
+                                errors = outcome.errors,
+                                "Batch processed"
+                            );
+
+                            // Trace per-table routing distribution for this batch
+                            if tracing::enabled!(tracing::Level::TRACE) {
+                                let buf_stats_tables = buffer_manager.per_table_stats();
+                                let tables: Vec<&str> =
+                                    buf_stats_tables.iter().map(|(t, _, _)| *t).collect();
+                                trace!(
+                                    total = batch.len(),
+                                    routed_tables = tables.len(),
+                                    tables = ?tables,
+                                    "Batch routing complete"
+                                );
+                            }
 
                             // Update stats from coordinator outcome
                             self.stats.messages_processed += outcome.processed;
