@@ -25,27 +25,8 @@ pub struct KafkaConfig {
     pub sasl: Option<SaslConfig>,
     pub tls: Option<TlsConfig>,
 
-    /// Regex patterns for topics to include during auto-discovery.
-    /// Empty = include all discovered topics. Applied after load-over-land fallback.
-    #[serde(default)]
-    pub topic_include: Vec<String>,
-
-    /// Regex patterns for topics to exclude during auto-discovery.
-    /// Applied after include filter.
-    #[serde(default)]
-    pub topic_exclude: Vec<String>,
-
-    /// How often (seconds) to re-check the broker for new/removed topics.
-    /// 0 = disabled. Default: 60.
-    #[serde(default = "default_topic_refresh_secs")]
-    pub topic_refresh_secs: u64,
-
     /// Raw librdkafka configuration overrides (highest priority).
     pub librdkafka_overrides: HashMap<String, String>,
-}
-
-fn default_topic_refresh_secs() -> u64 {
-    60
 }
 
 impl Default for KafkaConfig {
@@ -63,9 +44,6 @@ impl Default for KafkaConfig {
             client_id: "clickhouse-loader".to_string(),
             sasl: None,
             tls: None,
-            topic_include: vec![],
-            topic_exclude: vec![],
-            topic_refresh_secs: default_topic_refresh_secs(),
             librdkafka_overrides: overrides,
         }
     }

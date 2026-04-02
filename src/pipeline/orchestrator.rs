@@ -33,7 +33,7 @@ use crate::clickhouse::{
 };
 use crate::column_meta::{ColumnMetaCache, parse_directives};
 use crate::config::{Config, SharedConfig};
-use crate::kafka::{TopicResolver, TransportAdapter, TransportBackend, resolver_from_config};
+use crate::kafka::{TransportAdapter, TransportBackend};
 use crate::metrics::Metrics;
 use crate::payload::{FormatDetector, FormatMode};
 use crate::routing::Router;
@@ -138,7 +138,7 @@ impl Orchestrator {
         info!("Starting pipeline orchestrator");
 
         // Initialize transport backend (Kafka based on config)
-        let mut transport = TransportBackend::from_config(&self.config).await?;
+        let transport = TransportBackend::from_config(&self.config).await?;
         info!(transport = transport.name(), "Transport initialized");
 
         // Validate ClickHouse config (transport/port mismatch, native not yet supported)
@@ -377,33 +377,6 @@ impl Orchestrator {
         // Flush interval timer
         let mut flush_interval = interval(Duration::from_secs(self.config.buffer.flush_age_secs));
 
-        // Topic refresh: active only for Kafka transport in auto-discovery mode
-        // (topics.is_empty() = auto-discover). topic_refresh_secs=0 disables refresh.
-        let topic_refresh_enabled = matches!(transport, TransportBackend::Kafka(_))
-            && self.config.kafka.topics.is_empty()
-            && self.config.kafka.topic_refresh_secs > 0;
-
-        let topic_resolver: Option<TopicResolver> = if topic_refresh_enabled {
-            match resolver_from_config(&self.config.kafka) {
-                Ok(r) => Some(r),
-                Err(e) => {
-                    warn!(error = %e, "Failed to create topic resolver, refresh disabled");
-                    None
-                }
-            }
-        } else {
-            None
-        };
-
-        // Track the currently active topic set for change detection.
-        // Initialised empty; first refresh will populate it.
-        let mut current_topics: Vec<String> = vec![];
-
-        let refresh_secs = self.config.kafka.topic_refresh_secs.max(1);
-        let mut topic_refresh_interval = interval(Duration::from_secs(refresh_secs));
-        // Consume the immediate tick so first refresh fires after `refresh_secs`.
-        topic_refresh_interval.tick().await;
-
         // Hot-reload: subscribe to config changes if SharedConfig is available
         let mut config_rx = self
             .shared_config
@@ -479,50 +452,6 @@ impl Orchestrator {
                             &format!("pipeline config reloaded (version {version})"),
                         );
                         info!(version = version, "Config hot-reload complete");
-                    }
-                }
-
-                _ = topic_refresh_interval.tick(), if topic_resolver.is_some() => {
-                    if let Some(ref resolver) = topic_resolver {
-                        match resolver.resolve() {
-                            Ok(mut new_topics) => {
-                                new_topics.sort_unstable();
-                                let mut sorted_current = current_topics.clone();
-                                sorted_current.sort_unstable();
-
-                                if new_topics != sorted_current {
-                                    info!(
-                                        old = ?sorted_current,
-                                        new = ?new_topics,
-                                        "Topic list changed — recreating transport"
-                                    );
-
-                                    // Flush before recreating transport
-                                    let batches = buffer_manager.flush_all();
-                                    if !batches.is_empty() {
-                                        self.flush_batches_transport(&inserter, &transport, batches).await;
-                                    }
-
-                                    if let Err(e) = transport.close().await {
-                                        warn!(error = %e, "Error closing transport during topic refresh");
-                                    }
-
-                                    match TransportBackend::from_config(&self.config).await {
-                                        Ok(new_transport) => {
-                                            transport = new_transport;
-                                            current_topics = new_topics;
-                                            info!("Transport recreated with updated topic list");
-                                        }
-                                        Err(e) => {
-                                            error!(error = %e, "Failed to recreate transport after topic change — keeping old");
-                                        }
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                warn!(error = %e, "Topic refresh failed, retaining current topics");
-                            }
-                        }
                     }
                 }
 
