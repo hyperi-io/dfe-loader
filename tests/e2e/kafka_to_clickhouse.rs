@@ -409,7 +409,6 @@ async fn test_kafka_to_clickhouse_bulk_load() {
             brokers: brokers_from_env(),
             group: format!("e2e-bulk-{pid}"),
             topics: vec![topic.clone()],
-            topic_refresh_secs: 0,
             sasl: sasl_config_from_env(),
             tls: kafka_tls_from_env(),
             ..Default::default()
@@ -618,7 +617,6 @@ async fn test_kafka_to_clickhouse_org_routing() {
             brokers: brokers_from_env(),
             group: format!("e2e-org-{pid}"),
             topics: vec![topic.clone()],
-            topic_refresh_secs: 0,
             sasl: sasl_config_from_env(),
             tls: kafka_tls_from_env(),
             ..Default::default()
