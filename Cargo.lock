@@ -651,7 +651,7 @@ checksum = "3a822ea5bc7590f9d40f1ba12c0dc3c2760f3482c6984db1573ad11031420831"
 [[package]]
 name = "clickhouse"
 version = "0.14.2"
-source = "git+https://github.com/hyperi-io/clickhouse-rs.git?branch=hyperi%2Fschema-cache-strong#8ca77ba09cacde55c306d36caca052fe772264af"
+source = "git+https://github.com/hyperi-io/clickhouse-rs.git?branch=hyperi%2Fschema-cache-strong#c178b37b7c24464c66faba55a23e5695e8edb0bd"
 dependencies = [
  "bnum",
  "bstr",
@@ -685,7 +685,7 @@ dependencies = [
 [[package]]
 name = "clickhouse-macros"
 version = "0.3.0"
-source = "git+https://github.com/hyperi-io/clickhouse-rs.git?branch=hyperi%2Fschema-cache-strong#8ca77ba09cacde55c306d36caca052fe772264af"
+source = "git+https://github.com/hyperi-io/clickhouse-rs.git?branch=hyperi%2Fschema-cache-strong#c178b37b7c24464c66faba55a23e5695e8edb0bd"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -696,7 +696,7 @@ dependencies = [
 [[package]]
 name = "clickhouse-types"
 version = "0.1.1"
-source = "git+https://github.com/hyperi-io/clickhouse-rs.git?branch=hyperi%2Fschema-cache-strong#8ca77ba09cacde55c306d36caca052fe772264af"
+source = "git+https://github.com/hyperi-io/clickhouse-rs.git?branch=hyperi%2Fschema-cache-strong#c178b37b7c24464c66faba55a23e5695e8edb0bd"
 dependencies = [
  "bytes",
  "thiserror 2.0.18",
@@ -1098,7 +1098,7 @@ dependencies = [
 
 [[package]]
 name = "dfe-loader"
-version = "1.16.1"
+version = "1.16.2"
 dependencies = [
  "anyhow",
  "bytes",
