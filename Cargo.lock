@@ -1098,7 +1098,7 @@ dependencies = [
 
 [[package]]
 name = "dfe-loader"
-version = "1.16.0"
+version = "1.16.1"
 dependencies = [
  "anyhow",
  "bytes",
@@ -1847,15 +1847,17 @@ dependencies = [
 
 [[package]]
 name = "hyperi-rustlib"
-version = "2.3.0"
+version = "2.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e963fd1a5f723f60a749429094ba18bd02d3ab76ff5a088df14394dcf8e0d444"
+checksum = "99e1ce2d4647bde478d9543029599ccc4e560e7c2886e489e5a9c5ed2a37ffc6"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
+ "bytes",
  "cel-interpreter",
  "chrono",
  "clap",
+ "dashmap",
  "dirs",
  "dotenvy",
  "figment",
@@ -1870,11 +1872,13 @@ dependencies = [
  "ratatui",
  "rayon",
  "rdkafka",
+ "regex",
  "reqwest 0.12.28",
  "rmp-serde",
  "serde",
  "serde_json",
  "serde_yaml_ng",
+ "sonic-rs",
  "sysinfo",
  "thiserror 2.0.18",
  "tokio",

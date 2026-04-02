@@ -431,10 +431,11 @@ impl Config {
     pub fn deployment_contract() -> hyperi_rustlib::deployment::DeploymentContract {
         use hyperi_rustlib::deployment::{
             DeploymentContract, HealthContract, ImageProfile, KedaContract, NativeDepsContract,
-            SecretEnvContract, SecretGroupContract,
+            OciLabels, SecretEnvContract, SecretGroupContract,
         };
 
         DeploymentContract {
+            schema_version: 2,
             app_name: "dfe-loader".into(),
             base_image: "ubuntu:24.04".into(),
             binary_name: "dfe-loader".into(),
@@ -518,6 +519,11 @@ impl Config {
                 "ubuntu:24.04",
             ),
             image_profile: ImageProfile::Production,
+            oci_labels: OciLabels {
+                title: "dfe-loader".into(),
+                description: "High-performance Kafka to ClickHouse data loader".into(),
+                ..OciLabels::default()
+            },
         }
     }
 }
