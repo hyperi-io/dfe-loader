@@ -1,3 +1,16 @@
+## [1.16.2](https://github.com/hyperi-io/dfe-loader/compare/v1.16.1...v1.16.2) (2026-04-02)
+
+
+### Bug Fixes
+
+* adopt ServiceRuntime — remove manual MetricsManager/pool/shutdown wiring ([4eb077e](https://github.com/hyperi-io/dfe-loader/commit/4eb077ec816a8056ebf7eb4e38c9a108454f4b7f))
+* bump hyperi-rustlib to >=2.4.3 ([5956375](https://github.com/hyperi-io/dfe-loader/commit/5956375f8625c5edfeb5b04ae13f581338cccc34))
+* delete bespoke TopicResolver — use rustlib transport-kafka auto-discovery ([9394660](https://github.com/hyperi-io/dfe-loader/commit/93946609042eae944040350e8680cf1c5cc4e333))
+* invalidate schema cache on data errors that indicate schema drift ([f9b0671](https://github.com/hyperi-io/dfe-loader/commit/f9b067130ad7a70ae754140fd9f46257263d2949)), closes [#20](https://github.com/hyperi-io/dfe-loader/issues/20)
+* remove regex dep — no longer needed without bespoke resolver ([681e101](https://github.com/hyperi-io/dfe-loader/commit/681e101dc52749bb6e78ca9fef3f14cc5ca8fa52))
+* remove topic_refresh_secs references from tests and config example ([0844cf4](https://github.com/hyperi-io/dfe-loader/commit/0844cf44cbc34ed3a781f1fd7739da7ab54a1a21))
+* update clickhouse-rs to schema-cache-strong branch ([2231473](https://github.com/hyperi-io/dfe-loader/commit/2231473aa37bd84d4b6be79ccb97121c2556f61f)), closes [#20](https://github.com/hyperi-io/dfe-loader/issues/20)
+
 ## [1.16.1](https://github.com/hyperi-io/dfe-loader/compare/v1.16.0...v1.16.1) (2026-04-01)
 
 
