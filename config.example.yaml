@@ -24,21 +24,6 @@ kafka:
   # topic_regex: "events-.*"
   client_id: clickhouse-loader
 
-  # Auto-discovery filters (only used when topics is empty)
-  # Include only matching topics (regex, empty = include all)
-  topic_include: []
-  # topic_include:
-  #   - "^prod_"     # Only topics starting with prod_
-  # Exclude matching topics (applied after include filter)
-  topic_exclude: []
-  # topic_exclude:
-  #   - "^test_"     # Exclude test topics
-
-  # How often (seconds) to re-check the broker for new/removed topics.
-  # Only active when topics is empty (auto-discovery mode).
-  # 0 = disabled.
-  topic_refresh_secs: 60
-
   # Raw librdkafka overrides (highest priority, override all other settings).
   # Stats disabled by default to prevent log spam.
   librdkafka_overrides:
