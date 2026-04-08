@@ -114,9 +114,9 @@ impl TableBuffer {
         if let Some(off) = offset {
             self.offsets.push(off);
         }
-        if let Some(r) = raw {
-            self.raw_payloads.push(r);
-        }
+        // Always push to keep raw_payloads parallel with rows.
+        // Empty slice for transformer-path rows (they already have _json in the map).
+        self.raw_payloads.push(raw.unwrap_or_default());
     }
 
     fn is_ready(&self, flush_rows: usize, flush_age_secs: u64) -> bool {

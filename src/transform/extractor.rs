@@ -116,6 +116,18 @@ impl HeaderExtractor {
                 continue;
             }
 
+            // _timestamp: extract from source, fall back to now() if missing.
+            // The column is NOT Nullable and has no DEFAULT — omitting it would
+            // produce 1970-01-01 00:00:00.000 (epoch zero).
+            if name == "_timestamp" {
+                let found = lookup_one(parsed, "timestamp", name, &mut map)
+                    || lookup_one(parsed, name, name, &mut map);
+                if !found {
+                    map.insert(name.clone(), Value::String(fmt_ts(&now)));
+                }
+                continue;
+            }
+
             let directives = col_meta.get(table, name);
             if directives.skip {
                 continue;
