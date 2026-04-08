@@ -413,6 +413,70 @@ impl Orchestrator {
             "Pipeline running"
         );
 
+        // Pre-warm schema cache for all known tables so the first batch always
+        // uses the extractor (json_primary) path. Without this, messages arriving
+        // before background resolution completes fall through to the transformer
+        // path, producing inconsistent results (missing _timestamp_received, etc).
+        {
+            let default_db = &self.config.routing.default_db;
+            let mut tables_to_warm: Vec<String> = Vec::new();
+
+            // Default table (always known)
+            tables_to_warm.push(format!(
+                "{default_db}.{}",
+                self.config.routing.default_table
+            ));
+
+            // CEL routing rule targets
+            for rule in &self.config.routing.rules {
+                let db = rule.db.as_deref().unwrap_or(default_db);
+                tables_to_warm.push(format!("{db}.{}", rule.target));
+            }
+
+            // source_to_table mapping targets
+            for table in self.config.routing.source_to_table.values() {
+                tables_to_warm.push(format!("{default_db}.{table}"));
+            }
+
+            tables_to_warm.sort();
+            tables_to_warm.dedup();
+
+            for table in &tables_to_warm {
+                let (schema_res, comments_res, comment_res) = tokio::join!(
+                    http_client.fetch_table_schema(table),
+                    http_client.fetch_column_comments(table),
+                    http_client.fetch_table_comment(table),
+                );
+
+                if let Ok(schema) = schema_res {
+                    schema_cache.insert(table.clone(), schema);
+
+                    if let Ok(comments) = comments_res {
+                        let directives = comments
+                            .into_iter()
+                            .map(|(col, comment)| (col, parse_directives(&comment)))
+                            .collect();
+                        col_meta_cache.apply_ddl(table, directives);
+                    }
+
+                    if let Ok(comment) = comment_res {
+                        if !comment.is_empty() {
+                            capture_overrides.update_from_comment(table, &comment);
+                        }
+                    }
+
+                    debug!(table = %table, "Pre-warmed schema cache");
+                } else {
+                    warn!(table = %table, "Failed to pre-warm schema, first batch will use transformer path");
+                }
+            }
+
+            info!(
+                count = tables_to_warm.len(),
+                "Schema cache pre-warm complete"
+            );
+        }
+
         loop {
             tokio::select! {
                 biased; // Prioritize shutdown check

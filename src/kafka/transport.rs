@@ -59,9 +59,15 @@ impl TransportAdapter {
             group: config.group.clone(),
             client_id: config.client_id.clone(),
             topics: config.topics.clone(),
+            auto_discover: config.topics.is_empty(),
             librdkafka_overrides: config.librdkafka_overrides.clone(),
             ..Default::default()
         };
+
+        // Map topic_regex to rustlib's topic_include filter
+        if let Some(ref regex) = config.topic_regex {
+            transport_config.topic_include = vec![regex.clone()];
+        }
 
         // SASL configuration
         if let Some(ref sasl) = config.sasl

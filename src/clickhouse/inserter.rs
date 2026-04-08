@@ -311,7 +311,34 @@ impl Inserter {
         raw_payloads: &[Arc<[u8]>],
     ) -> Result<usize> {
         match self.insert_format {
-            InsertFormat::RowBinary => self.insert_rows_rowbinary(table, rows).await,
+            InsertFormat::RowBinary => {
+                // The extractor (json_primary) path omits _json from the data map,
+                // relying on zero-copy splice at serialisation time. That splice only
+                // works for JSONEachRow. For RowBinary we must inject _json into the
+                // rows before encoding. raw_payloads is always parallel to rows —
+                // empty entries mark transformer-path rows (already have _json in map).
+                let needs_patch = raw_payloads.iter().any(|r| !r.is_empty());
+                if needs_patch {
+                    let mut patched: Vec<Map<String, Value>> = Vec::with_capacity(rows.len());
+                    for (row, raw) in rows.iter().zip(raw_payloads.iter()) {
+                        if !raw.is_empty() && !row.contains_key("_json") {
+                            let mut row = row.clone();
+                            if let Ok(json_str) = std::str::from_utf8(raw) {
+                                row.insert(
+                                    "_json".to_string(),
+                                    Value::String(json_str.to_string()),
+                                );
+                            }
+                            patched.push(row);
+                        } else {
+                            patched.push(row.clone());
+                        }
+                    }
+                    self.insert_rows_rowbinary(table, &patched).await
+                } else {
+                    self.insert_rows_rowbinary(table, rows).await
+                }
+            }
             InsertFormat::JsonEachRow => self.insert_rows_json(table, rows, raw_payloads).await,
         }
     }
@@ -496,7 +523,15 @@ impl Inserter {
             }
         } else {
             for (row, raw) in rows.iter().zip(raw_payloads.iter()) {
-                write_row_with_json(&mut body, row, raw)?;
+                if raw.is_empty() {
+                    // Transformer-path row: _json already in the map (or absent).
+                    sonic_rs::to_writer(&mut body, row).map_err(|e| {
+                        crate::Error::ClickHouse(format!("JSON serialisation error: {e}"))
+                    })?;
+                    body.push(b'\n');
+                } else {
+                    write_row_with_json(&mut body, row, raw)?;
+                }
             }
         }
 
