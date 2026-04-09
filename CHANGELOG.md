@@ -1,3 +1,10 @@
+## [1.16.6](https://github.com/hyperi-io/dfe-loader/compare/v1.16.5...v1.16.6) (2026-04-09)
+
+
+### Bug Fixes
+
+* zero-copy RowBinary _json, extractor move semantics, schema pre-warm ([eb0b035](https://github.com/hyperi-io/dfe-loader/commit/eb0b0356fbb5fe31ad61505ed660f3be8d52a0cc))
+
 ## [1.16.5](https://github.com/hyperi-io/dfe-loader/compare/v1.16.4...v1.16.5) (2026-04-02)
 
 
