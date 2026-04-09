@@ -302,8 +302,9 @@ impl Inserter {
     /// - **Data errors**: Returns immediately (caller should salvage)
     /// - **Fatal errors**: Returns immediately (no retry)
     ///
-    /// `raw_payloads` is parallel to `rows` — used by `JSONEachRow` path for
-    /// zero-copy `_json` splice. Ignored by `RowBinary` path.
+    /// `raw_payloads` is parallel to `rows` — used for zero-copy `_json` splice.
+    /// For RowBinary: passed to `DynamicInsert::write_map_with_raw()` for direct
+    /// byte encoding (no row cloning). For JSONEachRow: spliced into NDJSON body.
     pub async fn insert_rows(
         &self,
         table: &str,
@@ -311,34 +312,7 @@ impl Inserter {
         raw_payloads: &[Arc<[u8]>],
     ) -> Result<usize> {
         match self.insert_format {
-            InsertFormat::RowBinary => {
-                // The extractor (json_primary) path omits _json from the data map,
-                // relying on zero-copy splice at serialisation time. That splice only
-                // works for JSONEachRow. For RowBinary we must inject _json into the
-                // rows before encoding. raw_payloads is always parallel to rows —
-                // empty entries mark transformer-path rows (already have _json in map).
-                let needs_patch = raw_payloads.iter().any(|r| !r.is_empty());
-                if needs_patch {
-                    let mut patched: Vec<Map<String, Value>> = Vec::with_capacity(rows.len());
-                    for (row, raw) in rows.iter().zip(raw_payloads.iter()) {
-                        if !raw.is_empty() && !row.contains_key("_json") {
-                            let mut row = row.clone();
-                            if let Ok(json_str) = std::str::from_utf8(raw) {
-                                row.insert(
-                                    "_json".to_string(),
-                                    Value::String(json_str.to_string()),
-                                );
-                            }
-                            patched.push(row);
-                        } else {
-                            patched.push(row.clone());
-                        }
-                    }
-                    self.insert_rows_rowbinary(table, &patched).await
-                } else {
-                    self.insert_rows_rowbinary(table, rows).await
-                }
-            }
+            InsertFormat::RowBinary => self.insert_rows_rowbinary(table, rows, raw_payloads).await,
             InsertFormat::JsonEachRow => self.insert_rows_json(table, rows, raw_payloads).await,
         }
     }
@@ -347,10 +321,14 @@ impl Inserter {
     ///
     /// `ClickHouse` receives pre-columnarised data, zero server-side JSON parsing.
     /// On schema mismatch, invalidates cache and retries once with fresh schema.
+    ///
+    /// `raw_payloads` is parallel to `rows` — non-empty entries are passed to
+    /// `DynamicInsert::write_map_with_raw()` for zero-copy `_json` encoding.
     async fn insert_rows_rowbinary(
         &self,
         table: &str,
         rows: &[Map<String, Value>],
+        raw_payloads: &[Arc<[u8]>],
     ) -> Result<usize> {
         if rows.is_empty() {
             return Ok(0);
@@ -381,7 +359,18 @@ impl Inserter {
                         "Encoding row"
                     );
                 }
-                if let Err(e) = insert.write_map(row).await {
+                // Zero-copy _json: pass raw bytes directly to the encoder when
+                // the extractor path provides them. No row cloning, no String
+                // allocation — raw Kafka payload flows straight to RowBinary.
+                let raw = raw_payloads.get(i).filter(|r| !r.is_empty());
+                let write_result = if let Some(raw_bytes) = raw {
+                    insert
+                        .write_map_with_raw(row, &[("_json", raw_bytes)])
+                        .await
+                } else {
+                    insert.write_map(row).await
+                };
+                if let Err(e) = write_result {
                     // Schema mismatch — invalidate both fork and loader caches, then retry
                     if matches!(e, clickhouse::dynamic::DynamicError::SchemaMismatch { .. }) {
                         insert.invalidate_schema();
@@ -1028,5 +1017,91 @@ mod tests {
 
         assert_eq!(config.backoff_delay(10), Duration::from_millis(1000));
         assert_eq!(config.backoff_delay(20), Duration::from_millis(1000));
+    }
+
+    #[test]
+    fn test_write_row_with_json_splices_raw_payload() {
+        // Extractor-path row: _json is NOT in the map, raw bytes are spliced in.
+        let row = serde_json::json!({"severity": "high", "_org_id": "acme"});
+        let row_map = row.as_object().unwrap();
+        let raw = br#"{"severity":"high","extra":"ignored"}"#;
+
+        let mut body = Vec::new();
+        write_row_with_json(&mut body, row_map, raw).unwrap();
+
+        let line = std::str::from_utf8(&body).unwrap();
+        assert!(line.ends_with('\n'), "must end with newline");
+        let parsed: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+
+        // _json must be present and contain the raw payload
+        assert_eq!(
+            parsed.get("_json").unwrap(),
+            &serde_json::json!({"severity":"high","extra":"ignored"})
+        );
+        // Original fields must still be present
+        assert_eq!(parsed.get("severity").unwrap(), "high");
+        assert_eq!(parsed.get("_org_id").unwrap(), "acme");
+    }
+
+    #[test]
+    fn test_write_row_with_json_empty_row() {
+        // Edge case: empty row map with only raw payload.
+        let row_map = serde_json::Map::new();
+        let raw = br#"{"event":"login"}"#;
+
+        let mut body = Vec::new();
+        write_row_with_json(&mut body, &row_map, raw).unwrap();
+
+        let line = std::str::from_utf8(&body).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+        assert_eq!(
+            parsed.get("_json").unwrap(),
+            &serde_json::json!({"event":"login"})
+        );
+    }
+
+    #[test]
+    fn test_json_insert_mixed_batch_raw_payloads() {
+        // Simulate a mixed batch: extractor-path rows (non-empty raw) and
+        // transformer-path rows (empty raw). Verifies that empty raw entries
+        // produce normal JSON serialisation (no _json splice).
+        let extractor_row = serde_json::json!({"severity": "high"});
+        let transformer_row = serde_json::json!({"severity": "low", "_json": "{}"});
+
+        let rows = [
+            extractor_row.as_object().unwrap().clone(),
+            transformer_row.as_object().unwrap().clone(),
+        ];
+        let raw_payloads: [Arc<[u8]>; 2] = [
+            Arc::from(br#"{"severity":"high","detail":"x"}"#.as_slice()),
+            Arc::from(b"".as_slice()), // empty = transformer path
+        ];
+
+        // Build NDJSON body the same way insert_rows_json does
+        let mut body = Vec::new();
+        for (row, raw) in rows.iter().zip(raw_payloads.iter()) {
+            if raw.is_empty() {
+                sonic_rs::to_writer(&mut body, row).unwrap();
+                body.push(b'\n');
+            } else {
+                write_row_with_json(&mut body, row, raw).unwrap();
+            }
+        }
+
+        let output = std::str::from_utf8(&body).unwrap();
+        let lines: Vec<&str> = output.lines().collect();
+        assert_eq!(lines.len(), 2);
+
+        // Line 0: extractor path — _json spliced from raw
+        let line0: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+        assert!(
+            line0.get("_json").is_some(),
+            "extractor row must have _json"
+        );
+
+        // Line 1: transformer path — _json already in map, no splice
+        let line1: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
+        assert_eq!(line1.get("_json").unwrap(), "{}");
+        assert_eq!(line1.get("severity").unwrap(), "low");
     }
 }

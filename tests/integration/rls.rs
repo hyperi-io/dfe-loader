@@ -189,9 +189,10 @@ async fn test_shared_schema_multiple_orgs() {
 #[tokio::test]
 async fn test_org_id_insert_to_clickhouse() {
     use crate::common::unique_table_name;
-    use crate::skip_if_no_clickhouse;
+    use crate::{skip_if_docker, skip_if_no_clickhouse};
 
     skip_if_no_clickhouse!();
+    skip_if_docker!();
 
     let client = if let Some(c) = create_http_test_client() {
         c
@@ -200,12 +201,6 @@ async fn test_org_id_insert_to_clickhouse() {
         return;
     };
     let oc = crate::common::on_cluster_clause();
-
-    // This test requires a Replicated database (ReplicatedMergeTree) — skip in Docker single-node
-    if crate::common::TestMode::detect() == crate::common::TestMode::Docker {
-        eprintln!("Skipping: ReplicatedMergeTree requires cluster (TEST_MODE=docker)");
-        return;
-    }
 
     // The cluster has two relevant databases:
     //   benchmark = Atomic engine (plain MergeTree, no replication, no auto-conversion)

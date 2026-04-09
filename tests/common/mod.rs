@@ -314,6 +314,19 @@ macro_rules! skip_if_no_kafka {
     };
 }
 
+/// Skip test in Docker mode — use for tests requiring Replicated DB or multi-node cluster.
+#[macro_export]
+macro_rules! skip_if_docker {
+    () => {
+        if $crate::common::TestMode::detect() == $crate::common::TestMode::Docker {
+            eprintln!(
+                "Skipping: test requires replicated cluster (TEST_MODE=docker is single-node)"
+            );
+            return;
+        }
+    };
+}
+
 // ============================================================================
 // Backward-Compatible Helpers
 // ============================================================================
