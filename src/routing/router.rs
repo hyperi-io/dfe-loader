@@ -15,7 +15,6 @@
 //! Uses `Cow<str>` internally to avoid String allocations when returning references.
 
 use std::borrow::Cow;
-use std::collections::HashMap;
 
 use rustc_hash::FxHashMap;
 use serde_json::Value;
@@ -367,12 +366,10 @@ impl Router {
             return None;
         }
 
-        // Convert top-level JSON object to HashMap for CEL context
+        // Pass serde_json::Map directly — build_context accepts any iterator
+        // of (&String, &Value), no clone needed.
         let obj = value.as_object()?;
-        let data: HashMap<String, serde_json::Value> =
-            obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-
-        let context = match hyperi_rustlib::expression::build_context(&data) {
+        let context = match hyperi_rustlib::expression::build_context(obj) {
             Ok(ctx) => ctx,
             Err(_) => return None,
         };

@@ -89,15 +89,16 @@ impl HeaderExtractor {
 
         // Parse once — all schema column lookups are O(1) hash operations on this map.
         // Misses are free here; with get_from_slice each miss still scans the full document.
-        let parsed_value: Value = match sonic_rs::from_slice(raw) {
-            Ok(v) => v,
+        // Take ownership of the parsed map so we can move Values out (zero-clone).
+        // Each lookup_move/lookup_first_move call removes the value from `parsed`
+        // and moves it into the output map — no Value::clone() on the hot path.
+        let mut parsed = match sonic_rs::from_slice::<Value>(raw) {
+            Ok(Value::Object(map)) => map,
+            Ok(_) => return map,
             Err(e) => {
                 debug!(table = %table, error = %e, "Payload parse failed, skipping extraction");
                 return map;
             }
-        };
-        let Some(parsed) = parsed_value.as_object() else {
-            return map;
         };
 
         for col in &schema.columns {
@@ -120,8 +121,8 @@ impl HeaderExtractor {
             // The column is NOT Nullable and has no DEFAULT — omitting it would
             // produce 1970-01-01 00:00:00.000 (epoch zero).
             if name == "_timestamp" {
-                let found = lookup_one(parsed, "timestamp", name, &mut map)
-                    || lookup_one(parsed, name, name, &mut map);
+                let found = lookup_move(&mut parsed, "timestamp", name, &mut map)
+                    || lookup_move(&mut parsed, name, name, &mut map);
                 if !found {
                     map.insert(name.clone(), Value::String(fmt_ts(&now)));
                 }
@@ -137,19 +138,19 @@ impl HeaderExtractor {
             // Priority: @renamed directive > per-column defaults > column name.
             let found = if directives.renamed.is_empty() {
                 match name.as_str() {
-                    "_org_id" => lookup_one(parsed, &self.org_id_field, name, &mut map),
+                    "_org_id" => lookup_move(&mut parsed, &self.org_id_field, name, &mut map),
                     "_source" if self.capture_source && self.metadata_enabled => {
-                        lookup_first(parsed, &self.source_fields, name, &mut map)
+                        lookup_first_move(&mut parsed, &self.source_fields, name, &mut map)
                     }
                     _ if name.starts_with('_') => {
                         // _foo → try "foo" (stripped) first, then "_foo" as literal fallback.
-                        lookup_one(parsed, &name[1..], name, &mut map)
-                            || lookup_one(parsed, name, name, &mut map)
+                        lookup_move(&mut parsed, &name[1..], name, &mut map)
+                            || lookup_move(&mut parsed, name, name, &mut map)
                     }
-                    _ => lookup_one(parsed, name, name, &mut map),
+                    _ => lookup_move(&mut parsed, name, name, &mut map),
                 }
             } else {
-                lookup_first(parsed, &directives.renamed, name, &mut map)
+                lookup_first_move(&mut parsed, &directives.renamed, name, &mut map)
             };
 
             // Apply column default when all source fields were absent.
@@ -163,33 +164,37 @@ impl HeaderExtractor {
     }
 }
 
-/// Look up a single source field in the pre-parsed object and insert into `map`.
+/// Move a source field from the parsed object into the output map (zero-clone).
+///
+/// Uses `remove()` to take ownership of the Value — no allocation for the value
+/// itself. The key allocation (`dest.to_string()`) is unavoidable since
+/// `Map<String, Value>` requires owned keys.
 #[inline]
-fn lookup_one(
-    parsed: &serde_json::Map<String, Value>,
+fn lookup_move(
+    parsed: &mut serde_json::Map<String, Value>,
     source: &str,
     dest: &str,
     map: &mut Map<String, Value>,
 ) -> bool {
-    if let Some(v) = parsed.get(source) {
-        map.insert(dest.to_string(), v.clone());
+    if let Some(v) = parsed.remove(source) {
+        map.insert(dest.to_string(), v);
         true
     } else {
         false
     }
 }
 
-/// Try source field names in order from the pre-parsed object. First match wins.
+/// Try source field names in order, moving the first match (zero-clone).
 #[inline]
-fn lookup_first(
-    parsed: &serde_json::Map<String, Value>,
+fn lookup_first_move(
+    parsed: &mut serde_json::Map<String, Value>,
     sources: &[String],
     dest: &str,
     map: &mut Map<String, Value>,
 ) -> bool {
     for source in sources {
-        if let Some(v) = parsed.get(source.as_str()) {
-            map.insert(dest.to_string(), v.clone());
+        if let Some(v) = parsed.remove(source.as_str()) {
+            map.insert(dest.to_string(), v);
             return true;
         }
     }
@@ -425,5 +430,53 @@ mod tests {
 
         let map = extractor2.extract(raw, "dfe.events", &schema, &col_meta);
         assert_eq!(map.get("_source"), Some(&Value::String("auth".into())));
+    }
+
+    #[test]
+    fn test_timestamp_fallback_to_now_when_missing() {
+        // _timestamp is NOT Nullable and has no DEFAULT — omitting it produces
+        // epoch zero (1970-01-01 00:00:00.000). The extractor must inject now().
+        let extractor = default_extractor();
+        let raw = br#"{"severity": "high"}"#; // No "timestamp" or "_timestamp" field
+        let schema = make_schema(&["_timestamp", "severity"]);
+        let col_meta = empty_col_meta();
+
+        let map = extractor.extract(raw, "dfe.events", &schema, &col_meta);
+
+        // _timestamp must be present (not omitted)
+        assert!(
+            map.contains_key("_timestamp"),
+            "_timestamp must be injected when source field is missing"
+        );
+        // Must be a valid timestamp string, not epoch zero
+        if let Some(Value::String(ts)) = map.get("_timestamp") {
+            assert!(
+                !ts.starts_with("1970"),
+                "_timestamp must not be epoch zero, got: {ts}"
+            );
+            assert!(ts.len() >= 19, "timestamp must be at least 19 chars: {ts}");
+            // Verify it starts with a recent year (2026+)
+            assert!(
+                ts.starts_with("202"),
+                "_timestamp should be current time, got: {ts}"
+            );
+        } else {
+            panic!("_timestamp must be a string value");
+        }
+    }
+
+    #[test]
+    fn test_timestamp_extracted_from_source_when_present() {
+        // When "timestamp" exists in source data, it should be used instead of now().
+        let extractor = default_extractor();
+        let raw = br#"{"timestamp": "2026-03-15 10:30:00.123", "severity": "high"}"#;
+        let schema = make_schema(&["_timestamp", "severity"]);
+        let col_meta = empty_col_meta();
+
+        let map = extractor.extract(raw, "dfe.events", &schema, &col_meta);
+        assert_eq!(
+            map.get("_timestamp"),
+            Some(&Value::String("2026-03-15 10:30:00.123".into()))
+        );
     }
 }

@@ -488,4 +488,68 @@ mod tests {
         assert_eq!(manager.flush_age_secs, 30);
         assert_eq!(manager.pending_rows(), 1);
     }
+
+    #[test]
+    fn test_raw_payloads_parallel_with_rows() {
+        // raw_payloads must always be the same length as rows — even when some
+        // rows come via the transformer path (no raw payload). Empty Arc<[u8]>
+        // entries mark transformer-path rows.
+        let mut manager = BufferManager::new(&test_config());
+
+        // Extractor-path row: has raw payload
+        let extractor_row = json!({"severity": "high"}).as_object().unwrap().clone();
+        let raw: Arc<[u8]> = Arc::from(br#"{"severity":"high","extra":"data"}"#.as_slice());
+        manager.push("db.events", extractor_row, None, Some(raw));
+
+        // Transformer-path row: no raw payload
+        let transformer_row = json!({"severity": "low", "_json": "{}"})
+            .as_object()
+            .unwrap()
+            .clone();
+        manager.push("db.events", transformer_row, None, None);
+
+        // Another extractor-path row
+        let extractor_row2 = json!({"severity": "medium"}).as_object().unwrap().clone();
+        let raw2: Arc<[u8]> = Arc::from(br#"{"severity":"medium"}"#.as_slice());
+        manager.push("db.events", extractor_row2, None, Some(raw2));
+
+        // Push enough to trigger flush
+        for i in 0..4 {
+            let data = json!({"id": i}).as_object().unwrap().clone();
+            manager.push("db.events", data, None, None);
+        }
+
+        let batches = manager.get_ready_for_flush();
+        assert_eq!(batches.len(), 1);
+
+        let batch = &batches[0];
+        assert_eq!(
+            batch.rows.len(),
+            batch.raw_payloads.len(),
+            "raw_payloads must be parallel with rows"
+        );
+
+        // Extractor rows have non-empty raw payloads
+        assert!(
+            !batch.raw_payloads[0].is_empty(),
+            "extractor row 0 should have raw payload"
+        );
+        // Transformer row has empty raw payload
+        assert!(
+            batch.raw_payloads[1].is_empty(),
+            "transformer row 1 should have empty raw payload"
+        );
+        // Second extractor row
+        assert!(
+            !batch.raw_payloads[2].is_empty(),
+            "extractor row 2 should have raw payload"
+        );
+        // Remaining transformer rows
+        for i in 3..batch.raw_payloads.len() {
+            assert!(
+                batch.raw_payloads[i].is_empty(),
+                "transformer row {i} should have empty raw payload"
+            );
+        }
+    }
 }
