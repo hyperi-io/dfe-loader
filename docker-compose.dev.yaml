@@ -11,7 +11,7 @@
 services:
   # ClickHouse for testing inserts
   clickhouse:
-    image: clickhouse/clickhouse-server:24.8
+    image: clickhouse/clickhouse-server:24.12@sha256:a65ca89ddbe8e04a05036dd7d7110a203256293b407b9359130ed5e4333f45ff
     container_name: clickhouse-dev
     ports:
       - "9000:9000"   # Native protocol
@@ -35,7 +35,7 @@ services:
 
   # Kafka (Redpanda - Kafka-compatible, lighter weight)
   redpanda:
-    image: redpandadata/redpanda:v24.2.1
+    image: redpandadata/redpanda:v24.3.18@sha256:5c6bdbaf30c97de1ebc2ad417b7d02e0bdb5bf88e243bd3079d74bfde9c7754f
     container_name: redpanda-dev
     command:
       - redpanda
@@ -66,7 +66,7 @@ services:
 
   # Redpanda Console (Kafka UI)
   console:
-    image: redpandadata/console:v2.7.0
+    image: redpandadata/console:v2.8.11@sha256:cc65b57d81d9c3696ed0e047afdd5445dab62db095c9052f69430184c93a8997
     container_name: redpanda-console-dev
     ports:
       - "8080:8080"
