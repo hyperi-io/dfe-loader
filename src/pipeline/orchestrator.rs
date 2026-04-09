@@ -413,6 +413,19 @@ impl Orchestrator {
             "Pipeline running"
         );
 
+        // Pre-warm schema cache for all config-known tables so the first batch
+        // uses the extractor (json_primary) path. Dynamically-routed tables
+        // (via table_fields/db_fields) can't be pre-warmed — they hit the
+        // transformer path on first batch until background resolution completes.
+        pre_warm_schema_cache(
+            &self.config.routing,
+            &http_client,
+            &schema_cache,
+            &col_meta_cache,
+            &mut capture_overrides,
+        )
+        .await;
+
         loop {
             tokio::select! {
                 biased; // Prioritize shutdown check
@@ -613,7 +626,7 @@ impl Orchestrator {
                                     if dlq.is_some() {
                                         let entry = DlqEntry::new("loader", reason.clone(), msg.payload.clone())
                                             .with_source(hyperi_rustlib::dlq::DlqSource::kafka(
-                                                msg.topic.to_string(),
+                                                &*msg.topic,
                                                 msg.partition,
                                                 msg.offset,
                                             ));
@@ -1048,6 +1061,89 @@ fn warn_restart_required(old: &Config, new: &Config) {
     if old.column_directives != new.column_directives {
         warn!("column_directives config changed — requires restart to take effect");
     }
+}
+
+/// Pre-warm schema cache for all config-known tables in parallel.
+///
+/// Fetches schema, column comments, and table comments for each table
+/// concurrently so the first batch always uses the extractor (json_primary)
+/// path. Without this, messages arriving before background resolution
+/// completes fall through to the transformer path.
+async fn pre_warm_schema_cache(
+    routing: &crate::config::RoutingConfig,
+    http_client: &Arc<ClickHouseQueryClient>,
+    schema_cache: &SharedSchemaCache,
+    col_meta_cache: &Arc<ColumnMetaCache>,
+    capture_overrides: &mut CaptureOverrides,
+) {
+    use futures::future::join_all;
+
+    let default_db = &routing.default_db;
+    let mut tables: Vec<String> = Vec::new();
+
+    // Default table (always known)
+    tables.push(format!("{default_db}.{}", routing.default_table));
+
+    // CEL routing rule targets
+    for rule in &routing.rules {
+        let db = rule.db.as_deref().unwrap_or(default_db);
+        tables.push(format!("{db}.{}", rule.target));
+    }
+
+    // source_to_table mapping targets
+    for table in routing.source_to_table.values() {
+        tables.push(format!("{default_db}.{table}"));
+    }
+
+    tables.sort();
+    tables.dedup();
+
+    // Fetch all tables in parallel — each table's three queries are also concurrent.
+    let results: Vec<_> = join_all(tables.iter().map(|table| {
+        let client = Arc::clone(http_client);
+        let table = table.clone();
+        async move {
+            let (schema_res, comments_res, comment_res) = tokio::join!(
+                client.fetch_table_schema(&table),
+                client.fetch_column_comments(&table),
+                client.fetch_table_comment(&table),
+            );
+            (table, schema_res, comments_res, comment_res)
+        }
+    }))
+    .await;
+
+    let mut warmed = 0usize;
+    for (table, schema_res, comments_res, comment_res) in results {
+        if let Ok(schema) = schema_res {
+            schema_cache.insert(table.clone(), schema);
+
+            if let Ok(comments) = comments_res {
+                let directives = comments
+                    .into_iter()
+                    .map(|(col, comment)| (col, parse_directives(&comment)))
+                    .collect();
+                col_meta_cache.apply_ddl(&table, directives);
+            }
+
+            if let Ok(comment) = comment_res
+                && !comment.is_empty()
+            {
+                capture_overrides.update_from_comment(&table, &comment);
+            }
+
+            debug!(table = %table, "Pre-warmed schema cache");
+            warmed += 1;
+        } else {
+            warn!(table = %table, "Failed to pre-warm schema, first batch will use transformer path");
+        }
+    }
+
+    info!(
+        count = warmed,
+        total = tables.len(),
+        "Schema cache pre-warm complete"
+    );
 }
 
 #[cfg(test)]

@@ -17,7 +17,7 @@ use dfe_loader::clickhouse::{Inserter, InserterConfig};
 use crate::common::{
     create_ch_test_client, create_http_test_client, drop_http_test_table, unique_table_name,
 };
-use crate::skip_if_no_clickhouse;
+use crate::{skip_if_docker, skip_if_no_clickhouse};
 
 /// Helper: create JSON rows for testing
 fn make_test_rows(count: usize) -> Vec<Map<String, Value>> {
@@ -454,4 +454,102 @@ fn test_circuit_breaker_config_validation() {
     assert_eq!(config.failure_threshold, 5);
     assert_eq!(config.success_threshold, 2);
     assert_eq!(config.open_duration, Duration::from_millis(30000));
+}
+
+// ============================================================================
+// RowBinary _json Zero-Copy Tests
+// ============================================================================
+
+#[tokio::test]
+async fn test_rowbinary_json_from_raw_payload() {
+    skip_if_no_clickhouse!();
+    skip_if_docker!();
+
+    let client = if let Some(c) = create_http_test_client() {
+        Arc::new(c)
+    } else {
+        eprintln!("Could not create HTTP client");
+        return;
+    };
+    let oc = crate::common::on_cluster_clause();
+
+    let table_name = unique_table_name("test_rb_json_raw");
+    let full_name = format!("default.{table_name}");
+
+    // Create table with Nullable(JSON) _json column — matches Common Header v2.
+    let ddl = format!(
+        "CREATE TABLE {full_name} (
+            _timestamp DateTime64(3),
+            _timestamp_load DateTime64(3) DEFAULT now64(3),
+            _uuid UUID DEFAULT generateUUIDv7(),
+            _org_id String,
+            severity String,
+            _json Nullable(JSON)
+        )
+        ENGINE = ReplicatedMergeTree()
+        ORDER BY (_timestamp, _org_id)"
+    );
+    client.execute(&ddl).await.expect("Failed to create table");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    // Create RowBinary inserter
+    let inserter = Inserter::new(
+        client.clone(),
+        create_ch_test_client().unwrap(),
+        InserterConfig::default(),
+    )
+    .with_insert_format(InsertFormat::RowBinary);
+
+    // Extractor-path rows: _json is NOT in the map — raw payload passed separately.
+    // This is the zero-copy path: raw Kafka bytes → Arc<[u8]> → RowBinary wire.
+    let rows: Vec<Map<String, Value>> = vec![
+        json!({"_timestamp": "2026-04-09 10:00:00.000", "_org_id": "acme", "severity": "high"})
+            .as_object()
+            .unwrap()
+            .clone(),
+        json!({"_timestamp": "2026-04-09 10:01:00.000", "_org_id": "acme", "severity": "low"})
+            .as_object()
+            .unwrap()
+            .clone(),
+    ];
+
+    let raw_payloads: Vec<Arc<[u8]>> = vec![
+        Arc::from(
+            br#"{"severity":"high","src_ip":"10.0.0.1","detail":"login attempt"}"#.as_slice(),
+        ),
+        Arc::from(br#"{"severity":"low","src_ip":"10.0.0.2","detail":"heartbeat"}"#.as_slice()),
+    ];
+
+    let result = inserter.insert_rows(&full_name, &rows, &raw_payloads).await;
+    assert!(
+        result.is_ok(),
+        "RowBinary insert failed: {:?}",
+        result.err()
+    );
+    assert_eq!(result.unwrap(), 2);
+
+    // Sync replicas then query back
+    client
+        .execute(&format!("SYSTEM SYNC REPLICA{oc} {full_name}"))
+        .await
+        .expect("Failed to sync replicas");
+
+    let count = client
+        .query_count(&full_name, None)
+        .await
+        .expect("Failed to query count");
+    assert_eq!(count, 2, "Should have 2 rows");
+
+    // Verify _json was stored and is queryable via path syntax
+    let json_count = client
+        .query_count(
+            &full_name,
+            Some("_json.src_ip = '10.0.0.1' AND severity = 'high'"),
+        )
+        .await
+        .expect("Failed to query _json path");
+    assert_eq!(json_count, 1, "_json.src_ip path query should match 1 row");
+
+    // Cleanup
+    drop_http_test_table(&client, &full_name).await;
 }

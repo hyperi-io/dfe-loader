@@ -63,6 +63,11 @@ impl TransportAdapter {
             ..Default::default()
         };
 
+        // Map topic_regex to rustlib's topic_include filter
+        if let Some(ref regex) = config.topic_regex {
+            transport_config.topic_include = vec![regex.clone()];
+        }
+
         // SASL configuration
         if let Some(ref sasl) = config.sasl
             && sasl.enabled

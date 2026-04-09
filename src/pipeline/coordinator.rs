@@ -110,11 +110,7 @@ impl BatchCoordinator<'_> {
 
                     if self.dlq_enabled {
                         let entry = DlqEntry::new("loader", e.to_string(), msg.payload.clone())
-                            .with_source(DlqSource::kafka(
-                                msg.topic.to_string(),
-                                msg.partition,
-                                msg.offset,
-                            ));
+                            .with_source(DlqSource::kafka(&*msg.topic, msg.partition, msg.offset));
 
                         match self.dlq_tx.try_send(entry) {
                             Ok(()) => {
