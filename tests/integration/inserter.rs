@@ -553,3 +553,165 @@ async fn test_rowbinary_json_from_raw_payload() {
     // Cleanup
     drop_http_test_table(&client, &full_name).await;
 }
+
+/// raw_only mode: _raw populated with full payload, _json stays NULL.
+#[tokio::test]
+async fn test_raw_only_mode_raw_populated_json_null() {
+    skip_if_no_clickhouse!();
+    skip_if_docker!();
+
+    let client = if let Some(c) = create_http_test_client() {
+        Arc::new(c)
+    } else {
+        return;
+    };
+    let oc = crate::common::on_cluster_clause();
+    let table_name = unique_table_name("test_raw_only");
+    let full_name = format!("default.{table_name}");
+
+    let ddl = format!(
+        "CREATE TABLE {full_name} (
+            _timestamp DateTime64(3),
+            _timestamp_load DateTime64(3) DEFAULT now64(3),
+            _uuid UUID DEFAULT generateUUIDv7(),
+            _org_id String,
+            severity String,
+            _raw Nullable(String),
+            _json Nullable(JSON(max_dynamic_paths = 2048))
+        )
+        ENGINE = ReplicatedMergeTree()
+        ORDER BY (_org_id, _timestamp)"
+    );
+    client.execute(&ddl).await.expect("Failed to create table");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    // Simulate raw_only mode: _raw contains full payload as String, _json not set.
+    let rows: Vec<Map<String, Value>> = vec![
+        json!({
+            "_timestamp": "2026-04-10 10:00:00.000",
+            "_org_id": "acme",
+            "severity": "high",
+            "_raw": r#"{"severity":"high","src_ip":"10.0.0.1","detail":"login"}"#
+        })
+        .as_object()
+        .unwrap()
+        .clone(),
+    ];
+
+    // No raw_payloads — raw_only mode puts payload in _raw directly, no _json splice
+    let inserter = Inserter::new(
+        client.clone(),
+        create_ch_test_client().unwrap(),
+        InserterConfig::default(),
+    )
+    .with_insert_format(InsertFormat::RowBinary);
+
+    let result = inserter.insert_rows(&full_name, &rows, &[]).await;
+    assert!(result.is_ok(), "Insert failed: {:?}", result.err());
+
+    client
+        .execute(&format!("SYSTEM SYNC REPLICA{oc} {full_name}"))
+        .await
+        .expect("Failed to sync replicas");
+
+    // _raw should contain the full payload string
+    let raw_count = client
+        .query_count(&full_name, Some("_raw IS NOT NULL AND _raw != ''"))
+        .await
+        .expect("Failed to query _raw");
+    assert_eq!(raw_count, 1, "_raw should be populated");
+
+    // _json should be NULL (not populated in raw_only mode)
+    let json_null_count = client
+        .query_count(&full_name, Some("_json IS NULL"))
+        .await
+        .expect("Failed to query _json NULL");
+    assert_eq!(json_null_count, 1, "_json should be NULL in raw_only mode");
+
+    // Text search on _raw should work
+    let search_count = client
+        .query_count(&full_name, Some("_raw LIKE '%login%'"))
+        .await
+        .expect("Failed to text search _raw");
+    assert_eq!(search_count, 1, "Text search on _raw should find the row");
+
+    drop_http_test_table(&client, &full_name).await;
+}
+
+/// extracted_only mode: neither _json nor _raw populated, only promoted fields.
+#[tokio::test]
+async fn test_extracted_only_mode_both_null() {
+    skip_if_no_clickhouse!();
+    skip_if_docker!();
+
+    let client = if let Some(c) = create_http_test_client() {
+        Arc::new(c)
+    } else {
+        return;
+    };
+    let oc = crate::common::on_cluster_clause();
+    let table_name = unique_table_name("test_extracted_only");
+    let full_name = format!("default.{table_name}");
+
+    let ddl = format!(
+        "CREATE TABLE {full_name} (
+            _timestamp DateTime64(3),
+            _timestamp_load DateTime64(3) DEFAULT now64(3),
+            _uuid UUID DEFAULT generateUUIDv7(),
+            _org_id String,
+            severity String,
+            _raw Nullable(String),
+            _json Nullable(JSON(max_dynamic_paths = 2048))
+        )
+        ENGINE = ReplicatedMergeTree()
+        ORDER BY (_org_id, _timestamp)"
+    );
+    client.execute(&ddl).await.expect("Failed to create table");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    // Simulate extracted_only mode: only promoted fields, no _raw or _json
+    let rows: Vec<Map<String, Value>> = vec![
+        json!({
+            "_timestamp": "2026-04-10 10:00:00.000",
+            "_org_id": "acme",
+            "severity": "critical"
+        })
+        .as_object()
+        .unwrap()
+        .clone(),
+    ];
+
+    let inserter = Inserter::new(
+        client.clone(),
+        create_ch_test_client().unwrap(),
+        InserterConfig::default(),
+    )
+    .with_insert_format(InsertFormat::RowBinary);
+
+    let result = inserter.insert_rows(&full_name, &rows, &[]).await;
+    assert!(result.is_ok(), "Insert failed: {:?}", result.err());
+
+    client
+        .execute(&format!("SYSTEM SYNC REPLICA{oc} {full_name}"))
+        .await
+        .expect("Failed to sync replicas");
+
+    // Promoted field should be present
+    let severity_count = client
+        .query_count(&full_name, Some("severity = 'critical'"))
+        .await
+        .expect("Failed to query severity");
+    assert_eq!(severity_count, 1, "Promoted field should be stored");
+
+    // Both _raw and _json should be NULL
+    let both_null = client
+        .query_count(&full_name, Some("_raw IS NULL AND _json IS NULL"))
+        .await
+        .expect("Failed to query NULLs");
+    assert_eq!(
+        both_null, 1,
+        "Both _raw and _json should be NULL in extracted_only mode"
+    );
+
+    drop_http_test_table(&client, &full_name).await;
+}
