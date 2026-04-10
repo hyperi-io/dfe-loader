@@ -97,9 +97,8 @@ fn test_capture_derive_config_parallel_safety() {
 
     let results: Vec<Result<(), String>> = pool.process_batch(&tables, |table| {
         let config = overrides.derive_config(table);
-        // All tables should have default config (nothing disabled)
-        assert!(!config.disable_json);
-        assert!(!config.disable_raw);
+        // All tables should have default config (Full mode)
+        assert_eq!(config.mode, dfe_loader::config::CaptureMode::Full);
         Ok(())
     });
 

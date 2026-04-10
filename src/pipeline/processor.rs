@@ -19,7 +19,7 @@ use tracing::{debug, trace};
 use crate::buffer::KafkaOffset;
 use crate::clickhouse::SharedSchemaCache;
 use crate::column_meta::ColumnMetaCache;
-use crate::config::Config;
+use crate::config::{CaptureMode, Config};
 use crate::payload::{FormatDetector, PayloadFormat};
 use crate::routing::{RouteResult, Router};
 use crate::transform::{ComputedColumnCache, FieldMappingCache, HeaderExtractor, Transformer};
@@ -142,12 +142,22 @@ impl MessageProcessor<'_> {
             None
         };
 
+        // Resolve capture mode for this table (DDL > per-table config > global).
+        let capture_mode = self.capture_overrides.derive_config(&table).mode;
+
         let (mut data, raw_payload) = if let Some(schema) = json_primary_schema {
             let promoted =
                 self.extractor
                     .extract(&msg.payload, &table, &schema, self.col_meta_cache);
-            let raw: Arc<[u8]> = Arc::from(msg.payload.as_slice());
-            (promoted, Some(raw))
+
+            // raw_payload carries Kafka bytes for zero-copy _json splice (full mode only).
+            // raw_only: _raw set below from payload bytes, no _json splice needed.
+            // extracted_only: neither — no raw payload passed to inserter.
+            let raw: Option<Arc<[u8]>> = match capture_mode {
+                CaptureMode::Full => Some(Arc::from(msg.payload.as_slice())),
+                CaptureMode::RawOnly | CaptureMode::ExtractedOnly => None,
+            };
+            (promoted, raw)
         } else {
             // Legacy flatten path
             let common_header = self.config.metadata.enabled;
@@ -176,21 +186,42 @@ impl MessageProcessor<'_> {
             )?;
             let mut d = transform_result.data;
 
-            // Pure derive instead of get_or_default(&mut self)
-            let table_capture = self.capture_overrides.derive_config(&table);
-            if common_header
-                && self.config.metadata.capture_json
-                && !table_capture.disable_json
-                && let Ok(json_str) = std::str::from_utf8(&msg.payload)
-            {
-                d.insert("_json".to_string(), Value::String(json_str.to_string()));
-            }
-            if common_header && table_capture.disable_raw {
-                d.remove(self.transformer.raw_output());
+            // Apply capture mode to legacy path
+            if common_header {
+                match capture_mode {
+                    CaptureMode::Full => {
+                        // _json: inject full payload as string (legacy path)
+                        if let Ok(json_str) = std::str::from_utf8(&msg.payload) {
+                            d.insert("_json".to_string(), Value::String(json_str.to_string()));
+                        }
+                        // _raw: already extracted by transformer from raw_source_fields
+                    }
+                    CaptureMode::RawOnly => {
+                        // _json: not populated
+                        // _raw: transformer may have extracted from raw_source_fields,
+                        // but we want the full Kafka payload instead — overwrite it
+                        d.remove(self.transformer.raw_output());
+                    }
+                    CaptureMode::ExtractedOnly => {
+                        // Neither _json nor _raw
+                        d.remove(self.transformer.raw_output());
+                    }
+                }
             }
 
             (d, None)
         };
+
+        // raw_only: write entire Kafka payload to _raw as UTF-8 string.
+        // Done after both paths since it's the same for extractor and transformer.
+        if capture_mode == CaptureMode::RawOnly
+            && let Ok(raw_str) = std::str::from_utf8(&msg.payload)
+        {
+            data.insert(
+                self.config.metadata.raw_output.clone(),
+                Value::String(raw_str.to_string()),
+            );
+        }
 
         // Step 5: Apply per-table field mapping (read-only cache lookup)
         if let Some(fm_cache) = self.field_mapping_cache

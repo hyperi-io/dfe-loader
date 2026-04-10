@@ -8,6 +8,10 @@ use std::collections::HashMap;
 use hyperi_rustlib::config::sensitive::SensitiveString;
 use serde::{Deserialize, Serialize};
 
+fn default_true() -> bool {
+    true
+}
+
 // ============================================================================
 // Payload Configuration
 // ============================================================================
@@ -595,18 +599,29 @@ pub struct MetadataConfig {
     /// Drop tags entirely after routing extraction (saves storage)
     pub drop_tags: bool,
 
-    // _json capture (Common Header v2)
+    // Capture mode (Common Header v2.1)
+    /// Controls how _json and _raw columns are populated.
+    /// All modes extract promoted fields to schema columns.
+    #[serde(default)]
+    pub capture_mode: CaptureMode,
+
+    /// Per-table capture mode overrides (table name → mode)
+    #[serde(default)]
+    pub table_capture_modes: HashMap<String, CaptureMode>,
+
+    // _json capture (Common Header v2) — DEPRECATED, use capture_mode
     /// Store complete original Kafka message as JSON before transformation
-    #[serde(alias = "capture_logjson")]
+    #[serde(alias = "capture_logjson", default = "default_true")]
     pub capture_json: bool,
     /// Output field name for _json
     #[serde(alias = "logjson_output")]
     pub json_output: String,
 
-    // _raw field injection (Common Header v2)
+    // _raw field injection (Common Header v2) — DEPRECATED, use capture_mode
     // Implements @renamed: first(source_fields...) → raw_output
     // Silent no-op if destination already present in data
     /// Enable _raw field injection from source (zero-copy rename)
+    #[serde(default = "default_true")]
     pub capture_raw: bool,
     /// Source fields to try for rename (first match wins). Default: ["logoriginal"]
     pub raw_source_fields: Vec<String>,
@@ -621,7 +636,7 @@ pub struct MetadataConfig {
     /// Output field name for _source
     pub source_output: String,
 
-    // Per-table capture overrides
+    // Per-table capture overrides — DEPRECATED, use table_capture_modes
     /// Tables where _json capture is disabled (e.g., ["dfe.metrics"])
     pub disable_json_tables: Vec<String>,
     /// Tables where _raw capture is disabled (e.g., ["dfe.metrics"])
@@ -651,11 +666,15 @@ impl Default for MetadataConfig {
             tags_output: "_tags".to_string(),
             drop_tags: false,
 
-            // _json capture defaults
+            // Capture mode (v2.1)
+            capture_mode: CaptureMode::Full,
+            table_capture_modes: HashMap::new(),
+
+            // _json capture defaults (deprecated — use capture_mode)
             capture_json: true,
             json_output: "_json".to_string(),
 
-            // _raw capture defaults (@renamed: logoriginal → _raw)
+            // _raw capture defaults (deprecated — use capture_mode)
             capture_raw: true,
             raw_source_fields: vec!["logoriginal".to_string()],
             raw_output: "_raw".to_string(),
@@ -665,7 +684,7 @@ impl Default for MetadataConfig {
             source_fields: vec!["_source".to_string()],
             source_output: "_source".to_string(),
 
-            // Per-table overrides
+            // Per-table overrides (deprecated — use table_capture_modes)
             disable_json_tables: vec![],
             disable_raw_tables: vec![],
 
@@ -813,15 +832,34 @@ impl ScalingConfig {
 
 /// Per-table capture override configuration.
 ///
-/// Resolved from two sources (DDL tags take precedence over config lists):
-/// 1. Config: `disable_json_tables` / `disable_raw_tables` lists
-/// 2. DDL: `@no_capture_json: true` / `@no_capture_raw: true` in table COMMENT
+/// Controls how `_json` and `_raw` columns are populated.
+///
+/// All modes extract promoted fields to schema columns. The only difference
+/// is where (or whether) the full payload is preserved.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CaptureMode {
+    /// `_json` = full payload (JSON type), `_raw` = extracted from raw_source_fields
+    #[default]
+    Full,
+    /// `_json` = NULL, `_raw` = entire Kafka payload as UTF-8 String
+    RawOnly,
+    /// `_json` = NULL, `_raw` = NULL — only promoted schema fields
+    ExtractedOnly,
+}
+
+/// Per-table capture configuration.
+///
+/// Resolved from three sources (highest priority first):
+/// 1. DDL: `@capture_mode: raw_only` in table COMMENT
+/// 2. Config: `table_capture_modes` map
+/// 3. Config: global `capture_mode`
+///
+/// Legacy fields (`disable_json_tables`, `@no_capture_json`) are deprecated
+/// but still supported for one release cycle.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct TableCaptureConfig {
-    /// Whether _json capture is disabled for this table
-    pub disable_json: bool,
-    /// Whether _raw capture is disabled for this table
-    pub disable_raw: bool,
+    pub mode: CaptureMode,
 }
 
 // ============================================================================

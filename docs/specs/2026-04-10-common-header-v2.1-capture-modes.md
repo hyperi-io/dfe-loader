@@ -115,6 +115,8 @@ No `_raw` changes (these profiles don't include `_raw`).
 | `raw_only` | Skipped (NULL) | Entire Kafka payload as UTF-8 String | CH CPU saving — no JSON type overhead, text search only |
 | `extracted_only` | Skipped (NULL) | Skipped (NULL) | Minimal — only promoted schema fields, lowest storage + CPU |
 
+All three modes extract promoted fields to schema columns. The only difference is where (or whether) the full payload is preserved. The `passthrough` schema profile (no field extraction) is orthogonal to capture mode.
+
 ### Mode Behaviours
 
 #### `full` (default)
