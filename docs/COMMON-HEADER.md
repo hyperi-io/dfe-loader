@@ -70,13 +70,14 @@ CREATE TABLE IF NOT EXISTS {db}.{table}
 
     -- Payload preservation
     `_raw` Nullable(String) CODEC(ZSTD(3)),
-    `_json` Nullable(JSON) CODEC(ZSTD(3)),
+    `_json` Nullable(JSON(max_dynamic_paths = 2048)) CODEC(ZSTD(3)),
 
     -- Metadata
     `_tags` Nullable(JSON) CODEC(ZSTD(3)),
 
     -- Indexes
-    INDEX idx_timestamp _timestamp TYPE minmax GRANULARITY 1
+    INDEX idx_timestamp _timestamp TYPE minmax GRANULARITY 1,
+    INDEX idx_raw_text _raw TYPE text(tokenizer = 'default') GRANULARITY 64
 )
 ENGINE = {engine}
 ORDER BY (_org_id, _timestamp_load, _uuid)
@@ -275,38 +276,35 @@ file or a database row, BEFORE any RFC/format parsing.
 - Nullable — can be disabled globally or per-table to save storage
 - Higher ZSTD level (3) for better compression of text
 
-**Text search index (optional):**
+**Text search index (default, included in Common Header v2.1):**
 
 ```sql
--- For ClickHouse 25.1+ (full_text GA)
-ALTER TABLE {db}.{table} ADD INDEX idx_raw _raw
-    TYPE full_text(0) GRANULARITY 1;
-
--- For older versions (n-gram bloom filter)
-ALTER TABLE {db}.{table} ADD INDEX idx_raw _raw
-    TYPE ngrambf_v1(3, 256, 2, 0) GRANULARITY 4;
+INDEX idx_raw_text _raw TYPE text(tokenizer = 'default') GRANULARITY 64
 ```
 
-**Configuration:**
+The `text` index (GA in ClickHouse 26.2+) provides deterministic full-text search
+with no false positives. Supported query functions: `hasToken()`, `hasAnyTokens()`,
+`hasAllTokens()`, `LIKE`, `ILIKE`. Insert overhead ~50%.
 
-```toml
-[metadata]
-include_raw = true   # Global default: include _raw in all tables
+`_raw` without the index has no reason to exist. To avoid the overhead, disable
+`_raw` entirely via `capture_mode` — don't keep the column without the index.
 
-# Per-table overrides (table name → include_raw)
-[metadata.raw_overrides]
-"default" = false    # Drop _raw for the catch-all default table
-"syslog" = true      # Keep _raw for syslog (original format is valuable)
-```
+**Capture modes** control `_raw` and `_json` population:
 
-Per-table overrides take precedence over the global default. When `_raw` is excluded,
-the loader omits the field from the row map (ClickHouse column stays NULL).
+| `capture_mode` | `_json` | `_raw` | Use case |
+|---|---|---|---|
+| `full` (default) | Full payload (JSON type) | Extracted from `raw_source_fields` | Full observability |
+| `raw_only` | NULL | Full Kafka payload (String) | CH CPU saving — no JSON type overhead |
+| `extracted_only` | NULL | NULL | Minimal — only promoted schema fields |
+
+All three modes extract promoted fields to schema columns. Configurable at global,
+per-table, and DDL levels. See `metadata.capture_mode` in config.
 
 ### `_json`
 
 | Property | Value |
 |----------|-------|
-| Type | `Nullable(JSON)` |
+| Type | `Nullable(JSON(max_dynamic_paths = 2048))` |
 | Nullable | Yes |
 | Default | None |
 | Codec | `ZSTD(3)` |
@@ -314,6 +312,12 @@ the loader omits the field from the row map (ClickHouse column stays NULL).
 
 **Purpose:** Complete Kafka message as native ClickHouse JSON type for structured
 path-based queries.
+
+**`max_dynamic_paths`:** Default raised to 2048 (from ClickHouse default 1024) to
+cover multi-Beats deployments (ECS + Winlogbeat + Sysmon generates 500-1500 unique
+paths). Per-column DDL only — cannot be changed after data is inserted. Hard max
+10,000. Paths exceeding the limit are stored in shared data (slower queries, data
+not lost).
 
 **NOT the same as `_raw`:** `_json` is the parsed/structured result stored as native
 columnar JSON. `_raw` is the original wire format before parsing.
@@ -335,7 +339,7 @@ columnar JSON. `_raw` is the original wire format before parsing.
 
 **Requirements:**
 
-- ClickHouse 25.3+ for GA JSON type (tested with 25.12)
+- ClickHouse 26.2+ for GA JSON type + `text` skip index (hard deck)
 
 **Configuration:**
 
