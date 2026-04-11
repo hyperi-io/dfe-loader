@@ -1,3 +1,13 @@
+# [1.17.0](https://github.com/hyperi-io/dfe-loader/compare/v1.16.6...v1.17.0) (2026-04-11)
+
+
+### Features
+
+* capture mode integration tests, max_dynamic_paths metric, doc updates ([4119456](https://github.com/hyperi-io/dfe-loader/commit/411945699c3ee2d1eadea2b709f040abe995cfae))
+* common header v2.1 — capture modes, JSON limits, text search ([e14baab](https://github.com/hyperi-io/dfe-loader/commit/e14baab94b0c6cb4a1b3ce705681ab32966befed))
+* implement CaptureMode enum and per-table resolution ([b32cbd0](https://github.com/hyperi-io/dfe-loader/commit/b32cbd0928d37aa96e72d3faab45781933ce5a00))
+* spec for Common Header v2.1 capture modes, JSON limits, text search ([7316080](https://github.com/hyperi-io/dfe-loader/commit/7316080f2ab3ccb4b44929bbf90427adcf9f872e))
+
 ## [1.16.6](https://github.com/hyperi-io/dfe-loader/compare/v1.16.5...v1.16.6) (2026-04-09)
 
 
