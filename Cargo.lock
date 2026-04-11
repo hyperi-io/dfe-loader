@@ -1063,7 +1063,7 @@ dependencies = [
 
 [[package]]
 name = "dfe-loader"
-version = "1.16.5"
+version = "1.16.6"
 dependencies = [
  "anyhow",
  "bytes",
@@ -1810,9 +1810,9 @@ dependencies = [
 
 [[package]]
 name = "hyperi-rustlib"
-version = "2.4.6"
+version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fee5626e75d007d7829779f18a5fbd1f363b96ca25e474d1c27e93a990ae4148"
+checksum = "a0b4e76ca5647cbfaab674fe8614cdddcedf7ee7e6e78f9fccb841ab1514f194"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -1825,6 +1825,7 @@ dependencies = [
  "dotenvy",
  "figment",
  "file-rotate",
+ "memchr",
  "metrics",
  "metrics-exporter-prometheus",
  "owo-colors",
@@ -3210,7 +3211,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "343d3bd7056eda839b03204e68deff7d1b13aba7af2b2fd16890697274262ee7"
 dependencies = [
  "heck",
- "itertools 0.13.0",
+ "itertools 0.14.0",
  "log",
  "multimap",
  "petgraph",
@@ -3231,7 +3232,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "27c6023962132f4b30eb4c172c91ce92d933da334c59c23cddee82358ddafb0b"
 dependencies = [
  "anyhow",
- "itertools 0.13.0",
+ "itertools 0.14.0",
  "proc-macro2",
  "quote",
  "syn 2.0.117",

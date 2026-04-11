@@ -160,10 +160,12 @@ Active optimisations in the pipeline (parse → route → transform → buffer):
 
 ---
 
-## Common Header Schema (v2)
+## Common Header Schema (v2.1)
 
 The destination tables have a minimal required schema. All other fields are dynamic.
 **All fields use underscore prefix** to avoid name collisions with source data.
+
+**Hard deck: ClickHouse 26.2+** (JSON type GA + `text` index GA — no experimental settings).
 
 | Column | Type | Default | Nullable | Notes |
 |--------|------|---------|----------|-------|
@@ -171,9 +173,10 @@ The destination tables have a minimal required schema. All other fields are dyna
 | `_timestamp_load` | DateTime64(3) | `now64(3)` | **NO** | Load time (ClickHouse DEFAULT, loader omits) |
 | `_timestamp_received` | DateTime64(3) | - | YES | When receiver/loader received the event |
 | `_uuid` | UUID | `generateUUIDv7()` | **NO** | Unique event ID — loader omits, ClickHouse generates |
-| `_org_id` | String | - | **NO** | Organisation ID for multi-tenancy and RLS |
-| `_raw` | String | - | YES | Original raw data (tailed log line, DB row). Configurable per-table. |
-| `_json` | JSON | - | YES | Complete Kafka message as native JSON type |
+| `_org_id` | LowCardinality(String) | - | **NO** | Organisation ID for multi-tenancy and RLS |
+| `_source` | LowCardinality(String) | - | YES | Data source label (e.g. beats, syslog) |
+| `_raw` | String | - | YES | Original raw data. **`text` index** by default for full-text search. |
+| `_json` | `JSON(max_dynamic_paths = 2048)` | - | YES | Complete Kafka message as native JSON type. Default raised from 1024 for multi-Beats. |
 | `_tags` | JSON | - | YES | Meta info + collector/agent info as JSON |
 
 ### Routing and Multi-Tenancy Fields
@@ -199,21 +202,47 @@ tags_output = "_tags"
 drop_tags = false  # Set true to not store after routing extraction
 ```
 
-### Config: Per-Table _raw Handling
+### Capture Modes (v2.1)
+
+`capture_mode` controls `_json` and `_raw` population. Three modes, configurable
+at global, per-table, and DDL levels (highest priority wins).
+
+| `capture_mode` | `_json` | `_raw` | Use case |
+|---|---|---|---|
+| `full` (default) | Full payload (JSON type) | Extracted from `raw_source_fields` | Full observability — path queries + text search |
+| `raw_only` | NULL | Full Kafka payload as String | CH CPU saving — no JSON type overhead |
+| `extracted_only` | NULL | NULL | Minimal — only promoted schema fields |
+
+All three modes extract promoted fields to schema columns. The only difference
+is where (or whether) the full payload is preserved.
 
 ```toml
 [metadata]
-include_raw = true  # Global default
+capture_mode = "full"  # global default
 
-[metadata.raw_overrides]
-"events" = false    # Drop _raw for catch-all events table
-"syslog" = true     # Always keep _raw for syslog
+[metadata.table_capture_modes]
+"dfe.metrics" = "extracted_only"  # per-table override
+"dfe.raw_logs" = "raw_only"
 ```
+
+DDL override (highest priority):
+```sql
+ALTER TABLE dfe.events COMMENT '@capture_mode: extracted_only';
+```
+
+**Breaking change in `raw_only`:** `_raw` contains the **entire Kafka payload**
+as UTF-8, NOT extracted from `raw_source_fields` (like `logoriginal`). Use `full`
+mode if you need field-extracted `_raw`.
+
+**Deprecated:** `capture_json`, `capture_raw`, `disable_json_tables`,
+`disable_raw_tables`, `@no_capture_json`, `@no_capture_raw`. Backward-compatible
+mapping during one release cycle.
 
 ### Field Notes
 
-- **`_json`**: Injected by `BufferManager` from raw Kafka bytes — NOT by the Transformer. Stored as native ClickHouse JSON type (GA v25.3). Path-based access: `_json.user.name`.
-- **`_raw`**: Original wire format — NOT the same as `_json`. Full-text indexed when enabled.
+- **`_json`**: For RowBinary, written zero-copy via fork's `write_map_with_raw()` (no row clone, no String alloc). Stored as native `JSON(max_dynamic_paths = 2048)` (GA v25.3). Path-based access: `_json.user.name`.
+- **`_raw`**: Original wire format — NOT the same as `_json`. **`text` index by default** (CH 26.2+ GA). If you don't want the ~50% insert overhead, use `capture_mode = 'extracted_only'` — `_raw` without the index has no purpose.
+- **`max_dynamic_paths`**: Per-column DDL only, cannot be changed after data is inserted. Default 2048 covers 99% of multi-Beats deployments. Hard max 10,000. On overflow, paths go to shared data (slower queries, data not lost). The loader emits `loader_json_max_paths_exceeded_total` metric and a 5-min debounced warning with the ALTER fix.
 - **`_uuid`**: Let ClickHouse generate via `DEFAULT generateUUIDv7()` — loader omits the field.
 - **`_timestamp_load`**: Let ClickHouse generate via `DEFAULT now64(3)` — loader omits the field.
 
@@ -503,5 +532,7 @@ Start a fresh session after any changes to this file.
 | JSONEachRow via reqwest (fallback) | Bypasses `clickhouse::Row` compile-time trait. `Map<String, Value>` serialises naturally. Available via `insert_format = "json_each_row"`. |
 | Test tables: ON CLUSTER + MergeTree/ReplicatedMergeTree | 3-node load-balanced cluster, no sticky sessions. CREATE without ON CLUSTER creates on one node only — inserts to other nodes cannot be queried back. Use benchmark DB (Atomic + ON CLUSTER + MergeTree) for most tests; default DB (Replicated + ReplicatedMergeTree) only when query-back verification required. |
 | clickhouse-rs fork licensing | Fork is `MIT OR Apache-2.0` (upstream license). NEVER use FSL-1.1-ALv2 in the fork. No file-level license headers — follow upstream convention. |
+| Common Header v2.1 + ClickHouse 26.2+ hard deck | JSON type GA (v25.3) and `text` skip index GA (v26.2) both required. No experimental settings. `_json` default `max_dynamic_paths=2048` covers multi-Beats (1024 default too tight). `_raw` carries `text` index by default — without it, `_raw` has no purpose. |
+| Three capture modes (full/raw_only/extracted_only) | Replaces scattered booleans (`capture_json`, `capture_raw`, `disable_*_tables`). `raw_only` skips ClickHouse JSON type CPU cost on tables that only need full-text search. All modes still extract promoted schema fields (parse always happens for routing/timestamps). |
 
 ---
