@@ -113,6 +113,16 @@ pub fn is_schema_drift_error(err: &str) -> bool {
         || lower.contains("no such column")
 }
 
+/// Returns true if the error indicates ClickHouse JSON column hit `max_dynamic_paths` limit.
+///
+/// Data is NOT lost — paths exceeding the limit are stored in shared data (slower queries).
+/// The warning should be debounced (5 min) since this fires on every affected row.
+pub fn is_max_dynamic_paths_error(err: &str) -> bool {
+    err.contains("max_dynamic_paths")
+        || err.contains("Cannot add new dynamic path")
+        || (err.contains("LOGICAL_ERROR") && err.contains("dynamic path"))
+}
+
 /// Classify error from HTTP response message.
 fn classify_from_message(msg: &str) -> ErrorCategory {
     let msg_lower = msg.to_lowercase();

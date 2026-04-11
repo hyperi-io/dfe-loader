@@ -235,6 +235,7 @@ impl GrpcTransportAdapter {
             recv_timeout_ms: config.recv_timeout_ms,
             max_message_size: config.max_message_size,
             compression: config.compression,
+            ..Default::default()
         };
 
         let transport = GrpcTransport::new(&transport_config)
@@ -332,6 +333,7 @@ mod memory_adapter {
             let config = MemoryConfig {
                 buffer_size: 10_000,
                 recv_timeout_ms: 100, // 100ms timeout for tests
+                ..Default::default()
             };
             Self {
                 transport: Arc::new(MemoryTransport::new(&config)),

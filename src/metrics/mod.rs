@@ -205,6 +205,15 @@ impl Metrics {
         self.dfe.transport_send_errors("clickhouse", 1);
     }
 
+    /// Record a max_dynamic_paths limit hit on a JSON column.
+    pub fn record_max_dynamic_paths_exceeded(&self, table: &str) {
+        metrics::counter!(
+            "loader_json_max_paths_exceeded_total",
+            "table" => table.to_string()
+        )
+        .increment(1);
+    }
+
     /// Update aggregate buffer stats.
     pub fn update_buffer_stats(&self, rows: usize, bytes: usize, tables: usize) {
         self.buffer_rows.set(rows as f64);

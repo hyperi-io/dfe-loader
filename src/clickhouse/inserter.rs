@@ -659,6 +659,33 @@ impl Inserter {
                     || e.to_string().to_lowercase().contains("incorrect data")
                     || e.to_string().to_lowercase().contains("cannot parse");
 
+                // max_dynamic_paths guidance: metric always, log debounced.
+                {
+                    use std::sync::atomic::AtomicU64;
+                    static MAX_PATHS_TS: AtomicU64 = AtomicU64::new(0);
+                    let err_str = e.to_string();
+                    if crate::clickhouse::error::is_max_dynamic_paths_error(&err_str) {
+                        // Metric: always (dashboards need accurate count)
+                        metrics::counter!(
+                            "loader_json_max_paths_exceeded_total",
+                            "table" => table.to_string()
+                        )
+                        .increment(1);
+                        // Log: debounced at 5 min (operator guidance, not spam)
+                        if hyperi_rustlib::logger::log_debounced(&MAX_PATHS_TS, 300_000) {
+                            warn!(
+                                table = %table,
+                                "Table _json column hit max_dynamic_paths limit. \
+                                 Paths beyond the limit are stored in shared data (slower queries). \
+                                 Fix: ALTER TABLE {table} MODIFY COLUMN \
+                                 _json JSON(max_dynamic_paths = 4096). \
+                                 Note: requires empty column. \
+                                 Consider capture_mode = 'raw_only' for high-cardinality tables."
+                            );
+                        }
+                    }
+                }
+
                 if !self.enable_salvage || num_rows <= 1 || !is_data_error {
                     let reason = e.to_string();
                     let is_fatal = e.to_string().to_lowercase().contains("unknown table")
