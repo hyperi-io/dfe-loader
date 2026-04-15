@@ -1,3 +1,10 @@
+## [1.17.1](https://github.com/hyperi-io/dfe-loader/compare/v1.17.0...v1.17.1) (2026-04-15)
+
+
+### Bug Fixes
+
+* enable Kafka auto-discover when topics list is empty ([#24](https://github.com/hyperi-io/dfe-loader/issues/24)) ([4c74cd8](https://github.com/hyperi-io/dfe-loader/commit/4c74cd82c426cabeed0878c40b0cdd75d31d63b3))
+
 # [1.17.0](https://github.com/hyperi-io/dfe-loader/compare/v1.16.6...v1.17.0) (2026-04-11)
 
 
