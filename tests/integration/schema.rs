@@ -294,6 +294,93 @@ async fn test_schema_cache_with_clickhouse() {
     drop_http_test_table(&client, &table_name).await;
 }
 
+/// Regression test for issue #25 — schema cache must NOT expire when the
+/// background refresh task is running. Without this, the orchestrator falls
+/// back from the extractor (json_primary) path to the transformer path,
+/// silently dropping `@renamed` directive mappings.
+///
+/// Test strategy:
+/// - Live ClickHouse table (so `fetch_table_schema()` actually works)
+/// - Short TTL (2s) + headroom (1s) + interval (500ms) — total runtime ~5s
+/// - Spawn background refresh, insert schema once
+/// - Wait past TTL — schema must still be retrievable (background kept it warm)
+#[tokio::test]
+async fn test_schema_cache_background_refresh_keeps_warm() {
+    skip_if_no_clickhouse!();
+
+    use std::sync::Arc;
+
+    let client = if let Some(c) = create_http_test_client() {
+        Arc::new(c)
+    } else {
+        eprintln!("Could not create HTTP client");
+        return;
+    };
+
+    let table_name = unique_table_name("test_bg_refresh");
+    let oc = crate::common::on_cluster_clause();
+
+    // Create a real table so fetch_table_schema() can succeed
+    let ddl = format!(
+        "CREATE TABLE {table_name}{oc} (
+            id UInt64,
+            name String
+        ) ENGINE = MergeTree() ORDER BY tuple()"
+    );
+    client.execute(&ddl).await.expect("Failed to create table");
+
+    // Short timings — proves the background refresh actually ran
+    let config = SchemaCacheConfig {
+        ttl_secs: 2,
+        auto_refresh: true,
+        refresh_interval_secs: 1, // wake every 1s
+        refresh_headroom_secs: 1, // refresh when 1s left → triggers around t=1s
+    };
+    let cache = Arc::new(SchemaCache::with_config(config));
+
+    // Pre-populate the cache so background refresh has something to work on
+    let schema = client.fetch_table_schema(&table_name).await.unwrap();
+    cache.insert(table_name.clone(), schema);
+    assert!(
+        cache.get(&table_name).is_some(),
+        "Cache should be populated"
+    );
+
+    // Start the background refresh task (the bit that was missing)
+    let _handle = cache.start_background_refresh(Arc::clone(&client));
+
+    // Wait past TTL. Without background refresh, get() would return None here.
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+
+    // The bug fix: schema must still be available because the background task
+    // refreshed it before TTL expired.
+    let cached = cache.get(&table_name);
+    assert!(
+        cached.is_some(),
+        "Schema cache should stay warm via background refresh. \
+         If this fails, issue #25 has regressed and the extractor path will \
+         silently fall back to the transformer path after TTL expiry."
+    );
+    assert_eq!(cached.unwrap().columns.len(), 2);
+
+    // At least one refresh should have happened
+    let stats = cache.stats();
+    assert!(
+        stats.refreshes >= 1,
+        "Background refresh should have run at least once (got {})",
+        stats.refreshes
+    );
+
+    eprintln!(
+        "✓ Background refresh kept schema warm past TTL ({} refreshes)",
+        stats.refreshes
+    );
+
+    // Cleanup
+    cache.shutdown();
+    drop_http_test_table(&client, &table_name).await;
+}
+
 // ============================================================================
 // Config Tests
 // ============================================================================
@@ -302,7 +389,8 @@ async fn test_schema_cache_with_clickhouse() {
 fn test_schema_cache_config_defaults() {
     let config = SchemaCacheConfig::default();
     assert_eq!(config.ttl_secs, 300);
-    assert!(!config.auto_refresh); // Default is false
+    // auto_refresh on by default — see issue #25 (silent extractor→transformer fallback on TTL expiry).
+    assert!(config.auto_refresh);
     assert_eq!(config.refresh_interval_secs, 60);
     assert_eq!(config.refresh_headroom_secs, 30);
 }
