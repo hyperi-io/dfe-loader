@@ -268,6 +268,12 @@ impl Orchestrator {
         let schema_cache: SharedSchemaCache =
             Arc::new(SchemaCache::new(self.config.schema.cache_ttl_secs));
 
+        // Background refresh — proactively re-fetches schemas before TTL expiry.
+        // Without this, expired schemas cause the extractor path to fall back to
+        // the transformer path, silently dropping @renamed directive mappings (#25).
+        let _schema_refresh_handle =
+            schema_cache.start_background_refresh(Arc::clone(&http_client));
+
         // Wire schema cache into inserter for drift-error invalidation (fixes #20).
         // RowBinary inserts that fail with data errors (e.g. "Cannot parse JSON",
         // "type mismatch") now invalidate the schema cache and retry with fresh schema.
@@ -844,6 +850,9 @@ impl Orchestrator {
             self.flush_batches_transport(&inserter, &transport, final_batches)
                 .await;
         }
+
+        // Stop schema cache background refresh task.
+        schema_cache.shutdown();
 
         // Close transport
         if let Err(e) = transport.close().await {
