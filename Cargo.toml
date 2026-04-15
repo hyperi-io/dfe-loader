@@ -63,7 +63,7 @@ maxminddb = { version = ">=0.24", features = ["mmap", "simdutf8"] }
 
 # GeoIP auto-download (HTTP + gzip decompression + tar extraction)
 # Pinned to 0.12 to match rustlib (reqwest-middleware/vaultrs don't support 0.13 yet)
-reqwest = { version = ">=0.12, <0.13", default-features = false, features = ["rustls-tls-native-roots", "gzip"] }
+reqwest = { version = ">=0.12, <0.14", default-features = false, features = ["rustls-tls-native-roots", "gzip"] }
 flate2 = ">=1.0"
 tar = ">=0.4"
 
