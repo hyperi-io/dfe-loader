@@ -54,7 +54,10 @@ impl Default for SchemaCacheConfig {
     fn default() -> Self {
         Self {
             ttl_secs: 300,
-            auto_refresh: false,
+            // Auto-refresh on by default. Without it, expired schemas cause the
+            // pipeline to fall back from extractor to transformer path, dropping
+            // @renamed directive mappings (issue #25).
+            auto_refresh: true,
             refresh_interval_secs: 60,
             refresh_headroom_secs: 30,
         }
@@ -502,7 +505,9 @@ mod tests {
     fn test_config_default() {
         let config = SchemaCacheConfig::default();
         assert_eq!(config.ttl_secs, 300);
-        assert!(!config.auto_refresh);
+        // auto_refresh on by default — prevents the issue #25 silent fallback
+        // from extractor to transformer path on TTL expiry.
+        assert!(config.auto_refresh);
         assert_eq!(config.refresh_interval_secs, 60);
         assert_eq!(config.refresh_headroom_secs, 30);
     }
