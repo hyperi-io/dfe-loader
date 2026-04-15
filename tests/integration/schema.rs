@@ -302,7 +302,8 @@ async fn test_schema_cache_with_clickhouse() {
 fn test_schema_cache_config_defaults() {
     let config = SchemaCacheConfig::default();
     assert_eq!(config.ttl_secs, 300);
-    assert!(!config.auto_refresh); // Default is false
+    // auto_refresh on by default — see issue #25 (silent extractor→transformer fallback on TTL expiry).
+    assert!(config.auto_refresh);
     assert_eq!(config.refresh_interval_secs, 60);
     assert_eq!(config.refresh_headroom_secs, 30);
 }
