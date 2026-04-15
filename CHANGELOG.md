@@ -1,3 +1,10 @@
+## [1.17.2](https://github.com/hyperi-io/dfe-loader/compare/v1.17.1...v1.17.2) (2026-04-15)
+
+
+### Bug Fixes
+
+* wire schema cache background refresh ([#25](https://github.com/hyperi-io/dfe-loader/issues/25)) ([8e17689](https://github.com/hyperi-io/dfe-loader/commit/8e1768917f11d25612c76a13905c6133a6491cea))
+
 ## [1.17.1](https://github.com/hyperi-io/dfe-loader/compare/v1.17.0...v1.17.1) (2026-04-15)
 
 
