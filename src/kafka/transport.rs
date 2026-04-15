@@ -59,6 +59,7 @@ impl TransportAdapter {
             group: config.group.clone(),
             client_id: config.client_id.clone(),
             topics: config.topics.clone(),
+            auto_discover: config.topics.is_empty(),
             librdkafka_overrides: config.librdkafka_overrides.clone(),
             ..Default::default()
         };
