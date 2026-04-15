@@ -1,5 +1,38 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "extends": ["github>hyperi-io/renovate-config"],
-  "ignoreDeps": ["clickhouse"]
+  "description": "ignoreDeps: clickhouse pinned to fork via [patch.crates-io]; reqwest pinned to <0.13 because rustlib v2.5.x pins <0.13 — bumping ours alone would ship two reqwest versions in the release binary. Remove reqwest from ignoreDeps once rustlib upgrades.",
+  "extends": [
+    "config:recommended",
+    "docker:pinDigests",
+    "helpers:pinGitHubActionDigestsToSemver"
+  ],
+  "labels": ["dependencies"],
+  "prHourlyLimit": 5,
+  "prConcurrentLimit": 10,
+  "commitMessagePrefix": "chore(deps):",
+  "dependencyDashboard": true,
+  "ignoreDeps": ["clickhouse", "reqwest"],
+  "packageRules": [
+    {
+      "description": "Automerge patch and digest updates",
+      "matchUpdateTypes": ["patch", "digest"],
+      "automerge": true
+    },
+    {
+      "description": "Group GitHub Actions updates",
+      "matchManagers": ["github-actions"],
+      "groupName": "github-actions",
+      "automerge": true
+    },
+    {
+      "description": "Group Rust crate updates",
+      "matchManagers": ["cargo"],
+      "groupName": "rust-dependencies"
+    },
+    {
+      "description": "Group Docker image updates",
+      "matchManagers": ["dockerfile", "docker-compose"],
+      "groupName": "docker-images"
+    }
+  ]
 }
