@@ -368,6 +368,56 @@ Each is a new file implementing `DlqBackend` trait + feature flag. No changes to
 
 ## Completed
 
+### 2026-04-15: Schema Cache Background Refresh + PR Triage → v1.17.2
+
+- [x] **Issue #25 fix (silent data loss after TTL expiry)** — `start_background_refresh()`
+      was implemented but never called. After 300s TTL, `get()` returned `None`, causing
+      extractor→transformer path fallback that dropped `@renamed` directive mappings.
+- [x] `SchemaCacheConfig::default()` → `auto_refresh: true`
+- [x] `Orchestrator` calls `schema_cache.start_background_refresh()` on start,
+      `schema_cache.shutdown()` on stop
+- [x] Regression test `test_schema_cache_background_refresh_keeps_warm` against live CH
+      (2s TTL, 1s interval — proves warm schema past expiry, asserts stats.refreshes >= 1)
+- [x] PR #27 merged, v1.17.2 released (JFrog + R2, amd64 + arm64)
+- [x] PR #24 merged (Kaz's `auto_discover: config.topics.is_empty()`) → v1.17.1
+- [x] Issue #6 closed (`clickhouse.protocol` not respected) — fixed by subsequent refactors:
+      RowBinary is now default, JSONEachRow-on-native errors clearly, port validation catches
+      mismatch at startup
+
+### 2026-04-10: Common Header v2.1 — Capture Modes + Zero-Copy → v1.17.0
+
+- [x] `CaptureMode` enum (`full`/`raw_only`/`extracted_only`) replacing scattered booleans
+      (`capture_json`, `capture_raw`, `disable_json_tables`). Config cascade: DDL
+      `@capture_mode` > `table_capture_modes` > global `capture_mode`.
+- [x] Schema v2.1: `_json` `max_dynamic_paths=2048` (from 1024 default — multi-Beats safe),
+      `text` index on `_raw` by default (CH 26.2+ GA)
+- [x] **Hard deck raised: ClickHouse 26.2+** (JSON type + text index both GA, no experimental settings)
+- [x] Zero-copy RowBinary `_json` via fork `write_map_with_raw()` — no row clone, no String alloc
+- [x] Extractor move semantics — `Value::clone()` eliminated on hot path (`remove()` from parsed Map)
+- [x] CEL router: dropped full-object clone — rustlib v2.5.0 `build_context` now generic over
+      `impl IntoIterator<Item = (&String, &Value)>`, accepts `serde_json::Map` directly
+- [x] DLQ: `&*msg.topic` deref instead of `.to_string()` on `Arc<str>`
+- [x] `max_dynamic_paths` error guidance — detection helper, 5-min debounced warning with
+      ALTER fix, `loader_json_max_paths_exceeded_total` metric (per-table label)
+- [x] Schema pre-warm extracted to `pre_warm_schema_cache()` helper, parallel via `futures::join_all`
+- [x] Schema profiles bumped to v1.1.0 (timeseries, minimal, passthrough) — submodule updated
+- [x] `skip_if_docker!` test macro, 179 integration tests with 2 new capture mode tests
+- [x] Docs: COMMON-HEADER.md, STATE.md (capture modes section, CH 26.2+), config.example.yaml
+- [x] Spec: `docs/specs/2026-04-10-common-header-v2.1-capture-modes.md`
+- [x] rustlib v2.5.0 consumed (GrpcConfig/MemoryConfig new filters fields)
+- [x] v1.17.0 released (JFrog + R2)
+
+### 2026-04-09: Zero-Copy RowBinary + Extractor Move Semantics (PR #23 rework)
+
+- [x] Kaz's PR #23 reviewed — clone-everything RowBinary `_json` patch replaced with
+      zero-copy fork API (`write_map_with_raw`). Raw Kafka bytes flow directly to RowBinary
+      wire format with zero intermediate `String` allocation.
+- [x] `clickhouse-rs` fork: `DynamicInsert::write_map_with_raw()` + `encode_dynamic_row_with_raw()`
+      (branch `hyperi/schema-cache-strong`, commit `1ab2c03`)
+- [x] Tests added: buffer `raw_payloads` parallel alignment, RowBinary `_json` integration
+      (live CH with `_json.src_ip` path query), extractor `_timestamp` fallback to `now()`
+- [x] Schema pre-warm `pre_warm_schema_cache()` helper with parallel `futures::join_all`
+
 ### 2026-03-16: Dead Code Cleanup + v1.14.4 GA Release
 
 - [x] Deleted `tests/fixtures/arrow_schema.rs` (246 lines, zero callers, arrow crate removed)
@@ -523,7 +573,6 @@ Each is a new file implementing `DlqBackend` trait + feature flag. No changes to
 
 ---
 
-**Last Updated:** 2026-03-27
 
 ### Single Versioning Migration + rustlib v1.20 + Release (2026-03-27)
 
