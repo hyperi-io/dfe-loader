@@ -342,23 +342,278 @@ impl ServerState {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, OnceLock};
+
+    use hyperi_rustlib::ScalingPressure;
+    use hyperi_rustlib::metrics::MetricsManager;
+    use hyperi_rustlib::scaling::ScalingPressureConfig;
+
+    use super::{Metrics, ServerState};
+
+    /// Global MetricsManager — recorder can only be installed once per process.
+    fn test_manager() -> &'static MetricsManager {
+        static MANAGER: OnceLock<MetricsManager> = OnceLock::new();
+        MANAGER.get_or_init(|| MetricsManager::new("loader_unit"))
+    }
+
+    fn test_metrics() -> Metrics {
+        Metrics::new(test_manager())
+    }
+
+    fn test_scaling() -> Arc<ScalingPressure> {
+        Arc::new(ScalingPressure::new(
+            ScalingPressureConfig::default(),
+            vec![],
+        ))
+    }
+
+    // ---- ServerState tests ----
+
     #[test]
-    fn test_server_state_ready() {
-        let ready = std::sync::atomic::AtomicBool::new(false);
-        assert!(!ready.load(std::sync::atomic::Ordering::Acquire));
-        ready.store(true, std::sync::atomic::Ordering::Release);
-        assert!(ready.load(std::sync::atomic::Ordering::Acquire));
+    fn server_state_starts_not_ready() {
+        let state = ServerState::new(test_metrics(), test_scaling());
+        assert!(!state.is_ready());
     }
 
     #[test]
-    fn test_server_state_connections() {
-        let kafka = std::sync::atomic::AtomicBool::new(false);
-        let clickhouse = std::sync::atomic::AtomicBool::new(false);
+    fn server_state_set_ready_true_then_false() {
+        let state = ServerState::new(test_metrics(), test_scaling());
+        state.set_ready(true);
+        assert!(state.is_ready());
+        state.set_ready(false);
+        assert!(!state.is_ready());
+    }
 
-        kafka.store(true, std::sync::atomic::Ordering::Release);
-        clickhouse.store(true, std::sync::atomic::Ordering::Release);
+    #[test]
+    fn server_state_kafka_connection_lifecycle() {
+        let state = ServerState::new(test_metrics(), test_scaling());
+        // Starts disconnected
+        assert!(
+            !state
+                .kafka_connected
+                .load(std::sync::atomic::Ordering::Acquire)
+        );
+        // Connect
+        state.set_kafka_connected(true);
+        assert!(
+            state
+                .kafka_connected
+                .load(std::sync::atomic::Ordering::Acquire)
+        );
+        // Disconnect
+        state.set_kafka_connected(false);
+        assert!(
+            !state
+                .kafka_connected
+                .load(std::sync::atomic::Ordering::Acquire)
+        );
+    }
 
-        assert!(kafka.load(std::sync::atomic::Ordering::Acquire));
-        assert!(clickhouse.load(std::sync::atomic::Ordering::Acquire));
+    #[test]
+    fn server_state_clickhouse_connection_lifecycle() {
+        let state = ServerState::new(test_metrics(), test_scaling());
+        assert!(
+            !state
+                .clickhouse_connected
+                .load(std::sync::atomic::Ordering::Acquire)
+        );
+        state.set_clickhouse_connected(true);
+        assert!(
+            state
+                .clickhouse_connected
+                .load(std::sync::atomic::Ordering::Acquire)
+        );
+        state.set_clickhouse_connected(false);
+        assert!(
+            !state
+                .clickhouse_connected
+                .load(std::sync::atomic::Ordering::Acquire)
+        );
+    }
+
+    #[test]
+    fn server_state_independent_flags() {
+        // Setting one flag must not affect others
+        let state = ServerState::new(test_metrics(), test_scaling());
+        state.set_ready(true);
+        state.set_kafka_connected(false);
+        state.set_clickhouse_connected(false);
+        assert!(state.is_ready());
+        assert!(
+            !state
+                .kafka_connected
+                .load(std::sync::atomic::Ordering::Acquire)
+        );
+
+        state.set_kafka_connected(true);
+        state.set_ready(false);
+        assert!(!state.is_ready());
+        assert!(
+            state
+                .kafka_connected
+                .load(std::sync::atomic::Ordering::Acquire)
+        );
+    }
+
+    // ---- Metrics record methods (exercise all paths, no panics) ----
+
+    #[test]
+    fn metrics_record_received_increments() {
+        let m = test_metrics();
+        // Should not panic — exercises counter + eps_counter
+        m.record_received();
+        m.record_received();
+        m.record_received();
+    }
+
+    #[test]
+    fn metrics_record_processed_with_various_tables() {
+        let m = test_metrics();
+        m.record_processed("dfe.events");
+        m.record_processed("dfe.metrics");
+        m.record_processed(""); // empty table name — edge case
+    }
+
+    #[test]
+    fn metrics_record_dlq() {
+        let m = test_metrics();
+        m.record_dlq();
+    }
+
+    #[test]
+    fn metrics_record_flush_zero_rows() {
+        let m = test_metrics();
+        m.record_flush(0, 0.0);
+    }
+
+    #[test]
+    fn metrics_record_flush_large_batch() {
+        let m = test_metrics();
+        m.record_flush(1_000_000, 2.5);
+    }
+
+    #[test]
+    fn metrics_record_flush_table() {
+        let m = test_metrics();
+        m.record_flush_table("dfe.events", 500, 0.042);
+        m.record_flush_table("dfe.events", 0, 0.0); // zero rows
+    }
+
+    #[test]
+    fn metrics_record_error() {
+        let m = test_metrics();
+        m.record_error();
+    }
+
+    #[test]
+    fn metrics_record_max_dynamic_paths_exceeded() {
+        let m = test_metrics();
+        m.record_max_dynamic_paths_exceeded("dfe.events");
+        m.record_max_dynamic_paths_exceeded(""); // empty table
+    }
+
+    #[test]
+    fn metrics_update_buffer_stats_zero() {
+        let m = test_metrics();
+        m.update_buffer_stats(0, 0, 0);
+    }
+
+    #[test]
+    fn metrics_update_buffer_stats_nonzero() {
+        let m = test_metrics();
+        m.update_buffer_stats(50_000, 10_485_760, 12);
+    }
+
+    #[test]
+    fn metrics_update_per_table_buffer() {
+        let m = test_metrics();
+        m.update_per_table_buffer("dfe.events", 1000, 65536);
+        m.update_per_table_buffer("dfe.events", 0, 0); // reset
+    }
+
+    #[test]
+    fn metrics_update_circuit_breaker_state() {
+        let m = test_metrics();
+        m.update_circuit_breaker_state("dfe.events", 0); // closed
+        m.update_circuit_breaker_state("dfe.events", 1); // open
+        m.update_circuit_breaker_state("dfe.events", 2); // half-open
+    }
+
+    #[test]
+    fn metrics_record_offsets_committed_zero_and_many() {
+        let m = test_metrics();
+        m.record_offsets_committed(0);
+        m.record_offsets_committed(1);
+        m.record_offsets_committed(10_000);
+    }
+
+    #[test]
+    fn metrics_set_pipeline_ready_toggle() {
+        let m = test_metrics();
+        m.set_pipeline_ready(true);
+        m.set_pipeline_ready(false);
+    }
+
+    #[test]
+    fn metrics_set_scaling_pressure_boundaries() {
+        let m = test_metrics();
+        m.set_scaling_pressure(0.0);
+        m.set_scaling_pressure(0.5);
+        m.set_scaling_pressure(1.0);
+    }
+
+    #[test]
+    fn metrics_set_memory_usage() {
+        let m = test_metrics();
+        m.set_memory_usage(0, 0); // edge: both zero
+        m.set_memory_usage(1_073_741_824, 4_294_967_296); // 1GB / 4GB
+    }
+
+    #[test]
+    fn metrics_update_eps_immediate_call() {
+        let m = test_metrics();
+        // First call with zero elapsed — should not divide by zero
+        m.update_eps();
+    }
+
+    #[test]
+    fn metrics_update_eps_after_receiving() {
+        let m = test_metrics();
+        m.record_received();
+        m.record_received();
+        m.record_received();
+        // Small delay to get non-zero elapsed
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        m.update_eps();
+        // EPS gauge should be set (we can't read the value, but it must not panic)
+    }
+
+    #[test]
+    fn metrics_update_pool_stats_none_is_noop() {
+        let m = test_metrics();
+        m.update_pool_stats(None);
+    }
+
+    #[test]
+    fn metrics_update_pool_stats_some() {
+        let m = test_metrics();
+        m.update_pool_stats(Some(clickhouse::PoolStats {
+            max_size: 10,
+            size: 5,
+            available: 3,
+            waiting: 2,
+        }));
+    }
+
+    #[test]
+    fn metrics_record_insert_quantities_zero() {
+        let m = test_metrics();
+        m.record_insert_quantities(0, 0);
+    }
+
+    #[test]
+    fn metrics_record_insert_quantities_large() {
+        let m = test_metrics();
+        m.record_insert_quantities(10_737_418_240, 5000);
     }
 }

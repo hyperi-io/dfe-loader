@@ -4,6 +4,7 @@
 //! Integration tests
 
 mod clickhouse;
+mod coerce_integration;
 mod config;
 mod datatypes;
 mod deployment;
@@ -18,3 +19,4 @@ mod property;
 mod resilience;
 mod rls;
 mod schema;
+mod transport;

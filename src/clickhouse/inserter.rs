@@ -1131,4 +1131,493 @@ mod tests {
         assert_eq!(line1.get("_json").unwrap(), "{}");
         assert_eq!(line1.get("severity").unwrap(), "low");
     }
+
+    // ============================================================
+    // parse_db_table — edge cases and fuzz-style inputs
+    // ============================================================
+
+    #[test]
+    fn test_parse_db_table_standard() {
+        assert_eq!(parse_db_table("mydb.events"), ("mydb", "events"));
+    }
+
+    #[test]
+    fn test_parse_db_table_no_dot_falls_back_to_default() {
+        // No dot — falls back to ("default", table)
+        assert_eq!(parse_db_table("events"), ("default", "events"));
+    }
+
+    #[test]
+    fn test_parse_db_table_empty_string() {
+        // Empty input — no dot, falls back to default
+        assert_eq!(parse_db_table(""), ("default", ""));
+    }
+
+    #[test]
+    fn test_parse_db_table_leading_dot() {
+        // Leading dot — empty db, non-empty table
+        assert_eq!(parse_db_table(".events"), ("", "events"));
+    }
+
+    #[test]
+    fn test_parse_db_table_trailing_dot() {
+        // Trailing dot — non-empty db, empty table
+        assert_eq!(parse_db_table("mydb."), ("mydb", ""));
+    }
+
+    #[test]
+    fn test_parse_db_table_just_dot() {
+        assert_eq!(parse_db_table("."), ("", ""));
+    }
+
+    #[test]
+    fn test_parse_db_table_multiple_dots_splits_on_first() {
+        // split_once uses first occurrence — trailing dots are part of table name
+        assert_eq!(parse_db_table("a.b.c.d"), ("a", "b.c.d"));
+    }
+
+    #[test]
+    fn test_parse_db_table_unicode() {
+        // Unicode in names — should work because split_once is byte-wise on ASCII '.'
+        assert_eq!(
+            parse_db_table("métrics.événements"),
+            ("métrics", "événements")
+        );
+    }
+
+    #[test]
+    fn test_parse_db_table_whitespace_preserved() {
+        // Whitespace is not stripped — callers must pre-validate
+        assert_eq!(parse_db_table(" db . table "), (" db ", " table "));
+    }
+
+    // ============================================================
+    // calc_backoff — geometric growth, cap, overflow protection
+    // ============================================================
+
+    #[test]
+    fn test_calc_backoff_attempt_zero() {
+        assert_eq!(calc_backoff(100, 0, 30_000), Duration::from_millis(100));
+    }
+
+    #[test]
+    fn test_calc_backoff_geometric_progression() {
+        // Each attempt doubles the delay: base * 2^attempt
+        let results: Vec<u128> = (0..8)
+            .map(|attempt| calc_backoff(50, attempt, 60_000).as_millis())
+            .collect();
+        assert_eq!(results, vec![50, 100, 200, 400, 800, 1600, 3200, 6400]);
+    }
+
+    #[test]
+    fn test_calc_backoff_capped_at_max() {
+        // Once base * 2^attempt exceeds max_ms, output stays at max_ms.
+        assert_eq!(calc_backoff(100, 16, 500), Duration::from_millis(500));
+        assert_eq!(calc_backoff(100, 20, 1000), Duration::from_millis(1000));
+    }
+
+    #[test]
+    fn test_calc_backoff_attempt_clamped_to_16() {
+        // Shift cap is attempt.min(16) — bigger attempts don't overflow.
+        // base * 2^16 = 100 * 65536 = 6_553_600, above any reasonable cap.
+        assert_eq!(
+            calc_backoff(100, 100, 10_000),
+            Duration::from_millis(10_000)
+        );
+        assert_eq!(
+            calc_backoff(100, u32::MAX, 10_000),
+            Duration::from_millis(10_000)
+        );
+    }
+
+    #[test]
+    fn test_calc_backoff_saturating_mul_protects_overflow() {
+        // saturating_mul handles u64 overflow — result caps at u64::MAX then min'd with max_ms
+        let result = calc_backoff(u64::MAX, 16, 1000);
+        assert_eq!(result, Duration::from_millis(1000));
+    }
+
+    #[test]
+    fn test_calc_backoff_zero_base() {
+        // 0 * anything = 0 — valid but weird config
+        assert_eq!(calc_backoff(0, 5, 30_000), Duration::from_millis(0));
+    }
+
+    #[test]
+    fn test_calc_backoff_zero_max_clamps_to_zero() {
+        // max=0 clamps every delay to 0
+        assert_eq!(calc_backoff(100, 5, 0), Duration::from_millis(0));
+    }
+
+    #[test]
+    fn test_calc_backoff_max_less_than_base() {
+        // Unusual: max < base. Output is max immediately.
+        assert_eq!(calc_backoff(1000, 0, 100), Duration::from_millis(100));
+    }
+
+    // ============================================================
+    // InserterConfig — defaults and boundary backoffs
+    // ============================================================
+
+    #[test]
+    fn test_inserter_config_default_full_values() {
+        let config = InserterConfig::default();
+        assert_eq!(config.max_retries, 5);
+        assert_eq!(config.base_retry_delay_ms, 100);
+        assert_eq!(config.max_retry_delay_ms, 30_000);
+        assert!(config.enable_salvage);
+        assert_eq!(config.max_salvage_depth, 20);
+        assert_eq!(config.max_concurrent_inserts, 8);
+    }
+
+    #[test]
+    fn test_inserter_config_backoff_at_default_max_retries() {
+        let config = InserterConfig::default();
+        // With defaults, backoff at max_retries (5) should be 100 * 2^5 = 3200ms
+        assert_eq!(config.backoff_delay(5), Duration::from_millis(3200));
+    }
+
+    #[test]
+    fn test_inserter_config_backoff_eventually_caps() {
+        let config = InserterConfig::default();
+        // 100 * 2^9 = 51200 > 30000, cap applies
+        assert_eq!(config.backoff_delay(9), Duration::from_millis(30_000));
+        assert_eq!(config.backoff_delay(100), Duration::from_millis(30_000));
+    }
+
+    // ============================================================
+    // InsertResult — counts and failure lists
+    // ============================================================
+
+    #[test]
+    fn test_insert_result_success_zero() {
+        let result = InsertResult::success(0);
+        assert_eq!(result.inserted, 0);
+        assert!(result.failed.is_empty());
+    }
+
+    #[test]
+    fn test_insert_result_success_large() {
+        let result = InsertResult::success(usize::MAX);
+        assert_eq!(result.inserted, usize::MAX);
+        assert!(result.failed.is_empty());
+    }
+
+    #[test]
+    fn test_insert_result_with_empty_failures() {
+        // with_failures passing empty vec should yield a behaviourally-successful result
+        let result = InsertResult::with_failures(50, Vec::new());
+        assert_eq!(result.inserted, 50);
+        assert_eq!(result.failed.len(), 0);
+    }
+
+    #[test]
+    fn test_insert_result_all_failed() {
+        // Zero inserted, many failed — simulates a complete batch failure
+        let failed: Vec<FailedRow> = (0..100)
+            .map(|i| FailedRow {
+                row_index: i,
+                offset: None,
+                reason: format!("Error at row {i}"),
+            })
+            .collect();
+        let result = InsertResult::with_failures(0, failed);
+        assert_eq!(result.inserted, 0);
+        assert_eq!(result.failed.len(), 100);
+        assert_eq!(result.failed[42].row_index, 42);
+        assert!(result.failed[42].reason.contains("row 42"));
+    }
+
+    // ============================================================
+    // FailedRow — construction with optional offset
+    // ============================================================
+
+    #[test]
+    fn test_failed_row_with_offset() {
+        let offset = KafkaOffset {
+            topic: Arc::from("events"),
+            partition: 3,
+            offset: 12345,
+        };
+        let row = FailedRow {
+            row_index: 7,
+            offset: Some(offset.clone()),
+            reason: "Type mismatch".to_string(),
+        };
+        assert_eq!(row.row_index, 7);
+        assert!(row.offset.is_some());
+        let ko = row.offset.unwrap();
+        assert_eq!(&*ko.topic, "events");
+        assert_eq!(ko.partition, 3);
+        assert_eq!(ko.offset, 12345);
+    }
+
+    #[test]
+    fn test_failed_row_no_offset() {
+        let row = FailedRow {
+            row_index: 0,
+            offset: None,
+            reason: "No offset (manual insert path)".to_string(),
+        };
+        assert!(row.offset.is_none());
+    }
+
+    #[test]
+    fn test_failed_row_unicode_reason() {
+        let row = FailedRow {
+            row_index: 1,
+            offset: None,
+            reason: "Erreur: données invalides 世界 🚫".to_string(),
+        };
+        assert!(row.reason.contains("世界"));
+        assert!(row.reason.contains("🚫"));
+    }
+
+    // ============================================================
+    // InsertFormat — serde round-trip and variant coverage
+    // ============================================================
+
+    #[test]
+    fn test_insert_format_default_is_row_binary() {
+        assert_eq!(InsertFormat::default(), InsertFormat::RowBinary);
+    }
+
+    #[test]
+    fn test_insert_format_serde_roundtrip_rowbinary() {
+        let fmt = InsertFormat::RowBinary;
+        let s = serde_json::to_string(&fmt).unwrap();
+        assert_eq!(s, "\"rowbinary\"");
+        let back: InsertFormat = serde_json::from_str(&s).unwrap();
+        assert_eq!(back, fmt);
+    }
+
+    #[test]
+    fn test_insert_format_serde_roundtrip_jsoneachrow() {
+        let fmt = InsertFormat::JsonEachRow;
+        let s = serde_json::to_string(&fmt).unwrap();
+        assert_eq!(s, "\"jsoneachrow\"");
+        let back: InsertFormat = serde_json::from_str(&s).unwrap();
+        assert_eq!(back, fmt);
+    }
+
+    #[test]
+    fn test_insert_format_serde_aliases() {
+        // Aliases from the config — verified via actual YAML/JSON input
+        let cases = [
+            ("\"rowbinary\"", InsertFormat::RowBinary),
+            ("\"native\"", InsertFormat::RowBinary),
+            ("\"binary\"", InsertFormat::RowBinary),
+            ("\"jsoneachrow\"", InsertFormat::JsonEachRow),
+            ("\"json\"", InsertFormat::JsonEachRow),
+            ("\"json_each_row\"", InsertFormat::JsonEachRow),
+        ];
+        for (input, expected) in cases {
+            let parsed: InsertFormat = serde_json::from_str(input).unwrap();
+            assert_eq!(parsed, expected, "alias {input} should map to {expected:?}");
+        }
+    }
+
+    #[test]
+    fn test_insert_format_invalid_variant_fails() {
+        // Unknown variants must error — prevents silent typos in config
+        let result: std::result::Result<InsertFormat, _> = serde_json::from_str("\"arrow\"");
+        assert!(result.is_err());
+        let result: std::result::Result<InsertFormat, _> = serde_json::from_str("42");
+        assert!(result.is_err());
+    }
+
+    // ============================================================
+    // write_row_with_json — splice behaviour for complex inputs
+    // ============================================================
+
+    #[test]
+    fn test_write_row_with_json_contains_escapes() {
+        // Row with escaped characters: JSON must round-trip correctly after splice.
+        let mut row = serde_json::Map::new();
+        row.insert(
+            "message".to_string(),
+            serde_json::Value::String("line1\nline2\t\"quoted\"".to_string()),
+        );
+        row.insert(
+            "path".to_string(),
+            serde_json::Value::String("C:\\Users\\test".to_string()),
+        );
+        let raw = br#"{"raw_key":"raw \"value\""}"#;
+
+        let mut body = Vec::new();
+        write_row_with_json(&mut body, &row, raw).unwrap();
+        let line = std::str::from_utf8(&body).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+
+        assert_eq!(parsed.get("message").unwrap(), "line1\nline2\t\"quoted\"");
+        assert_eq!(parsed.get("path").unwrap(), "C:\\Users\\test");
+        assert!(parsed.get("_json").is_some());
+        assert_eq!(
+            parsed.get("_json").unwrap().get("raw_key").unwrap(),
+            "raw \"value\""
+        );
+    }
+
+    #[test]
+    fn test_write_row_with_json_unicode_content() {
+        // Unicode keys/values — UTF-8 should pass through unchanged.
+        let mut row = serde_json::Map::new();
+        row.insert(
+            "ユーザー".to_string(),
+            serde_json::Value::String("日本語".to_string()),
+        );
+        row.insert(
+            "emoji".to_string(),
+            serde_json::Value::String("🔥🚀".to_string()),
+        );
+        let raw = "{\"地域\":\"東京\",\"status\":\"✅\"}".as_bytes();
+
+        let mut body = Vec::new();
+        write_row_with_json(&mut body, &row, raw).unwrap();
+        let line = std::str::from_utf8(&body).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+
+        assert_eq!(parsed.get("ユーザー").unwrap(), "日本語");
+        assert_eq!(parsed.get("emoji").unwrap(), "🔥🚀");
+        assert_eq!(parsed.get("_json").unwrap().get("地域").unwrap(), "東京");
+    }
+
+    #[test]
+    fn test_write_row_with_json_nested_structure() {
+        // Deeply nested Map values — splice must still produce valid JSON.
+        let row_val = serde_json::json!({
+            "level1": {
+                "level2": {
+                    "level3": {
+                        "deep": [1, 2, [3, [4, 5]]]
+                    }
+                }
+            },
+            "arr": [null, true, false, 3.14, "string"]
+        });
+        let row = row_val.as_object().unwrap();
+        let raw = br#"{"outer":{"inner":42}}"#;
+
+        let mut body = Vec::new();
+        write_row_with_json(&mut body, row, raw).unwrap();
+        let line = std::str::from_utf8(&body).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+
+        assert_eq!(
+            parsed["level1"]["level2"]["level3"]["deep"][2][1][1],
+            serde_json::json!(5)
+        );
+        assert_eq!(parsed["arr"][3], serde_json::json!(3.14));
+        assert_eq!(parsed["_json"]["outer"]["inner"], serde_json::json!(42));
+    }
+
+    #[test]
+    fn test_write_row_with_json_large_map() {
+        // Large map: 1000 keys. Splice must handle large allocations correctly.
+        let mut row = serde_json::Map::new();
+        for i in 0..1000 {
+            row.insert(format!("key_{i}"), serde_json::Value::from(i));
+        }
+        let raw = br#"{"summary":"lots"}"#;
+
+        let mut body = Vec::new();
+        write_row_with_json(&mut body, &row, raw).unwrap();
+
+        let line = std::str::from_utf8(&body).unwrap();
+        assert!(line.ends_with('\n'));
+        let parsed: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+        assert_eq!(parsed.as_object().unwrap().len(), 1001); // 1000 + _json
+        assert_eq!(parsed.get("key_500").unwrap(), 500);
+        assert_eq!(parsed.get("_json").unwrap().get("summary").unwrap(), "lots");
+    }
+
+    #[test]
+    fn test_write_row_with_json_raw_is_array() {
+        // The raw payload can be any valid JSON value, including arrays or scalars.
+        // This is a fuzz-style input: verify splicing doesn't break on non-object raw.
+        let mut row = serde_json::Map::new();
+        row.insert("id".to_string(), serde_json::Value::from(1));
+        let raw = b"[1,2,3]";
+
+        let mut body = Vec::new();
+        write_row_with_json(&mut body, &row, raw).unwrap();
+        let line = std::str::from_utf8(&body).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+
+        // _json is the literal raw bytes parsed as JSON — here an array.
+        assert!(parsed.get("_json").unwrap().is_array());
+        assert_eq!(parsed["_json"][0], serde_json::json!(1));
+    }
+
+    #[test]
+    fn test_write_row_with_json_empty_raw_produces_invalid_json() {
+        // Edge case: empty raw bytes. The splice produces {"_json":} which is NOT
+        // valid JSON — callers must filter empty raw (insert_rows_json does this).
+        // We verify the observable byte output matches the documented behaviour.
+        let row = serde_json::Map::new();
+        let raw: &[u8] = b"";
+
+        let mut body = Vec::new();
+        write_row_with_json(&mut body, &row, raw).unwrap();
+        let line = std::str::from_utf8(&body).unwrap();
+        // Empty map path: {"_json": + empty raw + } = {"_json":}
+        assert_eq!(line.trim_end(), r#"{"_json":}"#);
+        // This is INTENTIONALLY invalid — confirms caller must filter empty raw.
+        assert!(serde_json::from_str::<serde_json::Value>(line.trim()).is_err());
+    }
+
+    #[test]
+    fn test_write_row_with_json_appends_newline() {
+        // NDJSON format requires trailing newline — check both paths (empty + non-empty map).
+        let empty_row = serde_json::Map::new();
+        let raw = br#"{"k":1}"#;
+        let mut body1 = Vec::new();
+        write_row_with_json(&mut body1, &empty_row, raw).unwrap();
+        assert_eq!(body1.last(), Some(&b'\n'));
+
+        let mut nonempty_row = serde_json::Map::new();
+        nonempty_row.insert("x".to_string(), serde_json::Value::from(1));
+        let mut body2 = Vec::new();
+        write_row_with_json(&mut body2, &nonempty_row, raw).unwrap();
+        assert_eq!(body2.last(), Some(&b'\n'));
+    }
+
+    #[test]
+    fn test_write_row_with_json_null_and_bool_values() {
+        // Row with null, true, false — common for timestamps/flags.
+        let row_val = serde_json::json!({
+            "deleted_at": null,
+            "active": true,
+            "hidden": false,
+            "count": 0
+        });
+        let row = row_val.as_object().unwrap();
+        let raw = br#"{"note":"ok"}"#;
+
+        let mut body = Vec::new();
+        write_row_with_json(&mut body, row, raw).unwrap();
+        let parsed: serde_json::Value =
+            serde_json::from_str(std::str::from_utf8(&body).unwrap().trim()).unwrap();
+
+        assert!(parsed.get("deleted_at").unwrap().is_null());
+        assert_eq!(parsed.get("active").unwrap(), true);
+        assert_eq!(parsed.get("hidden").unwrap(), false);
+        assert_eq!(parsed.get("count").unwrap(), 0);
+    }
+
+    #[test]
+    fn test_write_row_with_json_splice_position_correct() {
+        // Whitebox check: the last byte before newline should be '}',
+        // and the splice should not leave the body malformed (e.g. trailing comma).
+        let row_val = serde_json::json!({"a": 1});
+        let row = row_val.as_object().unwrap();
+        let raw = br#"{"b":2}"#;
+
+        let mut body = Vec::new();
+        write_row_with_json(&mut body, row, raw).unwrap();
+
+        // Last byte is newline, second-to-last is '}' (the final brace of the object).
+        assert_eq!(body[body.len() - 1], b'\n');
+        assert_eq!(body[body.len() - 2], b'}');
+    }
 }

@@ -153,3 +153,474 @@ impl BatchCoordinator<'_> {
         outcome
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use tokio::sync::mpsc;
+
+    use hyperi_rustlib::dlq::DlqEntry;
+    use hyperi_rustlib::memory::{MemoryGuard, MemoryGuardConfig};
+
+    use crate::buffer::{BufferManager, KafkaOffset};
+    use crate::config::{BufferConfig, ComputedColumnsConfig, MetadataConfig};
+    use crate::kafka::KafkaMessage;
+    use crate::pipeline::capture::CaptureOverrides;
+    use crate::pipeline::types::ProcessedMessage;
+    use crate::transform::ComputedColumnCache;
+
+    use super::{BatchCoordinator, BatchOutcome};
+
+    fn make_kafka_message(
+        payload: &[u8],
+        topic: &str,
+        partition: i32,
+        offset: i64,
+    ) -> KafkaMessage {
+        KafkaMessage {
+            payload: payload.to_vec(),
+            topic: Arc::from(topic),
+            partition,
+            offset,
+            key: None,
+            timestamp_ms: None,
+        }
+    }
+
+    fn make_processed(table: &str) -> ProcessedMessage {
+        ProcessedMessage {
+            table: table.to_string(),
+            data: serde_json::Map::new(),
+            raw_payload: None,
+            kafka_offset: KafkaOffset {
+                topic: Arc::from("test-topic"),
+                partition: 0,
+                offset: 1,
+            },
+        }
+    }
+
+    fn make_coordinator<'a>(
+        buffer_manager: &'a mut BufferManager,
+        capture_overrides: &'a mut CaptureOverrides,
+        field_mapping_cache: &'a mut Option<crate::transform::FieldMappingCache>,
+        computed_column_cache: &'a mut ComputedColumnCache,
+        metrics: &'a Option<crate::metrics::Metrics>,
+        dlq_tx: &'a mpsc::Sender<DlqEntry>,
+        dlq_enabled: bool,
+        memory_guard: &'a MemoryGuard,
+    ) -> BatchCoordinator<'a> {
+        BatchCoordinator {
+            buffer_manager,
+            capture_overrides,
+            field_mapping_cache,
+            computed_column_cache,
+            metrics,
+            dlq_tx,
+            dlq_enabled,
+            memory_guard,
+        }
+    }
+
+    // ---- BatchOutcome tests ----
+
+    #[test]
+    fn batch_outcome_default_is_all_zeros() {
+        let outcome = BatchOutcome::default();
+        assert_eq!(outcome.processed, 0);
+        assert_eq!(outcome.errors, 0);
+        assert_eq!(outcome.dlq, 0);
+    }
+
+    // ---- BatchCoordinator tests ----
+
+    #[test]
+    fn apply_results_empty_batch() {
+        let (dlq_tx, _dlq_rx) = mpsc::channel(16);
+        let guard = MemoryGuard::new(MemoryGuardConfig {
+            limit_bytes: 1_073_741_824,
+            ..Default::default()
+        });
+        let mut buffer_manager = BufferManager::new(&BufferConfig::default());
+        let mut capture_overrides = CaptureOverrides::new(&MetadataConfig::default());
+        let mut field_mapping_cache = None;
+        let mut computed_column_cache = ComputedColumnCache::new(ComputedColumnsConfig::default());
+
+        let mut coord = make_coordinator(
+            &mut buffer_manager,
+            &mut capture_overrides,
+            &mut field_mapping_cache,
+            &mut computed_column_cache,
+            &None,
+            &dlq_tx,
+            true,
+            &guard,
+        );
+
+        let messages: Vec<KafkaMessage> = vec![];
+        let results: Vec<crate::Result<ProcessedMessage>> = vec![];
+
+        let outcome = coord.apply_results(results, &messages);
+        assert_eq!(outcome.processed, 0);
+        assert_eq!(outcome.errors, 0);
+        assert_eq!(outcome.dlq, 0);
+    }
+
+    #[test]
+    fn apply_results_all_success() {
+        let (dlq_tx, _dlq_rx) = mpsc::channel(16);
+        let guard = MemoryGuard::new(MemoryGuardConfig {
+            limit_bytes: 1_073_741_824,
+            ..Default::default()
+        });
+        let mut buffer_manager = BufferManager::new(&BufferConfig::default());
+        let mut capture_overrides = CaptureOverrides::new(&MetadataConfig::default());
+        let mut field_mapping_cache = None;
+        let mut computed_column_cache = ComputedColumnCache::new(ComputedColumnsConfig::default());
+
+        let mut coord = make_coordinator(
+            &mut buffer_manager,
+            &mut capture_overrides,
+            &mut field_mapping_cache,
+            &mut computed_column_cache,
+            &None,
+            &dlq_tx,
+            true,
+            &guard,
+        );
+
+        let messages = vec![
+            make_kafka_message(b"msg1", "topic", 0, 1),
+            make_kafka_message(b"msg2", "topic", 0, 2),
+            make_kafka_message(b"msg3", "topic", 0, 3),
+        ];
+        let results: Vec<crate::Result<ProcessedMessage>> = vec![
+            Ok(make_processed("dfe.events")),
+            Ok(make_processed("dfe.events")),
+            Ok(make_processed("dfe.metrics")),
+        ];
+
+        let outcome = coord.apply_results(results, &messages);
+        assert_eq!(outcome.processed, 3);
+        assert_eq!(outcome.errors, 0);
+        assert_eq!(outcome.dlq, 0);
+    }
+
+    #[test]
+    fn apply_results_all_errors_dlq_enabled() {
+        let (dlq_tx, mut dlq_rx) = mpsc::channel(16);
+        let guard = MemoryGuard::new(MemoryGuardConfig {
+            limit_bytes: 1_073_741_824,
+            ..Default::default()
+        });
+        let mut buffer_manager = BufferManager::new(&BufferConfig::default());
+        let mut capture_overrides = CaptureOverrides::new(&MetadataConfig::default());
+        let mut field_mapping_cache = None;
+        let mut computed_column_cache = ComputedColumnCache::new(ComputedColumnsConfig::default());
+
+        let mut coord = make_coordinator(
+            &mut buffer_manager,
+            &mut capture_overrides,
+            &mut field_mapping_cache,
+            &mut computed_column_cache,
+            &None,
+            &dlq_tx,
+            true,
+            &guard,
+        );
+
+        let messages = vec![
+            make_kafka_message(b"bad1", "topic", 0, 10),
+            make_kafka_message(b"bad2", "topic", 0, 11),
+        ];
+        let results: Vec<crate::Result<ProcessedMessage>> = vec![
+            Err(crate::Error::Json("parse failed".to_string())),
+            Err(crate::Error::Transform("missing field".to_string())),
+        ];
+
+        let outcome = coord.apply_results(results, &messages);
+        assert_eq!(outcome.processed, 0);
+        assert_eq!(outcome.errors, 2);
+        assert_eq!(outcome.dlq, 2);
+
+        // Verify DLQ entries were sent
+        let entry1 = dlq_rx.try_recv().expect("DLQ entry 1");
+        assert_eq!(entry1.service, "loader");
+        assert!(entry1.reason.contains("parse failed"));
+
+        let entry2 = dlq_rx.try_recv().expect("DLQ entry 2");
+        assert!(entry2.reason.contains("missing field"));
+    }
+
+    #[test]
+    fn apply_results_errors_dlq_disabled() {
+        let (dlq_tx, mut dlq_rx) = mpsc::channel(16);
+        let guard = MemoryGuard::new(MemoryGuardConfig {
+            limit_bytes: 1_073_741_824,
+            ..Default::default()
+        });
+        let mut buffer_manager = BufferManager::new(&BufferConfig::default());
+        let mut capture_overrides = CaptureOverrides::new(&MetadataConfig::default());
+        let mut field_mapping_cache = None;
+        let mut computed_column_cache = ComputedColumnCache::new(ComputedColumnsConfig::default());
+
+        let mut coord = make_coordinator(
+            &mut buffer_manager,
+            &mut capture_overrides,
+            &mut field_mapping_cache,
+            &mut computed_column_cache,
+            &None,
+            &dlq_tx,
+            false, // DLQ disabled
+            &guard,
+        );
+
+        let messages = vec![make_kafka_message(b"bad", "topic", 0, 1)];
+        let results: Vec<crate::Result<ProcessedMessage>> =
+            vec![Err(crate::Error::Json("boom".to_string()))];
+
+        let outcome = coord.apply_results(results, &messages);
+        assert_eq!(outcome.errors, 1);
+        assert_eq!(outcome.dlq, 0); // Nothing sent to DLQ
+
+        // Channel should be empty
+        assert!(dlq_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn apply_results_mixed_success_and_failure() {
+        let (dlq_tx, mut dlq_rx) = mpsc::channel(16);
+        let guard = MemoryGuard::new(MemoryGuardConfig {
+            limit_bytes: 1_073_741_824,
+            ..Default::default()
+        });
+        let mut buffer_manager = BufferManager::new(&BufferConfig::default());
+        let mut capture_overrides = CaptureOverrides::new(&MetadataConfig::default());
+        let mut field_mapping_cache = None;
+        let mut computed_column_cache = ComputedColumnCache::new(ComputedColumnsConfig::default());
+
+        let mut coord = make_coordinator(
+            &mut buffer_manager,
+            &mut capture_overrides,
+            &mut field_mapping_cache,
+            &mut computed_column_cache,
+            &None,
+            &dlq_tx,
+            true,
+            &guard,
+        );
+
+        let messages = vec![
+            make_kafka_message(b"good1", "topic", 0, 1),
+            make_kafka_message(b"bad1", "topic", 0, 2),
+            make_kafka_message(b"good2", "topic", 0, 3),
+            make_kafka_message(b"bad2", "topic", 0, 4),
+            make_kafka_message(b"good3", "topic", 0, 5),
+        ];
+        let results: Vec<crate::Result<ProcessedMessage>> = vec![
+            Ok(make_processed("dfe.events")),
+            Err(crate::Error::Json("parse error".to_string())),
+            Ok(make_processed("dfe.metrics")),
+            Err(crate::Error::Schema("schema mismatch".to_string())),
+            Ok(make_processed("dfe.events")),
+        ];
+
+        let outcome = coord.apply_results(results, &messages);
+        assert_eq!(outcome.processed, 3);
+        assert_eq!(outcome.errors, 2);
+        assert_eq!(outcome.dlq, 2);
+
+        // Verify exactly 2 DLQ entries
+        assert!(dlq_rx.try_recv().is_ok());
+        assert!(dlq_rx.try_recv().is_ok());
+        assert!(dlq_rx.try_recv().is_err()); // No more
+    }
+
+    #[test]
+    fn apply_results_dlq_channel_full() {
+        // Channel capacity 1, send 3 errors — first succeeds, rest drop
+        let (dlq_tx, _dlq_rx) = mpsc::channel(1);
+        let guard = MemoryGuard::new(MemoryGuardConfig {
+            limit_bytes: 1_073_741_824,
+            ..Default::default()
+        });
+        let mut buffer_manager = BufferManager::new(&BufferConfig::default());
+        let mut capture_overrides = CaptureOverrides::new(&MetadataConfig::default());
+        let mut field_mapping_cache = None;
+        let mut computed_column_cache = ComputedColumnCache::new(ComputedColumnsConfig::default());
+
+        let mut coord = make_coordinator(
+            &mut buffer_manager,
+            &mut capture_overrides,
+            &mut field_mapping_cache,
+            &mut computed_column_cache,
+            &None,
+            &dlq_tx,
+            true,
+            &guard,
+        );
+
+        let messages = vec![
+            make_kafka_message(b"e1", "topic", 0, 1),
+            make_kafka_message(b"e2", "topic", 0, 2),
+            make_kafka_message(b"e3", "topic", 0, 3),
+        ];
+        let results: Vec<crate::Result<ProcessedMessage>> = vec![
+            Err(crate::Error::Json("err1".to_string())),
+            Err(crate::Error::Json("err2".to_string())),
+            Err(crate::Error::Json("err3".to_string())),
+        ];
+
+        let outcome = coord.apply_results(results, &messages);
+        assert_eq!(outcome.errors, 3);
+        // Only 1 fits in the channel, remaining 2 are dropped
+        assert_eq!(outcome.dlq, 1);
+    }
+
+    #[test]
+    fn apply_results_memory_released_on_error() {
+        let (dlq_tx, _dlq_rx) = mpsc::channel(16);
+        let guard = MemoryGuard::new(MemoryGuardConfig {
+            limit_bytes: 1_073_741_824,
+            ..Default::default()
+        });
+        // Pre-acquire memory matching the payload sizes
+        guard.add_bytes(100);
+        let before = guard.current_bytes();
+
+        let mut buffer_manager = BufferManager::new(&BufferConfig::default());
+        let mut capture_overrides = CaptureOverrides::new(&MetadataConfig::default());
+        let mut field_mapping_cache = None;
+        let mut computed_column_cache = ComputedColumnCache::new(ComputedColumnsConfig::default());
+
+        let mut coord = make_coordinator(
+            &mut buffer_manager,
+            &mut capture_overrides,
+            &mut field_mapping_cache,
+            &mut computed_column_cache,
+            &None,
+            &dlq_tx,
+            false,
+            &guard,
+        );
+
+        // 50-byte payload — memory should be released on error
+        let messages = vec![make_kafka_message(&[0u8; 50], "topic", 0, 1)];
+        let results: Vec<crate::Result<ProcessedMessage>> =
+            vec![Err(crate::Error::Json("fail".to_string()))];
+
+        coord.apply_results(results, &messages);
+        let after = guard.current_bytes();
+        assert!(
+            after < before,
+            "Memory should be released on error: before={before}, after={after}"
+        );
+    }
+
+    #[test]
+    fn apply_results_refs_works_like_apply_results() {
+        let (dlq_tx, _dlq_rx) = mpsc::channel(16);
+        let guard = MemoryGuard::new(MemoryGuardConfig {
+            limit_bytes: 1_073_741_824,
+            ..Default::default()
+        });
+        let mut buffer_manager = BufferManager::new(&BufferConfig::default());
+        let mut capture_overrides = CaptureOverrides::new(&MetadataConfig::default());
+        let mut field_mapping_cache = None;
+        let mut computed_column_cache = ComputedColumnCache::new(ComputedColumnsConfig::default());
+
+        let mut coord = make_coordinator(
+            &mut buffer_manager,
+            &mut capture_overrides,
+            &mut field_mapping_cache,
+            &mut computed_column_cache,
+            &None,
+            &dlq_tx,
+            true,
+            &guard,
+        );
+
+        let msg1 = make_kafka_message(b"ref1", "topic", 0, 1);
+        let msg2 = make_kafka_message(b"ref2", "topic", 0, 2);
+        let messages: Vec<&KafkaMessage> = vec![&msg1, &msg2];
+        let results: Vec<crate::Result<ProcessedMessage>> = vec![
+            Ok(make_processed("dfe.events")),
+            Err(crate::Error::Json("parse fail".to_string())),
+        ];
+
+        let outcome = coord.apply_results_refs(results, &messages);
+        assert_eq!(outcome.processed, 1);
+        assert_eq!(outcome.errors, 1);
+        assert_eq!(outcome.dlq, 1);
+    }
+
+    #[test]
+    fn apply_results_more_results_than_messages_ignores_extras() {
+        // zip() stops at the shorter iterator — excess results are ignored
+        let (dlq_tx, _dlq_rx) = mpsc::channel(16);
+        let guard = MemoryGuard::new(MemoryGuardConfig {
+            limit_bytes: 1_073_741_824,
+            ..Default::default()
+        });
+        let mut buffer_manager = BufferManager::new(&BufferConfig::default());
+        let mut capture_overrides = CaptureOverrides::new(&MetadataConfig::default());
+        let mut field_mapping_cache = None;
+        let mut computed_column_cache = ComputedColumnCache::new(ComputedColumnsConfig::default());
+
+        let mut coord = make_coordinator(
+            &mut buffer_manager,
+            &mut capture_overrides,
+            &mut field_mapping_cache,
+            &mut computed_column_cache,
+            &None,
+            &dlq_tx,
+            true,
+            &guard,
+        );
+
+        let messages = vec![make_kafka_message(b"only_one", "topic", 0, 1)];
+        let results: Vec<crate::Result<ProcessedMessage>> = vec![
+            Ok(make_processed("dfe.events")),
+            Ok(make_processed("dfe.metrics")), // excess — should be ignored
+            Ok(make_processed("dfe.metrics")), // excess — should be ignored
+        ];
+
+        let outcome = coord.apply_results(results, &messages);
+        assert_eq!(outcome.processed, 1); // Only 1 message matched
+    }
+
+    #[test]
+    fn apply_results_more_messages_than_results_ignores_extras() {
+        let (dlq_tx, _dlq_rx) = mpsc::channel(16);
+        let guard = MemoryGuard::new(MemoryGuardConfig {
+            limit_bytes: 1_073_741_824,
+            ..Default::default()
+        });
+        let mut buffer_manager = BufferManager::new(&BufferConfig::default());
+        let mut capture_overrides = CaptureOverrides::new(&MetadataConfig::default());
+        let mut field_mapping_cache = None;
+        let mut computed_column_cache = ComputedColumnCache::new(ComputedColumnsConfig::default());
+
+        let mut coord = make_coordinator(
+            &mut buffer_manager,
+            &mut capture_overrides,
+            &mut field_mapping_cache,
+            &mut computed_column_cache,
+            &None,
+            &dlq_tx,
+            true,
+            &guard,
+        );
+
+        let messages = vec![
+            make_kafka_message(b"m1", "topic", 0, 1),
+            make_kafka_message(b"m2", "topic", 0, 2),
+            make_kafka_message(b"m3", "topic", 0, 3), // excess
+        ];
+        let results: Vec<crate::Result<ProcessedMessage>> = vec![Ok(make_processed("dfe.events"))];
+
+        let outcome = coord.apply_results(results, &messages);
+        assert_eq!(outcome.processed, 1);
+    }
+}

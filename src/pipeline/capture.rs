@@ -353,4 +353,201 @@ mod tests {
             CaptureMode::Full
         );
     }
+
+    // ---- Coverage gap: legacy raw_disabled only falls through to global mode ----
+
+    #[test]
+    fn test_legacy_disable_raw_only_falls_through_to_global_full() {
+        // disable_raw_tables has the table, disable_json_tables does not
+        // Global mode is Full (default) — (false, true) match arm → global_mode
+        let mut metadata_config = MetadataConfig::default();
+        metadata_config
+            .disable_raw_tables
+            .push("dfe.events".to_string());
+        let overrides = CaptureOverrides::new(&metadata_config);
+
+        // Hits the (false, true) legacy match arm → global_mode (Full)
+        assert_eq!(
+            overrides.derive_config("dfe.events").mode,
+            CaptureMode::Full
+        );
+    }
+
+    #[test]
+    fn test_legacy_disable_raw_only_falls_through_to_global_extracted() {
+        // Same path but different global mode to prove the arm delegates to global
+        let mut metadata_config = MetadataConfig {
+            capture_mode: CaptureMode::ExtractedOnly,
+            ..Default::default()
+        };
+        metadata_config
+            .disable_raw_tables
+            .push("dfe.events".to_string());
+        let overrides = CaptureOverrides::new(&metadata_config);
+
+        assert_eq!(
+            overrides.derive_config("dfe.events").mode,
+            CaptureMode::ExtractedOnly
+        );
+    }
+
+    // ---- Coverage gap: DDL @no_capture_raw alone falls through to global ----
+
+    #[test]
+    fn test_ddl_no_capture_raw_only_uses_global_mode() {
+        // Global is RawOnly — DDL @no_capture_raw alone should yield global (RawOnly)
+        let metadata_config = MetadataConfig {
+            capture_mode: CaptureMode::RawOnly,
+            ..Default::default()
+        };
+        let mut overrides = CaptureOverrides::new(&metadata_config);
+
+        overrides.update_from_comment("dfe.events", "@no_capture_raw: true");
+
+        // Hits (false, true) → global_mode (RawOnly)
+        assert_eq!(
+            overrides.derive_config("dfe.events").mode,
+            CaptureMode::RawOnly
+        );
+    }
+
+    #[test]
+    fn test_ddl_no_capture_raw_only_default_global_is_full() {
+        let metadata_config = MetadataConfig::default();
+        let mut overrides = CaptureOverrides::new(&metadata_config);
+
+        overrides.update_from_comment("dfe.events", "@no_capture_raw: true");
+
+        // Hits (false, true) → global_mode (Full)
+        assert_eq!(
+            overrides.derive_config("dfe.events").mode,
+            CaptureMode::Full
+        );
+    }
+
+    // ---- Coverage gap: DDL legacy no_capture_json and no_capture_raw together ----
+
+    #[test]
+    fn test_ddl_legacy_both_no_capture_maps_to_extracted_only() {
+        let metadata_config = MetadataConfig::default();
+        let mut overrides = CaptureOverrides::new(&metadata_config);
+
+        overrides.update_from_comment(
+            "dfe.events",
+            "@no_capture_json: true | @no_capture_raw: true",
+        );
+
+        // Hits (true, true) → ExtractedOnly
+        assert_eq!(
+            overrides.derive_config("dfe.events").mode,
+            CaptureMode::ExtractedOnly
+        );
+    }
+
+    #[test]
+    fn test_ddl_legacy_tags_false_values_noop() {
+        // @no_capture_json: false → is_some_and(|v| v == "true") returns false
+        // Both legacy flags false → update does nothing, global default applies
+        let metadata_config = MetadataConfig::default();
+        let mut overrides = CaptureOverrides::new(&metadata_config);
+
+        overrides.update_from_comment(
+            "dfe.events",
+            "@no_capture_json: false | @no_capture_raw: false",
+        );
+
+        assert_eq!(
+            overrides.derive_config("dfe.events").mode,
+            CaptureMode::Full
+        );
+    }
+
+    #[test]
+    fn test_ddl_update_full_capture_mode() {
+        // Ensure the "full" variant in update_from_comment is exercised
+        let metadata_config = MetadataConfig {
+            capture_mode: CaptureMode::RawOnly,
+            ..Default::default()
+        };
+        let mut overrides = CaptureOverrides::new(&metadata_config);
+
+        overrides.update_from_comment("dfe.events", "@capture_mode: full");
+
+        // DDL override wins — goes from RawOnly (global) to Full
+        assert_eq!(
+            overrides.derive_config("dfe.events").mode,
+            CaptureMode::Full
+        );
+    }
+
+    #[test]
+    fn test_take_pending_empty_initially() {
+        let metadata_config = MetadataConfig::default();
+        let mut overrides = CaptureOverrides::new(&metadata_config);
+        assert!(overrides.take_pending().is_empty());
+    }
+
+    #[test]
+    fn test_mark_pending_duplicates_allowed_until_cached() {
+        // mark_pending checks configs map, not pending vec — so it can add duplicates
+        let metadata_config = MetadataConfig::default();
+        let mut overrides = CaptureOverrides::new(&metadata_config);
+
+        overrides.mark_pending("dfe.events");
+        overrides.mark_pending("dfe.events");
+        overrides.mark_pending("dfe.events");
+
+        let pending = overrides.take_pending();
+        // Duplicates permitted — dedup happens upstream
+        assert_eq!(pending.len(), 3);
+    }
+
+    #[test]
+    fn test_deprecation_warning_emitted_on_legacy_config() {
+        // Just ensures Self::new doesn't panic when deprecated fields are populated.
+        // The warn! is a side effect; we don't capture logs here.
+        let mut metadata_config = MetadataConfig::default();
+        metadata_config.disable_json_tables.push("t1".to_string());
+        metadata_config.disable_raw_tables.push("t2".to_string());
+        let _overrides = CaptureOverrides::new(&metadata_config);
+    }
+
+    #[test]
+    fn test_unknown_capture_mode_preserves_existing_config() {
+        // If update_from_comment gets an unknown value AFTER a valid one,
+        // the valid config should remain (unknown → early return).
+        let metadata_config = MetadataConfig::default();
+        let mut overrides = CaptureOverrides::new(&metadata_config);
+
+        overrides.update_from_comment("dfe.events", "@capture_mode: raw_only");
+        assert_eq!(
+            overrides.derive_config("dfe.events").mode,
+            CaptureMode::RawOnly
+        );
+
+        // Now apply a bad value — should not clobber
+        overrides.update_from_comment("dfe.events", "@capture_mode: bogus");
+        assert_eq!(
+            overrides.derive_config("dfe.events").mode,
+            CaptureMode::RawOnly
+        );
+    }
+
+    #[test]
+    fn test_ensure_cached_is_idempotent() {
+        let metadata_config = MetadataConfig {
+            capture_mode: CaptureMode::RawOnly,
+            ..Default::default()
+        };
+        let mut overrides = CaptureOverrides::new(&metadata_config);
+
+        overrides.ensure_cached("dfe.events");
+        let first = overrides.derive_config("dfe.events").mode;
+        overrides.ensure_cached("dfe.events");
+        overrides.ensure_cached("dfe.events");
+        let second = overrides.derive_config("dfe.events").mode;
+
+        assert_eq!(first, second);
+        assert_eq!(first, CaptureMode::RawOnly);
+    }
 }

@@ -160,6 +160,33 @@ pub fn is_null_string(value: &str) -> bool {
 mod tests {
     use super::*;
 
+    // ---- Helper to build a ColumnInfo for testing ----
+
+    fn make_column(name: &str, type_str: &str) -> ColumnInfo {
+        ColumnInfo {
+            name: name.to_string(),
+            type_name: type_str.to_string(),
+            parsed_type: ParsedType::parse(type_str),
+            position: 1,
+            default_kind: String::new(),
+            default_expression: String::new(),
+            comment: String::new(),
+            is_in_primary_key: false,
+            is_in_sorting_key: false,
+        }
+    }
+
+    fn make_schema(columns: Vec<ColumnInfo>) -> TableSchema {
+        TableSchema {
+            database: "dfe".to_string(),
+            table: "events".to_string(),
+            columns,
+            comment: String::new(),
+        }
+    }
+
+    // ---- ParsedType tests (existing, kept for regression) ----
+
     #[test]
     fn test_parse_simple_types() {
         let t = ParsedType::parse("String");
@@ -276,5 +303,323 @@ mod tests {
         assert!(is_null_string(""));
         assert!(!is_null_string("hello"));
         assert!(!is_null_string("0"));
+    }
+
+    // ---- NEW: TableSchema tests ----
+
+    #[test]
+    fn table_schema_column_by_name_found() {
+        let schema = make_schema(vec![
+            make_column("_timestamp", "DateTime64(3)"),
+            make_column("_org_id", "LowCardinality(String)"),
+            make_column("_raw", "Nullable(String)"),
+        ]);
+
+        let col = schema.column("_org_id");
+        assert!(col.is_some());
+        assert_eq!(col.unwrap().name, "_org_id");
+        assert_eq!(col.unwrap().type_name, "LowCardinality(String)");
+    }
+
+    #[test]
+    fn table_schema_column_by_name_not_found() {
+        let schema = make_schema(vec![make_column("_timestamp", "DateTime64(3)")]);
+        assert!(schema.column("nonexistent").is_none());
+    }
+
+    #[test]
+    fn table_schema_column_empty_schema() {
+        let schema = make_schema(vec![]);
+        assert!(schema.column("anything").is_none());
+    }
+
+    #[test]
+    fn table_schema_column_names_preserves_order() {
+        let schema = make_schema(vec![
+            make_column("_timestamp", "DateTime64(3)"),
+            make_column("_org_id", "LowCardinality(String)"),
+            make_column("_raw", "Nullable(String)"),
+            make_column("_json", "JSON"),
+        ]);
+
+        let names = schema.column_names();
+        assert_eq!(names, vec!["_timestamp", "_org_id", "_raw", "_json"]);
+    }
+
+    #[test]
+    fn table_schema_column_names_empty() {
+        let schema = make_schema(vec![]);
+        let names = schema.column_names();
+        assert!(names.is_empty());
+    }
+
+    #[test]
+    fn table_schema_has_column_true() {
+        let schema = make_schema(vec![
+            make_column("_timestamp", "DateTime64(3)"),
+            make_column("user_id", "String"),
+        ]);
+        assert!(schema.has_column("_timestamp"));
+        assert!(schema.has_column("user_id"));
+    }
+
+    #[test]
+    fn table_schema_has_column_false() {
+        let schema = make_schema(vec![make_column("_timestamp", "DateTime64(3)")]);
+        assert!(!schema.has_column("missing"));
+        assert!(!schema.has_column("")); // empty name
+        assert!(!schema.has_column("_Timestamp")); // case sensitive
+    }
+
+    #[test]
+    fn table_schema_has_column_empty_schema() {
+        let schema = make_schema(vec![]);
+        assert!(!schema.has_column("anything"));
+    }
+
+    // ---- NEW: ColumnInfo tests ----
+
+    #[test]
+    fn column_info_is_nullable_true() {
+        let col = make_column("_raw", "Nullable(String)");
+        assert!(col.is_nullable());
+    }
+
+    #[test]
+    fn column_info_is_nullable_false() {
+        let col = make_column("_timestamp", "DateTime64(3)");
+        assert!(!col.is_nullable());
+    }
+
+    #[test]
+    fn column_info_is_nullable_lc_nullable() {
+        let col = make_column("status", "LowCardinality(Nullable(String))");
+        assert!(col.is_nullable());
+    }
+
+    #[test]
+    fn column_info_coercer_category_delegates() {
+        let col = make_column("count", "UInt64");
+        assert_eq!(col.coercer_category(), "UInt");
+
+        let col = make_column("ts", "DateTime64(3)");
+        assert_eq!(col.coercer_category(), "DateTime64");
+
+        let col = make_column("data", "JSON");
+        assert_eq!(col.coercer_category(), "JSON");
+    }
+
+    #[test]
+    fn column_info_with_default_kind() {
+        let mut col = make_column("_uuid", "UUID");
+        col.default_kind = "DEFAULT".to_string();
+        col.default_expression = "generateUUIDv7()".to_string();
+        assert_eq!(col.default_kind, "DEFAULT");
+        assert_eq!(col.default_expression, "generateUUIDv7()");
+    }
+
+    #[test]
+    fn column_info_primary_and_sorting_key() {
+        let mut col = make_column("_timestamp", "DateTime64(3)");
+        col.is_in_primary_key = true;
+        col.is_in_sorting_key = true;
+        assert!(col.is_in_primary_key);
+        assert!(col.is_in_sorting_key);
+    }
+
+    // ---- NEW: default_value_for_category tests ----
+
+    #[test]
+    fn default_values_all_known_categories() {
+        assert_eq!(default_value_for_category("String"), "");
+        assert_eq!(default_value_for_category("Int"), "0");
+        assert_eq!(default_value_for_category("UInt"), "0");
+        assert_eq!(default_value_for_category("Float"), "0.0");
+        assert_eq!(default_value_for_category("Decimal"), "0.0");
+        assert_eq!(default_value_for_category("Bool"), "false");
+        assert_eq!(default_value_for_category("Date"), "1970-01-01");
+        assert_eq!(
+            default_value_for_category("DateTime"),
+            "1970-01-01T00:00:00Z"
+        );
+        assert_eq!(
+            default_value_for_category("DateTime64"),
+            "1970-01-01T00:00:00Z"
+        );
+        assert_eq!(
+            default_value_for_category("UUID"),
+            "00000000-0000-0000-0000-000000000000"
+        );
+        assert_eq!(default_value_for_category("IPv4"), "0.0.0.0");
+        assert_eq!(default_value_for_category("IPv6"), "::");
+        assert_eq!(default_value_for_category("Array"), "[]");
+        assert_eq!(default_value_for_category("Map"), "{}");
+        assert_eq!(default_value_for_category("JSON"), "{}");
+        assert_eq!(default_value_for_category("Enum"), "");
+        assert_eq!(default_value_for_category("Geo"), "(0, 0)");
+    }
+
+    #[test]
+    fn default_value_unknown_category_returns_empty() {
+        assert_eq!(default_value_for_category(""), "");
+        assert_eq!(default_value_for_category("SomeFutureType"), "");
+        assert_eq!(default_value_for_category("Tuple"), "");
+    }
+
+    // ---- NEW: is_null_string edge cases ----
+
+    #[test]
+    fn null_string_all_known_representations() {
+        for &s in NULL_STRINGS {
+            assert!(is_null_string(s), "Expected '{s}' to be recognised as null");
+        }
+    }
+
+    #[test]
+    fn null_string_case_sensitivity() {
+        // "null", "NULL", "Null" are in the list, but not "nULL" or "nUll"
+        assert!(is_null_string("null"));
+        assert!(is_null_string("NULL"));
+        assert!(is_null_string("Null"));
+        assert!(!is_null_string("nULL"));
+        assert!(!is_null_string("nUll"));
+    }
+
+    #[test]
+    fn null_string_whitespace_not_recognised() {
+        assert!(!is_null_string(" "));
+        assert!(!is_null_string("  null  "));
+        assert!(!is_null_string("\tnull"));
+        assert!(!is_null_string("null\n"));
+    }
+
+    #[test]
+    fn null_string_similar_but_not_null() {
+        assert!(!is_null_string("0"));
+        assert!(!is_null_string("false"));
+        assert!(!is_null_string("no"));
+        assert!(!is_null_string("nulls"));
+        assert!(!is_null_string("NONE")); // "None" is in list, "NONE" is not
+        assert!(!is_null_string("Nil")); // "nil" is in list, "Nil" is not
+    }
+
+    #[test]
+    fn null_string_backslash_n() {
+        // \\N is a ClickHouse-specific null representation
+        assert!(is_null_string("\\N"));
+        assert!(!is_null_string("\\n")); // lowercase — not in list
+    }
+
+    #[test]
+    fn null_string_na_variants() {
+        assert!(is_null_string("NA"));
+        assert!(is_null_string("N/A"));
+        assert!(is_null_string("n/a"));
+        assert!(is_null_string("NaN"));
+        assert!(!is_null_string("na")); // not in list
+        assert!(!is_null_string("nan")); // not in list
+    }
+
+    // ---- NEW: coercer_category via ParsedTypeExt for additional types ----
+
+    #[test]
+    fn coercer_category_date_types() {
+        assert_eq!(ParsedType::parse("Date").coercer_category(), "Date");
+        assert_eq!(ParsedType::parse("Date32").coercer_category(), "Date");
+    }
+
+    #[test]
+    fn coercer_category_decimal_types() {
+        assert_eq!(
+            ParsedType::parse("Decimal(18, 4)").coercer_category(),
+            "Decimal"
+        );
+        assert_eq!(
+            ParsedType::parse("Decimal32(2)").coercer_category(),
+            "Decimal"
+        );
+        assert_eq!(
+            ParsedType::parse("Decimal64(4)").coercer_category(),
+            "Decimal"
+        );
+        assert_eq!(
+            ParsedType::parse("Decimal128(8)").coercer_category(),
+            "Decimal"
+        );
+    }
+
+    #[test]
+    fn coercer_category_int_widths() {
+        for t in ["Int8", "Int16", "Int32", "Int64", "Int128", "Int256"] {
+            assert_eq!(
+                ParsedType::parse(t).coercer_category(),
+                "Int",
+                "Failed for {t}"
+            );
+        }
+    }
+
+    #[test]
+    fn coercer_category_uint_widths() {
+        for t in ["UInt8", "UInt16", "UInt32", "UInt64", "UInt128", "UInt256"] {
+            assert_eq!(
+                ParsedType::parse(t).coercer_category(),
+                "UInt",
+                "Failed for {t}"
+            );
+        }
+    }
+
+    #[test]
+    fn coercer_category_nullable_preserves_inner() {
+        // Nullable wrapper should not change the category
+        assert_eq!(
+            ParsedType::parse("Nullable(Int64)").coercer_category(),
+            "Int"
+        );
+        assert_eq!(
+            ParsedType::parse("Nullable(UUID)").coercer_category(),
+            "UUID"
+        );
+    }
+
+    #[test]
+    fn coercer_category_lc_preserves_inner() {
+        assert_eq!(
+            ParsedType::parse("LowCardinality(String)").coercer_category(),
+            "String"
+        );
+    }
+
+    // ---- NEW: ParsedType edge cases ----
+
+    #[test]
+    fn parse_empty_string() {
+        let t = ParsedType::parse("");
+        assert_eq!(t.base, "");
+    }
+
+    #[test]
+    fn parse_enum_type() {
+        let t = ParsedType::parse("Enum8('a' = 1, 'b' = 2)");
+        assert_eq!(t.coercer_category(), "Enum");
+    }
+
+    #[test]
+    fn parse_nested_array() {
+        let t = ParsedType::parse("Array(Array(String))");
+        assert_eq!(t.base, "Array");
+        let inner = t.array_element.as_ref().unwrap();
+        assert_eq!(inner.base, "Array");
+        let innermost = inner.array_element.as_ref().unwrap();
+        assert_eq!(innermost.base, "String");
+    }
+
+    #[test]
+    fn parse_fixedstring_with_length() {
+        let t = ParsedType::parse("FixedString(16)");
+        assert_eq!(t.base, "FixedString");
+        assert!(t.is_string());
+        assert_eq!(t.coercer_category(), "String");
     }
 }

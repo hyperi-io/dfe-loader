@@ -578,4 +578,376 @@ mod tests {
         assert!(config.auto_download.enabled);
         assert_eq!(config.cache_capacity, 100_000);
     }
+
+    // ========================================================================
+    // GeoIpProvider: enum variants and defaults
+    // ========================================================================
+
+    #[test]
+    fn test_geoip_provider_default_is_dbiplite() {
+        assert_eq!(GeoIpProvider::default(), GeoIpProvider::DbIpLite);
+    }
+
+    #[test]
+    fn test_geoip_provider_equality() {
+        // PartialEq/Eq must work across all variants
+        assert_eq!(GeoIpProvider::DbIpLite, GeoIpProvider::DbIpLite);
+        assert_ne!(GeoIpProvider::DbIpLite, GeoIpProvider::MaxMindGeoLite2);
+        assert_ne!(GeoIpProvider::Custom, GeoIpProvider::Sapics);
+        assert_ne!(GeoIpProvider::IpLocate, GeoIpProvider::IpInfoLite);
+    }
+
+    #[test]
+    fn test_geoip_provider_clone() {
+        // Clone must produce an equal value for each variant
+        let variants = [
+            GeoIpProvider::DbIpLite,
+            GeoIpProvider::MaxMindGeoLite2,
+            GeoIpProvider::IpLocate,
+            GeoIpProvider::IpInfoLite,
+            GeoIpProvider::Sapics,
+            GeoIpProvider::Custom,
+        ];
+        for v in variants {
+            assert_eq!(v.clone(), v);
+        }
+    }
+
+    // ========================================================================
+    // DatabasePaths: default + construction
+    // ========================================================================
+
+    #[test]
+    fn test_database_paths_default() {
+        let paths = DatabasePaths::default();
+        assert!(paths.city.is_none());
+        assert!(paths.asn.is_none());
+    }
+
+    #[test]
+    fn test_database_paths_with_explicit_fields() {
+        let paths = DatabasePaths {
+            city: Some(PathBuf::from("/tmp/city.mmdb")),
+            asn: Some(PathBuf::from("/tmp/asn.mmdb")),
+        };
+        assert_eq!(paths.city, Some(PathBuf::from("/tmp/city.mmdb")));
+        assert_eq!(paths.asn, Some(PathBuf::from("/tmp/asn.mmdb")));
+    }
+
+    #[test]
+    fn test_database_paths_partial_city_only() {
+        let paths = DatabasePaths {
+            city: Some(PathBuf::from("/tmp/city.mmdb")),
+            asn: None,
+        };
+        assert!(paths.city.is_some());
+        assert!(paths.asn.is_none());
+    }
+
+    // ========================================================================
+    // AutoDownloadConfig: default values
+    // ========================================================================
+
+    #[test]
+    fn test_auto_download_config_default() {
+        let auto = AutoDownloadConfig::default();
+        assert!(auto.enabled);
+        assert_eq!(auto.data_dir, "/var/lib/dfe/geoip");
+        assert_eq!(auto.max_age_days, 30);
+        assert!(auto.maxmind_account_id.is_none());
+        assert!(auto.maxmind_license_key.is_none());
+        assert!(auto.ipinfo_token.is_none());
+    }
+
+    // ========================================================================
+    // ensure_databases: auto_download disabled + existing files
+    // ========================================================================
+
+    #[test]
+    fn test_ensure_databases_disabled_with_existing_files() {
+        // Create a temp directory and put a dummy "mmdb" file in it
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let city_file = tmp.path().join("dbip-city-lite.mmdb");
+        fs::write(&city_file, b"fake mmdb").expect("write dummy");
+        // NOTE: asn file NOT created
+
+        let config = GeoIpConfig {
+            provider: GeoIpProvider::DbIpLite,
+            auto_download: AutoDownloadConfig {
+                enabled: false,
+                data_dir: tmp.path().to_string_lossy().into_owned(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        let paths = rt.block_on(ensure_databases(&config)).unwrap();
+        // City file exists → returned; asn file missing → None
+        assert_eq!(paths.city, Some(city_file));
+        assert!(paths.asn.is_none());
+    }
+
+    #[test]
+    fn test_ensure_databases_custom_provider_none_paths() {
+        // Custom provider with no explicit paths → both None
+        let config = GeoIpConfig {
+            provider: GeoIpProvider::Custom,
+            city_db_path: None,
+            asn_db_path: None,
+            ..Default::default()
+        };
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        let paths = rt.block_on(ensure_databases(&config)).unwrap();
+        assert!(paths.city.is_none());
+        assert!(paths.asn.is_none());
+    }
+
+    #[test]
+    fn test_ensure_databases_custom_provider_asn_only() {
+        let config = GeoIpConfig {
+            provider: GeoIpProvider::Custom,
+            city_db_path: None,
+            asn_db_path: Some("/opt/asn.mmdb".into()),
+            ..Default::default()
+        };
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        let paths = rt.block_on(ensure_databases(&config)).unwrap();
+        assert!(paths.city.is_none());
+        assert_eq!(paths.asn, Some(PathBuf::from("/opt/asn.mmdb")));
+    }
+
+    #[test]
+    fn test_ensure_databases_ipinfo_without_token_fails_gracefully() {
+        // IpInfoLite requires ipinfo_token; without it, download fails and
+        // since no existing files are present, both paths are None.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let config = GeoIpConfig {
+            enabled: true,
+            provider: GeoIpProvider::IpInfoLite,
+            auto_download: AutoDownloadConfig {
+                enabled: true,
+                data_dir: tmp.path().to_string_lossy().into_owned(),
+                ipinfo_token: None, // Missing!
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        // ensure_databases is non-fatal — returns Ok with None paths
+        let paths = rt.block_on(ensure_databases(&config)).unwrap();
+        // IpInfoLite has no ASN database regardless, and city fails for
+        // missing token
+        assert!(paths.city.is_none());
+        assert!(paths.asn.is_none());
+    }
+
+    #[test]
+    fn test_ensure_databases_iplocate_has_no_city() {
+        // IpLocate has NO city database → city path always None regardless
+        // of auto_download settings.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let config = GeoIpConfig {
+            enabled: true,
+            provider: GeoIpProvider::IpLocate,
+            auto_download: AutoDownloadConfig {
+                enabled: false, // disable to avoid real network
+                data_dir: tmp.path().to_string_lossy().into_owned(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        let paths = rt.block_on(ensure_databases(&config)).unwrap();
+        // IpLocate provides no city database
+        assert!(paths.city.is_none());
+        // ASN file doesn't exist yet
+        assert!(paths.asn.is_none());
+    }
+
+    #[test]
+    fn test_ensure_databases_sapics_has_no_city() {
+        // Sapics has NO city database → city path always None
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let config = GeoIpConfig {
+            enabled: true,
+            provider: GeoIpProvider::Sapics,
+            auto_download: AutoDownloadConfig {
+                enabled: false,
+                data_dir: tmp.path().to_string_lossy().into_owned(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        let paths = rt.block_on(ensure_databases(&config)).unwrap();
+        assert!(paths.city.is_none());
+        assert!(paths.asn.is_none());
+    }
+
+    #[test]
+    fn test_ensure_databases_ipinfolite_has_no_asn() {
+        // IpInfoLite has NO separate ASN database → asn path always None
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let config = GeoIpConfig {
+            enabled: true,
+            provider: GeoIpProvider::IpInfoLite,
+            auto_download: AutoDownloadConfig {
+                enabled: false,
+                data_dir: tmp.path().to_string_lossy().into_owned(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        let paths = rt.block_on(ensure_databases(&config)).unwrap();
+        // IpInfoLite has no ASN database
+        assert!(paths.asn.is_none());
+    }
+
+    // ========================================================================
+    // is_fresh: different ages
+    // ========================================================================
+
+    #[test]
+    fn test_is_fresh_file_just_created() {
+        let tmp = tempfile::NamedTempFile::new().expect("tempfile");
+        // max_age = 24h — just-created file is fresh
+        assert!(is_fresh(tmp.path(), 86400));
+    }
+
+    #[test]
+    fn test_is_fresh_with_zero_max_age_always_stale() {
+        let tmp = tempfile::NamedTempFile::new().expect("tempfile");
+        // max_age = 0 → any file is stale
+        assert!(!is_fresh(tmp.path(), 0));
+    }
+
+    #[test]
+    fn test_is_fresh_nonexistent_returns_false() {
+        assert!(!is_fresh(Path::new("/nonexistent/path/file.mmdb"), 86400));
+        assert!(!is_fresh(Path::new("/nonexistent/path/file.mmdb"), 0));
+        assert!(!is_fresh(
+            Path::new("/nonexistent/path/file.mmdb"),
+            u64::MAX
+        ));
+    }
+
+    #[test]
+    fn test_is_fresh_with_huge_max_age() {
+        let tmp = tempfile::NamedTempFile::new().expect("tempfile");
+        // max_age = u64::MAX / 2 — definitely fresh
+        assert!(is_fresh(tmp.path(), u64::MAX / 2));
+    }
+
+    #[test]
+    fn test_is_fresh_directory_returns_appropriate_result() {
+        // Directories have metadata too — the function should not panic
+        let tmp = tempfile::tempdir().expect("tempdir");
+        // Newly-created directory should be "fresh" from function's POV
+        assert!(is_fresh(tmp.path(), 86400));
+    }
+
+    // ========================================================================
+    // Provider filename construction — per-provider correctness
+    // ========================================================================
+
+    #[test]
+    fn test_provider_filenames_dbiplite_both() {
+        let (city, asn) = provider_filenames(&GeoIpProvider::DbIpLite);
+        assert_eq!(city.unwrap(), "dbip-city-lite.mmdb");
+        assert_eq!(asn.unwrap(), "dbip-asn-lite.mmdb");
+    }
+
+    #[test]
+    fn test_provider_filenames_maxmind_both() {
+        let (city, asn) = provider_filenames(&GeoIpProvider::MaxMindGeoLite2);
+        assert_eq!(city.unwrap(), "GeoLite2-City.mmdb");
+        assert_eq!(asn.unwrap(), "GeoLite2-ASN.mmdb");
+    }
+
+    #[test]
+    fn test_provider_filenames_iplocate_asn_only() {
+        let (city, asn) = provider_filenames(&GeoIpProvider::IpLocate);
+        assert!(city.is_none());
+        assert_eq!(asn.unwrap(), "iplocate-asn.mmdb");
+    }
+
+    #[test]
+    fn test_provider_filenames_ipinfolite_city_only() {
+        let (city, asn) = provider_filenames(&GeoIpProvider::IpInfoLite);
+        assert_eq!(city.unwrap(), "ipinfo-lite.mmdb");
+        assert!(asn.is_none());
+    }
+
+    #[test]
+    fn test_provider_filenames_sapics_asn_only() {
+        let (city, asn) = provider_filenames(&GeoIpProvider::Sapics);
+        assert!(city.is_none());
+        assert_eq!(asn.unwrap(), "sapics-asn-country.mmdb");
+    }
+
+    #[test]
+    fn test_provider_filenames_custom_no_defaults() {
+        // Custom has no built-in filenames — users supply explicit paths
+        let (city, asn) = provider_filenames(&GeoIpProvider::Custom);
+        assert!(city.is_none());
+        assert!(asn.is_none());
+    }
+
+    // ========================================================================
+    // GeoIpDownloadError: error variants
+    // ========================================================================
+
+    #[test]
+    fn test_missing_credential_error_display() {
+        let err = GeoIpDownloadError::MissingCredential {
+            provider: "MaxMindGeoLite2",
+            field: "maxmind_account_id",
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("MaxMindGeoLite2"));
+        assert!(msg.contains("maxmind_account_id"));
+    }
+
+    #[test]
+    fn test_no_databases_error_display() {
+        let err = GeoIpDownloadError::NoDatabases("IpInfoLite".to_string());
+        let msg = err.to_string();
+        assert!(msg.contains("IpInfoLite"));
+    }
 }

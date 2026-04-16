@@ -1092,4 +1092,591 @@ kafka:
             "serde replaces default map — only user-specified keys present"
         );
     }
+
+    // ========================================================================
+    // Validation — empty ClickHouse hosts
+    // ========================================================================
+
+    #[test]
+    fn test_config_validation_empty_clickhouse_hosts() {
+        let mut config = Config::default();
+        config.clickhouse.hosts = vec![];
+        let result = config.validate();
+        assert!(result.is_err(), "Empty ClickHouse hosts must fail");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("ClickHouse") && err_msg.contains("host"),
+            "Error should mention ClickHouse host: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn test_config_validation_buffer_flush_bytes_zero() {
+        let mut config = Config::default();
+        config.buffer.flush_bytes = 0;
+        let result = config.validate();
+        assert!(result.is_err(), "flush_bytes=0 must fail");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("flush_bytes"),
+            "Error should mention flush_bytes: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn test_config_validation_buffer_flush_rows_zero() {
+        let mut config = Config::default();
+        config.buffer.flush_rows = 0;
+        let result = config.validate();
+        assert!(result.is_err(), "flush_rows=0 must fail");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("flush_rows"),
+            "Error should mention flush_rows: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn test_config_validation_memory_pressure_negative() {
+        let mut config = Config::default();
+        config.memory.pressure_threshold = -0.1;
+        let result = config.validate();
+        assert!(result.is_err(), "Negative pressure threshold must fail");
+    }
+
+    #[test]
+    fn test_config_validation_memory_pressure_boundary_0_and_1() {
+        // 0.0 and 1.0 are both valid boundary values
+        let mut config = Config::default();
+        config.memory.pressure_threshold = 0.0;
+        assert!(config.validate().is_ok(), "0.0 is a valid boundary");
+
+        config.memory.pressure_threshold = 1.0;
+        assert!(config.validate().is_ok(), "1.0 is a valid boundary");
+    }
+
+    #[test]
+    fn test_config_validation_memory_pressure_just_over_1() {
+        let mut config = Config::default();
+        config.memory.pressure_threshold = 1.000_001;
+        assert!(config.validate().is_err(), "Anything > 1.0 must fail");
+    }
+
+    // ========================================================================
+    // Default values for all config sections
+    // ========================================================================
+
+    #[test]
+    fn test_default_clickhouse_config() {
+        let config = Config::default();
+        assert_eq!(config.clickhouse.hosts, vec!["localhost:9000"]);
+        assert_eq!(config.clickhouse.database, "default");
+        assert_eq!(config.clickhouse.username, "default");
+        assert_eq!(config.clickhouse.protocol, "native");
+        assert!(config.clickhouse.tables.is_empty());
+        assert!(config.clickhouse.tls.is_none());
+    }
+
+    #[test]
+    fn test_default_routing_config() {
+        let config = Config::default();
+        assert_eq!(config.routing.default_db, "dfe");
+        assert_eq!(config.routing.default_table, "default");
+        assert_eq!(config.routing.org_id_field, Some("org_id".to_string()));
+        assert_eq!(
+            config.routing.topic_suffixes,
+            vec!["_land".to_string(), "_load".to_string()]
+        );
+        assert!(config.routing.rules.is_empty());
+        assert!(config.routing.db_fields.is_empty());
+    }
+
+    #[test]
+    fn test_default_buffer_config() {
+        let config = Config::default();
+        assert_eq!(config.buffer.flush_bytes, 1_048_576);
+        assert_eq!(config.buffer.flush_rows, 20_000);
+        assert_eq!(config.buffer.flush_age_secs, 5);
+    }
+
+    #[test]
+    fn test_default_memory_config() {
+        let config = Config::default();
+        assert_eq!(config.memory.limit_bytes, 0); // Auto-detect
+        assert!((config.memory.pressure_threshold - 0.8).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_default_metrics_config() {
+        let config = Config::default();
+        assert!(config.metrics.enabled);
+        assert_eq!(config.metrics.address, "0.0.0.0:9090");
+    }
+
+    #[test]
+    fn test_default_logging_config() {
+        let config = Config::default();
+        assert_eq!(config.logging.level, "info");
+        assert_eq!(config.logging.format, "json");
+    }
+
+    #[test]
+    fn test_default_transport_via_serde() {
+        // Config::default() uses #[derive(Default)] which gives String::default()="".
+        // The "kafka" default is ONLY applied via serde's #[serde(default = "...")].
+        // This is intentional — Default and serde default are separate paths.
+        let default_cfg = Config::default();
+        assert_eq!(default_cfg.transport, "", "Rust Default trait gives empty");
+
+        // But parsing via serde applies the "kafka" default
+        let yaml = "kafka:\n  brokers: [\"x:9092\"]\n";
+        let parsed: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        assert_eq!(parsed.transport, "kafka", "serde default applies 'kafka'");
+    }
+
+    // ========================================================================
+    // ClickHouseConfig → crate::clickhouse::ClickHouseConfig conversion
+    // ========================================================================
+
+    #[test]
+    fn test_clickhouse_config_from_native_protocol() {
+        let cfg = ClickHouseConfig {
+            hosts: vec!["ch:9000".to_string()],
+            database: "mydb".to_string(),
+            username: "user".to_string(),
+            password: SensitiveString::from("pwd"),
+            protocol: "native".to_string(),
+            tables: vec!["events".to_string()],
+            tls: None,
+        };
+        let client_cfg: crate::clickhouse::ClickHouseConfig = (&cfg).into();
+        assert_eq!(client_cfg.hosts, vec!["ch:9000"]);
+        assert_eq!(client_cfg.database, "mydb");
+        assert_eq!(client_cfg.username, "user");
+        assert_eq!(client_cfg.password, "pwd");
+        assert!(matches!(
+            client_cfg.transport,
+            crate::clickhouse::Transport::Native
+        ));
+        assert!(!client_cfg.tls);
+    }
+
+    #[test]
+    fn test_clickhouse_config_from_http_protocol() {
+        let cfg = ClickHouseConfig {
+            hosts: vec!["ch:8123".to_string()],
+            database: "db".to_string(),
+            username: "default".to_string(),
+            password: SensitiveString::default(),
+            protocol: "http".to_string(),
+            tables: vec![],
+            tls: None,
+        };
+        let client_cfg: crate::clickhouse::ClickHouseConfig = (&cfg).into();
+        assert!(matches!(
+            client_cfg.transport,
+            crate::clickhouse::Transport::Http
+        ));
+    }
+
+    #[test]
+    fn test_clickhouse_config_protocol_case_insensitive() {
+        let cfg = ClickHouseConfig {
+            hosts: vec!["ch:8123".to_string()],
+            protocol: "HTTP".to_string(),
+            ..ClickHouseConfig::default()
+        };
+        let client_cfg: crate::clickhouse::ClickHouseConfig = (&cfg).into();
+        assert!(matches!(
+            client_cfg.transport,
+            crate::clickhouse::Transport::Http
+        ));
+    }
+
+    #[test]
+    fn test_clickhouse_config_unknown_protocol_defaults_to_native() {
+        let cfg = ClickHouseConfig {
+            hosts: vec!["ch:9000".to_string()],
+            protocol: "mystery".to_string(),
+            ..ClickHouseConfig::default()
+        };
+        let client_cfg: crate::clickhouse::ClickHouseConfig = (&cfg).into();
+        assert!(matches!(
+            client_cfg.transport,
+            crate::clickhouse::Transport::Native
+        ));
+    }
+
+    // ========================================================================
+    // Invalid YAML / TOML handling
+    // ========================================================================
+
+    #[test]
+    fn test_load_invalid_yaml_returns_error() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let config_path = dir.path().join("broken.yaml");
+        std::fs::write(
+            &config_path,
+            "kafka:\n  brokers: [\n  this is: invalid yaml: too many colons:::",
+        )
+        .unwrap();
+
+        let result = Config::load(Some(config_path.to_str().unwrap()));
+        assert!(result.is_err(), "Malformed YAML must fail to load");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("parse") || err_msg.contains("YAML") || err_msg.contains("yaml"),
+            "Error should mention parse failure: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn test_load_unreadable_path_returns_default() {
+        // Non-existent path is NOT an error — falls through to defaults + env
+        let result = Config::load(Some("/this/path/does/not/exist.yaml"));
+        assert!(
+            result.is_ok(),
+            "Non-existent config path should fall through to defaults"
+        );
+    }
+
+    #[test]
+    fn test_serde_parse_empty_yaml_uses_defaults() {
+        // Empty YAML with #[serde(default)] on all fields → all defaults.
+        // Bypass Config::load() to avoid parallel env var contamination.
+        let config: Config = serde_yaml_ng::from_str("").unwrap();
+        // Every section should have its Default values
+        assert_eq!(config.kafka.brokers, vec!["localhost:9092"]);
+        assert_eq!(config.buffer.flush_rows, 20_000);
+        assert_eq!(config.clickhouse.hosts, vec!["localhost:9000"]);
+        assert_eq!(config.routing.default_db, "dfe");
+    }
+
+    #[test]
+    fn test_serde_parse_partial_yaml_merges_defaults() {
+        // Direct serde parsing (no env var interference) — verifies the
+        // #[serde(default)] cascade works end-to-end for partial configs.
+        let yaml = "buffer:\n  flush_rows: 12345\n";
+        let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        // Overridden field
+        assert_eq!(config.buffer.flush_rows, 12345);
+        // Untouched fields in the same section keep defaults
+        assert_eq!(config.buffer.flush_bytes, 1_048_576);
+        assert_eq!(config.buffer.flush_age_secs, 5);
+        // Other sections untouched — all use their Default impl via serde
+        assert_eq!(config.kafka.brokers, vec!["localhost:9092"]);
+        assert_eq!(config.routing.default_db, "dfe");
+    }
+
+    #[test]
+    fn test_serde_parse_only_required_kafka_block() {
+        // Config with only Kafka block — rest must get defaults
+        let yaml = r"
+kafka:
+  brokers: [localhost:9092]
+  group: my-group
+";
+        let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        assert_eq!(config.kafka.group, "my-group");
+        // Other sections get defaults
+        assert_eq!(config.buffer.flush_rows, 20_000);
+        assert_eq!(config.metrics.address, "0.0.0.0:9090");
+        assert_eq!(config.routing.default_db, "dfe");
+    }
+
+    #[test]
+    fn test_load_invalid_field_type_yaml() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let config_path = dir.path().join("bad_type.yaml");
+        std::fs::write(
+            &config_path,
+            // flush_rows expects a usize, giving a string
+            "buffer:\n  flush_rows: \"not_a_number\"\n",
+        )
+        .unwrap();
+
+        let result = Config::load(Some(config_path.to_str().unwrap()));
+        assert!(
+            result.is_err(),
+            "Type mismatch in YAML must fail to deserialize"
+        );
+    }
+
+    // ========================================================================
+    // ApplyFlatEnv trait — direct testing (no process-wide env state)
+    // ========================================================================
+
+    #[test]
+    fn test_apply_flat_env_directly_sasl_username() {
+        // SAFETY: single test, single env var, cleaned up.
+        let var = "TESTPREFIX_KAFKA_SASL_USERNAME";
+        unsafe { std::env::set_var(var, "kafka_user") };
+
+        let mut config = Config::default();
+        config.apply_flat_env("TESTPREFIX");
+
+        unsafe { std::env::remove_var(var) };
+
+        let sasl = config.kafka.sasl.expect("SASL config should be created");
+        assert_eq!(sasl.username, "kafka_user");
+    }
+
+    #[test]
+    fn test_apply_flat_env_ssl_auto_enables_tls() {
+        let var = "TESTPREFIX2_KAFKA_SECURITY_PROTOCOL";
+        unsafe { std::env::set_var(var, "SASL_SSL") };
+
+        let mut config = Config::default();
+        config.apply_flat_env("TESTPREFIX2");
+
+        unsafe { std::env::remove_var(var) };
+
+        let tls = config.kafka.tls.expect("TLS config should auto-enable");
+        assert!(tls.enabled);
+    }
+
+    #[test]
+    fn test_apply_flat_env_memory_limit() {
+        let var = "TESTPREFIX3_MEMORY_LIMIT_BYTES";
+        unsafe { std::env::set_var(var, "2147483648") }; // 2 GiB
+
+        let mut config = Config::default();
+        config.apply_flat_env("TESTPREFIX3");
+
+        unsafe { std::env::remove_var(var) };
+
+        assert_eq!(config.memory.limit_bytes, 2_147_483_648);
+    }
+
+    #[test]
+    fn test_apply_flat_env_routing_defaults() {
+        let var1 = "TESTPREFIX4_ROUTING_DEFAULT_DB";
+        let var2 = "TESTPREFIX4_ROUTING_DEFAULT_TABLE";
+        unsafe {
+            std::env::set_var(var1, "my_custom_db");
+            std::env::set_var(var2, "my_custom_table");
+        }
+
+        let mut config = Config::default();
+        config.apply_flat_env("TESTPREFIX4");
+
+        unsafe {
+            std::env::remove_var(var1);
+            std::env::remove_var(var2);
+        }
+
+        assert_eq!(config.routing.default_db, "my_custom_db");
+        assert_eq!(config.routing.default_table, "my_custom_table");
+    }
+
+    #[test]
+    fn test_apply_flat_env_hot_reload_enabled_flag() {
+        let var = "TESTPREFIX5_HOT_RELOAD_ENABLED";
+        unsafe { std::env::set_var(var, "true") };
+
+        let mut config = Config::default();
+        // Ensure default is false before apply
+        let was_enabled_before = config.hot_reload.enabled;
+        config.apply_flat_env("TESTPREFIX5");
+
+        unsafe { std::env::remove_var(var) };
+
+        assert!(
+            config.hot_reload.enabled,
+            "HOT_RELOAD_ENABLED=true should enable. Was before: {was_enabled_before}"
+        );
+    }
+
+    #[test]
+    fn test_apply_flat_env_config_reload_secs_enables_hot_reload() {
+        let var = "TESTPREFIX6_CONFIG_RELOAD_SECS";
+        unsafe { std::env::set_var(var, "60") };
+
+        let mut config = Config::default();
+        config.apply_flat_env("TESTPREFIX6");
+
+        unsafe { std::env::remove_var(var) };
+
+        // Setting CONFIG_RELOAD_SECS auto-enables hot_reload as a side effect
+        assert!(config.hot_reload.enabled);
+        assert_eq!(config.hot_reload.poll_interval_secs, 60);
+    }
+
+    #[test]
+    fn test_apply_flat_env_missing_vars_leaves_defaults() {
+        let mut config = Config::default();
+        // Apply with a prefix for which NO env vars are set
+        config.apply_flat_env("NONEXISTENT_PREFIX_UNIQUE_XYZ_12345");
+
+        // All defaults untouched
+        assert_eq!(config.kafka.brokers, vec!["localhost:9092"]);
+        assert_eq!(config.buffer.flush_rows, 20_000);
+        assert_eq!(config.routing.default_db, "dfe");
+        assert!(!config.hot_reload.enabled);
+    }
+
+    // ========================================================================
+    // Normalize trait — side-effects
+    // ========================================================================
+
+    #[test]
+    fn test_normalize_enables_sasl_with_username_only() {
+        let mut config = Config::default();
+        config.kafka.sasl = Some(SaslConfig {
+            enabled: false, // start disabled
+            username: "alice".to_string(),
+            password: SensitiveString::default(),
+            mechanism: String::new(),
+            ..Default::default()
+        });
+
+        config.normalize();
+
+        assert!(
+            config.kafka.sasl.as_ref().unwrap().enabled,
+            "Normalize should auto-enable SASL when username is set"
+        );
+    }
+
+    #[test]
+    fn test_normalize_enables_sasl_with_password_only() {
+        let mut config = Config::default();
+        config.kafka.sasl = Some(SaslConfig {
+            enabled: false,
+            username: String::new(),
+            password: SensitiveString::from("pwd"),
+            mechanism: String::new(),
+            ..Default::default()
+        });
+
+        config.normalize();
+
+        assert!(config.kafka.sasl.as_ref().unwrap().enabled);
+    }
+
+    #[test]
+    fn test_normalize_enables_sasl_with_mechanism_only() {
+        let mut config = Config::default();
+        config.kafka.sasl = Some(SaslConfig {
+            enabled: false,
+            username: String::new(),
+            password: SensitiveString::default(),
+            mechanism: "PLAIN".to_string(),
+            ..Default::default()
+        });
+
+        config.normalize();
+
+        assert!(config.kafka.sasl.as_ref().unwrap().enabled);
+    }
+
+    #[test]
+    fn test_normalize_leaves_empty_sasl_disabled() {
+        let mut config = Config::default();
+        config.kafka.sasl = Some(SaslConfig {
+            enabled: false,
+            username: String::new(),
+            password: SensitiveString::default(),
+            mechanism: String::new(),
+            ..Default::default()
+        });
+
+        config.normalize();
+
+        // All creds empty → stays disabled
+        assert!(!config.kafka.sasl.as_ref().unwrap().enabled);
+    }
+
+    #[test]
+    fn test_normalize_preserves_none_sasl() {
+        let mut config = Config::default();
+        config.kafka.sasl = None;
+
+        config.normalize();
+
+        assert!(
+            config.kafka.sasl.is_none(),
+            "Normalize should not create SASL config from nothing"
+        );
+    }
+
+    // ========================================================================
+    // YAML config field merging behaviour
+    // ========================================================================
+
+    #[test]
+    fn test_yaml_config_merging_all_sections() {
+        let yaml = r#"
+kafka:
+  brokers: ["k1:9092", "k2:9092"]
+  group: "merged-group"
+  topics: ["alpha", "beta"]
+clickhouse:
+  hosts: ["ch1:9000"]
+  database: "merged_db"
+routing:
+  default_db: "merged"
+  default_table: "tbl"
+buffer:
+  flush_rows: 77777
+  flush_bytes: 888888
+metrics:
+  enabled: false
+  address: "127.0.0.1:10000"
+logging:
+  level: "trace"
+  format: "pretty"
+"#;
+        let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        assert_eq!(config.kafka.brokers, vec!["k1:9092", "k2:9092"]);
+        assert_eq!(config.kafka.group, "merged-group");
+        assert_eq!(config.kafka.topics, vec!["alpha", "beta"]);
+        assert_eq!(config.clickhouse.hosts, vec!["ch1:9000"]);
+        assert_eq!(config.clickhouse.database, "merged_db");
+        assert_eq!(config.routing.default_db, "merged");
+        assert_eq!(config.routing.default_table, "tbl");
+        assert_eq!(config.buffer.flush_rows, 77777);
+        assert_eq!(config.buffer.flush_bytes, 888888);
+        assert!(!config.metrics.enabled);
+        assert_eq!(config.metrics.address, "127.0.0.1:10000");
+        assert_eq!(config.logging.level, "trace");
+    }
+
+    // ========================================================================
+    // deployment_contract
+    // ========================================================================
+
+    #[test]
+    fn test_deployment_contract_basic_fields() {
+        let contract = Config::deployment_contract();
+        assert_eq!(contract.schema_version, 2);
+        assert_eq!(contract.app_name, "dfe-loader");
+        assert_eq!(contract.binary_name, "dfe-loader");
+        assert_eq!(contract.base_image, "ubuntu:24.04");
+        assert_eq!(contract.env_prefix, "DFE_LOADER");
+        assert_eq!(contract.metrics_port, 9090);
+        assert_eq!(contract.health.liveness_path, "/healthz");
+        assert_eq!(contract.health.readiness_path, "/readyz");
+        assert_eq!(contract.health.metrics_path, "/metrics");
+    }
+
+    #[test]
+    fn test_deployment_contract_has_required_secrets() {
+        let contract = Config::deployment_contract();
+        // Kafka SASL + ClickHouse password are the required secret groups
+        let group_names: Vec<&str> = contract
+            .secrets
+            .iter()
+            .map(|g| g.group_name.as_str())
+            .collect();
+        assert!(group_names.contains(&"kafka"));
+        assert!(group_names.contains(&"clickhouse"));
+    }
+
+    #[test]
+    fn test_deployment_contract_dependencies() {
+        let contract = Config::deployment_contract();
+        assert!(contract.depends_on.contains(&"kafka".to_string()));
+        assert!(contract.depends_on.contains(&"clickhouse".to_string()));
+    }
 }
