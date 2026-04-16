@@ -1,3 +1,11 @@
+## [1.17.3](https://github.com/hyperi-io/dfe-loader/compare/v1.17.2...v1.17.3) (2026-04-16)
+
+
+### Bug Fixes
+
+* bump rustlib to v2.5.4, fix rustls-webpki CVEs, harden circuit breaker ([3363ca9](https://github.com/hyperi-io/dfe-loader/commit/3363ca9dd502733087b6bebc9277d8c6a206a5c1))
+* update 41 deps to latest, fix flaky parallel_test under tarpaulin ([62a8d9e](https://github.com/hyperi-io/dfe-loader/commit/62a8d9ecc7cbcec48b81b47e9a264e51bdb94b2d)), closes [#30](https://github.com/hyperi-io/dfe-loader/issues/30)
+
 ## [1.17.2](https://github.com/hyperi-io/dfe-loader/compare/v1.17.1...v1.17.2) (2026-04-15)
 
 
