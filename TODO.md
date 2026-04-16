@@ -616,3 +616,7 @@ Each is a new file implementing `DlqBackend` trait + feature flag. No changes to
 - [x] Code review: license headers clean, no TODOs, no unsafe in prod, no hardcoded secrets
 - [x] Security review: no vulnerabilities found, all changes security-positive
 - [x] 399 lib tests pass, clippy clean, cargo deny clean
+- [x] Full cargo update — 41 packages to latest (tokio 1.52, rayon 1.12, rustls 0.23.38, etc.)
+- [x] Fix flaky test_process_batch_uses_multiple_threads under tarpaulin (warn not fail)
+- [x] Close Renovate PR #30 (superseded by direct cargo update)
+- [x] Dependabot alert #9 (rand low — custom logger only) — not actionable, already allowed
