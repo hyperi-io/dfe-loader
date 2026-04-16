@@ -596,4 +596,241 @@ mod tests {
     fn test_parse_renamed_value_simple() {
         assert_eq!(parse_renamed_value("field_name"), vec!["field_name"]);
     }
+
+    // ========================================================================
+    // parse_renamed_value edge cases
+    // ========================================================================
+
+    #[test]
+    fn test_parse_renamed_value_empty() {
+        assert!(parse_renamed_value("").is_empty());
+    }
+
+    #[test]
+    fn test_parse_renamed_value_first_empty_inner() {
+        assert!(parse_renamed_value("first()").is_empty());
+    }
+
+    #[test]
+    fn test_parse_renamed_value_first_with_whitespace() {
+        let result = parse_renamed_value("first( a / b /c )");
+        assert_eq!(result, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn test_parse_renamed_value_single_field_with_whitespace() {
+        let result = parse_renamed_value("  field_x  ");
+        assert_eq!(result, vec!["field_x"]);
+    }
+
+    // ========================================================================
+    // ColumnMetaCache: apply_ddl + get
+    // ========================================================================
+
+    #[test]
+    fn test_cache_apply_ddl_and_get() {
+        let cache = ColumnMetaCache::new(ColumnDirectivesConfig::default());
+        let mut ddl_cols = FxHashMap::default();
+        ddl_cols.insert(
+            "col1".to_string(),
+            ColumnDirectives {
+                skip: true,
+                ..Default::default()
+            },
+        );
+        cache.apply_ddl("db.t", ddl_cols);
+
+        let result = cache.get("db.t", "col1");
+        assert!(result.skip);
+    }
+
+    #[test]
+    fn test_cache_get_nonexistent_returns_default() {
+        let cache = ColumnMetaCache::new(ColumnDirectivesConfig::default());
+        let result = cache.get("unknown.t", "col");
+        assert!(!result.skip);
+        assert!(result.default.is_none());
+    }
+
+    #[test]
+    fn test_cache_config_global_merges_with_ddl() {
+        let mut config = ColumnDirectivesConfig::default();
+        config.global.insert(
+            "common_col".to_string(),
+            ColumnDirectivesEntry {
+                skip: true,
+                ..Default::default()
+            },
+        );
+        let cache = ColumnMetaCache::new(config);
+        // No DDL applied — config still applies via get()
+        let result = cache.get("any.table", "common_col");
+        assert!(result.skip);
+    }
+
+    #[test]
+    fn test_skip_columns_multiple_sources() {
+        let mut config = ColumnDirectivesConfig::default();
+        // Global config skips col_g
+        config.global.insert(
+            "col_g".to_string(),
+            ColumnDirectivesEntry {
+                skip: true,
+                ..Default::default()
+            },
+        );
+        // Per-table config skips col_t for db.t
+        let mut tbl_cfg = FxHashMap::default();
+        tbl_cfg.insert(
+            "col_t".to_string(),
+            ColumnDirectivesEntry {
+                skip: true,
+                ..Default::default()
+            },
+        );
+        config.tables.insert("db.t".to_string(), tbl_cfg);
+
+        let cache = ColumnMetaCache::new(config);
+
+        // DDL for db.t skips col_d AND col_t (but table config wins)
+        let mut ddl_cols = FxHashMap::default();
+        ddl_cols.insert(
+            "col_d".to_string(),
+            ColumnDirectives {
+                skip: true,
+                ..Default::default()
+            },
+        );
+        cache.apply_ddl("db.t", ddl_cols);
+
+        let skips: std::collections::HashSet<String> =
+            cache.skip_columns("db.t").into_iter().collect();
+        // All three skip-flagged cols present
+        assert!(skips.contains("col_g"));
+        assert!(skips.contains("col_t"));
+        assert!(skips.contains("col_d"));
+    }
+
+    #[test]
+    fn test_computed_for_table_merges_sources() {
+        let mut config = ColumnDirectivesConfig::default();
+        config.global.insert(
+            "col_global".to_string(),
+            ColumnDirectivesEntry {
+                computed: Some("1 + 1".to_string()),
+                ..Default::default()
+            },
+        );
+        let cache = ColumnMetaCache::new(config);
+
+        // Add DDL-level computed
+        let mut ddl_cols = FxHashMap::default();
+        ddl_cols.insert(
+            "col_ddl".to_string(),
+            ColumnDirectives {
+                computed: Some("x * 2".to_string()),
+                ..Default::default()
+            },
+        );
+        cache.apply_ddl("db.t", ddl_cols);
+
+        let computed: std::collections::HashMap<String, String> =
+            cache.computed_for_table("db.t").into_iter().collect();
+        assert_eq!(computed.get("col_global"), Some(&"1 + 1".to_string()));
+        assert_eq!(computed.get("col_ddl"), Some(&"x * 2".to_string()));
+    }
+
+    #[test]
+    fn test_computed_for_table_config_wins() {
+        let mut config = ColumnDirectivesConfig::default();
+        // Global has one value
+        config.global.insert(
+            "col".to_string(),
+            ColumnDirectivesEntry {
+                computed: Some("global_val".to_string()),
+                ..Default::default()
+            },
+        );
+        let cache = ColumnMetaCache::new(config);
+
+        // DDL has another value for same col
+        let mut ddl_cols = FxHashMap::default();
+        ddl_cols.insert(
+            "col".to_string(),
+            ColumnDirectives {
+                computed: Some("ddl_val".to_string()),
+                ..Default::default()
+            },
+        );
+        cache.apply_ddl("db.t", ddl_cols);
+
+        let computed: std::collections::HashMap<String, String> =
+            cache.computed_for_table("db.t").into_iter().collect();
+        // Config wins over DDL
+        assert_eq!(computed.get("col"), Some(&"global_val".to_string()));
+    }
+
+    #[test]
+    fn test_renamed_for_table_from_config() {
+        let mut config = ColumnDirectivesConfig::default();
+        let mut tbl = FxHashMap::default();
+        tbl.insert(
+            "dest".to_string(),
+            ColumnDirectivesEntry {
+                renamed: Some("first(src1/src2)".to_string()),
+                ..Default::default()
+            },
+        );
+        config.tables.insert("db.t".to_string(), tbl);
+
+        let cache = ColumnMetaCache::new(config);
+        let renamed: std::collections::HashMap<String, Vec<String>> =
+            cache.renamed_for_table("db.t").into_iter().collect();
+        let sources = renamed.get("dest").expect("dest should have rename");
+        assert_eq!(sources, &vec!["src1".to_string(), "src2".to_string()]);
+    }
+
+    #[test]
+    fn test_renamed_for_table_from_ddl() {
+        let cache = ColumnMetaCache::new(ColumnDirectivesConfig::default());
+        let mut ddl_cols = FxHashMap::default();
+        ddl_cols.insert(
+            "dest".to_string(),
+            ColumnDirectives {
+                renamed: vec!["src_a".to_string(), "src_b".to_string()],
+                ..Default::default()
+            },
+        );
+        cache.apply_ddl("db.t", ddl_cols);
+
+        let renamed: std::collections::HashMap<String, Vec<String>> =
+            cache.renamed_for_table("db.t").into_iter().collect();
+        assert_eq!(
+            renamed.get("dest"),
+            Some(&vec!["src_a".to_string(), "src_b".to_string()])
+        );
+    }
+
+    #[test]
+    fn test_parse_scalar_value_returns_number() {
+        let result = parse_scalar_value("42");
+        assert_eq!(result, Some(Value::Number(42.into())));
+    }
+
+    #[test]
+    fn test_parse_scalar_value_returns_string_for_bare() {
+        let result = parse_scalar_value("unquoted");
+        assert_eq!(result, Some(Value::String("unquoted".to_string())));
+    }
+
+    #[test]
+    fn test_parse_scalar_value_empty_is_none() {
+        assert!(parse_scalar_value("").is_none());
+    }
+
+    #[test]
+    fn test_parse_scalar_value_returns_bool() {
+        let result = parse_scalar_value("true");
+        assert_eq!(result, Some(Value::Bool(true)));
+    }
 }

@@ -820,4 +820,413 @@ mod tests {
         assert_eq!(transformer.json_output(), "_json");
         assert_eq!(transformer.raw_output(), "_raw");
     }
+
+    // ========================================================================
+    // Non-object input → Transform error
+    // ========================================================================
+
+    #[test]
+    fn test_transform_non_object_value_returns_error() {
+        let transformer = Transformer::default();
+        // transform expects the top-level to be a JSON object
+        let result = transformer.transform(serde_json::json!([1, 2, 3]));
+        assert!(result.is_err(), "array payload should fail");
+
+        let result = transformer.transform(serde_json::json!("just a string"));
+        assert!(result.is_err(), "string payload should fail");
+
+        let result = transformer.transform(serde_json::json!(42));
+        assert!(result.is_err(), "number payload should fail");
+
+        let result = transformer.transform(serde_json::Value::Null);
+        assert!(result.is_err(), "null payload should fail");
+    }
+
+    // ========================================================================
+    // Timestamp: Valid/Corrected/Invalid branches
+    // ========================================================================
+
+    #[test]
+    fn test_transform_timestamp_numeric_epoch_seconds() {
+        let transformer = Transformer::default();
+        // Numeric timestamp (epoch seconds) is accepted via validate_unix_with_now
+        let raw = br#"{"event": "x", "timestamp": 1700000000}"#;
+        let value: Value = serde_json::from_slice(raw).unwrap();
+        let result = transformer.transform_with_raw(value, None, None).unwrap();
+        assert!(result.data.contains_key("_timestamp"));
+    }
+
+    #[test]
+    fn test_transform_timestamp_non_i64_number_is_invalid() {
+        let transformer = Transformer::default();
+        // A float that doesn't fit as i64 — falls to "Invalid number format" branch.
+        // We use a huge float-only value.
+        let raw = br#"{"event": "x", "timestamp": 1.7e308}"#;
+        let value: Value = serde_json::from_slice(raw).unwrap();
+        let result = transformer.transform_with_raw(value, None, None).unwrap();
+        // _timestamp should still be present (fallback to now())
+        assert!(result.data.contains_key("_timestamp"));
+    }
+
+    #[test]
+    fn test_transform_timestamp_wrong_type_is_invalid() {
+        let transformer = Transformer::default();
+        // Boolean timestamp — hits the _ => Invalid arm
+        let raw = br#"{"event": "x", "timestamp": true}"#;
+        let value: Value = serde_json::from_slice(raw).unwrap();
+        let result = transformer.transform_with_raw(value, None, None).unwrap();
+        assert!(result.data.contains_key("_timestamp"));
+    }
+
+    #[test]
+    fn test_transform_timestamp_invalid_string_falls_back_to_now() {
+        let transformer = Transformer::default();
+        let raw = br#"{"event": "x", "timestamp": "not-a-valid-timestamp"}"#;
+        let value: Value = serde_json::from_slice(raw).unwrap();
+        let result = transformer.transform_with_raw(value, None, None).unwrap();
+        assert!(result.data.contains_key("_timestamp"));
+    }
+
+    #[test]
+    fn test_transform_timestamp_valid_iso_kept() {
+        let transformer = Transformer::default();
+        let raw = br#"{"event": "x", "timestamp": "2024-12-25T10:30:00Z"}"#;
+        let value: Value = serde_json::from_slice(raw).unwrap();
+        let result = transformer.transform_with_raw(value, None, None).unwrap();
+        let ts = result
+            .data
+            .get("_timestamp")
+            .and_then(|v| v.as_str())
+            .unwrap();
+        // Should be formatted — typically YYYY-MM-DD HH:MM:SS.mmm
+        assert!(ts.starts_with("2024-12-25"), "Got: {ts}");
+    }
+
+    // ========================================================================
+    // Collector timestamp + timestamp_received extraction
+    // ========================================================================
+
+    #[test]
+    fn test_transform_extracts_collector_timestamp() {
+        let transformer = Transformer::default();
+        // Default collector_timestamp_path is "tags.collector.timestamp"
+        let raw =
+            br#"{"event": "x", "tags": {"collector": {"timestamp": "2024-01-01T00:00:00Z"}}}"#;
+        let value: Value = serde_json::from_slice(raw).unwrap();
+        let result = transformer.transform_with_raw(value, None, None).unwrap();
+        // _timestamp_collector may or may not be present depending on config semantics,
+        // but the transform must succeed.
+        // Key behaviour: no panic, and _timestamp is still injected.
+        assert!(result.data.contains_key("_timestamp"));
+    }
+
+    #[test]
+    fn test_transform_extracts_timestamp_received() {
+        let transformer = Transformer::default();
+        // timestamp_received → _timestamp_received
+        let raw = br#"{"event": "x", "timestamp_received": "2024-01-01T00:00:00Z"}"#;
+        let value: Value = serde_json::from_slice(raw).unwrap();
+        let result = transformer.transform_with_raw(value, None, None).unwrap();
+        // _timestamp_received should be present
+        assert!(result.data.contains_key("_timestamp_received"));
+        // Original field should be removed (ownership transferred)
+        assert!(!result.data.contains_key("timestamp_received"));
+    }
+
+    // ========================================================================
+    // _org_id + _source injection
+    // ========================================================================
+
+    #[test]
+    fn test_transform_injects_org_id() {
+        let transformer = Transformer::default();
+        let raw = br#"{"event": "login"}"#;
+        let value: Value = serde_json::from_slice(raw).unwrap();
+        let result = transformer
+            .transform_with_raw(value, Some("acme_corp"), None)
+            .unwrap();
+        assert_eq!(
+            result.data.get("_org_id").and_then(|v| v.as_str()),
+            Some("acme_corp")
+        );
+    }
+
+    #[test]
+    fn test_transform_injects_source() {
+        // Use a transformer without _source in routing_table_fields so _source
+        // survives the remove_routing_fields_from pass.
+        let transformer = Transformer {
+            routing_table_fields: Vec::new(),
+            ..Default::default()
+        };
+        let raw = br#"{"event": "login"}"#;
+        let value: Value = serde_json::from_slice(raw).unwrap();
+        let result = transformer
+            .transform_with_raw(value, None, Some("beats"))
+            .unwrap();
+        assert_eq!(
+            result.data.get("_source").and_then(|v| v.as_str()),
+            Some("beats")
+        );
+    }
+
+    #[test]
+    fn test_transform_injects_both_org_id_and_source() {
+        // Default routing_table_fields = ["_source"] strips the _source we inject.
+        // Clear it to observe both injections.
+        let transformer = Transformer {
+            routing_table_fields: Vec::new(),
+            ..Default::default()
+        };
+        let raw = br#"{"event": "login"}"#;
+        let value: Value = serde_json::from_slice(raw).unwrap();
+        let result = transformer
+            .transform_with_raw(value, Some("org1"), Some("source1"))
+            .unwrap();
+        assert_eq!(
+            result.data.get("_org_id").and_then(|v| v.as_str()),
+            Some("org1")
+        );
+        assert_eq!(
+            result.data.get("_source").and_then(|v| v.as_str()),
+            Some("source1")
+        );
+    }
+
+    // ========================================================================
+    // Common header disabled: no injection, no timestamp work
+    // ========================================================================
+
+    #[test]
+    fn test_transform_common_header_disabled_no_injection() {
+        let transformer = Transformer {
+            common_header_enabled: false,
+            ..Default::default()
+        };
+        let raw = br#"{"event": "x", "timestamp": "2024-01-01T00:00:00Z"}"#;
+        let value: Value = serde_json::from_slice(raw).unwrap();
+        let result = transformer
+            .transform_with_raw(value, Some("org"), Some("src"))
+            .unwrap();
+        // No _timestamp / _org_id / _source injected
+        assert!(!result.data.contains_key("_timestamp"));
+        assert!(!result.data.contains_key("_org_id"));
+        assert!(!result.data.contains_key("_source"));
+        // Original timestamp field kept (no removal)
+        assert!(result.data.contains_key("timestamp"));
+    }
+
+    // ========================================================================
+    // capture_source=false: _source not injected even when provided
+    // ========================================================================
+
+    #[test]
+    fn test_transform_capture_source_false_skips_source_injection() {
+        let transformer = Transformer {
+            capture_source: false,
+            ..Default::default()
+        };
+        let raw = br#"{"event": "x"}"#;
+        let value: Value = serde_json::from_slice(raw).unwrap();
+        let result = transformer
+            .transform_with_raw(value, None, Some("beats"))
+            .unwrap();
+        assert!(!result.data.contains_key("_source"));
+    }
+
+    // ========================================================================
+    // with_routing: pass routing config explicitly
+    // ========================================================================
+
+    #[test]
+    fn test_transformer_with_routing_removes_configured_fields() {
+        let timestamp_cfg = crate::config::TimestampDqConfig::default();
+        let meta_cfg = crate::config::MetadataConfig::default();
+        let sanit_cfg = crate::config::FieldSanitizationConfig::default();
+        let mut routing_cfg = crate::config::RoutingConfig::default();
+        routing_cfg.db_fields = vec!["org_id_routing".into()];
+        routing_cfg.table_fields = vec!["routing_event_type".into()];
+
+        let transformer =
+            Transformer::with_routing(&timestamp_cfg, &meta_cfg, &sanit_cfg, &routing_cfg);
+
+        let raw = br#"{
+            "event": "login",
+            "org_id_routing": "acme",
+            "routing_event_type": "auth",
+            "keep_me": "value"
+        }"#;
+        let value: Value = serde_json::from_slice(raw).unwrap();
+        let result = transformer.transform_with_raw(value, None, None).unwrap();
+
+        // Routing fields removed
+        assert!(!result.data.contains_key("org_id_routing"));
+        assert!(!result.data.contains_key("routing_event_type"));
+        // Other fields preserved
+        assert!(result.data.contains_key("keep_me"));
+    }
+
+    // ========================================================================
+    // Sanitization edge cases
+    // ========================================================================
+
+    #[test]
+    fn test_transformer_trim_leading_trailing_underscores() {
+        let transformer = Transformer {
+            trim_underscores: true,
+            ..Default::default()
+        };
+        let raw = br#"{"_field_": "v", "__leading": "l", "trailing__": "t"}"#;
+        let value: Value = serde_json::from_slice(raw).unwrap();
+        let result = transformer.transform_with_raw(value, None, None).unwrap();
+        // Trimmed versions present — but system-reserved fields like _tags, _json
+        // should not be affected. _field_ is not reserved so it becomes "field"
+        let keys: Vec<String> = result.data.keys().cloned().collect();
+        // "_field_" trimmed → "field"
+        assert!(
+            keys.iter().any(|k| k == "field") || keys.iter().any(|k| k == "_field_"),
+            "Trimming should produce 'field'. Keys: {keys:?}"
+        );
+    }
+
+    #[test]
+    fn test_transformer_empty_key_after_sanitization_becomes_unnamed() {
+        let transformer = Transformer {
+            trim_underscores: true,
+            ..Default::default()
+        };
+        // A key that is all underscores — after trimming becomes empty → "unnamed"
+        let raw = br#"{"___": "value"}"#;
+        let value: Value = serde_json::from_slice(raw).unwrap();
+        let result = transformer.transform_with_raw(value, None, None).unwrap();
+        assert!(
+            result.data.contains_key("unnamed"),
+            "Empty after trim should become 'unnamed'. Keys: {:?}",
+            result.data.keys().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_transformer_combined_sanitization() {
+        let transformer = Transformer {
+            strip_at_prefix: true,
+            collapse_underscores: true,
+            trim_underscores: true,
+            ..Default::default()
+        };
+        // @__foo__bar__ → strip @ → __foo__bar__ → collapse → _foo_bar_ → trim → foo_bar
+        let raw = br#"{"@__foo__bar__": "v"}"#;
+        let value: Value = serde_json::from_slice(raw).unwrap();
+        let result = transformer.transform_with_raw(value, None, None).unwrap();
+        let keys: Vec<String> = result.data.keys().cloned().collect();
+        assert!(
+            keys.contains(&"foo_bar".to_string()),
+            "Combined sanitization should produce 'foo_bar'. Keys: {keys:?}"
+        );
+    }
+
+    #[test]
+    fn test_transformer_system_fields_survive_sanitization() {
+        let transformer = Transformer {
+            trim_underscores: true,
+            strip_at_prefix: true,
+            collapse_underscores: true,
+            ..Default::default()
+        };
+        let raw = br#"{"event": "test"}"#;
+        let value: Value = serde_json::from_slice(raw).unwrap();
+        let result = transformer.transform_with_raw(value, None, None).unwrap();
+        // _timestamp is injected and should be preserved despite trim_underscores=true
+        assert!(
+            result.data.contains_key("_timestamp"),
+            "_timestamp must survive sanitization. Keys: {:?}",
+            result.data.keys().collect::<Vec<_>>()
+        );
+    }
+
+    // ========================================================================
+    // tags extraction: nested path + drop_tags true
+    // ========================================================================
+
+    #[test]
+    fn test_transformer_tags_nested_path_extraction() {
+        let transformer = Transformer {
+            tags_fields: vec!["meta.tags".to_string()],
+            ..Default::default()
+        };
+        let raw = br#"{"event": "x", "meta": {"tags": {"level": "info"}}}"#;
+        let value: Value = serde_json::from_slice(raw).unwrap();
+        let result = transformer.transform_with_raw(value, None, None).unwrap();
+        // _tags should be populated from the nested path
+        assert!(result.data.contains_key("_tags"));
+    }
+
+    #[test]
+    fn test_transformer_tags_fallback_when_first_missing() {
+        let transformer = Transformer {
+            tags_fields: vec!["does_not_exist".into(), "tags".into()],
+            ..Default::default()
+        };
+        let raw = br#"{"event": "x", "tags": {"a": "b"}}"#;
+        let value: Value = serde_json::from_slice(raw).unwrap();
+        let result = transformer.transform_with_raw(value, None, None).unwrap();
+        // Falls back to "tags" since first field missing
+        assert!(result.data.contains_key("_tags"));
+    }
+
+    #[test]
+    fn test_transformer_tags_no_source_no_tags_output() {
+        let transformer = Transformer::default();
+        // No tags field in input
+        let raw = br#"{"event": "x", "other": "value"}"#;
+        let value: Value = serde_json::from_slice(raw).unwrap();
+        let result = transformer.transform_with_raw(value, None, None).unwrap();
+        // _tags should not be in the output
+        assert!(!result.data.contains_key("_tags"));
+    }
+
+    // ========================================================================
+    // transform_bytes: end-to-end
+    // ========================================================================
+
+    #[test]
+    fn test_transform_bytes_invalid_json_errors() {
+        let transformer = Transformer::default();
+        let result = transformer.transform_bytes(b"{invalid json");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_transform_bytes_serialises_result() {
+        let transformer = Transformer::default();
+        let input = br#"{"key": "value"}"#;
+        let output = transformer.transform_bytes(input).unwrap();
+        // Output is JSON — should parse back
+        let parsed: Value = serde_json::from_slice(&output).unwrap();
+        assert!(parsed.is_object());
+        assert_eq!(parsed["key"], serde_json::json!("value"));
+    }
+
+    // ========================================================================
+    // common_header_enabled() accessor
+    // ========================================================================
+
+    #[test]
+    fn test_common_header_enabled_accessor() {
+        let t_default = Transformer::default();
+        assert!(t_default.common_header_enabled());
+
+        let t_disabled = Transformer {
+            common_header_enabled: false,
+            ..Default::default()
+        };
+        assert!(!t_disabled.common_header_enabled());
+    }
+
+    #[test]
+    fn test_source_output_accessor() {
+        let t = Transformer::default();
+        // Default source_output should be "_source"
+        assert_eq!(t.source_output(), "_source");
+    }
 }

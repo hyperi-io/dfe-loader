@@ -190,4 +190,94 @@ mod tests {
         assert_eq!(tags.remove("key"), Some("value".to_string()));
         assert!(!tags.has("key"));
     }
+
+    #[test]
+    fn test_table_tags_display_impl() {
+        let tags = TableTags::new().with("a", "1").with("b", "2");
+        // Display is the same as to_comment()
+        let s = format!("{tags}");
+        assert!(s.contains("@a: 1"));
+        assert!(s.contains("@b: 2"));
+    }
+
+    #[test]
+    fn test_table_tags_set_adds_and_overwrites() {
+        let mut tags = TableTags::new();
+        tags.set("k", "v1");
+        assert_eq!(tags.get("k"), Some("v1"));
+        tags.set("k", "v2");
+        assert_eq!(tags.get("k"), Some("v2"));
+    }
+
+    #[test]
+    fn test_table_tags_iter_yields_all_entries() {
+        let tags = TableTags::new()
+            .with("first", "1")
+            .with("second", "2")
+            .with("third", "3");
+        let collected: std::collections::BTreeMap<_, _> = tags
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        assert_eq!(collected.len(), 3);
+        assert_eq!(collected.get("first"), Some(&"1".to_string()));
+        assert_eq!(collected.get("second"), Some(&"2".to_string()));
+        assert_eq!(collected.get("third"), Some(&"3".to_string()));
+    }
+
+    #[test]
+    fn test_table_tags_remove_missing_returns_none() {
+        let mut tags = TableTags::new().with("a", "1");
+        assert!(tags.remove("nonexistent").is_none());
+        // Original entry remains
+        assert_eq!(tags.get("a"), Some("1"));
+    }
+
+    #[test]
+    fn test_table_tags_from_comment_handles_spaces() {
+        // Keys/values are trimmed
+        let tags = TableTags::from_comment("@key1:  val1  | @key2: val2");
+        assert_eq!(tags.get("key1"), Some("val1"));
+        assert_eq!(tags.get("key2"), Some("val2"));
+    }
+
+    #[test]
+    fn test_table_tags_from_comment_ignores_malformed() {
+        // A part without @ prefix is skipped; a part without : is skipped
+        let tags = TableTags::from_comment("no_at_sign | @no_colon | @good: value");
+        assert_eq!(tags.len(), 1);
+        assert_eq!(tags.get("good"), Some("value"));
+    }
+
+    #[test]
+    fn test_table_tags_from_comment_empty_string() {
+        let tags = TableTags::from_comment("");
+        assert!(tags.is_empty());
+    }
+
+    #[test]
+    fn test_table_tags_roundtrip_with_special_chars() {
+        let original = TableTags::new()
+            .with("path", "/some/path")
+            .with("url", "https://example.com");
+        let comment = original.to_comment();
+        let parsed = TableTags::from_comment(&comment);
+        assert_eq!(parsed.get("path"), Some("/some/path"));
+        assert_eq!(parsed.get("url"), Some("https://example.com"));
+    }
+
+    #[test]
+    fn test_table_tags_len_updates() {
+        let mut tags = TableTags::new();
+        assert_eq!(tags.len(), 0);
+        tags.set("a", "1");
+        assert_eq!(tags.len(), 1);
+        tags.set("b", "2");
+        assert_eq!(tags.len(), 2);
+        // Overwriting doesn't increase len
+        tags.set("a", "updated");
+        assert_eq!(tags.len(), 2);
+        tags.remove("a");
+        assert_eq!(tags.len(), 1);
+    }
 }

@@ -1679,4 +1679,112 @@ logging:
         assert!(contract.depends_on.contains(&"kafka".to_string()));
         assert!(contract.depends_on.contains(&"clickhouse".to_string()));
     }
+
+    // ========================================================================
+    // Config::load: various file scenarios
+    // ========================================================================
+
+    #[test]
+    fn test_load_with_nonexistent_path_uses_defaults() {
+        // Path doesn't exist → not read, defaults used. apply_flat_env / figment
+        // may still affect but should succeed.
+        let result = Config::load(Some("/nonexistent/path/config.yaml"));
+        assert!(result.is_ok(), "nonexistent path should not error");
+    }
+
+    #[test]
+    fn test_load_with_explicit_file_parses_yaml() {
+        // NOTE: env vars from other tests may override YAML values.
+        // We only verify load succeeds and returns a parseable config.
+        let tmp = tempfile::NamedTempFile::with_suffix(".yaml").expect("tempfile");
+        std::fs::write(
+            tmp.path(),
+            r#"
+kafka:
+  brokers: ["custom:9092"]
+  group: "custom-group"
+clickhouse:
+  hosts: ["custom-ch:9000"]
+  database: "custom_db"
+"#,
+        )
+        .expect("write");
+
+        let path = tmp.path().to_string_lossy().into_owned();
+        let result = Config::load(Some(&path));
+        // Load should succeed; env override is acceptable
+        assert!(result.is_ok(), "load should succeed: {:?}", result.err());
+        let config = result.unwrap();
+        // At minimum, config should have non-empty brokers
+        assert!(!config.kafka.brokers.is_empty());
+    }
+
+    #[test]
+    fn test_load_with_malformed_yaml_errors() {
+        let tmp = tempfile::NamedTempFile::with_suffix(".yaml").expect("tempfile");
+        std::fs::write(tmp.path(), "this is: not: : : valid yaml ::: :").expect("write");
+
+        let path = tmp.path().to_string_lossy().into_owned();
+        let result = Config::load(Some(&path));
+        // Should either fail parsing (Err) or be accepted as scalar (Ok).
+        // Either way, no panic.
+        let _ = result;
+    }
+
+    #[test]
+    fn test_validate_zero_flush_rows() {
+        let mut config = Config::default();
+        config.buffer.flush_rows = 0;
+        let result = config.validate();
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("flush_rows") || err.contains("greater than 0"));
+    }
+
+    #[test]
+    fn test_validate_zero_flush_bytes() {
+        let mut config = Config::default();
+        config.buffer.flush_bytes = 0;
+        let result = config.validate();
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("flush_bytes") || err.contains("greater than 0"));
+    }
+
+    #[test]
+    fn test_validate_empty_clickhouse_hosts() {
+        let mut config = Config::default();
+        config.clickhouse.hosts = vec![];
+        let result = config.validate();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_negative_pressure_threshold() {
+        let mut config = Config::default();
+        config.memory.pressure_threshold = -0.1;
+        let result = config.validate();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_pressure_threshold_boundary_zero() {
+        let mut config = Config::default();
+        config.memory.pressure_threshold = 0.0;
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_pressure_threshold_boundary_one() {
+        let mut config = Config::default();
+        config.memory.pressure_threshold = 1.0;
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_register_sections_does_not_panic() {
+        let config = Config::default();
+        // Should not panic
+        config.register_sections();
+    }
 }

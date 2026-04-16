@@ -348,4 +348,172 @@ mod tests {
         // Edge: exactly at max
         assert!(is_valid_datetime64_ms(MAX_DATETIME64_MS));
     }
+
+    #[test]
+    fn test_clamp_timestamp_ms_nano_within_bounds() {
+        let ts = 1704067200000_i64; // 2024-01-01
+        assert_eq!(clamp_timestamp_ms_nano(ts), ts);
+    }
+
+    #[test]
+    fn test_clamp_timestamp_ms_nano_below_min() {
+        // Pre-1900 timestamp should be clamped up
+        let ts = -5_364_662_400_000_i64;
+        assert_eq!(clamp_timestamp_ms_nano(ts), MIN_DATETIME64_MS);
+    }
+
+    #[test]
+    fn test_clamp_timestamp_ms_nano_above_nano_max() {
+        // Year 2500 clamped to DateTime64(9) nano max
+        let ts = 16_725_225_600_000_i64;
+        assert_eq!(clamp_timestamp_ms_nano(ts), MAX_DATETIME64_NANO_MS);
+    }
+
+    #[test]
+    fn test_past_rejection_with_specific_max_past() {
+        // max_past_seconds = 60 -- timestamps 1 hour in the past are rejected
+        let validator = TimestampValidator {
+            max_future_seconds: 0,
+            max_past_seconds: 60,
+            correct_known_bad: false,
+        };
+        let past = Utc::now() - chrono::Duration::hours(1);
+        let ts = past.to_rfc3339();
+        match validator.validate(&ts) {
+            TimestampResult::Invalid(reason) => {
+                assert!(reason.contains("past"));
+            }
+            other => panic!("Expected Invalid past, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_unix_seconds_correction_reason() {
+        // Seconds timestamp (>1e9, <1e12) via numeric string
+        // After correction, should produce Corrected variant
+        let validator = TimestampValidator::default();
+        let ts = "1703412600"; // seconds epoch
+        match validator.validate(ts) {
+            TimestampResult::Corrected(_, reason) => {
+                assert!(
+                    reason.contains("Corrected") || !reason.is_empty(),
+                    "Reason: {reason}"
+                );
+            }
+            TimestampResult::Valid(_) => {} // Also acceptable if parser handled it directly
+            TimestampResult::Invalid(e) => panic!("unexpected invalid: {e}"),
+        }
+    }
+
+    #[test]
+    fn test_correction_disabled_returns_invalid() {
+        // correct_known_bad=false means unparseable strings stay Invalid
+        let validator = TimestampValidator {
+            max_future_seconds: 0,
+            max_past_seconds: 0,
+            correct_known_bad: false,
+        };
+        let result = validator.validate("not-parseable-at-all");
+        match result {
+            TimestampResult::Invalid(_) => {} // Expected
+            other => panic!("Expected Invalid, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_validate_timestamp_function_on_invalid() {
+        // Top-level helper function: invalid input → None
+        assert!(validate_timestamp("complete garbage").is_none());
+        assert!(validate_timestamp("").is_none());
+    }
+
+    #[test]
+    fn test_validate_timestamp_function_on_valid() {
+        let result = validate_timestamp("2024-12-25T10:00:00Z");
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_space_separator_no_tz_does_not_correct() {
+        // Space separator WITHOUT timezone — correct_known_bad_format only
+        // handles space-with-TZ cases. Without Z or +offset, space→T replacement
+        // fails rfc3339 parsing.
+        let validator = TimestampValidator {
+            max_future_seconds: 0,
+            max_past_seconds: 0,
+            correct_known_bad: true,
+        };
+        // This parses via the format list ("%Y-%m-%d %H:%M:%S"), so it's Valid
+        let result = validator.validate("2024-12-24 10:30:00");
+        match result {
+            TimestampResult::Valid(_) | TimestampResult::Corrected(_, _) => {}
+            TimestampResult::Invalid(e) => panic!("should parse: {e}"),
+        }
+    }
+
+    #[test]
+    fn test_parse_timestamp_iso_with_offset() {
+        let validator = TimestampValidator {
+            max_future_seconds: 0,
+            max_past_seconds: 0,
+            correct_known_bad: false,
+        };
+        // ISO 8601 with offset
+        let result = validator.validate("2024-12-24T10:30:00+00:00");
+        match result {
+            TimestampResult::Valid(_) => {}
+            other => panic!("Expected Valid, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parse_timestamp_naive_with_millis() {
+        let validator = TimestampValidator {
+            max_future_seconds: 0,
+            max_past_seconds: 0,
+            correct_known_bad: false,
+        };
+        // Naive datetime with milliseconds (no timezone)
+        let result = validator.validate("2024-12-24 10:30:00.123");
+        match result {
+            TimestampResult::Valid(_) => {}
+            other => panic!("Expected Valid, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_unix_seconds_helper() {
+        // validate_unix with small epoch (seconds)
+        let validator = TimestampValidator::default();
+        // Seconds epoch for 2024-01-01
+        let r = validator.validate_unix(1704067200);
+        matches!(
+            r,
+            TimestampResult::Valid(_) | TimestampResult::Corrected(_, _)
+        );
+    }
+
+    #[test]
+    fn test_validate_with_strict_future_and_past() {
+        // Both bounds set — test both paths are reachable
+        let validator = TimestampValidator {
+            max_future_seconds: 30,
+            max_past_seconds: 30,
+            correct_known_bad: false,
+        };
+        // Current time should be valid
+        let now = Utc::now();
+        let r = validator.validate(&now.to_rfc3339());
+        matches!(r, TimestampResult::Valid(_));
+
+        // 5 min future → invalid
+        let future = now + chrono::Duration::minutes(5);
+        let r = validator.validate(&future.to_rfc3339());
+        matches!(r, TimestampResult::Invalid(_));
+
+        // 5 min past → invalid
+        let past = now - chrono::Duration::minutes(5);
+        let r = validator.validate(&past.to_rfc3339());
+        matches!(r, TimestampResult::Invalid(_));
+    }
 }

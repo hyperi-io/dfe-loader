@@ -1097,4 +1097,215 @@ mod tests {
         assert!(!data.contains_key("risk_score"));
         assert!(!data.contains_key("risk_level"));
     }
+
+    // ========================================================================
+    // EnrichmentPipeline::init async constructor paths
+    // ========================================================================
+
+    #[tokio::test]
+    async fn init_all_disabled_produces_inactive_pipeline() {
+        // All enrichment components disabled → init should yield an inactive pipeline.
+        let mut config = crate::config::Config::default();
+        config.geoip.enabled = false;
+        config.enrichment.reputation.enabled = false;
+        config.enrichment.risk_scoring.enabled = false;
+
+        let pipeline = EnrichmentPipeline::init(&config).await;
+        assert!(!pipeline.is_active());
+        assert!(pipeline.geoip.is_none());
+        assert!(pipeline.reputation.is_none());
+        assert!(pipeline.risk.is_none());
+    }
+
+    #[tokio::test]
+    async fn init_reputation_enabled_no_blocklists_still_active() {
+        let mut config = crate::config::Config::default();
+        config.geoip.enabled = false;
+        config.enrichment.reputation.enabled = true;
+        config.enrichment.reputation.blocklist_files = Vec::new();
+        config.enrichment.risk_scoring.enabled = false;
+
+        let pipeline = EnrichmentPipeline::init(&config).await;
+        // Reputation without blocklists is still considered active (ready to add IPs)
+        assert!(pipeline.reputation.is_some(), "reputation should be Some");
+        assert!(pipeline.is_active());
+    }
+
+    #[tokio::test]
+    async fn init_reputation_with_nonexistent_blocklist_warns_but_continues() {
+        let mut config = crate::config::Config::default();
+        config.geoip.enabled = false;
+        config.enrichment.reputation.enabled = true;
+        config.enrichment.reputation.blocklist_files =
+            vec!["/nonexistent/path/blocklist.txt".to_string()];
+        config.enrichment.risk_scoring.enabled = false;
+
+        let pipeline = EnrichmentPipeline::init(&config).await;
+        // Bad path is warned + skipped. If no other blocklists loaded and
+        // blocklist_files was non-empty, reputation becomes None.
+        // Based on impl: if loaded=0 and blocklist_files non-empty, reputation=None
+        assert!(
+            pipeline.reputation.is_none(),
+            "reputation should be None when all blocklists failed to load"
+        );
+    }
+
+    #[tokio::test]
+    async fn init_reputation_with_valid_blocklist() {
+        let tmp = tempfile::NamedTempFile::new().expect("tempfile");
+        std::fs::write(
+            tmp.path(),
+            "192.0.2.1\n203.0.113.5\n# comment\n198.51.100.1\n",
+        )
+        .expect("write");
+
+        let mut config = crate::config::Config::default();
+        config.geoip.enabled = false;
+        config.enrichment.reputation.enabled = true;
+        config.enrichment.reputation.blocklist_files =
+            vec![tmp.path().to_string_lossy().into_owned()];
+        config.enrichment.risk_scoring.enabled = false;
+
+        let pipeline = EnrichmentPipeline::init(&config).await;
+        // Blocklist loaded successfully → reputation is active
+        assert!(pipeline.reputation.is_some());
+        assert!(pipeline.is_active());
+    }
+
+    #[tokio::test]
+    async fn init_risk_scoring_each_preset() {
+        // Exercise every preset branch
+        for preset_str in &[
+            "us_enterprise",
+            "eu_enterprise",
+            "apac_enterprise",
+            "high_security",
+            "global",
+            "unknown_preset_falls_to_global",
+        ] {
+            let mut config = crate::config::Config::default();
+            config.geoip.enabled = false;
+            config.enrichment.reputation.enabled = false;
+            config.enrichment.risk_scoring.enabled = true;
+            config.enrichment.risk_scoring.preset = preset_str.to_string();
+
+            let pipeline = EnrichmentPipeline::init(&config).await;
+            assert!(
+                pipeline.risk.is_some(),
+                "risk should be Some for preset '{preset_str}'"
+            );
+            assert!(pipeline.is_active());
+        }
+    }
+
+    #[tokio::test]
+    async fn init_all_components_combined() {
+        let tmp = tempfile::NamedTempFile::new().expect("tempfile");
+        std::fs::write(tmp.path(), "192.0.2.1\n").expect("write");
+
+        let mut config = crate::config::Config::default();
+        // GeoIP: enabled but no MMDB → no enricher
+        config.geoip.enabled = true;
+        config.geoip.provider = crate::config::GeoIpProvider::Custom;
+        // Ensure no download attempt
+        config.geoip.auto_download.enabled = false;
+
+        config.enrichment.reputation.enabled = true;
+        config.enrichment.reputation.blocklist_files =
+            vec![tmp.path().to_string_lossy().into_owned()];
+
+        config.enrichment.risk_scoring.enabled = true;
+        config.enrichment.risk_scoring.preset = "global".to_string();
+
+        let pipeline = EnrichmentPipeline::init(&config).await;
+        // GeoIP probably None (no MMDB). Reputation and risk should be active.
+        assert!(pipeline.reputation.is_some());
+        assert!(pipeline.risk.is_some());
+        assert!(pipeline.is_active());
+    }
+
+    #[tokio::test]
+    async fn init_geoip_disabled_no_enricher() {
+        let mut config = crate::config::Config::default();
+        config.geoip.enabled = false;
+        let pipeline = EnrichmentPipeline::init(&config).await;
+        assert!(pipeline.geoip.is_none());
+    }
+
+    // ========================================================================
+    // extract_enrich_ip: whitespace IPs and numeric fields
+    // ========================================================================
+
+    #[test]
+    fn extract_ip_with_only_invalid_fields() {
+        let mut data = Map::new();
+        data.insert("src".into(), json!(42));
+        data.insert("dst".into(), serde_json::Value::Null);
+        data.insert("other".into(), json!({"nested": "object"}));
+
+        let fields = vec!["src".into(), "dst".into(), "other".into()];
+        assert!(extract_enrich_ip(&data, &fields).is_none());
+    }
+
+    #[test]
+    fn extract_ip_single_field_match() {
+        let mut data = Map::new();
+        data.insert("ip".into(), json!("127.0.0.1"));
+
+        let fields = vec!["ip".to_string()];
+        assert_eq!(extract_enrich_ip(&data, &fields), Some("127.0.0.1"));
+    }
+
+    // ========================================================================
+    // Full pipeline: reputation handles empty IP gracefully
+    // ========================================================================
+
+    #[test]
+    fn enrich_empty_data_map_is_noop() {
+        let scorer = RiskScorer::from_preset(RiskPreset::Global);
+        let pipeline = EnrichmentPipeline {
+            ip_fields: vec!["src_ip".into()],
+            geoip: None,
+            reputation: None,
+            risk: Some(scorer),
+        };
+
+        let mut data = Map::new();
+        pipeline.enrich(&mut data);
+        // No data → no enrichment; data remains empty
+        assert!(data.is_empty());
+    }
+
+    #[test]
+    fn enrich_with_additional_non_ip_fields_preserves_them() {
+        use crate::enrich::reputation::{ReputationEnricher, ThreatSource, ThreatType};
+        use std::net::IpAddr;
+
+        let enricher = ReputationEnricher::new();
+        let addr: IpAddr = "203.0.113.5".parse().expect("ip");
+        enricher.add_ip(addr, ThreatType::Proxy, ThreatSource::AbuseIpdb);
+
+        let pipeline = EnrichmentPipeline {
+            ip_fields: vec!["src_ip".into()],
+            geoip: None,
+            reputation: Some(enricher),
+            risk: None,
+        };
+
+        let mut data = Map::new();
+        data.insert("src_ip".into(), json!("203.0.113.5"));
+        data.insert("timestamp".into(), json!("2024-01-01"));
+        data.insert("event".into(), json!("login"));
+        data.insert("user".into(), json!("alice"));
+
+        pipeline.enrich(&mut data);
+
+        // Original fields preserved
+        assert_eq!(data["src_ip"], json!("203.0.113.5"));
+        assert_eq!(data["timestamp"], json!("2024-01-01"));
+        assert_eq!(data["event"], json!("login"));
+        assert_eq!(data["user"], json!("alice"));
+        // Reputation data added
+        assert_eq!(data["rep_is_proxy"], json!(true));
+    }
 }

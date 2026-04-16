@@ -1,0 +1,6 @@
+# Tarpaulin coverage configuration
+
+[default]
+# Exclude binary entry point — covered by smoke tests at the integration level.
+# main.rs is just CLI bootstrap glue; the meaningful code is in lib.
+exclude-files = ["src/main.rs"]

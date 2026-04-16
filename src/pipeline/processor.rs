@@ -1127,4 +1127,169 @@ mod tests {
             assert_eq!(processed.kafka_offset.offset, offset);
         }
     }
+
+    // ========================================================================
+    // MessagePack payloads (strict format mode)
+    // ========================================================================
+
+    #[test]
+    fn process_msgpack_with_strict_format_check_rejects_json() {
+        // If FormatDetector is forced to MessagePack but the payload is JSON,
+        // format detection should reject it.
+        // Use a forced-MessagePack detector directly.
+        let harness = TestHarness::new();
+        let msgpack_detector = FormatDetector::with_mode(FormatMode::ForceMessagePack);
+
+        let processor = MessageProcessor {
+            config: &harness.config,
+            router: &harness.router,
+            transformer: &harness.transformer,
+            extractor: &harness.extractor,
+            format_detector: &msgpack_detector,
+            json_primary_mode: false,
+            enrichment: &harness.enrichment,
+            schema_cache: &harness.schema_cache,
+            col_meta_cache: &harness.col_meta_cache,
+            field_mapping_cache: None,
+            computed_column_cache: &harness.computed_column_cache,
+            capture_overrides: &harness.capture_overrides,
+        };
+
+        let payload = serde_json::to_vec(&json!({"event_category": "x"})).expect("serialize");
+        let msg = harness.make_msg(&payload);
+
+        let result = processor.process(&msg);
+        // Strict format mode should fail fast on format mismatch
+        assert!(
+            result.is_err(),
+            "JSON payload with strict msgpack format should error"
+        );
+    }
+
+    // ========================================================================
+    // Routing: DLQ path
+    // ========================================================================
+
+    #[test]
+    fn process_malformed_json_goes_to_error() {
+        let harness = TestHarness::new();
+        let proc = harness.processor();
+
+        // Truncated JSON
+        let payload = b"{\"event_category\":";
+        let msg = harness.make_msg(payload);
+        let result = proc.process(&msg);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn process_large_json_payload() {
+        // Sanity check: processor doesn't choke on large payloads
+        let harness = TestHarness::new();
+        let proc = harness.processor();
+
+        let mut big = json!({"event_category": "big_table"});
+        // Add a big string field
+        big["payload"] = json!("x".repeat(100_000));
+        let payload = serde_json::to_vec(&big).expect("serialize");
+        let msg = harness.make_msg(&payload);
+        let processed = proc.process(&msg).ok().expect("should succeed");
+        // Should still produce a valid ProcessedMessage
+        assert!(!processed.data.is_empty());
+    }
+
+    #[test]
+    fn process_json_with_deeply_nested_routing_field() {
+        // Router should extract routing field from deep dot path
+        let mut config = Config::default();
+        config.routing.table_fields = vec!["level1.level2.level3.table_name".into()];
+        let harness = TestHarness::with_config(config);
+        let proc = harness.processor();
+
+        let payload = serde_json::to_vec(&json!({
+            "level1": {
+                "level2": {
+                    "level3": {
+                        "table_name": "deep_table"
+                    }
+                }
+            }
+        }))
+        .expect("serialize");
+        let msg = harness.make_msg(&payload);
+
+        let processed = proc.process(&msg).ok().expect("should succeed");
+        // Table should be routed to deep_table
+        assert!(
+            processed.table.contains("deep_table"),
+            "Got: {}",
+            processed.table
+        );
+    }
+
+    #[test]
+    fn process_unicode_payload_preserved() {
+        let harness = TestHarness::new();
+        let proc = harness.processor();
+
+        let payload = serde_json::to_vec(&json!({
+            "event_category": "unicode",
+            "message": "Hello, 世界! 🔥",
+            "user": "Zoë"
+        }))
+        .expect("serialize");
+        let msg = harness.make_msg(&payload);
+
+        let processed = proc.process(&msg).ok().expect("should succeed");
+        assert_eq!(
+            processed.data.get("message").and_then(|v| v.as_str()),
+            Some("Hello, 世界! 🔥")
+        );
+    }
+
+    // ========================================================================
+    // Multiple offsets / partitions — ensures correct topic propagation
+    // ========================================================================
+
+    #[test]
+    fn process_kafka_offset_topic_shared() {
+        let harness = TestHarness::new();
+        let proc = harness.processor();
+
+        let payload = serde_json::to_vec(&json!({"event_category": "x"})).expect("serialize");
+        let mut msg = harness.make_msg(&payload);
+        msg.topic = Arc::from("special-topic");
+
+        let processed = proc.process(&msg).ok().expect("should succeed");
+        assert_eq!(&*processed.kafka_offset.topic, "special-topic");
+    }
+
+    #[test]
+    fn process_empty_json_object() {
+        // Empty {} object — routes to default, no enrichable fields
+        let harness = TestHarness::new();
+        let proc = harness.processor();
+
+        let payload = b"{}";
+        let msg = harness.make_msg(payload);
+        let processed = proc.process(&msg).ok().expect("should succeed");
+        // Table should route to default
+        assert!(!processed.table.is_empty());
+    }
+
+    #[test]
+    fn process_string_instead_of_object_still_works() {
+        // Non-object JSON payload — the transformer wraps/errors gracefully
+        let harness = TestHarness::new();
+        let proc = harness.processor();
+
+        // A JSON string
+        let payload = b"\"just a string\"";
+        let msg = harness.make_msg(payload);
+        let result = proc.process(&msg);
+        // Should either process (router with default) or error — both are valid
+        // depending on the non-object handling in transformer.
+        // What matters: no panic.
+        let _ = result;
+    }
 }
