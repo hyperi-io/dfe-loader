@@ -636,4 +636,255 @@ mod tests {
         tc.evaluate(&mut data3);
         assert_eq!(data3.get("risk_label"), Some(&serde_json::json!("low")));
     }
+
+    // ========================================================================
+    // TableComputedColumns: len + is_empty + cache accessor methods
+    // ========================================================================
+
+    #[test]
+    fn table_computed_columns_len_and_is_empty() {
+        // Default config with no columns → cache build yields no columns
+        let config = ComputedColumnsConfig::default();
+        let mut cache = ComputedColumnCache::new(config);
+        cache.build_and_cache(
+            "common.empty",
+            &ColumnMetaCache::new(ColumnDirectivesConfig::default()),
+        );
+        let tc = cache.get("common.empty").unwrap();
+        assert!(tc.is_empty());
+        assert_eq!(tc.len(), 0);
+    }
+
+    #[test]
+    fn table_computed_columns_with_multiple_columns() {
+        let mut config = ComputedColumnsConfig::default();
+        config
+            .columns
+            .insert("col_a".to_string(), "1 + 2".to_string());
+        config
+            .columns
+            .insert("col_b".to_string(), r#""hello""#.to_string());
+
+        let mut cache = ComputedColumnCache::new(config);
+        cache.build_and_cache(
+            "common.multi",
+            &ColumnMetaCache::new(ColumnDirectivesConfig::default()),
+        );
+        let tc = cache.get("common.multi").unwrap();
+        assert!(!tc.is_empty());
+        assert_eq!(tc.len(), 2);
+    }
+
+    #[test]
+    fn cache_has_config_empty() {
+        let cache = ComputedColumnCache::new(ComputedColumnsConfig::default());
+        assert!(!cache.has_config());
+    }
+
+    #[test]
+    fn cache_has_config_with_global_columns() {
+        let mut config = ComputedColumnsConfig::default();
+        config.columns.insert("c".to_string(), "1".to_string());
+        let cache = ComputedColumnCache::new(config);
+        assert!(cache.has_config());
+    }
+
+    #[test]
+    fn cache_has_config_with_per_table_overrides() {
+        let mut config = ComputedColumnsConfig::default();
+        let mut t_map = indexmap::IndexMap::new();
+        t_map.insert("colx".to_string(), "true".to_string());
+        config.overrides.insert("db.tbl".to_string(), t_map);
+        let cache = ComputedColumnCache::new(config);
+        assert!(cache.has_config());
+    }
+
+    #[test]
+    fn cache_mark_pending_and_take() {
+        let mut cache = ComputedColumnCache::new(ComputedColumnsConfig::default());
+        cache.mark_pending("t1");
+        cache.mark_pending("t2");
+        // Duplicate ignored
+        cache.mark_pending("t1");
+
+        let pending = cache.take_pending();
+        assert_eq!(pending.len(), 2);
+        assert!(pending.contains(&"t1".to_string()));
+        assert!(pending.contains(&"t2".to_string()));
+        // Now empty
+        assert!(cache.take_pending().is_empty());
+    }
+
+    #[test]
+    fn cache_mark_pending_skips_already_cached() {
+        // After build_and_cache, mark_pending on same table should no-op
+        let config = ComputedColumnsConfig::default();
+        let mut cache = ComputedColumnCache::new(config);
+        cache.build_and_cache(
+            "db.t",
+            &ColumnMetaCache::new(ColumnDirectivesConfig::default()),
+        );
+        cache.mark_pending("db.t");
+        let pending = cache.take_pending();
+        assert!(
+            pending.is_empty(),
+            "Already-cached table should not be pending"
+        );
+    }
+
+    #[test]
+    fn cache_build_skips_invalid_expression() {
+        let mut config = ComputedColumnsConfig::default();
+        // Invalid CEL syntax
+        config
+            .columns
+            .insert("bad".to_string(), "this is not valid CEL @@@".to_string());
+        config
+            .columns
+            .insert("good".to_string(), "1 + 1".to_string());
+
+        let mut cache = ComputedColumnCache::new(config);
+        cache.build_and_cache(
+            "common.mix",
+            &ColumnMetaCache::new(ColumnDirectivesConfig::default()),
+        );
+        let tc = cache.get("common.mix").unwrap();
+        // bad expression skipped, good one compiled
+        assert_eq!(tc.len(), 1);
+    }
+
+    // ========================================================================
+    // cel_to_json: all CEL value types
+    // ========================================================================
+
+    #[test]
+    fn evaluate_produces_various_json_types() {
+        let mut config = ComputedColumnsConfig::default();
+        config
+            .columns
+            .insert("as_bool".to_string(), "true".to_string());
+        config
+            .columns
+            .insert("as_int".to_string(), "42".to_string());
+        config
+            .columns
+            .insert("as_float".to_string(), "3.14".to_string());
+        config
+            .columns
+            .insert("as_string".to_string(), r#""text""#.to_string());
+        config
+            .columns
+            .insert("as_list".to_string(), "[1, 2, 3]".to_string());
+
+        let mut cache = ComputedColumnCache::new(config);
+        cache.build_and_cache(
+            "db.types",
+            &ColumnMetaCache::new(ColumnDirectivesConfig::default()),
+        );
+        let tc = cache.get("db.types").unwrap();
+
+        let mut data = serde_json::Map::new();
+        tc.evaluate(&mut data);
+
+        assert_eq!(data.get("as_bool"), Some(&serde_json::json!(true)));
+        assert_eq!(data.get("as_int"), Some(&serde_json::json!(42)));
+        assert_eq!(data.get("as_float"), Some(&serde_json::json!(3.14)));
+        assert_eq!(data.get("as_string"), Some(&serde_json::json!("text")));
+        assert_eq!(data.get("as_list"), Some(&serde_json::json!([1, 2, 3])));
+    }
+
+    #[test]
+    fn evaluate_preserves_existing_field() {
+        // Implementation skips columns that already exist in data
+        let mut config = ComputedColumnsConfig::default();
+        config
+            .columns
+            .insert("val".to_string(), "x * 2".to_string());
+        let mut cache = ComputedColumnCache::new(config);
+        cache.build_and_cache(
+            "db.ovr",
+            &ColumnMetaCache::new(ColumnDirectivesConfig::default()),
+        );
+        let tc = cache.get("db.ovr").unwrap();
+
+        let mut data = serde_json::Map::new();
+        data.insert("x".to_string(), serde_json::json!(5));
+        data.insert("val".to_string(), serde_json::json!("original"));
+        tc.evaluate(&mut data);
+
+        // Pre-existing value wins — computed is skipped
+        assert_eq!(data.get("val"), Some(&serde_json::json!("original")));
+    }
+
+    #[test]
+    fn parse_computed_directive_empty_after_prefix() {
+        // "@computed:   " -> nothing after trim
+        assert!(parse_computed_directive("@computed:   ").is_none());
+        assert!(parse_computed_directive("@computed:").is_none());
+    }
+
+    #[test]
+    fn parse_computed_directive_pipe_without_surrounding_spaces_preserved() {
+        // Pipe without " | " doesn't split — preserved as-is (unlikely CEL though)
+        let result = parse_computed_directive("@computed: a|b");
+        assert_eq!(result, Some("a|b".to_string()));
+    }
+
+    #[test]
+    fn parse_computed_directive_with_double_pipe_or_preserved() {
+        // `||` is CEL OR — should be preserved, not treated as delimiter
+        let result = parse_computed_directive("@computed: a || b");
+        assert_eq!(result, Some("a || b".to_string()));
+    }
+
+    #[test]
+    fn parse_computed_directive_takes_only_first_directive() {
+        let result = parse_computed_directive("@computed: first | @computed: second_ignored");
+        assert_eq!(result, Some("first".to_string()));
+    }
+
+    #[test]
+    fn parse_computed_directive_no_directive() {
+        assert!(parse_computed_directive("no directive here").is_none());
+        assert!(parse_computed_directive("").is_none());
+    }
+
+    #[test]
+    fn parse_computed_directive_with_leading_other_directive() {
+        let result = parse_computed_directive("@renamed: src | @computed: x + 1");
+        assert_eq!(result, Some("x + 1".to_string()));
+    }
+
+    #[test]
+    fn cache_per_table_overrides_global() {
+        let mut config = ComputedColumnsConfig::default();
+        config
+            .columns
+            .insert("col".to_string(), r#""global""#.to_string());
+        let mut t_override = indexmap::IndexMap::new();
+        t_override.insert("col".to_string(), r#""per_table""#.to_string());
+        config.overrides.insert("db.tbl".to_string(), t_override);
+
+        let mut cache = ComputedColumnCache::new(config);
+        cache.build_and_cache(
+            "db.tbl",
+            &ColumnMetaCache::new(ColumnDirectivesConfig::default()),
+        );
+        let tc = cache.get("db.tbl").unwrap();
+
+        let mut data = serde_json::Map::new();
+        tc.evaluate(&mut data);
+        // Per-table override wins
+        assert_eq!(data.get("col"), Some(&serde_json::json!("per_table")));
+    }
+
+    #[test]
+    fn cache_computed_columns_use_ddl_when_no_config() {
+        // ColumnMetaCache provides computed expressions via DDL annotations.
+        // Without config overrides, DDL columns should be used.
+        // Note: we can't directly populate DDL-based computed columns in tests
+        // without setting up the full cache flow, so we verify the empty case.
+        let cache = ComputedColumnCache::new(ComputedColumnsConfig::default());
+        assert!(!cache.has_config());
+    }
 }

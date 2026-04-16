@@ -123,7 +123,7 @@ both formats.
 
 Larger batches amortise HTTP overhead. Default flush thresholds:
 
-- `flush_rows = 10000` rows
+- `flush_rows = 20000` rows
 - `flush_bytes = 1048576` (1MB)
 - `flush_age_secs = 5`
 
@@ -145,9 +145,9 @@ mimalloc = ["dep:mimalloc"]
 
 | Setting | Default | Tuning Guidance |
 |---------|---------|-----------------|
-| `flush_rows` | 10,000 | Increase for throughput, decrease for latency |
+| `flush_rows` | 20,000 | Increase for throughput, decrease for latency |
 | `flush_bytes` | 1MB | Match to typical batch memory size |
-| `flush_timeout` | 5s | Lower for real-time, higher for batch |
+| `flush_age_secs` | 5s | Lower for real-time, higher for batch |
 
 ### Concurrent Inserts
 

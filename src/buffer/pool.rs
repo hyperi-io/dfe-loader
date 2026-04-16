@@ -429,4 +429,136 @@ mod tests {
         let stats = pool.stats();
         assert_eq!(stats.available, 2);
     }
+
+    #[test]
+    fn test_pool_stats_hit_rate_empty_is_100() {
+        // With no gets yet, hit_rate is defined as 100%
+        let pool: ObjectPool<PooledString> = ObjectPool::new(4);
+        let stats = pool.stats();
+        assert_eq!(stats.hits, 0);
+        assert_eq!(stats.creates, 0);
+        assert_eq!(stats.hit_rate(), 100.0);
+    }
+
+    #[test]
+    fn test_pool_stats_hit_rate_all_creates_is_zero() {
+        // Zero-capacity pool: every get is a fresh create
+        let pool: ObjectPool<PooledString> = ObjectPool::new(0);
+        let _a = pool.get();
+        let _b = pool.get();
+        let _c = pool.get();
+        let stats = pool.stats();
+        assert_eq!(stats.hits, 0);
+        assert_eq!(stats.creates, 3);
+        assert_eq!(stats.hit_rate(), 0.0);
+    }
+
+    #[test]
+    fn test_pool_stats_hit_rate_mixed() {
+        let pool: ObjectPool<PooledString> = ObjectPool::new(2);
+        let a = pool.get(); // hit
+        let b = pool.get(); // hit
+        let c = pool.get(); // create
+        drop((a, b, c));
+        let stats = pool.stats();
+        assert_eq!(stats.hits, 2);
+        assert_eq!(stats.creates, 1);
+        // hit_rate = 2/3 = ~66.67
+        assert!(stats.hit_rate() > 66.0);
+        assert!(stats.hit_rate() < 67.0);
+    }
+
+    #[test]
+    fn test_poolable_default_capacity_map() {
+        assert_eq!(<PooledMap as Poolable>::default_capacity(), 32);
+    }
+
+    #[test]
+    fn test_poolable_default_capacity_offsets() {
+        assert_eq!(<PooledOffsets as Poolable>::default_capacity(), 1000);
+    }
+
+    #[test]
+    fn test_poolable_default_capacity_string() {
+        assert_eq!(<PooledString as Poolable>::default_capacity(), 256);
+    }
+
+    #[test]
+    fn test_pool_config_default_values() {
+        let cfg = PoolConfig::default();
+        assert_eq!(cfg.map_pool_size, 1000);
+        assert_eq!(cfg.offset_pool_size, 100);
+        assert_eq!(cfg.string_pool_size, 500);
+    }
+
+    #[test]
+    fn test_buffer_pools_default() {
+        // Use the default-impl path of BufferPools
+        let pools = BufferPools::default();
+        let stats = pools.stats();
+        // Default sizes match PoolConfig::default
+        assert_eq!(stats.maps.capacity, 1000);
+        assert_eq!(stats.offsets.capacity, 100);
+        assert_eq!(stats.strings.capacity, 500);
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn test_legacy_buffer_pool_still_constructible() {
+        // Deprecated, but must still build and default cleanly
+        let _ = BufferPool::new();
+        let _ = BufferPool::default();
+    }
+
+    #[test]
+    fn test_pool_reset_on_drop_preserves_capacity() {
+        // Items returned to the pool should be reset (cleared) and reusable
+        let pool: ObjectPool<PooledMap> = ObjectPool::new(1);
+        {
+            let mut m = pool.get();
+            m.insert("x".to_string(), Value::String("y".to_string()));
+            m.insert("a".to_string(), Value::Number(42.into()));
+            assert_eq!(m.len(), 2);
+        } // Drop — reset() clears
+        let m2 = pool.get();
+        assert!(m2.is_empty(), "returned map should be cleared");
+    }
+
+    #[test]
+    fn test_pool_stats_clone_is_independent() {
+        let pool: ObjectPool<PooledString> = ObjectPool::new(2);
+        let s1 = pool.stats();
+        let _g = pool.get();
+        let s2 = pool.stats();
+        // First snapshot remains unchanged
+        assert_eq!(s1.hits, 0);
+        // Second snapshot reflects hit
+        assert_eq!(s2.hits, 1);
+    }
+
+    #[test]
+    fn test_pooled_offsets_default_capacity_roundtrip() {
+        let pool: ObjectPool<PooledOffsets> = ObjectPool::new(3);
+        let mut offsets = pool.get();
+        for i in 0..10 {
+            offsets.push(KafkaOffset::new("t", 0, i));
+        }
+        assert_eq!(offsets.len(), 10);
+        drop(offsets);
+        let offsets2 = pool.get();
+        assert_eq!(offsets2.len(), 0, "reset clears contents");
+    }
+
+    #[test]
+    fn test_buffer_pools_new_explicit_sizes() {
+        let cfg = PoolConfig {
+            map_pool_size: 3,
+            offset_pool_size: 2,
+            string_pool_size: 1,
+        };
+        let pools = BufferPools::new(&cfg);
+        assert_eq!(pools.maps.stats().capacity, 3);
+        assert_eq!(pools.offsets.stats().capacity, 2);
+        assert_eq!(pools.strings.stats().capacity, 1);
+    }
 }

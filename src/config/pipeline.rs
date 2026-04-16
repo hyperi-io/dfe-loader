@@ -1067,3 +1067,198 @@ impl Default for FieldMappingConfig {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ========================================================================
+    // DlqConfig::to_rustlib_config — mode parsing
+    // ========================================================================
+
+    #[test]
+    fn dlq_config_mode_cascade() {
+        let cfg = DlqConfig {
+            enabled: true,
+            mode: "cascade".to_string(),
+            topic_suffix: ".dlq".to_string(),
+            file_enabled: true,
+            file_path: "/var/spool".to_string(),
+            kafka_enabled: true,
+        };
+        let rc = cfg.to_rustlib_config();
+        assert!(rc.enabled);
+        // Cascade is the default variant
+    }
+
+    #[test]
+    fn dlq_config_mode_disabled_forces_off() {
+        let cfg = DlqConfig {
+            enabled: true,
+            mode: "disabled".to_string(),
+            topic_suffix: ".dlq".to_string(),
+            file_enabled: true,
+            file_path: "/tmp".to_string(),
+            kafka_enabled: true,
+        };
+        let rc = cfg.to_rustlib_config();
+        // "disabled" mode overrides enabled flag to false
+        assert!(!rc.enabled);
+    }
+
+    #[test]
+    fn dlq_config_mode_fan_out() {
+        let cfg = DlqConfig {
+            enabled: true,
+            mode: "fan_out".to_string(),
+            topic_suffix: ".dlq".to_string(),
+            file_enabled: false,
+            file_path: "/tmp".to_string(),
+            kafka_enabled: false,
+        };
+        let rc = cfg.to_rustlib_config();
+        assert!(rc.enabled);
+    }
+
+    #[test]
+    fn dlq_config_mode_file_only() {
+        let cfg = DlqConfig {
+            enabled: true,
+            mode: "file_only".to_string(),
+            ..default_dlq_base()
+        };
+        let rc = cfg.to_rustlib_config();
+        assert!(rc.enabled);
+        assert!(rc.file.enabled);
+    }
+
+    #[test]
+    fn dlq_config_mode_kafka_only() {
+        let cfg = DlqConfig {
+            enabled: true,
+            mode: "kafka_only".to_string(),
+            ..default_dlq_base()
+        };
+        let rc = cfg.to_rustlib_config();
+        assert!(rc.enabled);
+    }
+
+    #[test]
+    fn dlq_config_mode_unknown_defaults_to_cascade() {
+        let cfg = DlqConfig {
+            enabled: true,
+            mode: "bogus_mode".to_string(),
+            ..default_dlq_base()
+        };
+        let rc = cfg.to_rustlib_config();
+        assert!(rc.enabled);
+        // Unknown mode falls through to Cascade + enabled stays
+    }
+
+    #[test]
+    fn dlq_config_disabled_flag_respected() {
+        let cfg = DlqConfig {
+            enabled: false,
+            mode: "cascade".to_string(),
+            ..default_dlq_base()
+        };
+        let rc = cfg.to_rustlib_config();
+        assert!(!rc.enabled);
+    }
+
+    #[test]
+    fn dlq_config_topic_suffix_propagated() {
+        let cfg = DlqConfig {
+            enabled: true,
+            mode: "kafka_only".to_string(),
+            topic_suffix: ".custom_dlq".to_string(),
+            ..default_dlq_base()
+        };
+        let rc = cfg.to_rustlib_config();
+        assert_eq!(rc.kafka.topic_suffix, ".custom_dlq");
+    }
+
+    #[test]
+    fn dlq_config_file_path_propagated() {
+        let cfg = DlqConfig {
+            enabled: true,
+            mode: "file_only".to_string(),
+            file_path: "/custom/dlq/path".to_string(),
+            ..default_dlq_base()
+        };
+        let rc = cfg.to_rustlib_config();
+        assert_eq!(rc.file.path.to_string_lossy(), "/custom/dlq/path");
+    }
+
+    fn default_dlq_base() -> DlqConfig {
+        DlqConfig {
+            enabled: true,
+            mode: "cascade".to_string(),
+            topic_suffix: ".dlq".to_string(),
+            file_enabled: true,
+            file_path: "/var/spool".to_string(),
+            kafka_enabled: true,
+        }
+    }
+
+    // ========================================================================
+    // ScalingConfig::build_pressure
+    // ========================================================================
+
+    #[test]
+    fn scaling_config_build_pressure_default() {
+        let cfg = ScalingConfig::default();
+        let _pressure = cfg.build_pressure();
+        // Construction succeeds — no panic
+    }
+
+    #[test]
+    fn scaling_config_build_pressure_with_custom_values() {
+        let mut cfg = ScalingConfig::default();
+        cfg.enabled = true;
+        cfg.memory_gate_threshold = 0.8;
+        cfg.weight_kafka_lag = 0.5;
+        cfg.saturation_kafka_lag = 50_000.0;
+        let _pressure = cfg.build_pressure();
+        // Should construct without panic
+    }
+
+    #[test]
+    fn scaling_config_build_pressure_disabled() {
+        let mut cfg = ScalingConfig::default();
+        cfg.enabled = false;
+        let _pressure = cfg.build_pressure();
+        // Disabled is valid construction
+    }
+
+    // ========================================================================
+    // Default configs sanity
+    // ========================================================================
+
+    #[test]
+    fn dlq_config_default_values() {
+        let cfg = DlqConfig::default();
+        assert!(cfg.enabled);
+        assert_eq!(cfg.mode, "cascade");
+        assert!(cfg.file_enabled);
+        assert!(cfg.kafka_enabled);
+    }
+
+    #[test]
+    fn payload_config_default_values() {
+        let cfg = PayloadConfig::default();
+        assert_eq!(cfg.format, "auto");
+        assert_eq!(cfg.mismatch_threshold, 10);
+        assert_eq!(cfg.pipeline_mode, "json_primary");
+    }
+
+    #[test]
+    fn field_mapping_config_default_values() {
+        let cfg = FieldMappingConfig::default();
+        assert!(!cfg.enabled);
+        assert_eq!(cfg.default_action, "rename");
+        assert_eq!(cfg.builtin, "none");
+        assert!(cfg.files.is_empty());
+        assert!(cfg.overrides.is_empty());
+    }
+}

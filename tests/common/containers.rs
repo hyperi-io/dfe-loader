@@ -44,6 +44,36 @@ mod testcontainers_impl {
             Self { clickhouse, kafka }
         }
 
+        /// Spin up exactly the containers the app declares it depends on.
+        ///
+        /// Reads `Config::deployment_contract().depends_on` (the same list that
+        /// drives Helm/Compose generation) and starts the corresponding
+        /// testcontainers. Keeps test infra in lockstep with deployment infra
+        /// — when the app gains a new `depends_on` entry, tests pick it up
+        /// automatically.
+        ///
+        /// Currently recognises: `kafka`, `clickhouse`. Unknown entries are
+        /// logged and ignored (so a new dep doesn't break existing tests
+        /// before a corresponding image is wired in).
+        pub async fn from_contract() -> Self {
+            let contract = dfe_loader::config::Config::deployment_contract();
+            let mut need_clickhouse = false;
+            let mut need_kafka = false;
+            for dep in &contract.depends_on {
+                match dep.as_str() {
+                    "clickhouse" => need_clickhouse = true,
+                    "kafka" | "redpanda" => need_kafka = true,
+                    other => {
+                        eprintln!(
+                            "TestInfrastructure::from_contract: ignoring unknown dependency \
+                             '{other}' — wire up an image in containers.rs to support it"
+                        );
+                    }
+                }
+            }
+            Self::new(need_clickhouse, need_kafka).await
+        }
+
         /// Get ClickHouse configuration
         pub async fn clickhouse_config(&self) -> Option<ClickHouseConfig> {
             let container = self.clickhouse.as_ref()?;
@@ -111,3 +141,9 @@ mod testcontainers_impl {
         }
     }
 }
+
+// Re-export so tests can use `crate::common::containers::TestInfrastructure`
+// regardless of whether the feature is enabled. Unused in binaries that don't
+// reference it — hence the allow.
+#[allow(unused_imports)]
+pub use testcontainers_impl::TestInfrastructure;

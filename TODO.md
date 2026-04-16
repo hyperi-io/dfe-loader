@@ -25,6 +25,16 @@ Stage 1 ships first, Stage 2 is a drop-in upgrade — same API, better protocol.
 
 ## Active
 
+### Performance Review
+
+Audit [docs/PERFORMANCE.md](docs/PERFORMANCE.md) — confirm what's still applied, decide what's worth wiring next.
+
+- [ ] Allocator: `jemalloc`/`mimalloc` features built in CI but `default = []`. Decide production default and document in DEPLOYMENT.md.
+- [ ] PGO + BOLT: only in Cargo.toml comments today. Evaluate ROI for release pipeline (10-20% + 5-15%) vs CI complexity.
+- [ ] Profile under representative load (perf, flamegraph, jeprof). Record baseline so future regressions are detectable.
+- [ ] Validate `flush_rows = 20_000` still aligns with rustlib Kafka transport (`DEFAULT_BATCH_SIZE = 10_000`, `queued.min.messages = 20000` prod profile) under PB/day workloads.
+- [ ] Consider `lto = "fat"` for release builds — measure compile-time vs runtime trade.
+
 ### Phase 6: Pipeline Parallelisation (rustlib v2.x AdaptiveWorkerPool)
 
 Refactor the sequential `for msg in batch` loop into a parallel-then-sequential

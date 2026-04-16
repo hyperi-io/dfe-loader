@@ -422,4 +422,137 @@ mod tests {
         cache.invalidate("common.events");
         assert!(cache.get("common.events").is_none());
     }
+
+    // ========================================================================
+    // from_config: various configurations
+    // ========================================================================
+
+    #[test]
+    fn from_config_empty_fields_yields_empty_builder() {
+        // Default: no builtin, no files, no overrides — empty base_rules
+        let config = FieldMappingConfig::default();
+        let builder = MappingBuilder::from_config(&config).unwrap();
+        assert_eq!(builder.base_rule_count(), 0);
+    }
+
+    #[test]
+    fn from_config_unknown_builtin_falls_through() {
+        // Unknown builtin name — BuiltinPreset::parse returns None → no rules loaded
+        let mut config = FieldMappingConfig::default();
+        config.builtin = "nonexistent_preset".to_string();
+        let builder = MappingBuilder::from_config(&config).unwrap();
+        assert_eq!(builder.base_rule_count(), 0);
+    }
+
+    #[test]
+    fn from_config_with_nonexistent_external_file_errors() {
+        // Cannot load file → Err(Config(...))
+        let mut config = FieldMappingConfig::default();
+        config.files = vec!["/nonexistent/path/mapping.csv".to_string()];
+        let result = MappingBuilder::from_config(&config);
+        assert!(result.is_err());
+        match result.err().unwrap() {
+            crate::Error::Config(msg) => {
+                assert!(msg.contains("remap file") || !msg.is_empty());
+            }
+            other => panic!("expected Config error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn from_config_parses_overrides() {
+        use crate::config::FieldMappingOverride;
+        let mut config = FieldMappingConfig::default();
+        config.overrides.insert(
+            "source.ip".to_string(),
+            FieldMappingOverride {
+                action: "copy".to_string(),
+            },
+        );
+        let builder = MappingBuilder::from_config(&config).unwrap();
+        assert_eq!(builder.base_rule_count(), 0);
+        // override stored — we can verify via a build_for_table call
+        let schema = make_schema(&["source.ip"]);
+        let col_meta = crate::column_meta::ColumnMetaCache::new(Default::default());
+        let _mapping = builder.build_for_table(&schema, &col_meta);
+        // no panic — override map populated
+    }
+
+    #[test]
+    fn from_config_with_malformed_csv_file_errors() {
+        // Malformed CSV (missing expected columns) — load_file returns Err
+        let tmp = tempfile::NamedTempFile::with_suffix(".csv").expect("tempfile");
+        std::fs::write(tmp.path(), "src,dst\nsrc_ip,source.ip\n").expect("write");
+
+        let mut config = FieldMappingConfig::default();
+        config.files = vec![tmp.path().to_string_lossy().into_owned()];
+
+        // Loader expects specific column headers — this CSV won't parse
+        let result = MappingBuilder::from_config(&config);
+        assert!(result.is_err(), "CSV with wrong headers should error");
+    }
+
+    #[test]
+    fn base_rule_count_accessor() {
+        let builder = MappingBuilder {
+            base_rules: vec![
+                FieldMappingRule {
+                    source_fields: vec!["a".into()],
+                    destination: "A".into(),
+                    action: MappingAction::Rename,
+                    origin: RuleOrigin::Builtin("b".into()),
+                },
+                FieldMappingRule {
+                    source_fields: vec!["b".into()],
+                    destination: "B".into(),
+                    action: MappingAction::Copy,
+                    origin: RuleOrigin::Builtin("b".into()),
+                },
+            ],
+            default_action: MappingAction::Rename,
+            overrides: FxHashMap::default(),
+        };
+        assert_eq!(builder.base_rule_count(), 2);
+    }
+
+    #[test]
+    fn cache_get_on_nonexistent_table_is_none() {
+        let builder = MappingBuilder {
+            base_rules: vec![],
+            default_action: MappingAction::Rename,
+            overrides: FxHashMap::default(),
+        };
+        let cache = FieldMappingCache::new(builder);
+        assert!(cache.get("never.cached").is_none());
+    }
+
+    #[test]
+    fn cache_mark_pending_after_cached_is_noop() {
+        let builder = MappingBuilder {
+            base_rules: vec![],
+            default_action: MappingAction::Rename,
+            overrides: FxHashMap::default(),
+        };
+        let mut cache = FieldMappingCache::new(builder);
+        let schema = make_schema(&[]);
+        let col_meta = crate::column_meta::ColumnMetaCache::new(Default::default());
+        cache.build_and_cache("common.cached", &schema, &col_meta);
+
+        // Already cached; mark_pending should not add to pending list
+        cache.mark_pending("common.cached");
+        let pending = cache.take_pending();
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn cache_invalidate_nonexistent_is_ok() {
+        let builder = MappingBuilder {
+            base_rules: vec![],
+            default_action: MappingAction::Rename,
+            overrides: FxHashMap::default(),
+        };
+        let mut cache = FieldMappingCache::new(builder);
+        // No-op — should not panic
+        cache.invalidate("never_existed");
+    }
 }

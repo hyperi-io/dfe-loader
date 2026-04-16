@@ -552,4 +552,219 @@ mod tests {
             );
         }
     }
+
+    // ========================================================================
+    // BufferManager accessors / edge cases
+    // ========================================================================
+
+    #[test]
+    fn test_buffer_manager_default_instance() {
+        let m = BufferManager::default();
+        assert_eq!(m.pending_rows(), 0);
+        assert!(!m.should_flush());
+    }
+
+    #[test]
+    fn test_buffer_manager_empty_stats() {
+        let m = BufferManager::new(&test_config());
+        let s = m.stats();
+        assert_eq!(s.pending_rows, 0);
+        assert_eq!(s.pending_bytes, 0);
+        assert_eq!(s.pending_chunks, 0);
+        assert_eq!(s.table_count, 0);
+    }
+
+    #[test]
+    fn test_buffer_manager_stats_with_data() {
+        let mut m = BufferManager::new(&test_config());
+        for i in 0..3 {
+            let data = json!({"id": i}).as_object().unwrap().clone();
+            m.push("db.a", data, None, None);
+        }
+        for i in 0..2 {
+            let data = json!({"id": i}).as_object().unwrap().clone();
+            m.push("db.b", data, None, None);
+        }
+
+        let s = m.stats();
+        assert_eq!(s.table_count, 2);
+        assert_eq!(s.pending_rows, 5);
+        assert_eq!(s.pending_chunks, 2, "Two non-empty buffers");
+        assert!(s.pending_bytes > 0);
+    }
+
+    #[test]
+    fn test_buffer_manager_clear_removes_all_buffers() {
+        let mut m = BufferManager::new(&test_config());
+        m.push(
+            "db.a",
+            json!({"id": 1}).as_object().unwrap().clone(),
+            None,
+            None,
+        );
+        assert_eq!(m.pending_rows(), 1);
+        m.clear();
+        assert_eq!(m.pending_rows(), 0);
+        assert_eq!(m.stats().table_count, 0);
+    }
+
+    #[test]
+    fn test_buffer_manager_per_table_stats() {
+        let mut m = BufferManager::new(&test_config());
+        m.push(
+            "db.a",
+            json!({"id": 1}).as_object().unwrap().clone(),
+            None,
+            None,
+        );
+        m.push(
+            "db.b",
+            json!({"id": 2}).as_object().unwrap().clone(),
+            None,
+            None,
+        );
+        m.push(
+            "db.b",
+            json!({"id": 3}).as_object().unwrap().clone(),
+            None,
+            None,
+        );
+
+        let stats: std::collections::HashMap<&str, (usize, usize)> = m
+            .per_table_stats()
+            .into_iter()
+            .map(|(t, r, b)| (t, (r, b)))
+            .collect();
+        assert_eq!(stats["db.a"], (1, 200));
+        assert_eq!(stats["db.b"], (2, 400));
+    }
+
+    #[test]
+    fn test_buffer_manager_tables_with_pending() {
+        let mut m = BufferManager::new(&test_config());
+        m.push(
+            "db.a",
+            json!({"id": 1}).as_object().unwrap().clone(),
+            None,
+            None,
+        );
+        m.push(
+            "db.b",
+            json!({"id": 2}).as_object().unwrap().clone(),
+            None,
+            None,
+        );
+        let tables: std::collections::HashSet<&str> = m.tables_with_pending().into_iter().collect();
+        assert!(tables.contains("db.a"));
+        assert!(tables.contains("db.b"));
+    }
+
+    #[test]
+    fn test_buffer_manager_should_flush_flag() {
+        let mut m = BufferManager::new(&test_config());
+        // Empty → false
+        assert!(!m.should_flush());
+        // One row, threshold 5 → false
+        m.push(
+            "db.a",
+            json!({"id": 1}).as_object().unwrap().clone(),
+            None,
+            None,
+        );
+        assert!(!m.should_flush());
+        // Push enough to exceed threshold
+        for i in 0..10 {
+            m.push(
+                "db.a",
+                json!({"id": i}).as_object().unwrap().clone(),
+                None,
+                None,
+            );
+        }
+        assert!(m.should_flush());
+    }
+
+    #[test]
+    fn test_buffer_manager_get_ready_for_flush_empty() {
+        let mut m = BufferManager::new(&test_config());
+        let batches = m.get_ready_for_flush();
+        assert!(batches.is_empty());
+    }
+
+    #[test]
+    fn test_buffer_manager_flush_all_empty() {
+        let mut m = BufferManager::new(&test_config());
+        let batches = m.flush_all();
+        assert!(batches.is_empty());
+    }
+
+    #[test]
+    fn test_buffer_manager_batch_size_min_100() {
+        // BufferManager::new clamps batch_size to at least 100
+        let tiny_config = BufferConfig {
+            flush_bytes: 1024,
+            flush_rows: 5, // < 100
+            flush_age_secs: 10,
+        };
+        let m = BufferManager::new(&tiny_config);
+        assert_eq!(m.batch_size, 100, "batch_size should be clamped to 100");
+    }
+
+    #[test]
+    fn test_buffer_manager_pending_bytes_estimate() {
+        let mut m = BufferManager::new(&test_config());
+        // 5 rows × 200 bytes each = 1000
+        for i in 0..5 {
+            m.push(
+                "db.a",
+                json!({"id": i}).as_object().unwrap().clone(),
+                None,
+                None,
+            );
+        }
+        assert_eq!(m.pending_bytes(), 1000);
+    }
+
+    #[test]
+    fn test_buffer_manager_flush_leaves_buffer_empty_but_table_key() {
+        // After flush, the buffer is emptied but the key still exists.
+        // tables_with_pending() should filter out empty buffers.
+        let mut m = BufferManager::new(&test_config());
+        for i in 0..6 {
+            m.push(
+                "db.a",
+                json!({"id": i}).as_object().unwrap().clone(),
+                None,
+                None,
+            );
+        }
+        let _ = m.get_ready_for_flush();
+        // Buffer exists but empty
+        let pending_tables = m.tables_with_pending();
+        assert!(pending_tables.is_empty());
+    }
+
+    #[test]
+    fn test_table_buffer_push_and_build_preserves_offsets() {
+        // Directly test TableBuffer via BufferManager.push with offsets
+        let mut m = BufferManager::new(&test_config());
+        let topic: Arc<str> = Arc::from("t");
+        for i in 0..5 {
+            let off = KafkaOffset::with_shared_topic(topic.clone(), 0, i * 10);
+            m.push(
+                "db.a",
+                json!({"id": i}).as_object().unwrap().clone(),
+                Some(off),
+                None,
+            );
+        }
+        // threshold is 5
+        let batches = m.get_ready_for_flush();
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].offsets.len(), 5);
+        // Offsets preserved in insertion order
+        for (i, o) in batches[0].offsets.iter().enumerate() {
+            assert_eq!(o.offset, (i as i64) * 10);
+        }
+    }
 }

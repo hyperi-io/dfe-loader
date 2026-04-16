@@ -329,4 +329,133 @@ mod tests {
         // Non-escaped should be Borrowed (zero-copy)
         assert!(matches!(result, Some(Cow::Borrowed(_))));
     }
+
+    #[test]
+    fn test_parse_invalid_json_returns_json_error() {
+        let payload = b"{not valid";
+        let err = parse_payload(payload).unwrap_err();
+        match err {
+            crate::Error::Json(_) => {}
+            other => panic!("Expected Json error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parse_msgpack_invalid_bytes_errors() {
+        // Truncated MessagePack — will fail to parse
+        let payload = &[0x81u8, 0xa3]; // fixmap(1) + fixstr(3) + no content
+        let result = parse_payload(payload);
+        // May succeed if detector doesn't recognize as MessagePack — then fails as JSON
+        // Or fails as invalid MessagePack — either way, Err
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_empty_payload_errors() {
+        let result = parse_payload(b"");
+        assert!(
+            result.is_err(),
+            "empty payload should fail format detection"
+        );
+    }
+
+    #[test]
+    fn test_extract_field_json_non_string_field_returns_none() {
+        // The field exists but is not a string
+        let payload = br#"{"num": 42, "arr": [1, 2], "obj": {}}"#;
+        assert_eq!(extract_field_json(payload, "num"), None);
+        assert_eq!(extract_field_json(payload, "arr"), None);
+        assert_eq!(extract_field_json(payload, "obj"), None);
+    }
+
+    #[test]
+    fn test_extract_field_json_cow_non_string_returns_none() {
+        // Non-string values return None
+        let payload = br#"{"num": 42, "bool_field": true, "null_field": null}"#;
+        assert!(extract_field_json_cow(payload, "num").is_none());
+        assert!(extract_field_json_cow(payload, "bool_field").is_none());
+        assert!(extract_field_json_cow(payload, "null_field").is_none());
+    }
+
+    #[test]
+    fn test_extract_field_json_cow_missing_returns_none() {
+        let payload = br#"{"a": "x"}"#;
+        assert!(extract_field_json_cow(payload, "missing").is_none());
+    }
+
+    #[test]
+    fn test_extract_nested_field_json_cow_missing_returns_none() {
+        let payload = br#"{"a": {"b": "x"}}"#;
+        assert!(extract_nested_field_json_cow(payload, "a.missing").is_none());
+        assert!(extract_nested_field_json_cow(payload, "x.y").is_none());
+    }
+
+    #[test]
+    fn test_extract_nested_field_json_escapes() {
+        use std::borrow::Cow;
+        let payload = br#"{"outer": {"msg": "tab\there", "plain": "normal"}}"#;
+
+        let result = extract_nested_field_json_cow(payload, "outer.msg");
+        assert_eq!(result.as_deref(), Some("tab\there"));
+        assert!(matches!(result, Some(Cow::Owned(_))));
+
+        let result = extract_nested_field_json_cow(payload, "outer.plain");
+        assert_eq!(result.as_deref(), Some("normal"));
+    }
+
+    #[test]
+    fn test_extract_field_json_empty_string_value() {
+        // Empty string "" — raw is "\"\"" (2 chars), .len() >= 2 but inner is ""
+        let payload = br#"{"empty": ""}"#;
+        let result = extract_field_json_cow(payload, "empty");
+        // Cow::Borrowed("") inner
+        assert_eq!(result.as_deref(), Some(""));
+    }
+
+    #[test]
+    fn test_extract_deeply_nested_path() {
+        let payload = br#"{"a": {"b": {"c": {"d": "deep"}}}}"#;
+        let result = extract_nested_field_json(payload, "a.b.c.d");
+        assert_eq!(result, Some("deep".to_string()));
+    }
+
+    #[test]
+    fn test_extract_deeply_nested_path_cow() {
+        use std::borrow::Cow;
+        let payload = br#"{"a": {"b": {"c": {"d": "deep"}}}}"#;
+        let result = extract_nested_field_json_cow(payload, "a.b.c.d");
+        assert_eq!(result.as_deref(), Some("deep"));
+        // Non-escaped → borrowed
+        assert!(matches!(result, Some(Cow::Borrowed(_))));
+    }
+
+    #[test]
+    fn test_extract_field_with_unicode_value() {
+        let payload = r#"{"city": "Zürich"}"#.as_bytes();
+        let result = extract_field_json(payload, "city");
+        assert_eq!(result, Some("Zürich".to_string()));
+    }
+
+    #[test]
+    fn test_parse_msgpack_valid_nested() {
+        let original = serde_json::json!({
+            "outer": {
+                "inner": {
+                    "deep": 42
+                }
+            }
+        });
+        let payload = rmp_serde::to_vec(&original).unwrap();
+        let value = parse_payload(&payload).unwrap();
+        assert_eq!(value["outer"]["inner"]["deep"], 42);
+    }
+
+    #[test]
+    fn test_parse_json_array_at_top_level() {
+        // Top-level array
+        let payload = br#"[1, 2, 3]"#;
+        let value = parse_payload(payload).unwrap();
+        assert!(value.is_array());
+        assert_eq!(value.as_array().unwrap().len(), 3);
+    }
 }
