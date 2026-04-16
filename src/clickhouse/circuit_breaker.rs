@@ -21,9 +21,10 @@
 //! - `half_open_max_requests`: Max requests allowed in half-open state
 
 use std::collections::HashMap;
-use std::sync::RwLock;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
+
+use parking_lot::RwLock;
 
 use tracing::{debug, info, warn};
 
@@ -123,7 +124,7 @@ impl CircuitBreaker {
     ///
     /// Returns `true` if request can proceed, `false` if circuit is open.
     pub fn allow_request(&self, table: &str) -> bool {
-        let mut circuits = self.circuits.write().unwrap();
+        let mut circuits = self.circuits.write();
         let circuit = circuits
             .entry(table.to_string())
             .or_insert_with(TableCircuit::new);
@@ -171,7 +172,7 @@ impl CircuitBreaker {
 
     /// Record a successful request
     pub fn record_success(&self, table: &str) {
-        let mut circuits = self.circuits.write().unwrap();
+        let mut circuits = self.circuits.write();
         let circuit = circuits
             .entry(table.to_string())
             .or_insert_with(TableCircuit::new);
@@ -211,7 +212,7 @@ impl CircuitBreaker {
 
     /// Record a failed request
     pub fn record_failure(&self, table: &str) {
-        let mut circuits = self.circuits.write().unwrap();
+        let mut circuits = self.circuits.write();
         let circuit = circuits
             .entry(table.to_string())
             .or_insert_with(TableCircuit::new);
@@ -258,7 +259,7 @@ impl CircuitBreaker {
 
     /// Get the current state for a table
     pub fn get_state(&self, table: &str) -> CircuitState {
-        let circuits = self.circuits.read().unwrap();
+        let circuits = self.circuits.read();
         circuits
             .get(table)
             .map_or(CircuitState::Closed, |c| c.state)
@@ -268,7 +269,7 @@ impl CircuitBreaker {
     ///
     /// Returns `(table_name, state_u8)` where state is 0=closed, 1=open, 2=half-open.
     pub fn per_table_states(&self) -> Vec<(String, u8)> {
-        let circuits = self.circuits.read().unwrap();
+        let circuits = self.circuits.read();
         circuits
             .iter()
             .map(|(table, c)| {
@@ -284,7 +285,7 @@ impl CircuitBreaker {
 
     /// Get all tables with open circuits
     pub fn get_open_circuits(&self) -> Vec<String> {
-        let circuits = self.circuits.read().unwrap();
+        let circuits = self.circuits.read();
         circuits
             .iter()
             .filter(|(_, c)| c.state == CircuitState::Open)
@@ -294,7 +295,7 @@ impl CircuitBreaker {
 
     /// Get circuit breaker statistics
     pub fn stats(&self) -> CircuitBreakerStats {
-        let circuits = self.circuits.read().unwrap();
+        let circuits = self.circuits.read();
         let mut open_count = 0;
         let mut half_open_count = 0;
         let mut closed_count = 0;
@@ -319,7 +320,7 @@ impl CircuitBreaker {
 
     /// Reset circuit for a table (manual override)
     pub fn reset(&self, table: &str) {
-        let mut circuits = self.circuits.write().unwrap();
+        let mut circuits = self.circuits.write();
         if let Some(circuit) = circuits.get_mut(table) {
             info!(table = %table, "Circuit manually reset");
             circuit.state = CircuitState::Closed;
@@ -332,7 +333,7 @@ impl CircuitBreaker {
 
     /// Reset all circuits (e.g., after config change)
     pub fn reset_all(&self) {
-        let mut circuits = self.circuits.write().unwrap();
+        let mut circuits = self.circuits.write();
         circuits.clear();
         info!("All circuits reset");
     }

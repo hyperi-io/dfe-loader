@@ -606,3 +606,13 @@ Each is a new file implementing `DlqBackend` trait + feature flag. No changes to
 - [x] Adopt `ConfigReloader` from rustlib (ConfigWatcher wraps it — already done)
 - [x] Review for lazy shims / pass-through functions over rustlib (none found)
 - [x] Bump rustlib to >=1.19.6, wire Config Registry, adopt SensitiveString for auth fields
+
+### Housekeeping: rustlib v2.5.4 + Security Fixes (2026-04-16)
+
+- [x] Bump hyperi-rustlib >=2.5.0 → >=2.5.4 (rustdoc compliance)
+- [x] Fix rustls-webpki CVEs (RUSTSEC-2026-0098/0099 — TLS cert validation bypass) via cargo update
+- [x] Circuit breaker: migrate std::sync::RwLock → parking_lot::RwLock (no poisoning, no unwrap)
+- [x] Clean up stale local release branch (remote already deleted)
+- [x] Code review: license headers clean, no TODOs, no unsafe in prod, no hardcoded secrets
+- [x] Security review: no vulnerabilities found, all changes security-positive
+- [x] 399 lib tests pass, clippy clean, cargo deny clean
