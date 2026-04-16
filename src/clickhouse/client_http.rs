@@ -492,4 +492,304 @@ mod tests {
         let client = client.unwrap();
         assert_eq!(client.database(), "default");
     }
+
+    // ============================================================
+    // parse_db_table — additional edge cases
+    // ============================================================
+
+    #[test]
+    fn test_parse_db_table_empty_string_fallback() {
+        let (db, tbl) = parse_db_table("", "my_default");
+        assert_eq!(db, "my_default");
+        assert_eq!(tbl, "");
+    }
+
+    #[test]
+    fn test_parse_db_table_leading_dot() {
+        // Leading dot — empty db string, non-empty table
+        let (db, tbl) = parse_db_table(".events", "defaultdb");
+        assert_eq!(db, "");
+        assert_eq!(tbl, "events");
+    }
+
+    #[test]
+    fn test_parse_db_table_unicode() {
+        let (db, tbl) = parse_db_table("données.évènements", "default");
+        assert_eq!(db, "données");
+        assert_eq!(tbl, "évènements");
+    }
+
+    #[test]
+    fn test_parse_db_table_returns_owned_strings() {
+        // Regression: parse_db_table returns (String, String) - verify independence
+        // from the input lifetime.
+        let result;
+        {
+            let input = String::from("foo.bar");
+            result = parse_db_table(&input, "def");
+        }
+        assert_eq!(result.0, "foo");
+        assert_eq!(result.1, "bar");
+    }
+
+    #[test]
+    fn test_parse_db_table_first_dot_wins() {
+        // split_once uses the FIRST delimiter — dotted table names go to the "table" half
+        let (db, tbl) = parse_db_table("db.schema.table", "default");
+        assert_eq!(db, "db");
+        assert_eq!(tbl, "schema.table");
+    }
+
+    // ============================================================
+    // escape_identifier — edge cases
+    // ============================================================
+
+    #[test]
+    fn test_escape_identifier_empty() {
+        assert_eq!(escape_identifier(""), "``");
+    }
+
+    #[test]
+    fn test_escape_identifier_unicode() {
+        // Non-ASCII characters pass through unescaped — only the 5 special chars get escaped.
+        assert_eq!(escape_identifier("événements"), "`événements`");
+        assert_eq!(escape_identifier("テーブル"), "`テーブル`");
+    }
+
+    #[test]
+    fn test_escape_identifier_all_special_chars_at_once() {
+        let input = "a\\b'c`d\te\nf";
+        let expected = "`a\\\\b\\'c\\`d\\\te\\\nf`";
+        assert_eq!(escape_identifier(input), expected);
+    }
+
+    #[test]
+    fn test_escape_identifier_quote_wrap_always_added() {
+        // Even pathological input is wrapped in backticks
+        assert_eq!(escape_identifier("x"), "`x`");
+        assert_eq!(escape_identifier("`"), "`\\``");
+    }
+
+    #[test]
+    fn test_escape_identifier_safe_chars_passthrough() {
+        // Numbers, underscores, hyphens, spaces — no escaping needed
+        assert_eq!(escape_identifier("table_1-2 name"), "`table_1-2 name`");
+    }
+
+    // ============================================================
+    // escape_string — edge cases
+    // ============================================================
+
+    #[test]
+    fn test_escape_string_empty() {
+        assert_eq!(escape_string(""), "''");
+    }
+
+    #[test]
+    fn test_escape_string_unicode() {
+        assert_eq!(escape_string("日本語"), "'日本語'");
+        assert_eq!(escape_string("emoji 🔥"), "'emoji 🔥'");
+    }
+
+    #[test]
+    fn test_escape_string_sql_injection_attempt() {
+        // Common SQL injection pattern — must be safely escaped.
+        let payload = "'; DROP TABLE users; --";
+        let escaped = escape_string(payload);
+        // The outer single-quote in the payload is escaped with backslash.
+        assert_eq!(escaped, "'\\'; DROP TABLE users; --'");
+    }
+
+    #[test]
+    fn test_escape_string_all_special_chars() {
+        let input = "\\'`\t\n";
+        let expected = "'\\\\\\'\\`\\\t\\\n'";
+        assert_eq!(escape_string(input), expected);
+    }
+
+    #[test]
+    fn test_escape_string_repeated_quotes() {
+        assert_eq!(escape_string("'''"), "'\\'\\'\\''");
+    }
+
+    #[test]
+    fn test_escape_string_capacity_preallocation() {
+        // Whitebox: result length should be at least input + 2 (quotes),
+        // and at most 2 * input + 2 (every char escaped).
+        let input = "test";
+        let out = escape_string(input);
+        assert!(out.len() >= input.len() + 2);
+        assert!(out.len() <= 2 * input.len() + 2);
+    }
+
+    // ============================================================
+    // Client construction — HTTP and Native transports
+    // ============================================================
+
+    #[test]
+    fn test_client_new_http_transport() {
+        let config = ClickHouseConfig {
+            hosts: vec!["localhost:8123".to_string()],
+            transport: super::super::config::Transport::Http,
+            database: "events".to_string(),
+            ..Default::default()
+        };
+        let client = ClickHouseQueryClient::new(&config).unwrap();
+        assert_eq!(client.database(), "events");
+    }
+
+    #[test]
+    fn test_client_new_native_transport() {
+        let config = ClickHouseConfig {
+            hosts: vec!["localhost:9000".to_string()],
+            transport: super::super::config::Transport::Native,
+            database: "logs".to_string(),
+            ..Default::default()
+        };
+        let client = ClickHouseQueryClient::new(&config).unwrap();
+        assert_eq!(client.database(), "logs");
+    }
+
+    #[test]
+    fn test_client_new_http_without_tls() {
+        // HTTP constructor without TLS — builds cleanly without rustls CryptoProvider.
+        let config = ClickHouseConfig {
+            hosts: vec!["secure.example.com:8443".to_string()],
+            transport: super::super::config::Transport::Http,
+            database: "secure_db".to_string(),
+            tls: false,
+            ..Default::default()
+        };
+        let client = ClickHouseQueryClient::new(&config).unwrap();
+        assert_eq!(client.database(), "secure_db");
+    }
+
+    #[test]
+    fn test_client_new_http_with_password() {
+        // Ensures the password branch of the HTTP builder is exercised.
+        let config = ClickHouseConfig {
+            hosts: vec!["localhost:8123".to_string()],
+            transport: super::super::config::Transport::Http,
+            database: "db".to_string(),
+            username: "user".to_string(),
+            password: "s3cret!@#$".to_string(),
+            ..Default::default()
+        };
+        let client = ClickHouseQueryClient::new(&config).unwrap();
+        assert_eq!(client.database(), "db");
+    }
+
+    #[test]
+    fn test_client_new_native_with_password_no_tls() {
+        // Native + password, no TLS — exercises the password branch without
+        // needing a rustls CryptoProvider.
+        let config = ClickHouseConfig {
+            hosts: vec!["clickhouse.example.com:9000".to_string()],
+            transport: super::super::config::Transport::Native,
+            database: "prod".to_string(),
+            username: "app".to_string(),
+            password: "password".to_string(),
+            tls: false,
+            ..Default::default()
+        };
+        let client = ClickHouseQueryClient::new(&config).unwrap();
+        assert_eq!(client.database(), "prod");
+    }
+
+    #[test]
+    fn test_client_new_native_multi_host_failover() {
+        // Multi-host config should produce a client with multi-host failover on native.
+        // We cannot reach the server — we only verify construction succeeds.
+        let config = ClickHouseConfig {
+            hosts: vec![
+                "127.0.0.1:9000".to_string(),
+                "127.0.0.1:9001".to_string(),
+                "127.0.0.1:9002".to_string(),
+            ],
+            transport: super::super::config::Transport::Native,
+            database: "default".to_string(),
+            ..Default::default()
+        };
+        let client = ClickHouseQueryClient::new(&config).unwrap();
+        assert_eq!(client.database(), "default");
+    }
+
+    #[test]
+    fn test_client_new_native_multi_host_unresolvable() {
+        // Hostnames that cannot resolve are filtered out by filter_map.
+        // Construction still succeeds (may fall back to single host).
+        let config = ClickHouseConfig {
+            hosts: vec![
+                "this-host-will-never-resolve.invalid.example:9000".to_string(),
+                "127.0.0.1:9000".to_string(),
+            ],
+            transport: super::super::config::Transport::Native,
+            database: "default".to_string(),
+            ..Default::default()
+        };
+        // Either succeeds (at least one resolves) or fails — both are acceptable,
+        // the test asserts the call doesn't panic.
+        let _ = ClickHouseQueryClient::new(&config);
+    }
+
+    #[test]
+    fn test_client_new_empty_hosts_returns_connection_error() {
+        let config = ClickHouseConfig {
+            hosts: vec![],
+            ..Default::default()
+        };
+        // ClickHouseQueryClient doesn't impl Debug, so can't use unwrap_err().
+        match ClickHouseQueryClient::new(&config) {
+            Ok(_) => panic!("expected error for empty hosts"),
+            Err(ClickHouseError::Connection(msg)) => {
+                assert!(
+                    msg.contains("No ClickHouse hosts"),
+                    "unexpected error message: {msg}"
+                );
+            }
+            Err(other) => panic!("expected Connection error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_client_database_accessor_various_names() {
+        // Exercise the database() accessor across a few realistic names.
+        for db in ["default", "events", "prod_logs", "db-with-dash", "数据库"] {
+            let config = ClickHouseConfig {
+                hosts: vec!["localhost:9000".to_string()],
+                database: db.to_string(),
+                ..Default::default()
+            };
+            let client = ClickHouseQueryClient::new(&config).unwrap();
+            assert_eq!(client.database(), db, "database() should return {db}");
+        }
+    }
+
+    #[test]
+    fn test_client_new_empty_password_skips_builder_branch() {
+        // Empty password (explicit or default) bypasses the with_password() call.
+        // Both HTTP and Native branches must still build successfully.
+        let mut http_config = ClickHouseConfig::default();
+        http_config.transport = super::super::config::Transport::Http;
+        http_config.password = String::new();
+        assert!(ClickHouseQueryClient::new(&http_config).is_ok());
+
+        let mut native_config = ClickHouseConfig::default();
+        native_config.transport = super::super::config::Transport::Native;
+        native_config.password = String::new();
+        assert!(ClickHouseQueryClient::new(&native_config).is_ok());
+    }
+
+    #[test]
+    fn test_client_new_host_without_tls_builds() {
+        // Native + host:port, no TLS — builder does not touch rustls.
+        let config = ClickHouseConfig {
+            hosts: vec!["ch.example.com:9000".to_string()],
+            transport: super::super::config::Transport::Native,
+            tls: false,
+            database: "default".to_string(),
+            ..Default::default()
+        };
+        assert!(ClickHouseQueryClient::new(&config).is_ok());
+    }
 }

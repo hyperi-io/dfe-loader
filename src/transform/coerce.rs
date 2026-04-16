@@ -1109,4 +1109,1380 @@ mod tests {
 
         assert!(c.normalize_uuid("550e8400").is_err());
     }
+
+    // ========================================================================
+    // Delta mode tests
+    // ========================================================================
+
+    fn delta_coercer() -> Coercer {
+        Coercer::new(CoercionConfig::default()).with_mode(CoercionMode::Delta)
+    }
+
+    fn make_schema(columns: Vec<(&str, &str)>) -> TableSchema {
+        use crate::clickhouse::ColumnInfo;
+        TableSchema {
+            database: "test".to_string(),
+            table: "test".to_string(),
+            columns: columns
+                .into_iter()
+                .enumerate()
+                .map(|(i, (name, type_str))| ColumnInfo {
+                    name: name.to_string(),
+                    type_name: type_str.to_string(),
+                    parsed_type: ParsedType::parse(type_str),
+                    position: (i + 1) as u64,
+                    default_kind: String::new(),
+                    default_expression: String::new(),
+                    comment: String::new(),
+                    is_in_primary_key: false,
+                    is_in_sorting_key: false,
+                })
+                .collect(),
+            comment: String::new(),
+        }
+    }
+
+    #[test]
+    fn test_delta_mode_skips_string_int_float() {
+        let c = delta_coercer();
+
+        // String should pass through unchanged in Delta mode
+        let v = serde_json::json!(42);
+        let target = ParsedType::parse("String");
+        let result = c.coerce_value(&v, &target).unwrap();
+        // Delta mode returns value.clone() for String category
+        assert_eq!(result, serde_json::json!(42));
+
+        // Int64 should pass through unchanged
+        let v = serde_json::json!("not_a_number");
+        let target = ParsedType::parse("Int64");
+        let result = c.coerce_value(&v, &target).unwrap();
+        assert_eq!(result, serde_json::json!("not_a_number"));
+
+        // Float64 should pass through unchanged
+        let v = serde_json::json!("nope");
+        let target = ParsedType::parse("Float64");
+        let result = c.coerce_value(&v, &target).unwrap();
+        assert_eq!(result, serde_json::json!("nope"));
+    }
+
+    #[test]
+    fn test_delta_mode_coerces_datetime64() {
+        let c = delta_coercer();
+        let target = ParsedType::parse("DateTime64(3)");
+
+        // ISO 8601 T separator should be normalised
+        let v = serde_json::json!("2024-12-25T10:30:00.123Z");
+        let result = c.coerce_value(&v, &target).unwrap();
+        let s = result.as_str().unwrap();
+        assert!(!s.contains('T'), "Delta should normalise T separator: {s}");
+        assert!(s.contains(' '), "Should contain space separator: {s}");
+    }
+
+    #[test]
+    fn test_delta_mode_coerces_uuid() {
+        let c = delta_coercer();
+        let target = ParsedType::parse("UUID");
+
+        // No-hyphen UUID should be normalised
+        let v = serde_json::json!("550e8400e29b41d4a716446655440000");
+        let result = c.coerce_value(&v, &target).unwrap();
+        assert_eq!(
+            result.as_str(),
+            Some("550e8400-e29b-41d4-a716-446655440000")
+        );
+    }
+
+    #[test]
+    fn test_delta_mode_coerces_ipv4_from_integer() {
+        let c = delta_coercer();
+        let target = ParsedType::parse("IPv4");
+
+        let v = serde_json::json!(3232235777u64); // 192.168.1.1
+        let result = c.coerce_value(&v, &target).unwrap();
+        assert_eq!(result.as_str(), Some("192.168.1.1"));
+    }
+
+    #[test]
+    fn test_delta_mode_coerces_bool() {
+        let c = delta_coercer();
+        let target = ParsedType::parse("Bool");
+
+        let v = serde_json::json!("yes");
+        let result = c.coerce_value(&v, &target).unwrap();
+        assert_eq!(result.as_bool(), Some(true));
+
+        let v = serde_json::json!("off");
+        let result = c.coerce_value(&v, &target).unwrap();
+        assert_eq!(result.as_bool(), Some(false));
+    }
+
+    #[test]
+    fn test_delta_mode_coerce_row_skips_non_targeted() {
+        let c = delta_coercer();
+        let schema = make_schema(vec![
+            ("name", "String"),
+            ("age", "Int64"),
+            ("score", "Float64"),
+            ("ts", "DateTime64(3)"),
+        ]);
+
+        let mut row = serde_json::Map::new();
+        row.insert("name".to_string(), serde_json::json!(12345));
+        row.insert("age".to_string(), serde_json::json!("not_int"));
+        row.insert("score".to_string(), serde_json::json!("bad_float"));
+        row.insert("ts".to_string(), serde_json::json!("2024-01-01T00:00:00Z"));
+
+        c.coerce_row(&mut row, &schema).unwrap();
+
+        // String and Int and Float should be unchanged in Delta mode
+        assert_eq!(row["name"], serde_json::json!(12345));
+        assert_eq!(row["age"], serde_json::json!("not_int"));
+        assert_eq!(row["score"], serde_json::json!("bad_float"));
+        // DateTime64 should be normalised
+        let ts = row["ts"].as_str().unwrap();
+        assert!(!ts.contains('T'));
+    }
+
+    // ========================================================================
+    // Overflow scenarios
+    // ========================================================================
+
+    #[test]
+    fn test_coerce_int_overflow_from_u64_max() {
+        let c = default_coercer();
+        // u64::MAX cannot fit in i64
+        let v = serde_json::json!(u64::MAX);
+        let result = c.coerce_int(&v);
+        assert!(result.is_err(), "u64::MAX should overflow i64");
+    }
+
+    #[test]
+    fn test_coerce_int_overflow_extreme_float() {
+        let c = default_coercer();
+        let v = serde_json::json!(1.0e20);
+        let result = c.coerce_int(&v);
+        assert!(
+            result.is_err(),
+            "1e20 exceeds i64::MAX and should fail: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_coerce_uint_negative_value() {
+        let c = default_coercer();
+        let v = serde_json::json!(-1);
+        let result = c.coerce_uint(&v);
+        assert!(result.is_err(), "Negative values should fail for UInt");
+    }
+
+    #[test]
+    fn test_coerce_uint_negative_float() {
+        let c = default_coercer();
+        let v = serde_json::json!(-0.5);
+        let result = c.coerce_uint(&v);
+        assert!(result.is_err(), "Negative float should fail for UInt");
+    }
+
+    #[test]
+    fn test_coerce_uint_from_string_negative() {
+        let c = default_coercer();
+        let v = serde_json::json!("-42");
+        let result = c.coerce_uint(&v);
+        assert!(
+            result.is_err(),
+            "Negative string should fail for unsigned int"
+        );
+    }
+
+    #[test]
+    fn test_coerce_int_i64_max_boundary() {
+        let c = default_coercer();
+        let v = serde_json::json!(i64::MAX);
+        let result = c.coerce_int(&v).unwrap();
+        assert_eq!(result.as_i64(), Some(i64::MAX));
+    }
+
+    #[test]
+    fn test_coerce_int_i64_min_boundary() {
+        let c = default_coercer();
+        let v = serde_json::json!(i64::MIN);
+        let result = c.coerce_int(&v).unwrap();
+        assert_eq!(result.as_i64(), Some(i64::MIN));
+    }
+
+    // ========================================================================
+    // Boundary values: empty strings, whitespace, special floats
+    // ========================================================================
+
+    #[test]
+    fn test_coerce_int_empty_string() {
+        let c = default_coercer();
+        // Empty string is treated as null by default CoercionConfig
+        let target = ParsedType::parse("Int64");
+        let v = serde_json::json!("");
+        let result = c.coerce_value(&v, &target).unwrap();
+        // Default null handling returns default value (0 for Int)
+        assert_eq!(result.as_i64(), Some(0));
+    }
+
+    #[test]
+    fn test_coerce_int_whitespace_only_string() {
+        let c = default_coercer();
+        let v = serde_json::json!("   ");
+        let result = c.coerce_int(&v);
+        assert!(
+            result.is_err(),
+            "Whitespace-only string should fail integer parse"
+        );
+    }
+
+    #[test]
+    fn test_coerce_float_empty_string_as_null() {
+        let c = default_coercer();
+        let target = ParsedType::parse("Float64");
+        let v = serde_json::json!("");
+        // Empty string is a null string, should return default (0.0)
+        let result = c.coerce_value(&v, &target).unwrap();
+        assert_eq!(result.as_f64(), Some(0.0));
+    }
+
+    #[test]
+    fn test_coerce_float_nan_string() {
+        let c = default_coercer();
+        // "NaN" is in the default null_strings list
+        let target = ParsedType::parse("Float64");
+        let v = serde_json::json!("NaN");
+        let result = c.coerce_value(&v, &target).unwrap();
+        // Should be treated as null -> default 0.0
+        assert_eq!(result.as_f64(), Some(0.0));
+    }
+
+    #[test]
+    fn test_coerce_float_infinity_string() {
+        let c = default_coercer();
+        // "Infinity" parses to f64::INFINITY, but serde_json::json!(inf) -> Null
+        // since JSON can't represent infinity. Coerce should still succeed.
+        let v = serde_json::json!("Infinity");
+        let result = c.coerce_float(&v);
+        assert!(result.is_ok());
+        // Result will be null because serde_json drops inf/NaN
+        let val = result.unwrap();
+        assert!(
+            val.is_null() || val.as_f64().map_or(false, |f| f.is_infinite()),
+            "Infinity should either be null (JSON limitation) or parsed as inf: {val:?}"
+        );
+    }
+
+    #[test]
+    fn test_coerce_float_neg_infinity_string() {
+        let c = default_coercer();
+        // Same caveat — JSON cannot represent -inf
+        let v = serde_json::json!("-Infinity");
+        let result = c.coerce_float(&v);
+        assert!(result.is_ok());
+        let val = result.unwrap();
+        assert!(
+            val.is_null()
+                || val
+                    .as_f64()
+                    .map_or(false, |f| f.is_infinite() && f.is_sign_negative()),
+            "-Infinity: {val:?}"
+        );
+    }
+
+    #[test]
+    fn test_coerce_float_nan_raw_string_parses() {
+        let c = default_coercer();
+        // "nan" (lowercase) parses to f64::NAN, not in null_strings.
+        // serde_json converts NaN to Null.
+        let v = serde_json::json!("nan");
+        let result = c.coerce_float(&v);
+        assert!(result.is_ok());
+        // Result is null because JSON can't hold NaN
+        assert!(result.unwrap().is_null());
+    }
+
+    // ========================================================================
+    // Fuzz-like inputs
+    // ========================================================================
+
+    #[test]
+    fn test_coerce_int_unicode_string() {
+        let c = default_coercer();
+        let v = serde_json::json!("四十二"); // "forty-two" in Chinese
+        let result = c.coerce_int(&v);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_coerce_int_control_characters() {
+        let c = default_coercer();
+        let v = serde_json::json!("\x00\x01\x02");
+        let result = c.coerce_int(&v);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_coerce_int_extremely_long_string() {
+        let c = default_coercer();
+        let long_str = "9".repeat(1000);
+        let v = serde_json::json!(long_str);
+        let result = c.coerce_int(&v);
+        // Parsing a 1000-digit number as i64 should fail (overflow)
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_coerce_uint_from_array_fails() {
+        let c = default_coercer();
+        let v = serde_json::json!([1, 2, 3]);
+        let result = c.coerce_uint(&v);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_coerce_float_unicode_fails() {
+        let c = default_coercer();
+        let v = serde_json::json!("π");
+        let result = c.coerce_float(&v);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_coerce_float_from_object_fails() {
+        let c = default_coercer();
+        let v = serde_json::json!({"key": "value"});
+        let result = c.coerce_float(&v);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_coerce_uuid_null_bytes_in_string() {
+        let c = default_coercer();
+        // Embedded null byte between hex chars — filtered out by is_ascii_hexdigit.
+        // 32 hex chars remain, so normalization succeeds.
+        let v = serde_json::json!("550e8400\x00e29b41d4a716446655440000");
+        let result = c.coerce_uuid(&v);
+        assert!(result.is_ok(), "Null byte filtered, 32 hex chars remain");
+        assert_eq!(
+            result.unwrap().as_str(),
+            Some("550e8400-e29b-41d4-a716-446655440000")
+        );
+    }
+
+    #[test]
+    fn test_coerce_uuid_insufficient_hex_after_filter() {
+        let c = default_coercer();
+        // Less than 32 hex chars after filtering non-hex
+        let v = serde_json::json!("not-enough-hex");
+        let result = c.coerce_uuid(&v);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_coerce_uuid_from_non_string() {
+        let c = default_coercer();
+        let v = serde_json::json!(42);
+        let result = c.coerce_uuid(&v);
+        assert!(result.is_err(), "UUID from number should fail");
+    }
+
+    #[test]
+    fn test_coerce_ipv4_garbage_string() {
+        let c = default_coercer();
+        let v = serde_json::json!("not.an.ip.address");
+        let result = c.coerce_ipv4(&v);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_coerce_ipv6_garbage_string() {
+        let c = default_coercer();
+        let v = serde_json::json!("zzzz::yyyy");
+        let result = c.coerce_ipv6(&v);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_coerce_ipv6_from_number_fails() {
+        let c = default_coercer();
+        let v = serde_json::json!(12345);
+        let result = c.coerce_ipv6(&v);
+        assert!(result.is_err());
+    }
+
+    // ========================================================================
+    // Array coercion edge cases
+    // ========================================================================
+
+    #[test]
+    fn test_coerce_array_with_inner_datetime64_mixed_valid_invalid() {
+        let c = default_coercer();
+        let target = ParsedType::parse("Array(DateTime64(3))");
+
+        // Mix of valid ISO timestamp and epoch ms
+        let v = serde_json::json!(["2024-12-25T10:30:00.123Z", 1735084800000i64]);
+        let result = c.coerce_array(&v, &target).unwrap();
+        let arr = result.as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+        // First element should have T replaced
+        let first = arr[0].as_str().unwrap();
+        assert!(!first.contains('T'));
+        // Second element (epoch ms) should be converted to datetime string
+        let second = arr[1].as_str().unwrap();
+        assert!(
+            second.contains('-'),
+            "Epoch should become date string: {second}"
+        );
+    }
+
+    #[test]
+    fn test_coerce_array_wraps_scalar() {
+        let c = default_coercer();
+        let target = ParsedType::parse("Array(String)");
+        // Non-array value gets wrapped in a single-element array
+        let v = serde_json::json!("single_value");
+        let result = c.coerce_array(&v, &target).unwrap();
+        let arr = result.as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0].as_str(), Some("single_value"));
+    }
+
+    #[test]
+    fn test_coerce_array_empty() {
+        let c = default_coercer();
+        let target = ParsedType::parse("Array(Int64)");
+        let v = serde_json::json!([]);
+        let result = c.coerce_array(&v, &target).unwrap();
+        assert_eq!(result.as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn test_coerce_array_invalid_json_string() {
+        let c = default_coercer();
+        let target = ParsedType::parse("Array(Int64)");
+        let v = serde_json::json!("[invalid json");
+        let result = c.coerce_array(&v, &target);
+        assert!(result.is_err());
+    }
+
+    // ========================================================================
+    // Map coercion edge cases
+    // ========================================================================
+
+    #[test]
+    fn test_coerce_map_with_int_values_from_strings() {
+        let c = default_coercer();
+        let target = ParsedType::parse("Map(String, Int64)");
+        let v = serde_json::json!({"a": "42", "b": "100", "c": true});
+        let result = c.coerce_map(&v, &target).unwrap();
+        let obj = result.as_object().unwrap();
+        assert_eq!(obj["a"].as_i64(), Some(42));
+        assert_eq!(obj["b"].as_i64(), Some(100));
+        assert_eq!(obj["c"].as_i64(), Some(1)); // bool true -> 1
+    }
+
+    #[test]
+    fn test_coerce_map_from_json_string() {
+        let c = default_coercer();
+        let target = ParsedType::parse("Map(String, String)");
+        let v = serde_json::json!(r#"{"key": "value"}"#);
+        let result = c.coerce_map(&v, &target).unwrap();
+        assert!(result.is_object());
+        assert_eq!(result.as_object().unwrap()["key"].as_str(), Some("value"));
+    }
+
+    #[test]
+    fn test_coerce_map_from_number_fails() {
+        let c = default_coercer();
+        let target = ParsedType::parse("Map(String, String)");
+        let v = serde_json::json!(42);
+        let result = c.coerce_map(&v, &target);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_coerce_map_invalid_json_string() {
+        let c = default_coercer();
+        let target = ParsedType::parse("Map(String, String)");
+        let v = serde_json::json!("{broken json");
+        let result = c.coerce_map(&v, &target);
+        assert!(result.is_err());
+    }
+
+    // ========================================================================
+    // Null handling comprehensive
+    // ========================================================================
+
+    #[test]
+    fn test_null_handling_default_for_each_type() {
+        let c = default_coercer();
+        let cases: Vec<(&str, Box<dyn Fn(&Value) -> bool>)> = vec![
+            ("String", Box::new(|v: &Value| v.as_str() == Some(""))),
+            ("Int64", Box::new(|v: &Value| v.as_i64() == Some(0))),
+            ("UInt32", Box::new(|v: &Value| v.as_u64() == Some(0))),
+            ("Float64", Box::new(|v: &Value| v.as_f64() == Some(0.0))),
+            ("Bool", Box::new(|v: &Value| v.as_bool() == Some(false))),
+            (
+                "Date",
+                Box::new(|v: &Value| v.as_str() == Some("1970-01-01")),
+            ),
+            (
+                "UUID",
+                Box::new(|v: &Value| v.as_str() == Some("00000000-0000-0000-0000-000000000000")),
+            ),
+            ("IPv4", Box::new(|v: &Value| v.as_str() == Some("0.0.0.0"))),
+            ("IPv6", Box::new(|v: &Value| v.as_str() == Some("::"))),
+            (
+                "Array(String)",
+                Box::new(|v: &Value| v.as_array().unwrap().is_empty()),
+            ),
+            (
+                "Map(String, String)",
+                Box::new(|v: &Value| v.as_object().unwrap().is_empty()),
+            ),
+        ];
+
+        for (type_str, check_fn) in cases {
+            let target = ParsedType::parse(type_str);
+            let result = c.default_value(&target);
+            assert!(
+                check_fn(&result),
+                "Default value for {type_str} was unexpected: {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_null_handling_skip_passthrough() {
+        let config = CoercionConfig {
+            null_handling: NullHandling::Passthrough,
+            ..Default::default()
+        };
+        let c = Coercer::new(config);
+        let target = ParsedType::parse("Int64"); // non-nullable
+        let result = c.handle_null(&target).unwrap();
+        assert!(result.is_null(), "Passthrough should pass null through");
+    }
+
+    #[test]
+    fn test_null_handling_error_on_nullable_still_ok() {
+        // Even with Error null handling, nullable columns should accept null
+        let config = CoercionConfig {
+            null_handling: NullHandling::Error,
+            ..Default::default()
+        };
+        let c = Coercer::new(config);
+        let target = ParsedType::parse("Nullable(Int64)");
+        let result = c.handle_null(&target).unwrap();
+        assert!(result.is_null());
+    }
+
+    #[test]
+    fn test_null_string_nil_detection() {
+        let c = default_coercer();
+        // "nil" is in the default null_strings list
+        assert!(c.is_null_value(&serde_json::json!("nil")));
+        // "N/A" is in the default list
+        assert!(c.is_null_value(&serde_json::json!("N/A")));
+        assert!(c.is_null_value(&serde_json::json!("n/a")));
+        // "NaN" is in the default list
+        assert!(c.is_null_value(&serde_json::json!("NaN")));
+        // "undefined" is in the default list
+        assert!(c.is_null_value(&serde_json::json!("undefined")));
+        // "\\N" (postgres-style)
+        assert!(c.is_null_value(&serde_json::json!("\\N")));
+        // "<null>" is in the default list
+        assert!(c.is_null_value(&serde_json::json!("<null>")));
+        // NA (without slash)
+        assert!(c.is_null_value(&serde_json::json!("NA")));
+        // "-" is NOT in the default list (user can add it via config)
+        assert!(!c.is_null_value(&serde_json::json!("-")));
+        // Non-string values (numbers) should return false
+        assert!(!c.is_null_value(&serde_json::json!(0)));
+        assert!(!c.is_null_value(&serde_json::json!(false)));
+    }
+
+    // ========================================================================
+    // Bool edge cases
+    // ========================================================================
+
+    #[test]
+    fn test_coerce_bool_mixed_case_strings() {
+        let c = default_coercer();
+        // Implementation lowercases before matching
+        assert_eq!(
+            c.coerce_bool(&serde_json::json!("TRUE")).unwrap().as_bool(),
+            Some(true)
+        );
+        assert_eq!(
+            c.coerce_bool(&serde_json::json!("FALSE"))
+                .unwrap()
+                .as_bool(),
+            Some(false)
+        );
+        assert_eq!(
+            c.coerce_bool(&serde_json::json!("Yes")).unwrap().as_bool(),
+            Some(true)
+        );
+        assert_eq!(
+            c.coerce_bool(&serde_json::json!("No")).unwrap().as_bool(),
+            Some(false)
+        );
+        assert_eq!(
+            c.coerce_bool(&serde_json::json!("ON")).unwrap().as_bool(),
+            Some(true)
+        );
+        assert_eq!(
+            c.coerce_bool(&serde_json::json!("T")).unwrap().as_bool(),
+            Some(true)
+        );
+        assert_eq!(
+            c.coerce_bool(&serde_json::json!("Y")).unwrap().as_bool(),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn test_coerce_bool_zero_string_is_false() {
+        let c = default_coercer();
+        // "0" is not in the truthy list, so it's false
+        assert_eq!(
+            c.coerce_bool(&serde_json::json!("0")).unwrap().as_bool(),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn test_coerce_bool_from_negative_number() {
+        let c = default_coercer();
+        // -1 != 0, so it's true
+        assert_eq!(
+            c.coerce_bool(&serde_json::json!(-1)).unwrap().as_bool(),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn test_coerce_bool_from_float_zero() {
+        let c = default_coercer();
+        assert_eq!(
+            c.coerce_bool(&serde_json::json!(0.0)).unwrap().as_bool(),
+            Some(false)
+        );
+        assert_eq!(
+            c.coerce_bool(&serde_json::json!(0.001)).unwrap().as_bool(),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn test_coerce_bool_from_array_is_false() {
+        let c = default_coercer();
+        // Array and Object fall into _ => false
+        assert_eq!(
+            c.coerce_bool(&serde_json::json!([1, 2])).unwrap().as_bool(),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn test_coerce_bool_arbitrary_string_is_false() {
+        let c = default_coercer();
+        assert_eq!(
+            c.coerce_bool(&serde_json::json!("maybe"))
+                .unwrap()
+                .as_bool(),
+            Some(false)
+        );
+        assert_eq!(
+            c.coerce_bool(&serde_json::json!("")).unwrap().as_bool(),
+            Some(false)
+        );
+    }
+
+    // ========================================================================
+    // DateTime64 edge cases
+    // ========================================================================
+
+    #[test]
+    fn test_coerce_datetime64_epoch_zero() {
+        let c = default_coercer();
+        let target = ParsedType::parse("DateTime64(3)");
+        let v = serde_json::json!(0);
+        let result = c.coerce_datetime64(&v, &target).unwrap();
+        let s = result.as_str().unwrap();
+        assert!(
+            s.starts_with("1970-01-01"),
+            "Epoch 0 should be 1970-01-01: {s}"
+        );
+    }
+
+    #[test]
+    fn test_coerce_datetime64_negative_epoch() {
+        let c = default_coercer();
+        let target = ParsedType::parse("DateTime64(3)");
+        // Negative epoch = before 1970
+        let v = serde_json::json!(-86400);
+        let result = c.coerce_datetime64(&v, &target).unwrap();
+        let s = result.as_str().unwrap();
+        assert!(
+            s.starts_with("1969-12-31"),
+            "Negative epoch (-86400) should be 1969-12-31: {s}"
+        );
+    }
+
+    #[test]
+    fn test_coerce_datetime64_far_future() {
+        let c = default_coercer();
+        let target = ParsedType::parse("DateTime64(3)");
+        // Year 2100: ~4102444800
+        let v = serde_json::json!(4102444800i64);
+        let result = c.coerce_datetime64(&v, &target).unwrap();
+        let s = result.as_str().unwrap();
+        assert!(
+            s.starts_with("2100-"),
+            "Far future epoch should be in 2100: {s}"
+        );
+    }
+
+    #[test]
+    fn test_coerce_datetime64_millisecond_epoch() {
+        let c = default_coercer();
+        let target = ParsedType::parse("DateTime64(3)");
+        // 1735084800000 ms = 2024-12-25 00:00:00.000
+        let v = serde_json::json!(1735084800000i64);
+        let result = c.coerce_datetime64(&v, &target).unwrap();
+        let s = result.as_str().unwrap();
+        assert!(
+            s.contains("2024-12-25"),
+            "Millisecond epoch should detect magnitude: {s}"
+        );
+    }
+
+    #[test]
+    fn test_coerce_datetime64_microsecond_epoch() {
+        let c = default_coercer();
+        let target = ParsedType::parse("DateTime64(6)");
+        // Microsecond epoch
+        let v = serde_json::json!(1735084800000000i64);
+        let result = c.coerce_datetime64(&v, &target).unwrap();
+        let s = result.as_str().unwrap();
+        assert!(
+            s.contains("2024-12-25"),
+            "Microsecond epoch should detect magnitude: {s}"
+        );
+    }
+
+    #[test]
+    fn test_coerce_datetime64_nanosecond_epoch() {
+        let c = default_coercer();
+        let target = ParsedType::parse("DateTime64(9)");
+        let v = serde_json::json!(1735084800000000000i64);
+        let result = c.coerce_datetime64(&v, &target).unwrap();
+        let s = result.as_str().unwrap();
+        assert!(
+            s.contains("2024-12-25"),
+            "Nanosecond epoch should detect magnitude: {s}"
+        );
+    }
+
+    #[test]
+    fn test_coerce_datetime64_with_timezone_offset() {
+        let c = default_coercer();
+        let target = ParsedType::parse("DateTime64(3)");
+        let v = serde_json::json!("2024-12-25T10:30:00.123+11:00");
+        let result = c.coerce_datetime64(&v, &target).unwrap();
+        let s = result.as_str().unwrap();
+        assert!(!s.contains('T'));
+        // Timezone offset should be stripped (everything after +)
+        assert!(!s.contains("+11:00"), "Offset should be stripped: {s}");
+    }
+
+    #[test]
+    fn test_coerce_datetime64_string_without_dot_gets_precision_appended() {
+        let c = default_coercer();
+        let target = ParsedType::parse("DateTime64(3)");
+        let v = serde_json::json!("2024-12-25 10:30:00");
+        let result = c.coerce_datetime64(&v, &target).unwrap();
+        let s = result.as_str().unwrap();
+        assert!(
+            s.ends_with(".000"),
+            "Should append .000 for precision 3: {s}"
+        );
+    }
+
+    #[test]
+    fn test_coerce_datetime64_from_bool_fails() {
+        let c = default_coercer();
+        let target = ParsedType::parse("DateTime64(3)");
+        let v = serde_json::json!(true);
+        let result = c.coerce_datetime64(&v, &target);
+        assert!(result.is_err());
+    }
+
+    // ========================================================================
+    // Decimal coercion
+    // ========================================================================
+
+    #[test]
+    fn test_coerce_decimal_with_scale() {
+        let c = default_coercer();
+        let target = ParsedType::parse("Decimal(18, 4)");
+        let v = serde_json::json!(3.14159);
+        let result = c.coerce_decimal(&v, &target).unwrap();
+        assert_eq!(result.as_str(), Some("3.1416")); // rounded to 4 decimal places
+    }
+
+    #[test]
+    fn test_coerce_decimal_from_string() {
+        let c = default_coercer();
+        let target = ParsedType::parse("Decimal(10, 2)");
+        let v = serde_json::json!("99.99");
+        let result = c.coerce_decimal(&v, &target).unwrap();
+        assert_eq!(result.as_str(), Some("99.99"));
+    }
+
+    // ========================================================================
+    // JSON coercion
+    // ========================================================================
+
+    #[test]
+    fn test_coerce_json_from_string() {
+        let c = default_coercer();
+        let v = serde_json::json!(r#"{"key": "value", "num": 42}"#);
+        let result = c.coerce_json(&v).unwrap();
+        assert!(result.is_object());
+        assert_eq!(result["key"].as_str(), Some("value"));
+        assert_eq!(result["num"].as_i64(), Some(42));
+    }
+
+    #[test]
+    fn test_coerce_json_invalid_string() {
+        let c = default_coercer();
+        let v = serde_json::json!("{not valid json}");
+        let result = c.coerce_json(&v);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_coerce_json_passthrough_object() {
+        let c = default_coercer();
+        let v = serde_json::json!({"already": "an_object"});
+        let result = c.coerce_json(&v).unwrap();
+        assert_eq!(result, v);
+    }
+
+    // ========================================================================
+    // Enum coercion
+    // ========================================================================
+
+    #[test]
+    fn test_coerce_enum_from_number() {
+        let c = default_coercer();
+        let v = serde_json::json!(42);
+        let result = c.coerce_enum(&v).unwrap();
+        assert_eq!(result.as_str(), Some("42"));
+    }
+
+    #[test]
+    fn test_coerce_enum_from_bool_fails() {
+        let c = default_coercer();
+        let v = serde_json::json!(true);
+        let result = c.coerce_enum(&v);
+        assert!(result.is_err());
+    }
+
+    // ========================================================================
+    // Strict mode
+    // ========================================================================
+
+    #[test]
+    fn test_strict_mode_coerce_row_fails_on_bad_value() {
+        let config = CoercionConfig {
+            strict: true,
+            ..Default::default()
+        };
+        let c = Coercer::new(config);
+        let schema = make_schema(vec![("ip", "IPv4")]);
+
+        let mut row = serde_json::Map::new();
+        row.insert("ip".to_string(), serde_json::json!("not_an_ip"));
+
+        let result = c.coerce_row(&mut row, &schema);
+        assert!(result.is_err(), "Strict mode should propagate errors");
+    }
+
+    #[test]
+    fn test_non_strict_mode_uses_default_on_failure() {
+        let c = default_coercer(); // strict = false
+        let schema = make_schema(vec![("ip", "IPv4")]);
+
+        let mut row = serde_json::Map::new();
+        row.insert("ip".to_string(), serde_json::json!("garbage"));
+
+        let result = c.coerce_row(&mut row, &schema);
+        assert!(result.is_ok(), "Non-strict should not fail");
+        // Default for IPv4 is "0.0.0.0"
+        assert_eq!(row["ip"].as_str(), Some("0.0.0.0"));
+    }
+
+    // ========================================================================
+    // FixedString truncation
+    // ========================================================================
+
+    #[test]
+    fn test_coerce_fixed_string_truncates() {
+        let c = default_coercer();
+        let target = ParsedType::parse("FixedString(5)");
+        let v = serde_json::json!("hello_world_too_long");
+        let result = c.coerce_string(&v, &target).unwrap();
+        assert_eq!(result.as_str(), Some("hello"));
+    }
+
+    #[test]
+    fn test_coerce_fixed_string_short_value_unchanged() {
+        let c = default_coercer();
+        let target = ParsedType::parse("FixedString(10)");
+        let v = serde_json::json!("hi");
+        let result = c.coerce_string(&v, &target).unwrap();
+        assert_eq!(result.as_str(), Some("hi"));
+    }
+
+    // ========================================================================
+    // Date coercion edge cases
+    // ========================================================================
+
+    #[test]
+    fn test_coerce_date_epoch_seconds() {
+        let c = default_coercer();
+        let v = serde_json::json!(0);
+        let result = c.coerce_date(&v).unwrap();
+        assert_eq!(result.as_str(), Some("1970-01-01"));
+    }
+
+    #[test]
+    fn test_coerce_date_epoch_string() {
+        let c = default_coercer();
+        let v = serde_json::json!("1735084800");
+        let result = c.coerce_date(&v).unwrap();
+        assert_eq!(result.as_str(), Some("2024-12-25"));
+    }
+
+    #[test]
+    fn test_coerce_date_invalid_format() {
+        let c = default_coercer();
+        let v = serde_json::json!("25/12/2024"); // DD/MM/YYYY not supported
+        let result = c.coerce_date(&v);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_coerce_date_from_bool_fails() {
+        let c = default_coercer();
+        let v = serde_json::json!(true);
+        let result = c.coerce_date(&v);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_coerce_datetime_from_epoch() {
+        let c = default_coercer();
+        let v = serde_json::json!(1735084800);
+        let result = c.coerce_datetime(&v).unwrap();
+        let s = result.as_str().unwrap();
+        assert!(s.starts_with("2024-12-25"), "Should be 2024-12-25: {s}");
+    }
+
+    #[test]
+    fn test_coerce_datetime_from_bool_fails() {
+        let c = default_coercer();
+        let v = serde_json::json!(false);
+        let result = c.coerce_datetime(&v);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_coerce_datetime_short_string_fails() {
+        let c = default_coercer();
+        // Too short for a datetime
+        let v = serde_json::json!("2024-12-25T10");
+        let result = c.coerce_datetime(&v);
+        assert!(result.is_err());
+    }
+
+    // ========================================================================
+    // Custom type mapping
+    // ========================================================================
+
+    #[test]
+    fn test_custom_type_mapping_in_full_mode() {
+        let mut type_mappings = std::collections::HashMap::new();
+        type_mappings.insert("MyCustomType".to_string(), "Int".to_string());
+        let config = CoercionConfig {
+            type_mappings,
+            ..Default::default()
+        };
+        let c = Coercer::new(config);
+        let target = ParsedType::parse("MyCustomType");
+        let v = serde_json::json!("42");
+        let result = c.coerce_value(&v, &target).unwrap();
+        assert_eq!(result.as_i64(), Some(42));
+    }
+
+    #[test]
+    fn test_custom_type_mapping_in_delta_mode_still_applies() {
+        // Delta mode skips categories not in the delta set, BUT if there's
+        // a custom type_mapping, it checks the mapped category
+        let mut type_mappings = std::collections::HashMap::new();
+        type_mappings.insert("SpecialTime".to_string(), "DateTime64".to_string());
+        let config = CoercionConfig {
+            type_mappings,
+            ..Default::default()
+        };
+        let c = Coercer::new(config).with_mode(CoercionMode::Delta);
+        let target = ParsedType::parse("SpecialTime");
+        let v = serde_json::json!("2024-12-25T10:30:00.123Z");
+        let result = c.coerce_value(&v, &target).unwrap();
+        let s = result.as_str().unwrap();
+        assert!(
+            !s.contains('T'),
+            "Custom mapping to DateTime64 should normalise T in delta mode"
+        );
+    }
+
+    // ========================================================================
+    // Enum edge cases
+    // ========================================================================
+
+    #[test]
+    fn test_coerce_enum_from_string_passthrough() {
+        let c = default_coercer();
+        let v = serde_json::json!("VARIANT_A");
+        let result = c.coerce_enum(&v).unwrap();
+        assert_eq!(result.as_str(), Some("VARIANT_A"));
+    }
+
+    #[test]
+    fn test_coerce_enum_from_negative_number() {
+        let c = default_coercer();
+        // Enum8 supports negative values in ClickHouse (signed 8-bit)
+        let v = serde_json::json!(-5);
+        let result = c.coerce_enum(&v).unwrap();
+        assert_eq!(result.as_str(), Some("-5"));
+    }
+
+    #[test]
+    fn test_coerce_enum_from_null_fails() {
+        let c = default_coercer();
+        // Null goes through handle_null first, but calling coerce_enum directly
+        // with a non-null, non-string, non-number value should fail
+        let v = serde_json::json!([1, 2]);
+        let result = c.coerce_enum(&v);
+        assert!(result.is_err(), "Array not supported for enum");
+    }
+
+    #[test]
+    fn test_coerce_enum_via_coerce_value_with_enum16_type() {
+        // Enum16 goes through the registry dispatch in full mode
+        let c = default_coercer();
+        let target = ParsedType::parse("Enum16('red' = 1, 'green' = 2)");
+        let v = serde_json::json!("red");
+        let result = c.coerce_value(&v, &target).unwrap();
+        assert_eq!(result.as_str(), Some("red"));
+    }
+
+    #[test]
+    fn test_coerce_enum8_integer_value_via_dispatch() {
+        let c = default_coercer();
+        let target = ParsedType::parse("Enum8('a' = 1, 'b' = 2)");
+        let v = serde_json::json!(2);
+        let result = c.coerce_value(&v, &target).unwrap();
+        // Number becomes the string form — ClickHouse resolves by numeric ID
+        assert_eq!(result.as_str(), Some("2"));
+    }
+
+    // ========================================================================
+    // Nested types: Array of Array, Map with complex value types
+    // ========================================================================
+
+    #[test]
+    fn test_coerce_nested_array_of_array() {
+        let c = default_coercer();
+        let target = ParsedType::parse("Array(Array(Int64))");
+        let v = serde_json::json!([[1, 2, 3], [4, 5], []]);
+        let result = c.coerce_array(&v, &target).unwrap();
+        let outer = result.as_array().expect("outer array");
+        assert_eq!(outer.len(), 3);
+        assert_eq!(outer[0].as_array().unwrap().len(), 3);
+        assert_eq!(outer[1].as_array().unwrap().len(), 2);
+        assert_eq!(outer[2].as_array().unwrap().len(), 0);
+        // Inner element values should survive through two levels of coercion
+        assert_eq!(outer[0].as_array().unwrap()[0].as_i64(), Some(1));
+    }
+
+    #[test]
+    fn test_coerce_array_of_uuids_normalises_each_element() {
+        let c = default_coercer();
+        let target = ParsedType::parse("Array(UUID)");
+        let v = serde_json::json!([
+            "550e8400-e29b-41d4-a716-446655440000",
+            "550e8400e29b41d4a716446655440001",
+            "{550e8400-e29b-41d4-a716-446655440002}"
+        ]);
+        let result = c.coerce_array(&v, &target).unwrap();
+        let arr = result.as_array().unwrap();
+        assert_eq!(arr.len(), 3);
+        // All three forms must normalise to the canonical hyphenated form
+        for (i, elem) in arr.iter().enumerate() {
+            let s = elem.as_str().expect("element is string");
+            assert_eq!(s.len(), 36, "UUID at index {i} should be 36 chars: {s}");
+            assert_eq!(s.matches('-').count(), 4, "UUID should have 4 hyphens");
+        }
+    }
+
+    #[test]
+    fn test_coerce_map_with_array_values() {
+        let c = default_coercer();
+        // Map(String, Array(Int64)) — nested array inside a map
+        let target = ParsedType::parse("Map(String, Array(Int64))");
+        let v = serde_json::json!({
+            "alpha": [1, 2, 3],
+            "beta": [4, 5]
+        });
+        let result = c.coerce_map(&v, &target).unwrap();
+        let obj = result.as_object().unwrap();
+        assert_eq!(obj["alpha"].as_array().unwrap().len(), 3);
+        assert_eq!(obj["beta"].as_array().unwrap().len(), 2);
+        assert_eq!(obj["alpha"].as_array().unwrap()[0].as_i64(), Some(1));
+    }
+
+    #[test]
+    fn test_coerce_map_empty_object() {
+        let c = default_coercer();
+        let target = ParsedType::parse("Map(String, Int64)");
+        let v = serde_json::json!({});
+        let result = c.coerce_map(&v, &target).unwrap();
+        assert!(result.as_object().unwrap().is_empty());
+    }
+
+    // ========================================================================
+    // Strict mode — specific error messages
+    // ========================================================================
+
+    #[test]
+    fn test_strict_mode_bad_uuid_error_message() {
+        let config = CoercionConfig {
+            strict: true,
+            ..Default::default()
+        };
+        let c = Coercer::new(config);
+        let schema = make_schema(vec![("id", "UUID")]);
+
+        let mut row = serde_json::Map::new();
+        row.insert("id".to_string(), serde_json::json!("not-a-uuid"));
+
+        let err = c.coerce_row(&mut row, &schema).expect_err("should fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("UUID") || msg.contains("hex"),
+            "Error should mention UUID failure, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_strict_mode_bad_ipv6_error_message() {
+        let config = CoercionConfig {
+            strict: true,
+            ..Default::default()
+        };
+        let c = Coercer::new(config);
+        let schema = make_schema(vec![("addr", "IPv6")]);
+
+        let mut row = serde_json::Map::new();
+        row.insert("addr".to_string(), serde_json::json!("not::a::valid::v6"));
+
+        let err = c.coerce_row(&mut row, &schema).expect_err("should fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("IPv6") || msg.contains("Invalid"),
+            "Error should mention IPv6, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_strict_mode_datetime64_bool_error() {
+        let config = CoercionConfig {
+            strict: true,
+            ..Default::default()
+        };
+        let c = Coercer::new(config);
+        let schema = make_schema(vec![("ts", "DateTime64(3)")]);
+
+        let mut row = serde_json::Map::new();
+        row.insert("ts".to_string(), serde_json::json!(true));
+
+        let err = c.coerce_row(&mut row, &schema).expect_err("should fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("datetime64") || msg.contains("Cannot convert"),
+            "Error should mention datetime64 conversion failure, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_strict_mode_null_non_nullable_int_error() {
+        let config = CoercionConfig {
+            strict: true,
+            null_handling: NullHandling::Error,
+            ..Default::default()
+        };
+        let c = Coercer::new(config);
+        let schema = make_schema(vec![("n", "Int64")]);
+
+        let mut row = serde_json::Map::new();
+        row.insert("n".to_string(), serde_json::Value::Null);
+
+        let err = c.coerce_row(&mut row, &schema).expect_err("should fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("NULL") || msg.contains("non-nullable"),
+            "Error should mention NULL non-nullable, got: {msg}"
+        );
+    }
+
+    // ========================================================================
+    // Delta mode: Array(DateTime64) inner coercion
+    // ========================================================================
+
+    #[test]
+    fn test_delta_mode_array_datetime64_coerces_inner() {
+        let c = delta_coercer();
+        let target = ParsedType::parse("Array(DateTime64(3))");
+        let v = serde_json::json!(["2024-12-25T10:30:00.123Z", "2024-12-26T11:00:00Z"]);
+        let result = c.coerce_value(&v, &target).unwrap();
+        let arr = result.as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+        for (i, e) in arr.iter().enumerate() {
+            let s = e.as_str().expect("string");
+            assert!(
+                !s.contains('T'),
+                "Element {i} should have T normalised: {s}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_delta_mode_datetime_no_t_passthrough() {
+        // DateTime (not DateTime64) in delta mode — only strips T/Z
+        let c = delta_coercer();
+        let target = ParsedType::parse("DateTime");
+        // No T — still goes through coerce_datetime
+        let v = serde_json::json!("2024-12-25 10:30:00");
+        let result = c.coerce_value(&v, &target).unwrap();
+        assert_eq!(result.as_str(), Some("2024-12-25 10:30:00"));
+    }
+
+    // ========================================================================
+    // Whitespace handling in numeric strings
+    // ========================================================================
+
+    #[test]
+    fn test_coerce_int_leading_trailing_whitespace() {
+        let c = default_coercer();
+        // Leading/trailing whitespace should be trimmed
+        let v = serde_json::json!("  42  ");
+        let result = c.coerce_int(&v).unwrap();
+        assert_eq!(result.as_i64(), Some(42));
+    }
+
+    #[test]
+    fn test_coerce_float_leading_trailing_whitespace() {
+        let c = default_coercer();
+        let v = serde_json::json!("  3.14  ");
+        let result = c.coerce_float(&v).unwrap();
+        assert!((result.as_f64().unwrap() - 3.14).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_coerce_uint_from_float_string_whole() {
+        // Whole float strings should succeed for uint
+        let c = default_coercer();
+        let v = serde_json::json!("42.0");
+        let result = c.coerce_uint(&v).unwrap();
+        assert_eq!(result.as_u64(), Some(42));
+    }
+
+    #[test]
+    fn test_coerce_uint_from_float_string_fractional_fails() {
+        // Fractional float strings should fail for uint
+        let c = default_coercer();
+        let v = serde_json::json!("42.5");
+        let result = c.coerce_uint(&v);
+        assert!(result.is_err(), "Fractional float string cannot be uint");
+    }
+
+    // ========================================================================
+    // ParsedType default_value category coverage
+    // ========================================================================
+
+    #[test]
+    fn test_default_value_datetime64_format() {
+        let c = default_coercer();
+        let target = ParsedType::parse("DateTime64(3)");
+        let result = c.default_value(&target);
+        assert_eq!(result.as_str(), Some("1970-01-01 00:00:00.000"));
+    }
+
+    #[test]
+    fn test_default_value_decimal_is_zero() {
+        let c = default_coercer();
+        let target = ParsedType::parse("Decimal(18, 4)");
+        let result = c.default_value(&target);
+        // Decimal category → 0.0 JSON number
+        assert!(
+            result.as_f64() == Some(0.0) || result.as_str() == Some("0.0000"),
+            "Expected numeric 0 or string '0.0000', got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_coerce_row_skips_missing_fields() {
+        // Columns in schema but NOT in row should be ignored (not injected)
+        let c = default_coercer();
+        let schema = make_schema(vec![("a", "Int64"), ("b", "String"), ("c", "UUID")]);
+
+        let mut row = serde_json::Map::new();
+        row.insert("a".to_string(), serde_json::json!(42));
+        // 'b' and 'c' absent
+
+        c.coerce_row(&mut row, &schema).unwrap();
+
+        assert_eq!(row.len(), 1, "Missing fields should not be injected");
+        assert_eq!(row["a"].as_i64(), Some(42));
+        assert!(!row.contains_key("b"));
+        assert!(!row.contains_key("c"));
+    }
+
+    #[test]
+    fn test_coerce_row_non_schema_fields_passthrough() {
+        // Fields NOT in schema should pass through unchanged
+        let c = default_coercer();
+        let schema = make_schema(vec![("a", "Int64")]);
+
+        let mut row = serde_json::Map::new();
+        row.insert("a".to_string(), serde_json::json!("123"));
+        row.insert(
+            "extra".to_string(),
+            serde_json::json!({"complex": "object"}),
+        );
+
+        c.coerce_row(&mut row, &schema).unwrap();
+
+        // 'a' should be coerced to int
+        assert_eq!(row["a"].as_i64(), Some(123));
+        // 'extra' should be untouched (not in schema)
+        assert_eq!(row["extra"]["complex"].as_str(), Some("object"));
+    }
 }

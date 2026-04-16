@@ -28,6 +28,8 @@ target/
 *.profdata
 coverage-html/
 coverage.lcov
+tarpaulin-report.json
+cobertura.xml
 .cargo/
 !.cargo/config.toml
 

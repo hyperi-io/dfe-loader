@@ -511,4 +511,451 @@ mod tests {
         assert_eq!(config.refresh_interval_secs, 60);
         assert_eq!(config.refresh_headroom_secs, 30);
     }
+
+    // ============================================================
+    // SchemaCache::new / SchemaCache::with_config — construction
+    // ============================================================
+
+    #[test]
+    fn test_new_sets_ttl_from_argument() {
+        let cache = SchemaCache::new(42);
+        let stats = cache.stats();
+        assert_eq!(stats.ttl_secs, 42);
+        assert_eq!(stats.total, 0);
+    }
+
+    #[test]
+    fn test_new_with_zero_ttl_makes_everything_expire_immediately() {
+        let cache = SchemaCache::new(0);
+        cache.insert("t".to_string(), make_test_schema("t"));
+        // Empty interval = instant expiry
+        assert!(cache.get("t").is_none());
+        // But it's still in the backing map until accessed
+        assert_eq!(cache.stats().total, 1);
+        assert_eq!(cache.stats().expired, 1);
+        assert_eq!(cache.stats().valid, 0);
+    }
+
+    #[test]
+    fn test_with_config_preserves_all_fields() {
+        let cfg = SchemaCacheConfig {
+            ttl_secs: 99,
+            auto_refresh: false,
+            refresh_interval_secs: 11,
+            refresh_headroom_secs: 3,
+        };
+        let cache = SchemaCache::with_config(cfg);
+        assert_eq!(cache.stats().ttl_secs, 99);
+    }
+
+    // ============================================================
+    // SchemaCacheConfig — edge cases and clone
+    // ============================================================
+
+    #[test]
+    fn test_schema_cache_config_clone_preserves_values() {
+        let cfg = SchemaCacheConfig {
+            ttl_secs: 600,
+            auto_refresh: false,
+            refresh_interval_secs: 120,
+            refresh_headroom_secs: 15,
+        };
+        let cloned = cfg.clone();
+        assert_eq!(cloned.ttl_secs, 600);
+        assert!(!cloned.auto_refresh);
+        assert_eq!(cloned.refresh_interval_secs, 120);
+        assert_eq!(cloned.refresh_headroom_secs, 15);
+    }
+
+    #[test]
+    fn test_schema_cache_config_debug_not_empty() {
+        let cfg = SchemaCacheConfig::default();
+        let debug = format!("{cfg:?}");
+        assert!(debug.contains("SchemaCacheConfig"));
+        assert!(debug.contains("300"));
+    }
+
+    // ============================================================
+    // Hit/miss/invalidation counters — precise accounting
+    // ============================================================
+
+    #[test]
+    fn test_multiple_hits_accumulate() {
+        let cache = SchemaCache::new(300);
+        cache.insert("t".to_string(), make_test_schema("t"));
+        for _ in 0..10 {
+            assert!(cache.get("t").is_some());
+        }
+        let stats = cache.stats();
+        assert_eq!(stats.hits, 10);
+        assert_eq!(stats.misses, 0);
+    }
+
+    #[test]
+    fn test_expired_increments_miss_counter() {
+        // TTL = 0 means every get() on an existing entry is a miss.
+        let cache = SchemaCache::new(0);
+        cache.insert("t".to_string(), make_test_schema("t"));
+        // First get — increments miss (expired).
+        assert!(cache.get("t").is_none());
+        // Second get — still miss.
+        assert!(cache.get("t").is_none());
+        let stats = cache.stats();
+        assert_eq!(stats.misses, 2);
+        assert_eq!(stats.hits, 0);
+    }
+
+    #[test]
+    fn test_invalidation_counter_only_increments_when_entry_existed() {
+        let cache = SchemaCache::new(300);
+
+        // No-op invalidate — entry absent
+        cache.invalidate("nonexistent");
+        assert_eq!(cache.stats().invalidations, 0);
+
+        // Real invalidate — entry present
+        cache.insert("t".to_string(), make_test_schema("t"));
+        cache.invalidate("t");
+        assert_eq!(cache.stats().invalidations, 1);
+
+        // Repeat invalidate — entry already gone, no counter increment
+        cache.invalidate("t");
+        assert_eq!(cache.stats().invalidations, 1);
+    }
+
+    #[test]
+    fn test_invalidate_all_counter_sums_entries() {
+        let cache = SchemaCache::new(300);
+        for i in 0..5 {
+            cache.insert(format!("t{i}"), make_test_schema(&format!("t{i}")));
+        }
+        cache.invalidate_all();
+        assert_eq!(cache.stats().invalidations, 5);
+        assert_eq!(cache.stats().total, 0);
+    }
+
+    #[test]
+    fn test_invalidate_all_noop_on_empty_cache() {
+        let cache = SchemaCache::new(300);
+        cache.invalidate_all();
+        assert_eq!(cache.stats().invalidations, 0);
+    }
+
+    #[test]
+    fn test_refresh_counter_tracks_reinserts() {
+        let cache = SchemaCache::new(300);
+
+        // First insert — refresh_count = 0 (not counted as refresh)
+        cache.insert("t".to_string(), make_test_schema("t"));
+        assert_eq!(cache.stats().refreshes, 0);
+
+        // Re-insert — counted as refresh
+        cache.insert("t".to_string(), make_test_schema("t"));
+        assert_eq!(cache.stats().refreshes, 1);
+
+        // Third insert — refresh #2
+        cache.insert("t".to_string(), make_test_schema("t"));
+        assert_eq!(cache.stats().refreshes, 2);
+    }
+
+    // ============================================================
+    // needs_refresh — headroom and TTL interplay
+    // ============================================================
+
+    #[test]
+    fn test_needs_refresh_zero_headroom() {
+        let cfg = SchemaCacheConfig {
+            ttl_secs: 60,
+            refresh_headroom_secs: 0,
+            ..Default::default()
+        };
+        let cache = SchemaCache::with_config(cfg);
+        cache.insert("t".to_string(), make_test_schema("t"));
+        // Fresh + zero headroom = no refresh needed.
+        assert!(!cache.needs_refresh("t"));
+    }
+
+    #[test]
+    fn test_needs_refresh_large_headroom_triggers_immediately() {
+        // Headroom larger than TTL → even a fresh cache entry "needs refresh"
+        let cfg = SchemaCacheConfig {
+            ttl_secs: 60,
+            refresh_headroom_secs: 120, // 2× TTL
+            ..Default::default()
+        };
+        let cache = SchemaCache::with_config(cfg);
+        cache.insert("t".to_string(), make_test_schema("t"));
+        assert!(cache.needs_refresh("t"));
+    }
+
+    #[test]
+    fn test_needs_refresh_nonexistent_table() {
+        let cache = SchemaCache::new(300);
+        assert!(cache.needs_refresh("does_not_exist"));
+    }
+
+    // ============================================================
+    // invalidate_on_schema_error — pattern recognition
+    // ============================================================
+
+    #[test]
+    fn test_invalidate_on_schema_error_all_known_patterns() {
+        let patterns = [
+            "Unknown column 'foo'",
+            "Missing columns: [a, b]",
+            "Type mismatch for column x",
+            "Cannot insert into table",
+            "Column types don't match",
+            "expected column of type Int64",
+            "wrong number of columns: got 5, want 3",
+        ];
+        for pattern in patterns {
+            let cache = SchemaCache::new(300);
+            cache.insert("t".to_string(), make_test_schema("t"));
+            assert!(
+                cache.invalidate_on_schema_error("t", pattern),
+                "pattern should trigger: {pattern}"
+            );
+            assert!(cache.get("t").is_none());
+        }
+    }
+
+    #[test]
+    fn test_invalidate_on_schema_error_unrecognised_patterns() {
+        let benign = [
+            "Connection timeout",
+            "Network unreachable",
+            "Too many requests",
+            "503 Service Unavailable",
+            "OOM killer",
+            "",
+        ];
+        for err in benign {
+            let cache = SchemaCache::new(300);
+            cache.insert("t".to_string(), make_test_schema("t"));
+            assert!(
+                !cache.invalidate_on_schema_error("t", err),
+                "pattern should NOT trigger: {err}"
+            );
+            assert!(cache.get("t").is_some(), "entry preserved for: {err}");
+        }
+    }
+
+    #[test]
+    fn test_invalidate_on_schema_error_substring_match() {
+        // Patterns match anywhere in the string — not just prefix.
+        let cache = SchemaCache::new(300);
+        cache.insert("t".to_string(), make_test_schema("t"));
+        let err =
+            "DB::Exception: Unknown column 'bogus' in query SELECT x FROM events (OS code 42)";
+        assert!(cache.invalidate_on_schema_error("t", err));
+    }
+
+    // ============================================================
+    // cached_tables / tables_needing_refresh — listing behaviour
+    // ============================================================
+
+    #[test]
+    fn test_cached_tables_returns_all_keys() {
+        let cache = SchemaCache::new(300);
+        cache.insert("a".to_string(), make_test_schema("a"));
+        cache.insert("b".to_string(), make_test_schema("b"));
+        cache.insert("c.nested".to_string(), make_test_schema("c.nested"));
+        let mut tables = cache.cached_tables();
+        tables.sort();
+        assert_eq!(tables, vec!["a", "b", "c.nested"]);
+    }
+
+    #[test]
+    fn test_cached_tables_empty() {
+        let cache = SchemaCache::new(300);
+        assert_eq!(cache.cached_tables().len(), 0);
+    }
+
+    #[test]
+    fn test_tables_needing_refresh_returns_empty_when_fresh() {
+        let cache = SchemaCache::new(300);
+        cache.insert("fresh".to_string(), make_test_schema("fresh"));
+        // TTL 300, headroom 30, just inserted — not due for refresh.
+        assert_eq!(cache.tables_needing_refresh().len(), 0);
+    }
+
+    #[test]
+    fn test_tables_needing_refresh_includes_expired() {
+        // Zero TTL = everything is immediately "expired + past headroom".
+        let cache = SchemaCache::new(0);
+        cache.insert("x".to_string(), make_test_schema("x"));
+        cache.insert("y".to_string(), make_test_schema("y"));
+        let mut due = cache.tables_needing_refresh();
+        due.sort();
+        assert_eq!(due, vec!["x", "y"]);
+    }
+
+    // ============================================================
+    // stats — aggregation correctness
+    // ============================================================
+
+    #[test]
+    fn test_stats_mixed_valid_and_expired() {
+        // We can't cleanly mix valid + expired without time manipulation,
+        // but we can verify stats with all-valid and all-expired.
+        let valid = SchemaCache::new(3600);
+        for i in 0..3 {
+            valid.insert(format!("t{i}"), make_test_schema(&format!("t{i}")));
+        }
+        let s = valid.stats();
+        assert_eq!(s.total, 3);
+        assert_eq!(s.valid, 3);
+        assert_eq!(s.expired, 0);
+
+        let expired = SchemaCache::new(0);
+        for i in 0..3 {
+            expired.insert(format!("t{i}"), make_test_schema(&format!("t{i}")));
+        }
+        let s = expired.stats();
+        assert_eq!(s.total, 3);
+        assert_eq!(s.valid, 0);
+        assert_eq!(s.expired, 3);
+    }
+
+    #[test]
+    fn test_stats_struct_clone() {
+        let cache = SchemaCache::new(300);
+        cache.insert("t".to_string(), make_test_schema("t"));
+        let stats = cache.stats();
+        let cloned = stats.clone();
+        assert_eq!(cloned.total, stats.total);
+        assert_eq!(cloned.ttl_secs, stats.ttl_secs);
+    }
+
+    #[test]
+    fn test_stats_debug_output_includes_counters() {
+        let cache = SchemaCache::new(300);
+        cache.insert("t".to_string(), make_test_schema("t"));
+        let _ = cache.get("t");
+        let debug = format!("{:?}", cache.stats());
+        assert!(debug.contains("SchemaCacheStats"));
+        assert!(debug.contains("total"));
+        assert!(debug.contains("hits"));
+    }
+
+    // ============================================================
+    // shutdown — state transitions
+    // ============================================================
+
+    #[test]
+    fn test_shutdown_flag_starts_false() {
+        let cache = SchemaCache::new(300);
+        assert!(!cache.is_shutdown());
+    }
+
+    #[test]
+    fn test_shutdown_sets_flag() {
+        let cache = SchemaCache::new(300);
+        cache.shutdown();
+        assert!(cache.is_shutdown());
+    }
+
+    #[test]
+    fn test_shutdown_idempotent() {
+        let cache = SchemaCache::new(300);
+        cache.shutdown();
+        cache.shutdown();
+        cache.shutdown();
+        assert!(cache.is_shutdown());
+    }
+
+    // ============================================================
+    // Large-scale fuzz-style tests
+    // ============================================================
+
+    #[test]
+    fn test_large_number_of_tables() {
+        let cache = SchemaCache::new(300);
+        // Insert 1000 distinct table schemas.
+        for i in 0..1000 {
+            let name = format!("db_{i}.table_{i}");
+            cache.insert(name.clone(), make_test_schema(&name));
+        }
+        let stats = cache.stats();
+        assert_eq!(stats.total, 1000);
+        assert_eq!(stats.valid, 1000);
+
+        // Every lookup must hit.
+        for i in 0..1000 {
+            let name = format!("db_{i}.table_{i}");
+            assert!(cache.get(&name).is_some());
+        }
+        assert_eq!(cache.stats().hits, 1000);
+
+        // Bulk invalidate.
+        cache.invalidate_all();
+        assert_eq!(cache.stats().invalidations, 1000);
+        assert_eq!(cache.cached_tables().len(), 0);
+    }
+
+    #[test]
+    fn test_unicode_table_names() {
+        let cache = SchemaCache::new(300);
+        let names = [
+            "日本語.テーブル",
+            "数据库.表",
+            "база.таблица",
+            "emoji_🔥.data",
+        ];
+        for name in names {
+            cache.insert(name.to_string(), make_test_schema(name));
+        }
+        for name in names {
+            assert!(cache.get(name).is_some(), "missing: {name}");
+        }
+    }
+
+    #[test]
+    fn test_empty_string_table_name() {
+        // Edge case — empty key is legal for HashMap.
+        let cache = SchemaCache::new(300);
+        cache.insert(String::new(), make_test_schema(""));
+        assert!(cache.get("").is_some());
+        cache.invalidate("");
+        assert!(cache.get("").is_none());
+    }
+
+    #[test]
+    fn test_invalidate_independent_tables() {
+        // Invalidating one table must not affect others.
+        let cache = SchemaCache::new(300);
+        cache.insert("a".to_string(), make_test_schema("a"));
+        cache.insert("b".to_string(), make_test_schema("b"));
+        cache.insert("c".to_string(), make_test_schema("c"));
+
+        cache.invalidate("b");
+        assert!(cache.get("a").is_some());
+        assert!(cache.get("b").is_none());
+        assert!(cache.get("c").is_some());
+        assert_eq!(cache.stats().total, 2);
+    }
+
+    #[test]
+    fn test_concurrent_hits_counter_thread_safe() {
+        // Verify atomics — spawn threads that each read the same table.
+        use std::thread;
+        let cache = Arc::new(SchemaCache::new(300));
+        cache.insert("t".to_string(), make_test_schema("t"));
+
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let c = Arc::clone(&cache);
+            handles.push(thread::spawn(move || {
+                for _ in 0..100 {
+                    let _ = c.get("t");
+                }
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+        // 8 threads × 100 gets = 800 hits
+        assert_eq!(cache.stats().hits, 800);
+    }
 }

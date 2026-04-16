@@ -547,4 +547,507 @@ mod tests {
         assert_eq!(cb.get_state("table_b"), CircuitState::Closed);
         assert!(cb.allow_request("table_b"));
     }
+
+    // ========================================================================
+    // reset_all()
+    // ========================================================================
+
+    #[test]
+    fn test_reset_all_clears_all_circuits() {
+        let cb = CircuitBreaker::new(test_config());
+
+        // Open circuits for multiple tables
+        for _ in 0..3 {
+            cb.record_failure("table_a");
+            cb.record_failure("table_b");
+            cb.record_failure("table_c");
+        }
+
+        assert_eq!(cb.get_state("table_a"), CircuitState::Open);
+        assert_eq!(cb.get_state("table_b"), CircuitState::Open);
+        assert_eq!(cb.get_state("table_c"), CircuitState::Open);
+
+        // stats reflects three registered tables
+        let pre = cb.stats();
+        assert_eq!(pre.total_tables, 3);
+        assert_eq!(pre.open_count, 3);
+
+        // reset_all clears the entire map
+        cb.reset_all();
+
+        // After reset_all, no tables are registered → get_state returns Closed default
+        let post = cb.stats();
+        assert_eq!(
+            post.total_tables, 0,
+            "reset_all should clear all circuit state"
+        );
+        assert_eq!(post.open_count, 0);
+        assert_eq!(post.half_open_count, 0);
+        assert_eq!(post.closed_count, 0);
+
+        // But total_opens counter is NOT cleared (it's a cumulative metric)
+        assert_eq!(
+            post.total_opens, 3,
+            "cumulative total_opens metric should survive reset_all"
+        );
+
+        // Requests on previously-open circuits should now proceed (fresh default)
+        assert!(cb.allow_request("table_a"));
+        assert!(cb.allow_request("table_b"));
+        assert!(cb.allow_request("table_c"));
+    }
+
+    #[test]
+    fn test_reset_all_on_empty() {
+        let cb = CircuitBreaker::new(test_config());
+        // reset_all on an empty breaker should not panic or misbehave
+        cb.reset_all();
+        let stats = cb.stats();
+        assert_eq!(stats.total_tables, 0);
+        assert_eq!(stats.total_opens, 0);
+        assert_eq!(stats.total_rejections, 0);
+    }
+
+    // ========================================================================
+    // get_open_circuits()
+    // ========================================================================
+
+    #[test]
+    fn test_get_open_circuits_when_all_closed() {
+        let cb = CircuitBreaker::new(test_config());
+        // Register two tables in closed state via allow_request
+        cb.allow_request("healthy.a");
+        cb.allow_request("healthy.b");
+
+        let open = cb.get_open_circuits();
+        assert!(open.is_empty(), "No circuits should be open, got: {open:?}");
+    }
+
+    #[test]
+    fn test_get_open_circuits_when_empty() {
+        let cb = CircuitBreaker::new(test_config());
+        // Nothing registered at all
+        assert!(cb.get_open_circuits().is_empty());
+    }
+
+    #[test]
+    fn test_get_open_circuits_filters_correctly() {
+        let cb = CircuitBreaker::new(test_config());
+        // Table A: closed (healthy)
+        cb.allow_request("a.closed");
+        // Table B: open
+        for _ in 0..3 {
+            cb.record_failure("b.open");
+        }
+        // Table C: open, then transition to half-open
+        for _ in 0..3 {
+            cb.record_failure("c.half_open");
+        }
+        std::thread::sleep(Duration::from_millis(150));
+        cb.allow_request("c.half_open");
+
+        let open = cb.get_open_circuits();
+        assert_eq!(open.len(), 1, "Only 'b.open' should be Open, got: {open:?}");
+        assert_eq!(open[0], "b.open");
+    }
+
+    // ========================================================================
+    // Rapid state transitions
+    // ========================================================================
+
+    #[test]
+    fn test_rapid_closed_open_half_open_closed_open_transitions() {
+        let cb = CircuitBreaker::new(test_config());
+        let table = "rapid.transitions";
+
+        // Starts closed
+        assert_eq!(cb.get_state(table), CircuitState::Closed);
+
+        // Transition 1: closed -> open (3 failures)
+        for _ in 0..3 {
+            cb.record_failure(table);
+        }
+        assert_eq!(cb.get_state(table), CircuitState::Open);
+
+        // Transition 2: open -> half-open (wait, probe)
+        std::thread::sleep(Duration::from_millis(150));
+        assert!(cb.allow_request(table));
+        assert_eq!(cb.get_state(table), CircuitState::HalfOpen);
+
+        // Transition 3: half-open -> closed (2 successes)
+        cb.record_success(table);
+        cb.record_success(table);
+        assert_eq!(cb.get_state(table), CircuitState::Closed);
+
+        // Transition 4: closed -> open again
+        for _ in 0..3 {
+            cb.record_failure(table);
+        }
+        assert_eq!(cb.get_state(table), CircuitState::Open);
+
+        // total_opens should record TWO open events
+        let stats = cb.stats();
+        assert_eq!(
+            stats.total_opens, 2,
+            "Two open transitions expected, got {}",
+            stats.total_opens
+        );
+    }
+
+    #[test]
+    fn test_half_open_failure_increments_total_opens() {
+        let cb = CircuitBreaker::new(test_config());
+        let table = "reopen.table";
+
+        // Open (1st open event)
+        for _ in 0..3 {
+            cb.record_failure(table);
+        }
+        std::thread::sleep(Duration::from_millis(150));
+
+        // Half-open probe
+        cb.allow_request(table);
+        assert_eq!(cb.get_state(table), CircuitState::HalfOpen);
+
+        // Failure reopens (2nd open event — this is the critical path)
+        cb.record_failure(table);
+        assert_eq!(cb.get_state(table), CircuitState::Open);
+
+        let stats = cb.stats();
+        assert_eq!(
+            stats.total_opens, 2,
+            "Half-open -> open should count as a new open"
+        );
+    }
+
+    #[test]
+    fn test_success_while_open_does_not_close() {
+        // Edge case: if record_success is called while the circuit is Open
+        // (e.g. a racey caller), it should NOT transition to closed.
+        let cb = CircuitBreaker::new(test_config());
+        let table = "racey.table";
+
+        for _ in 0..3 {
+            cb.record_failure(table);
+        }
+        assert_eq!(cb.get_state(table), CircuitState::Open);
+
+        cb.record_success(table);
+        // State should remain Open — success in Open state is a no-op (logged warn)
+        assert_eq!(cb.get_state(table), CircuitState::Open);
+    }
+
+    #[test]
+    fn test_failure_while_open_refreshes_opened_at() {
+        // Additional failures while Open should refresh the opened_at timestamp,
+        // effectively resetting the countdown to half-open.
+        let cb = CircuitBreaker::new(test_config());
+        let table = "persistent.failure";
+
+        for _ in 0..3 {
+            cb.record_failure(table);
+        }
+        assert_eq!(cb.get_state(table), CircuitState::Open);
+
+        // Wait nearly the full open_duration, then record another failure
+        std::thread::sleep(Duration::from_millis(80));
+        cb.record_failure(table);
+
+        // Since failure refreshed opened_at, we should still need to wait
+        // the full 100ms from THIS failure. Check after only 50ms: still open.
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(
+            !cb.allow_request(table),
+            "Circuit should stay open — failure refreshed opened_at"
+        );
+        assert_eq!(cb.get_state(table), CircuitState::Open);
+    }
+
+    // ========================================================================
+    // CircuitBreakerStats
+    // ========================================================================
+
+    #[test]
+    fn test_stats_all_fields() {
+        let cb = CircuitBreaker::new(test_config());
+
+        // Table A: closed
+        cb.allow_request("a.closed");
+
+        // Table B: open
+        for _ in 0..3 {
+            cb.record_failure("b.open");
+        }
+
+        // Table C: half-open
+        for _ in 0..3 {
+            cb.record_failure("c.half_open");
+        }
+        std::thread::sleep(Duration::from_millis(150));
+        cb.allow_request("c.half_open");
+
+        // Table D: open and rejected requests (counting rejections)
+        for _ in 0..3 {
+            cb.record_failure("d.rejected");
+        }
+        for _ in 0..5 {
+            cb.allow_request("d.rejected"); // 5 rejected requests
+        }
+
+        let stats = cb.stats();
+        assert_eq!(stats.total_tables, 4);
+        assert_eq!(stats.closed_count, 1);
+        assert_eq!(stats.open_count, 2); // b.open, d.rejected
+        assert_eq!(stats.half_open_count, 1); // c.half_open
+        assert_eq!(
+            stats.total_opens, 3,
+            "3 circuits opened, got {}",
+            stats.total_opens
+        );
+        assert!(
+            stats.total_rejections >= 5,
+            "Expected >= 5 rejections, got {}",
+            stats.total_rejections
+        );
+    }
+
+    #[test]
+    fn test_stats_after_reset() {
+        let cb = CircuitBreaker::new(test_config());
+        for _ in 0..3 {
+            cb.record_failure("t");
+        }
+
+        // Cause rejections to increment counter
+        cb.allow_request("t");
+        cb.allow_request("t");
+
+        let pre = cb.stats();
+        assert_eq!(pre.open_count, 1);
+        assert!(pre.total_rejections >= 2);
+
+        // reset() only clears per-table state, not counters
+        cb.reset("t");
+        let post = cb.stats();
+        assert_eq!(post.open_count, 0);
+        assert_eq!(post.closed_count, 1);
+        // Cumulative counter preserved
+        assert_eq!(post.total_opens, pre.total_opens);
+        assert_eq!(post.total_rejections, pre.total_rejections);
+    }
+
+    #[test]
+    fn test_reset_nonexistent_table_noop() {
+        let cb = CircuitBreaker::new(test_config());
+        // Should not panic
+        cb.reset("never.registered");
+        let stats = cb.stats();
+        assert_eq!(stats.total_tables, 0);
+    }
+
+    // ========================================================================
+    // Concurrent access from multiple threads
+    // ========================================================================
+
+    #[test]
+    fn test_concurrent_failure_recording() {
+        use std::sync::Arc;
+
+        let cb = Arc::new(CircuitBreaker::new(CircuitBreakerConfig {
+            failure_threshold: 50,
+            success_threshold: 2,
+            open_duration: Duration::from_secs(60),
+            half_open_max_requests: 3,
+        }));
+
+        let thread_count = 8;
+        let failures_per_thread = 20;
+
+        let mut handles = Vec::with_capacity(thread_count);
+        for tid in 0..thread_count {
+            let cb = Arc::clone(&cb);
+            handles.push(std::thread::spawn(move || {
+                for _ in 0..failures_per_thread {
+                    cb.record_failure("shared.table");
+                    // Also record some across different tables to stress the map
+                    cb.record_failure(&format!("thread.{tid}"));
+                }
+            }));
+        }
+
+        for h in handles {
+            h.join().expect("thread join");
+        }
+
+        // shared.table saw 8*20 = 160 failures, well above threshold (50)
+        assert_eq!(
+            cb.get_state("shared.table"),
+            CircuitState::Open,
+            "High failure count should open the shared circuit"
+        );
+
+        // Each per-thread table saw 20 failures, below threshold (50) → closed
+        for tid in 0..thread_count {
+            assert_eq!(
+                cb.get_state(&format!("thread.{tid}")),
+                CircuitState::Closed,
+                "Low-failure tables should stay closed"
+            );
+        }
+
+        let stats = cb.stats();
+        // total_tables = 1 shared + 8 per-thread
+        assert_eq!(stats.total_tables, 1 + thread_count);
+    }
+
+    #[test]
+    fn test_concurrent_mixed_success_failure() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        let cb = Arc::new(CircuitBreaker::new(CircuitBreakerConfig {
+            failure_threshold: 10,
+            success_threshold: 2,
+            open_duration: Duration::from_millis(50),
+            half_open_max_requests: 5,
+        }));
+
+        let success_counter = Arc::new(AtomicU32::new(0));
+        let rejected_counter = Arc::new(AtomicU32::new(0));
+
+        let mut handles = Vec::new();
+        // Writers: record failures
+        for _ in 0..4 {
+            let cb = Arc::clone(&cb);
+            handles.push(std::thread::spawn(move || {
+                for _ in 0..50 {
+                    cb.record_failure("t");
+                }
+            }));
+        }
+        // Readers: probe state, track outcomes
+        for _ in 0..4 {
+            let cb = Arc::clone(&cb);
+            let succ = Arc::clone(&success_counter);
+            let rej = Arc::clone(&rejected_counter);
+            handles.push(std::thread::spawn(move || {
+                for _ in 0..50 {
+                    if cb.allow_request("t") {
+                        succ.fetch_add(1, Ordering::Relaxed);
+                    } else {
+                        rej.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+            }));
+        }
+
+        for h in handles {
+            h.join().expect("thread join");
+        }
+
+        // All operations were atomic — must not deadlock, must not panic.
+        // Eventually the circuit should be Open (200 failures, threshold 10)
+        // or HalfOpen (transition from probe). Must NOT be uninitialised.
+        let state = cb.get_state("t");
+        assert!(
+            matches!(state, CircuitState::Open | CircuitState::HalfOpen),
+            "Expected Open or HalfOpen after 200 failures, got {state:?}"
+        );
+
+        // Verify totals summed correctly with no lost updates
+        let total_probes =
+            success_counter.load(Ordering::Relaxed) + rejected_counter.load(Ordering::Relaxed);
+        assert_eq!(
+            total_probes, 200,
+            "All 4*50 = 200 probes must be accounted for"
+        );
+    }
+
+    #[test]
+    fn test_concurrent_reset_with_failures() {
+        use std::sync::Arc;
+
+        let cb = Arc::new(CircuitBreaker::new(test_config()));
+
+        // Open the circuit first
+        for _ in 0..3 {
+            cb.record_failure("reset.race");
+        }
+        assert_eq!(cb.get_state("reset.race"), CircuitState::Open);
+
+        // Thread 1: rapidly records failures
+        let cb1 = Arc::clone(&cb);
+        let writer = std::thread::spawn(move || {
+            for _ in 0..100 {
+                cb1.record_failure("reset.race");
+            }
+        });
+
+        // Thread 2: periodically resets
+        let cb2 = Arc::clone(&cb);
+        let resetter = std::thread::spawn(move || {
+            for _ in 0..10 {
+                cb2.reset("reset.race");
+                std::thread::yield_now();
+            }
+        });
+
+        writer.join().expect("writer thread");
+        resetter.join().expect("resetter thread");
+
+        // Both threads completed without deadlock/panic. Final state is
+        // non-deterministic (depends on interleaving) but must be a valid enum.
+        let final_state = cb.get_state("reset.race");
+        assert!(
+            matches!(
+                final_state,
+                CircuitState::Closed | CircuitState::Open | CircuitState::HalfOpen
+            ),
+            "Final state must be a valid variant: {final_state:?}"
+        );
+    }
+
+    #[test]
+    fn test_per_table_states_returns_all_tables() {
+        let cb = CircuitBreaker::new(test_config());
+
+        // Closed
+        cb.allow_request("a");
+        // Open
+        for _ in 0..3 {
+            cb.record_failure("b");
+        }
+
+        let states = cb.per_table_states();
+        assert_eq!(states.len(), 2);
+
+        let map: std::collections::HashMap<_, _> = states.into_iter().collect();
+        assert_eq!(map.get("a"), Some(&0), "Closed = 0");
+        assert_eq!(map.get("b"), Some(&1), "Open = 1");
+    }
+
+    #[test]
+    fn test_circuit_state_display() {
+        // Covers the Display impl
+        assert_eq!(format!("{}", CircuitState::Closed), "closed");
+        assert_eq!(format!("{}", CircuitState::Open), "open");
+        assert_eq!(format!("{}", CircuitState::HalfOpen), "half-open");
+    }
+
+    #[test]
+    fn test_default_circuit_breaker_config() {
+        let cfg = CircuitBreakerConfig::default();
+        assert_eq!(cfg.failure_threshold, 5);
+        assert_eq!(cfg.success_threshold, 3);
+        assert_eq!(cfg.open_duration, Duration::from_secs(30));
+        assert_eq!(cfg.half_open_max_requests, 3);
+    }
+
+    #[test]
+    fn test_default_circuit_breaker_impl() {
+        let cb = CircuitBreaker::default();
+        let stats = cb.stats();
+        assert_eq!(stats.total_tables, 0);
+        assert_eq!(stats.total_opens, 0);
+    }
 }

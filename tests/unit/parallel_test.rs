@@ -43,18 +43,17 @@ fn test_process_batch_uses_multiple_threads() {
     let unique_threads = thread_ids.lock().len();
 
     // Tarpaulin (coverage) constrains thread scheduling — parallelism
-    // may not manifest under instrumentation. Warn instead of failing.
-    if std::env::var("TARPAULIN").is_ok() || std::env::var("CARGO_TARPAULIN").is_ok() {
-        if unique_threads <= 1 {
-            eprintln!(
-                "WARNING: only {unique_threads} thread(s) observed under tarpaulin — \
-                 parallelism not verifiable under coverage instrumentation"
-            );
-        }
-    } else {
-        assert!(
-            unique_threads > 1,
-            "Expected multiple threads, got {unique_threads} — parallelism not working"
+    // may not manifest under instrumentation. Skip the assertion there.
+    #[cfg(not(tarpaulin))]
+    assert!(
+        unique_threads > 1,
+        "Expected multiple threads, got {unique_threads} — parallelism not working"
+    );
+    #[cfg(tarpaulin)]
+    if unique_threads <= 1 {
+        eprintln!(
+            "WARNING: only {unique_threads} thread(s) observed under tarpaulin — \
+             parallelism not verifiable under coverage instrumentation"
         );
     }
 }

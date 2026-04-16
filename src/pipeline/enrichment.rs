@@ -255,3 +255,846 @@ fn inject_risk(data: &mut serde_json::Map<String, Value>, output: &RiskOutput) {
         data.insert("risk_factors".to_string(), Value::Array(factors));
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::{Map, json};
+
+    // ========================================================================
+    // extract_enrich_ip
+    // ========================================================================
+
+    #[test]
+    fn extract_ip_first_matching_field() {
+        let mut data = Map::new();
+        data.insert("src_ip".into(), json!("10.0.0.1"));
+        data.insert("dst_ip".into(), json!("192.168.1.1"));
+
+        let fields = vec!["src_ip".to_string(), "dst_ip".to_string()];
+        let ip = extract_enrich_ip(&data, &fields);
+        assert_eq!(ip, Some("10.0.0.1"));
+    }
+
+    #[test]
+    fn extract_ip_skips_empty_strings() {
+        let mut data = Map::new();
+        data.insert("src_ip".into(), json!(""));
+        data.insert("dst_ip".into(), json!("8.8.8.8"));
+
+        let fields = vec!["src_ip".to_string(), "dst_ip".to_string()];
+        let ip = extract_enrich_ip(&data, &fields);
+        assert_eq!(ip, Some("8.8.8.8"));
+    }
+
+    #[test]
+    fn extract_ip_returns_none_when_no_match() {
+        let mut data = Map::new();
+        data.insert("hostname".into(), json!("server-01"));
+        data.insert("port".into(), json!(8080));
+
+        let fields = vec!["src_ip".to_string(), "dst_ip".to_string()];
+        assert!(extract_enrich_ip(&data, &fields).is_none());
+    }
+
+    #[test]
+    fn extract_ip_returns_none_for_empty_field_list() {
+        let mut data = Map::new();
+        data.insert("src_ip".into(), json!("10.0.0.1"));
+
+        let fields: Vec<String> = vec![];
+        assert!(extract_enrich_ip(&data, &fields).is_none());
+    }
+
+    #[test]
+    fn extract_ip_ignores_non_string_values() {
+        let mut data = Map::new();
+        data.insert("src_ip".into(), json!(192)); // number, not string
+        data.insert("dst_ip".into(), json!(true)); // bool, not string
+        data.insert("real_ip".into(), json!("1.2.3.4"));
+
+        let fields = vec![
+            "src_ip".to_string(),
+            "dst_ip".to_string(),
+            "real_ip".to_string(),
+        ];
+        assert_eq!(extract_enrich_ip(&data, &fields), Some("1.2.3.4"));
+    }
+
+    #[test]
+    fn extract_ip_returns_none_for_empty_data() {
+        let data = Map::new();
+        let fields = vec!["src_ip".to_string()];
+        assert!(extract_enrich_ip(&data, &fields).is_none());
+    }
+
+    // ========================================================================
+    // inject_geo
+    // ========================================================================
+
+    #[test]
+    fn inject_geo_populates_all_available_fields() {
+        let mut data = Map::new();
+        let result = GeoIpResult {
+            continent_code: Some("OC".into()),
+            country_code: Some("AU".into()),
+            country_name: Some("Australia".into()),
+            city: Some("Sydney".into()),
+            latitude: Some(-33.8688),
+            longitude: Some(151.2093),
+            timezone: Some("Australia/Sydney".into()),
+            subdivision: Some("New South Wales".into()),
+            subdivision_code: Some("NSW".into()),
+            asn: Some(13335),
+            asn_org: Some("Cloudflare Inc".into()),
+            is_private: false,
+            ..Default::default()
+        };
+
+        inject_geo(&mut data, &result);
+
+        assert_eq!(data["geo_continent_code"], json!("OC"));
+        assert_eq!(data["geo_country_code"], json!("AU"));
+        assert_eq!(data["geo_country"], json!("Australia"));
+        assert_eq!(data["geo_city"], json!("Sydney"));
+        assert_eq!(data["geo_latitude"], json!(-33.8688));
+        assert_eq!(data["geo_longitude"], json!(151.2093));
+        assert_eq!(data["geo_timezone"], json!("Australia/Sydney"));
+        assert_eq!(data["geo_region"], json!("New South Wales"));
+        assert_eq!(data["geo_region_code"], json!("NSW"));
+        assert_eq!(data["geo_asn"], json!(13335));
+        assert_eq!(data["geo_asn_org"], json!("Cloudflare Inc"));
+        assert_eq!(data["geo_is_private"], json!(false));
+    }
+
+    #[test]
+    fn inject_geo_handles_minimal_result() {
+        let mut data = Map::new();
+        let result = GeoIpResult {
+            country_code: Some("US".into()),
+            is_private: false,
+            ..Default::default()
+        };
+
+        inject_geo(&mut data, &result);
+
+        assert_eq!(data["geo_country_code"], json!("US"));
+        assert_eq!(data["geo_is_private"], json!(false));
+        // Fields with None should NOT be present
+        assert!(!data.contains_key("geo_city"));
+        assert!(!data.contains_key("geo_latitude"));
+        assert!(!data.contains_key("geo_asn"));
+    }
+
+    #[test]
+    fn inject_geo_private_ip_result() {
+        let mut data = Map::new();
+        let result = GeoIpResult {
+            is_private: true,
+            ..Default::default()
+        };
+
+        inject_geo(&mut data, &result);
+
+        assert_eq!(data["geo_is_private"], json!(true));
+        assert!(!data.contains_key("geo_country_code"));
+    }
+
+    #[test]
+    fn inject_geo_does_not_overwrite_existing_fields() {
+        let mut data = Map::new();
+        data.insert("geo_country_code".into(), json!("EXISTING"));
+        data.insert("geo_is_private".into(), json!("EXISTING"));
+
+        let result = GeoIpResult {
+            country_code: Some("AU".into()),
+            is_private: false,
+            ..Default::default()
+        };
+
+        inject_geo(&mut data, &result);
+
+        // Pre-existing values must NOT be overwritten
+        assert_eq!(data["geo_country_code"], json!("EXISTING"));
+        assert_eq!(data["geo_is_private"], json!("EXISTING"));
+    }
+
+    // ========================================================================
+    // inject_reputation
+    // ========================================================================
+
+    #[test]
+    fn inject_reputation_tor_node() {
+        let mut data = Map::new();
+        let result = ReputationResult {
+            is_tor: true,
+            is_malicious: true,
+            threat_type: ThreatType::Tor,
+            abuse_score: 85,
+            ..Default::default()
+        };
+
+        inject_reputation(&mut data, &result);
+
+        assert_eq!(data["rep_is_tor"], json!(true));
+        assert_eq!(data["rep_is_malicious"], json!(true));
+        assert_eq!(data["rep_is_vpn"], json!(false));
+        assert_eq!(data["rep_is_proxy"], json!(false));
+        assert_eq!(data["rep_threat_type"], json!("tor"));
+        assert_eq!(data["rep_abuse_score"], json!(85));
+    }
+
+    #[test]
+    fn inject_reputation_clean_ip() {
+        let mut data = Map::new();
+        let result = ReputationResult::default();
+
+        inject_reputation(&mut data, &result);
+
+        assert_eq!(data["rep_is_vpn"], json!(false));
+        assert_eq!(data["rep_is_tor"], json!(false));
+        assert_eq!(data["rep_is_botnet"], json!(false));
+        assert_eq!(data["rep_is_scanner"], json!(false));
+        // abuse_score == 0 → should NOT be inserted
+        assert!(!data.contains_key("rep_abuse_score"));
+        // threat_type None → "none" string
+        assert_eq!(data["rep_threat_type"], json!("none"));
+    }
+
+    #[test]
+    fn inject_reputation_does_not_overwrite_existing() {
+        let mut data = Map::new();
+        data.insert("rep_is_vpn".into(), json!("MANUAL_OVERRIDE"));
+
+        let result = ReputationResult {
+            is_vpn: true,
+            ..Default::default()
+        };
+
+        inject_reputation(&mut data, &result);
+
+        // Existing value must survive
+        assert_eq!(data["rep_is_vpn"], json!("MANUAL_OVERRIDE"));
+    }
+
+    #[test]
+    fn inject_reputation_multi_threat() {
+        let mut data = Map::new();
+        let result = ReputationResult {
+            is_vpn: true,
+            is_proxy: true,
+            is_datacenter: true,
+            is_spam: true,
+            threat_type: ThreatType::Vpn,
+            abuse_score: 42,
+            ..Default::default()
+        };
+
+        inject_reputation(&mut data, &result);
+
+        assert_eq!(data["rep_is_vpn"], json!(true));
+        assert_eq!(data["rep_is_proxy"], json!(true));
+        assert_eq!(data["rep_is_datacenter"], json!(true));
+        assert_eq!(data["rep_is_spam"], json!(true));
+        assert_eq!(data["rep_abuse_score"], json!(42));
+    }
+
+    // ========================================================================
+    // inject_risk
+    // ========================================================================
+
+    #[test]
+    fn inject_risk_high_score_with_factors() {
+        let mut data = Map::new();
+        let output = RiskOutput {
+            risk_score: 85,
+            risk_level: crate::enrich::risk::RiskLevel::Critical,
+            risk_factors: vec!["high_risk_country", "tor_detected"],
+            ..Default::default()
+        };
+
+        inject_risk(&mut data, &output);
+
+        assert_eq!(data["risk_score"], json!(85));
+        assert_eq!(data["risk_level"], json!("critical"));
+        let factors = data["risk_factors"]
+            .as_array()
+            .expect("risk_factors should be array");
+        assert_eq!(factors.len(), 2);
+        assert_eq!(factors[0], json!("high_risk_country"));
+        assert_eq!(factors[1], json!("tor_detected"));
+    }
+
+    #[test]
+    fn inject_risk_zero_score_no_factors() {
+        let mut data = Map::new();
+        let output = RiskOutput {
+            risk_score: 0,
+            risk_level: crate::enrich::risk::RiskLevel::Minimal,
+            risk_factors: vec![],
+            ..Default::default()
+        };
+
+        inject_risk(&mut data, &output);
+
+        assert_eq!(data["risk_score"], json!(0));
+        assert_eq!(data["risk_level"], json!("minimal"));
+        // Empty factors should NOT be inserted
+        assert!(!data.contains_key("risk_factors"));
+    }
+
+    #[test]
+    fn inject_risk_does_not_overwrite_existing() {
+        let mut data = Map::new();
+        data.insert("risk_score".into(), json!(999));
+        data.insert("risk_level".into(), json!("override"));
+        data.insert("risk_factors".into(), json!(["manual"]));
+
+        let output = RiskOutput {
+            risk_score: 50,
+            risk_level: crate::enrich::risk::RiskLevel::Medium,
+            risk_factors: vec!["should_not_appear"],
+            ..Default::default()
+        };
+
+        inject_risk(&mut data, &output);
+
+        assert_eq!(data["risk_score"], json!(999));
+        assert_eq!(data["risk_level"], json!("override"));
+        assert_eq!(data["risk_factors"], json!(["manual"]));
+    }
+
+    // ========================================================================
+    // EnrichmentPipeline: is_active and enrich (no-op path)
+    // ========================================================================
+
+    #[test]
+    fn pipeline_no_components_is_inactive() {
+        let pipeline = EnrichmentPipeline {
+            ip_fields: vec!["src_ip".into()],
+            geoip: None,
+            reputation: None,
+            risk: None,
+        };
+        assert!(!pipeline.is_active());
+    }
+
+    #[test]
+    fn pipeline_with_risk_only_is_active() {
+        let scorer = RiskScorer::from_preset(RiskPreset::Global);
+        let pipeline = EnrichmentPipeline {
+            ip_fields: vec!["src_ip".into()],
+            geoip: None,
+            reputation: None,
+            risk: Some(scorer),
+        };
+        assert!(pipeline.is_active());
+    }
+
+    #[test]
+    fn enrich_noop_when_no_enrichers() {
+        let pipeline = EnrichmentPipeline {
+            ip_fields: vec!["src_ip".into()],
+            geoip: None,
+            reputation: None,
+            risk: None,
+        };
+        let mut data = Map::new();
+        data.insert("src_ip".into(), json!("8.8.8.8"));
+        data.insert("hostname".into(), json!("test"));
+
+        pipeline.enrich(&mut data);
+
+        // Data should be completely untouched
+        assert_eq!(data.len(), 2);
+        assert!(!data.contains_key("geo_country_code"));
+        assert!(!data.contains_key("rep_is_vpn"));
+        assert!(!data.contains_key("risk_score"));
+    }
+
+    #[test]
+    fn enrich_noop_when_no_ip_found() {
+        let scorer = RiskScorer::from_preset(RiskPreset::Global);
+        let pipeline = EnrichmentPipeline {
+            ip_fields: vec!["src_ip".into()],
+            geoip: None,
+            reputation: None,
+            risk: Some(scorer),
+        };
+        let mut data = Map::new();
+        data.insert("hostname".into(), json!("no-ip-here"));
+
+        pipeline.enrich(&mut data);
+
+        // No IP found → no enrichment
+        assert_eq!(data.len(), 1);
+        assert!(!data.contains_key("risk_score"));
+    }
+
+    #[test]
+    fn enrich_reputation_only_pipeline() {
+        // Create a reputation enricher and load a known malicious IP
+        let enricher = ReputationEnricher::new();
+        use std::net::IpAddr;
+        let addr: IpAddr = "203.0.113.50".parse().expect("valid IP");
+        enricher.add_ip(addr, ThreatType::Botnet, ThreatSource::AbuseCh);
+
+        let pipeline = EnrichmentPipeline {
+            ip_fields: vec!["src_ip".into()],
+            geoip: None,
+            reputation: Some(enricher),
+            risk: None,
+        };
+
+        let mut data = Map::new();
+        data.insert("src_ip".into(), json!("203.0.113.50"));
+
+        pipeline.enrich(&mut data);
+
+        assert_eq!(data["rep_is_botnet"], json!(true));
+        assert_eq!(data["rep_is_vpn"], json!(false));
+        // No GeoIP → no geo fields
+        assert!(!data.contains_key("geo_country_code"));
+        // No risk scorer → no risk fields
+        assert!(!data.contains_key("risk_score"));
+    }
+
+    #[test]
+    fn enrich_reputation_plus_risk_pipeline() {
+        let enricher = ReputationEnricher::new();
+        use std::net::IpAddr;
+        let addr: IpAddr = "198.51.100.99".parse().expect("valid IP");
+        enricher.add_ip(addr, ThreatType::Tor, ThreatSource::TorProject);
+
+        let scorer = RiskScorer::from_preset(RiskPreset::HighSecurity);
+
+        let pipeline = EnrichmentPipeline {
+            ip_fields: vec!["client_ip".into()],
+            geoip: None,
+            reputation: Some(enricher),
+            risk: Some(scorer),
+        };
+
+        let mut data = Map::new();
+        data.insert("client_ip".into(), json!("198.51.100.99"));
+
+        pipeline.enrich(&mut data);
+
+        // Reputation fields should be present
+        assert_eq!(data["rep_is_tor"], json!(true));
+        // Risk scoring should run because reputation result is Some
+        assert!(data.contains_key("risk_score"));
+        assert!(data.contains_key("risk_level"));
+        // Score should be non-trivial due to Tor detection
+        let score = data["risk_score"].as_u64().expect("score should be u64");
+        assert!(
+            score > 0,
+            "Tor IP should produce non-zero risk score, got {score}"
+        );
+    }
+
+    #[test]
+    fn enrich_unknown_ip_returns_clean_reputation() {
+        // Enricher with no data loaded — clean IP returns all-false result
+        let enricher = ReputationEnricher::new();
+
+        let pipeline = EnrichmentPipeline {
+            ip_fields: vec!["ip".into()],
+            geoip: None,
+            reputation: Some(enricher),
+            risk: None,
+        };
+
+        let mut data = Map::new();
+        data.insert("ip".into(), json!("192.0.2.1"));
+
+        pipeline.enrich(&mut data);
+
+        assert_eq!(data["rep_is_vpn"], json!(false));
+        assert_eq!(data["rep_is_tor"], json!(false));
+        assert_eq!(data["rep_is_botnet"], json!(false));
+    }
+
+    #[test]
+    fn enrich_invalid_ip_string_skips_enrichment() {
+        // ReputationEnricher.lookup parses the IP — "not_an_ip" returns None
+        let enricher = ReputationEnricher::new();
+        use std::net::IpAddr;
+        let addr: IpAddr = "10.0.0.1".parse().expect("valid");
+        enricher.add_ip(addr, ThreatType::Scanner, ThreatSource::Custom);
+
+        let pipeline = EnrichmentPipeline {
+            ip_fields: vec!["ip".into()],
+            geoip: None,
+            reputation: Some(enricher),
+            risk: None,
+        };
+
+        let mut data = Map::new();
+        data.insert("ip".into(), json!("not_an_ip_address"));
+
+        pipeline.enrich(&mut data);
+
+        // lookup returns None for invalid IP → no rep fields injected
+        // (ReputationEnricher.lookup parses the IP; parse failure → returns None)
+        assert!(!data.contains_key("rep_is_scanner"));
+    }
+
+    // ========================================================================
+    // IP field precedence — order matters
+    // ========================================================================
+
+    #[test]
+    fn extract_ip_precedence_order_matters() {
+        // When multiple IP fields are present, the FIRST one listed in ip_fields wins.
+        let mut data = Map::new();
+        data.insert("client_ip".into(), json!("1.1.1.1"));
+        data.insert("src_ip".into(), json!("2.2.2.2"));
+        data.insert("dst_ip".into(), json!("3.3.3.3"));
+
+        // Order: src_ip first
+        let fields = vec![
+            "src_ip".to_string(),
+            "client_ip".to_string(),
+            "dst_ip".to_string(),
+        ];
+        assert_eq!(extract_enrich_ip(&data, &fields), Some("2.2.2.2"));
+
+        // Order: client_ip first
+        let fields = vec![
+            "client_ip".to_string(),
+            "src_ip".to_string(),
+            "dst_ip".to_string(),
+        ];
+        assert_eq!(extract_enrich_ip(&data, &fields), Some("1.1.1.1"));
+
+        // Order: dst_ip first
+        let fields = vec![
+            "dst_ip".to_string(),
+            "src_ip".to_string(),
+            "client_ip".to_string(),
+        ];
+        assert_eq!(extract_enrich_ip(&data, &fields), Some("3.3.3.3"));
+    }
+
+    #[test]
+    fn extract_ip_skips_null_values() {
+        let mut data = Map::new();
+        data.insert("src_ip".into(), serde_json::Value::Null);
+        data.insert("dst_ip".into(), json!("10.0.0.5"));
+
+        let fields = vec!["src_ip".to_string(), "dst_ip".to_string()];
+        // null is not a string, so src_ip is skipped and dst_ip is picked
+        assert_eq!(extract_enrich_ip(&data, &fields), Some("10.0.0.5"));
+    }
+
+    #[test]
+    fn extract_ip_skips_array_and_object_values() {
+        let mut data = Map::new();
+        data.insert("src_ip".into(), json!(["1.1.1.1", "2.2.2.2"]));
+        data.insert("dst_ip".into(), json!({"ip": "3.3.3.3"}));
+        data.insert("real_ip".into(), json!("4.4.4.4"));
+
+        let fields = vec![
+            "src_ip".to_string(),
+            "dst_ip".to_string(),
+            "real_ip".to_string(),
+        ];
+        // Only real_ip is a string
+        assert_eq!(extract_enrich_ip(&data, &fields), Some("4.4.4.4"));
+    }
+
+    #[test]
+    fn extract_ip_whitespace_not_empty() {
+        // Whitespace-only string is not empty, so it IS returned
+        // (caller's responsibility to validate — extract is pure field lookup)
+        let mut data = Map::new();
+        data.insert("src_ip".into(), json!("   "));
+
+        let fields = vec!["src_ip".to_string()];
+        assert_eq!(extract_enrich_ip(&data, &fields), Some("   "));
+    }
+
+    // ========================================================================
+    // inject_geo / inject_reputation / inject_risk — edge cases
+    // ========================================================================
+
+    #[test]
+    fn inject_geo_partial_only_overwrites_missing_fields() {
+        // Mixed case: some fields pre-existing, others not → inject only missing
+        let mut data = Map::new();
+        data.insert("geo_country_code".into(), json!("PRE_EXISTING"));
+        // geo_city NOT set
+
+        let result = GeoIpResult {
+            country_code: Some("NEW".into()),
+            city: Some("Melbourne".into()),
+            latitude: Some(-37.8136),
+            is_private: false,
+            ..Default::default()
+        };
+
+        inject_geo(&mut data, &result);
+
+        // Pre-existing preserved
+        assert_eq!(data["geo_country_code"], json!("PRE_EXISTING"));
+        // Missing fields were injected
+        assert_eq!(data["geo_city"], json!("Melbourne"));
+        assert_eq!(data["geo_latitude"], json!(-37.8136));
+        assert_eq!(data["geo_is_private"], json!(false));
+    }
+
+    #[test]
+    fn inject_reputation_does_not_overwrite_mixed_fields() {
+        let mut data = Map::new();
+        data.insert("rep_is_vpn".into(), json!("manual_string"));
+        data.insert("rep_abuse_score".into(), json!(-999));
+        // rep_is_tor NOT set
+
+        let result = ReputationResult {
+            is_vpn: true,
+            is_tor: true,
+            abuse_score: 50,
+            ..Default::default()
+        };
+
+        inject_reputation(&mut data, &result);
+
+        // Pre-existing values (even wrong-typed) are preserved
+        assert_eq!(data["rep_is_vpn"], json!("manual_string"));
+        assert_eq!(data["rep_abuse_score"], json!(-999));
+        // Missing field gets injected
+        assert_eq!(data["rep_is_tor"], json!(true));
+    }
+
+    #[test]
+    fn inject_risk_partial_existing() {
+        let mut data = Map::new();
+        data.insert("risk_score".into(), json!(99)); // pre-existing
+        // risk_level and risk_factors NOT set
+
+        let output = RiskOutput {
+            risk_score: 42,
+            risk_level: crate::enrich::risk::RiskLevel::Low,
+            risk_factors: vec!["factor_a", "factor_b"],
+            ..Default::default()
+        };
+
+        inject_risk(&mut data, &output);
+
+        // Pre-existing preserved
+        assert_eq!(data["risk_score"], json!(99));
+        // Missing injected
+        assert_eq!(data["risk_level"], json!("low"));
+        let factors = data["risk_factors"].as_array().unwrap();
+        assert_eq!(factors.len(), 2);
+        assert_eq!(factors[0], json!("factor_a"));
+    }
+
+    #[test]
+    fn inject_geo_empty_result_only_adds_is_private() {
+        // All-None GeoIpResult still sets geo_is_private (which is non-Option)
+        let mut data = Map::new();
+        let result = GeoIpResult::default();
+
+        inject_geo(&mut data, &result);
+
+        assert_eq!(data.len(), 1);
+        assert_eq!(data["geo_is_private"], json!(false));
+    }
+
+    #[test]
+    fn inject_reputation_every_threat_flag() {
+        // Exercise every boolean flag once — ensures no missed fields
+        let mut data = Map::new();
+        let result = ReputationResult {
+            is_vpn: true,
+            is_proxy: true,
+            is_tor: true,
+            is_relay: true,
+            is_datacenter: true,
+            is_botnet: true,
+            is_spam: true,
+            is_scanner: true,
+            is_malicious: true,
+            threat_type: ThreatType::Proxy,
+            abuse_score: 100,
+            ..Default::default()
+        };
+
+        inject_reputation(&mut data, &result);
+
+        // Every flag set to true
+        for key in &[
+            "rep_is_vpn",
+            "rep_is_proxy",
+            "rep_is_tor",
+            "rep_is_relay",
+            "rep_is_datacenter",
+            "rep_is_botnet",
+            "rep_is_spam",
+            "rep_is_scanner",
+            "rep_is_malicious",
+        ] {
+            assert_eq!(data[*key], json!(true), "field {key} should be true");
+        }
+        assert_eq!(data["rep_threat_type"], json!("proxy"));
+        assert_eq!(data["rep_abuse_score"], json!(100));
+    }
+
+    // ========================================================================
+    // Full pipeline: all three enrichers configured
+    // ========================================================================
+
+    #[test]
+    fn enrich_all_three_components_configured() {
+        // GeoIP is skipped (requires MMDB files), but reputation + risk cover
+        // the combined path. This test demonstrates the full pipeline with
+        // both non-None reputation and risk scorer.
+        let enricher = ReputationEnricher::new();
+        use std::net::IpAddr;
+        let addr: IpAddr = "203.0.113.100".parse().expect("valid");
+        enricher.add_ip(addr, ThreatType::Botnet, ThreatSource::AbuseCh);
+
+        let scorer = RiskScorer::from_preset(RiskPreset::HighSecurity);
+
+        let pipeline = EnrichmentPipeline {
+            ip_fields: vec!["src_ip".into(), "client_ip".into()],
+            geoip: None, // GeoIP requires MMDB files — skip in unit tests
+            reputation: Some(enricher),
+            risk: Some(scorer),
+        };
+
+        assert!(pipeline.is_active());
+
+        let mut data = Map::new();
+        data.insert("src_ip".into(), json!("203.0.113.100"));
+        data.insert("action".into(), json!("login"));
+        data.insert("user".into(), json!("alice"));
+
+        pipeline.enrich(&mut data);
+
+        // Reputation results injected
+        assert_eq!(data["rep_is_botnet"], json!(true));
+        assert_eq!(data["rep_is_malicious"], json!(true)); // Botnet → malicious
+        // Risk score present
+        assert!(data.contains_key("risk_score"));
+        assert!(data.contains_key("risk_level"));
+        let score = data["risk_score"].as_u64().unwrap();
+        // Botnet contributes substantial threat points; require > 20 to confirm
+        // the risk scorer was invoked and produced a non-trivial score.
+        assert!(
+            score > 20,
+            "Botnet IP should produce non-trivial risk score, got {score}"
+        );
+        // Original fields preserved
+        assert_eq!(data["action"], json!("login"));
+        assert_eq!(data["user"], json!("alice"));
+        // GeoIP wasn't configured, so no geo fields
+        assert!(!data.contains_key("geo_country_code"));
+    }
+
+    #[test]
+    fn enrich_risk_does_not_overwrite_manually_set_risk_score() {
+        // User has pre-computed a risk score — enrichment must not clobber
+        let enricher = ReputationEnricher::new();
+        use std::net::IpAddr;
+        let addr: IpAddr = "203.0.113.200".parse().expect("valid");
+        enricher.add_ip(addr, ThreatType::Malware, ThreatSource::AbuseCh);
+
+        let scorer = RiskScorer::from_preset(RiskPreset::Global);
+
+        let pipeline = EnrichmentPipeline {
+            ip_fields: vec!["ip".into()],
+            geoip: None,
+            reputation: Some(enricher),
+            risk: Some(scorer),
+        };
+
+        let mut data = Map::new();
+        data.insert("ip".into(), json!("203.0.113.200"));
+        data.insert("risk_score".into(), json!(42)); // manually set
+        data.insert("risk_level".into(), json!("manual"));
+
+        pipeline.enrich(&mut data);
+
+        // User's manual values preserved despite high-threat reputation
+        assert_eq!(data["risk_score"], json!(42));
+        assert_eq!(data["risk_level"], json!("manual"));
+        // But reputation fields (not pre-set) are injected
+        assert_eq!(data["rep_is_malicious"], json!(true));
+    }
+
+    #[test]
+    fn enrich_second_ip_field_used_when_first_missing() {
+        let enricher = ReputationEnricher::new();
+        use std::net::IpAddr;
+        let addr: IpAddr = "10.10.10.10".parse().expect("valid");
+        enricher.add_ip(addr, ThreatType::Vpn, ThreatSource::AbuseIpdb);
+
+        let pipeline = EnrichmentPipeline {
+            // src_ip is first, then client_ip
+            ip_fields: vec!["src_ip".into(), "client_ip".into()],
+            geoip: None,
+            reputation: Some(enricher),
+            risk: None,
+        };
+
+        // Only client_ip present
+        let mut data = Map::new();
+        data.insert("client_ip".into(), json!("10.10.10.10"));
+        data.insert("session".into(), json!("abc123"));
+
+        pipeline.enrich(&mut data);
+
+        // Fallback to client_ip worked — VPN detected
+        assert_eq!(data["rep_is_vpn"], json!(true));
+    }
+
+    #[test]
+    fn enrich_empty_ip_fields_list_skips_enrichment() {
+        // Configuration oversight: reputation enabled but no IP fields listed
+        let enricher = ReputationEnricher::new();
+        use std::net::IpAddr;
+        let addr: IpAddr = "1.2.3.4".parse().expect("valid");
+        enricher.add_ip(addr, ThreatType::Scanner, ThreatSource::Custom);
+
+        let pipeline = EnrichmentPipeline {
+            ip_fields: vec![], // empty
+            geoip: None,
+            reputation: Some(enricher),
+            risk: None,
+        };
+
+        let mut data = Map::new();
+        data.insert("src_ip".into(), json!("1.2.3.4"));
+
+        pipeline.enrich(&mut data);
+
+        // No IP fields configured → no enrichment occurred
+        assert!(!data.contains_key("rep_is_scanner"));
+        assert_eq!(data.len(), 1, "Data should be untouched");
+    }
+
+    #[test]
+    fn enrich_risk_only_without_geo_or_rep_skips_scoring() {
+        // Risk scorer alone can't produce meaningful output without GeoIP or reputation.
+        // Implementation: risk only runs when geo_result.is_some() || rep_result.is_some().
+        let scorer = RiskScorer::from_preset(RiskPreset::Global);
+        let pipeline = EnrichmentPipeline {
+            ip_fields: vec!["ip".into()],
+            geoip: None,
+            reputation: None,
+            risk: Some(scorer),
+        };
+
+        let mut data = Map::new();
+        data.insert("ip".into(), json!("8.8.8.8"));
+
+        pipeline.enrich(&mut data);
+
+        // No geo or rep data → risk scoring is skipped
+        assert!(!data.contains_key("risk_score"));
+        assert!(!data.contains_key("risk_level"));
+    }
+}
