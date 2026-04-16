@@ -3,6 +3,26 @@
 This document covers performance optimization techniques for dfe-loader, including
 PGO/BOLT build optimizations and runtime tuning.
 
+> **CI Integration Notice (2026-04+):**
+> hyperi-ci now applies **Tier 1** build optimisations (jemalloc allocator + fat
+> LTO) automatically on `beta` and `release` channels. **Tier 2** (PGO + BOLT)
+> is opt-in per project via `.hyperi-ci.yaml`. The manual `cargo pgo` / `cargo
+> pgo bolt` commands documented below are now for **local development and
+> one-off profiling only** — CI handles them automatically when configured.
+>
+> See:
+> - `hyperi-ai/standards/languages/RUST.md` — *Release-Track Build
+>   Optimisation (hyperi-ci)* for the full contract
+> - `hyperi-ai/standards/infrastructure/CI.md` — *Channel-Tiered Build
+>   Optimisation* for the channel × tier table
+> - `TODO.md` — *Rust Release-Track Optimisation* for dfe-loader's specific
+>   Tier 2 opt-in steps
+>
+> The rest of this document remains relevant for:
+> - Understanding *why* each optimisation matters (the CI just automates them)
+> - Local profiling / one-off performance investigation
+> - Runtime tuning (batch sizes, concurrent inserts — NOT build-time concerns)
+
 ## Build Optimizations
 
 ### Profile-Guided Optimization (PGO)
@@ -10,7 +30,11 @@ PGO/BOLT build optimizations and runtime tuning.
 PGO can provide **10-20% performance improvement** by using runtime profiling data
 to guide compiler optimizations. See [cargo-pgo](https://github.com/Kobzol/cargo-pgo).
 
-#### Setup
+> **CI:** hyperi-ci runs this automatically on `release` channel when
+> configured. See `TODO.md` → *Rust Release-Track Optimisation* for the
+> opt-in steps. The commands below are for **local profiling only**.
+
+#### Local Setup (Manual)
 
 ```bash
 # Install the tool
@@ -29,19 +53,28 @@ cargo pgo build
 cargo pgo optimize
 ```
 
-#### Best Practices
+#### Best Practices for PGO Workloads
 
 - Run the instrumented binary with a **representative workload**
 - Include all common code paths (various message types, error handling)
 - Profile for at least 5-10 minutes of sustained load
 - Re-profile when making significant code changes
+- **CRITICAL:** The workload must exercise REAL data-processing paths —
+  parse, transform, serialise, insert. **Do NOT use port checks, health
+  probes, or "does the service start" tests.** Profile data from startup /
+  readiness paths misleads the compiler and produces NEGATIVE PGO gains.
 
 ### BOLT Post-Link Optimization
 
 BOLT provides **additional 5-15% improvement** on top of PGO by optimizing
 code layout in the final binary. See [LLVM BOLT](https://github.com/llvm/llvm-project/tree/main/bolt).
 
-#### Setup
+> **CI:** hyperi-ci runs BOLT automatically on `release` channel when
+> `optimize.bolt.enabled: true` is set in `.hyperi-ci.yaml` AND `pgo.enabled`
+> is also true (BOLT requires PGO profile data). Linux-only. The commands
+> below are for **local profiling only**.
+
+#### Local Setup (Manual)
 
 ```bash
 # Build with BOLT (requires BOLT installed)
@@ -190,6 +223,12 @@ cargo flamegraph --bin dfe-loader -- --config config.yaml
 ```
 
 ## Recommended Production Build
+
+**For production releases: let hyperi-ci do this.** Push to a `release`-channel
+project and CI applies the full optimisation pipeline automatically. See
+`TODO.md` → *Rust Release-Track Optimisation* for opt-in steps.
+
+**For local development / one-off profiling:**
 
 ```bash
 # Full optimization build

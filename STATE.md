@@ -536,3 +536,26 @@ Start a fresh session after any changes to this file.
 | Three capture modes (full/raw_only/extracted_only) | Replaces scattered booleans (`capture_json`, `capture_raw`, `disable_*_tables`). `raw_only` skips ClickHouse JSON type CPU cost on tables that only need full-text search. All modes still extract promoted schema fields (parse always happens for routing/timestamps). |
 
 ---
+
+---
+
+## Rust Release-Track Optimisation Readiness
+
+**Tier 1 (allocator + fat LTO on beta+):** ✅ **READY**
+- `jemalloc` / `mimalloc` features declared
+- `#[global_allocator]` wired in `src/main.rs`
+- `default = []` — clean
+- `[profile.release] lto = "thin"` — CI overrides to `fat`
+
+**Tier 2 (PGO + BOLT on release):** ⚠️ **NOT CONFIGURED — BEST CANDIDATE**
+
+This project has `docs/PERFORMANCE.md` already documenting PGO/BOLT manually.
+It's the ideal first Tier 2 adopter once the workload script is written.
+Needs: `scripts/pgo-workload.sh` that drives real ClickHouse inserts via
+Kafka (testcontainers OK) for 5+ minutes, then opt in via `.hyperi-ci.yaml`.
+
+Critical: workload must exercise the real hot path (parse → transform →
+serialise → insert). Port checks and startup probes produce misleading
+profile data — bad workload causes NEGATIVE PGO gain.
+
+See TODO.md → *Rust Release-Track Optimisation* for detailed action items.

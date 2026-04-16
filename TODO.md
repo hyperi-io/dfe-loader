@@ -630,3 +630,59 @@ Each is a new file implementing `DlqBackend` trait + feature flag. No changes to
 - [x] Fix flaky test_process_batch_uses_multiple_threads under tarpaulin (warn not fail)
 - [x] Close Renovate PR #30 (superseded by direct cargo update)
 - [x] Dependabot alert #9 (rand low — custom logger only) — not actionable, already allowed
+
+---
+
+## Rust Release-Track Optimisation (hyperi-ci Tier 1/2)
+
+**Context:** hyperi-ci is shipping channel-gated build optimisations for Rust
+binaries (see `hyperi-ai/standards/languages/RUST.md` — *Release-Track Build
+Optimisation*). Local `cargo build` is unaffected. This project was the
+reference case for the design (see `docs/PERFORMANCE.md`).
+
+### Tier 1 prep (automatic at beta+/release once hyperi-ci ships)
+
+Current state: **✅ READY — no source changes required.**
+
+- [x] `Cargo.toml` has `[features] jemalloc` + `mimalloc` declared
+- [x] `main.rs` wires `#[global_allocator]` for both
+- [x] `default = []` — allocators opt-in via `--features`
+- [x] `[profile.release] lto = "thin"` — CI overrides to `fat` on beta+
+
+### Tier 2 opt-in (PGO + BOLT — release channel only)
+
+Current state: **⚠️ NOT CONFIGURED — this is the best candidate for PGO/BOLT
+given its hot path profile.**
+
+- [ ] Write `scripts/pgo-workload.sh` that performs **actual ClickHouse inserts**
+      via Kafka — spin up testcontainers ClickHouse + Kafka, drive realistic
+      message volumes for at least 5 minutes. Cover:
+      - Multiple message types / schema variants
+      - Parse + transform + serialise + write paths
+      - Concurrent batch processing (exercise the worker pool)
+- [ ] **PGO workload MUST NOT be a port check, health probe, or startup test** —
+      profile data from those paths teaches the compiler nothing about the real
+      hot path, and worse, *misleads* it. Bad workload = negative PGO gain.
+- [ ] Leverage the existing `docs/PERFORMANCE.md` guidance for workload design
+- [ ] Add to `.hyperi-ci.yaml`:
+  ```yaml
+  build:
+    rust:
+      optimize:
+        pgo:
+          enabled: true
+          workload_cmd: "bash scripts/pgo-workload.sh"
+          duration_secs: 300
+        bolt:
+          enabled: true    # Linux only, +5-15% on top of PGO
+  ```
+- [ ] Cross-reference `docs/PERFORMANCE.md` with the new hyperi-ci CI flow —
+      docs currently describe manual `cargo pgo` invocation; update to note
+      that CI now handles it on `release` channel when configured.
+
+### Docs update
+
+- [ ] Update `docs/PERFORMANCE.md` to note that build optimisations are now
+      applied by hyperi-ci at release-channel CI time — the manual
+      `cargo pgo build` / `cargo pgo optimize` commands documented there
+      should be marked as "for local development / one-off profiling" only.
