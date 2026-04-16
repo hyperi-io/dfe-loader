@@ -1,6 +1,6 @@
 # ClickHouse Data Types Reference
 
-**Purpose:** Complete enumeration of ClickHouse data types for reference during schema design and Phase 5.5 (native protocol migration).
+**Purpose:** Complete enumeration of ClickHouse data types for reference during schema design and when extending RowBinary encoding in the clickhouse-rs fork.
 
 **Last Updated:** 2026-03-09
 
@@ -262,19 +262,24 @@ SELECT data.user, data.score FROM events;
 
 ## Library Support
 
-### Current Stack (JSONEachRow, 2026-03-09)
+### Current Stack (RowBinary via clickhouse-rs fork)
 
-dfe-loader sends JSON to ClickHouse via HTTP JSONEachRow. Type coercion happens
-server-side. The loader does not need to know ClickHouse types at insert time.
+dfe-loader writes to ClickHouse in one of two formats, dispatched by
+`InsertFormat` configuration:
 
-| Client | Purpose | Types |
-|--------|---------|-------|
-| `clickhouse` crate (HTTP) | DDL, schema queries | Used for system.columns queries |
-| `reqwest` (HTTP POST) | Data inserts (JSONEachRow) | All types via server-side coercion |
+| Format | Client | Purpose | Default |
+|--------|--------|---------|---------|
+| **RowBinary** | `clickhouse` (fork) via `DynamicInsert` | Schema-reflected typed binary encoding | ✅ Yes |
+| **JSONEachRow** | `reqwest` HTTP POST | Fallback, server-side type coercion | No |
 
-### Phase 5.5: clickhouse-rs Native Protocol Fork
+The fork's `DynamicInsert` reflects the target schema from `system.columns`,
+encodes a `Map<String, Value>` to RowBinary column-by-column, and sets
+`input_format_binary_read_json_as_string=1` for JSON-typed columns. The
+loader never calls `clickhouse::Row` — everything is dynamic.
 
-`/projects/clickhouse-rs` adds capabilities beyond upstream `clickhouse` crate:
+DDL and schema queries use the same fork via `ClickHouseQueryClient`.
+
+### Fork Capabilities Beyond Upstream
 
 | Type | Status |
 |------|--------|
@@ -289,10 +294,14 @@ server-side. The loader does not need to know ClickHouse types at insert time.
 | **SimpleAggregateFunction** | ✅ Fork |
 | Native TCP protocol | ✅ Fork (upstream removed in v0.12+) |
 
-See TODO.md Phase 5.5 for migration plan.
+The fork lives at `/projects/clickhouse-rs` (GitHub: `hyperi-io/clickhouse-rs`)
+and is pulled in via `[patch.crates-io]` in `Cargo.toml`. See
+[DESIGN.md](./DESIGN.md) for the branch chain and upstream PR plan.
 
-**Note:** clickhouse-arrow (DFE fork) was used in earlier development (2025-12 to 2026-03)
-but dropped in favour of the simpler JSONEachRow approach. See [WHY-ARROW.md](./WHY-ARROW.md).
+**Historical note:** clickhouse-arrow (DFE fork) was trialled in early
+development and dropped — RowBinary insert throughput matched Arrow within
+noise (network-dominated) while avoiding the complexity of building Arrow
+RecordBatches. See [DESIGN.md](./DESIGN.md) § Parser Selection History.
 
 ---
 
@@ -337,29 +346,26 @@ Timezone stored in column metadata, not per-value. All values in column share ti
 
 ## Implementation Status for dfe-loader
 
-Current (JSONEachRow): all types work via server-side coercion. No client-side type
-serialisation required — ClickHouse parses the JSON and converts as needed.
+**RowBinary (default):** encoded by the fork's `DynamicInsert` from the
+reflected schema. All standard types plus JSON, Variant, Dynamic, Nested,
+BFloat16, Time/Time64, AggregateFunction, SimpleAggregateFunction. Decimal(P,S)
+resolves to the concrete Decimal32/64/128/256 at encode time based on precision.
 
-Phase 5.5 target (native protocol via `/projects/clickhouse-rs` fork):
-
-1. **JSON** — full native columnar JSON type
-2. **Variant** — discriminated union
-3. **Dynamic** — runtime-typed storage
-4. **Nested** — parallel arrays
-5. **AggregateFunction** — materialized view support
-6. **SimpleAggregateFunction** — simplified aggregate state
-7. **BFloat16** — ML workload support
-8. **Time/Time64** — time-of-day types
+**JSONEachRow (fallback):** all types work via server-side coercion. Set
+`insert_format = "json_each_row"` to opt in.
 
 ---
 
 ## Decision: Library Choice
 
-**Current:** `reqwest` (JSONEachRow inserts) + `clickhouse` crate (DDL/queries).
+**Current:** `/projects/clickhouse-rs` fork (MIT/Apache-2.0) used for DDL,
+queries, and inserts. RowBinary via `DynamicInsert` is the default; JSONEachRow
+via `reqwest` is the fallback.
 
-**Rationale:** Schema-flexible, simpler code, sufficient throughput at current scale.
-See [WHY-ARROW.md](./WHY-ARROW.md) for full decision history including why Arrow was
-chosen then dropped.
+**Rationale:** Schema-reflected RowBinary skips the server-side JSON parse, cuts
+ClickHouse CPU, and gives full type support (JSON, Variant, Dynamic, Nested)
+without requiring compile-time schemas. The `Map<String, Value>` model is
+preserved end-to-end — encoding happens against `system.columns` at runtime.
 
-**Planned (Phase 5.5):** Migrate to `/projects/clickhouse-rs` fork for native protocol
-with full type support. See TODO.md Phase 5.5.
+See [DESIGN.md](./DESIGN.md) § Parser Selection History for the full decision
+trail including Arrow, Mison, and simd-json evaluation results.

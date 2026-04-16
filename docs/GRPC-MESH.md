@@ -1176,6 +1176,8 @@ The mesh implementation itself (WAL, origin tracking logic, fan-out routing) is 
 
 ---
 
-**Last Updated:** 2026-03-02
-**Status:** Design complete, ready for Phase 1 implementation
+**Status:** v1 shipped. `GrpcTransportAdapter` lives in
+[src/kafka/transport.rs](../src/kafka/transport.rs) and the `transport-grpc`
+feature is enabled in `Cargo.toml`. v2 mesh fields (`cell_id`, `routing_hints`)
+are present in the proto but unused.
 **Proto version:** v1 (mesh-ready fields present but unused)

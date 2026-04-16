@@ -491,8 +491,10 @@ source.port: 54321
 Arrays are preserved as-is (JSON array value). Only objects are flattened.
 This matches ClickHouse expectations for `Array(T)` columns in both RowBinary and JSONEachRow paths.
 
-**Phase 5.6 note:** For columns typed as `JSON`, `Nested`, or `Variant` in ClickHouse,
-additional client-side handling may be needed. See TODO Phase 5.6 for the gap analysis.
+JSON-typed columns are handled by setting `input_format_binary_read_json_as_string=1`
+on the insert; the encoder writes the value as a JSON string and ClickHouse parses
+it server-side into the native JSON type. Variant and Nested are encoded directly
+by the fork's `DynamicInsert`.
 
 ---
 

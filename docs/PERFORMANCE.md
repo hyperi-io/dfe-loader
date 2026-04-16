@@ -113,7 +113,11 @@ cargo build --release --features mimalloc
 
 ## Insert Throughput
 
-dfe-loader uses `reqwest` HTTP POST with JSONEachRow for data inserts. Key tuning:
+dfe-loader writes to ClickHouse via the `/projects/clickhouse-rs` fork.
+The default path is RowBinary via `DynamicInsert` (schema-reflected typed
+encoding — ClickHouse skips JSON parsing). Set `insert_format = "json_each_row"`
+to fall back to `reqwest` HTTP POST with JSONEachRow. Tuning below applies to
+both formats.
 
 ### Batch Size
 

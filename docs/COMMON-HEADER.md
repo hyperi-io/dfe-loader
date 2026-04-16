@@ -345,8 +345,12 @@ columnar JSON. `_raw` is the original wire format before parsing.
 
 ```toml
 [metadata]
-capture_json = true  # Enable/disable _json capture (default: true)
+capture_mode = "full"  # full (default) | raw_only | extracted_only
 ```
+
+`capture_mode` controls `_json` and `_raw` population — see the Capture Modes
+section below. Legacy booleans `capture_json` / `capture_raw` are still
+accepted for backwards compatibility and mapped onto `capture_mode`.
 
 ### `_tags`
 
@@ -591,29 +595,34 @@ INDEX idx_timestamp _timestamp TYPE minmax GRANULARITY 1
 - Analytics queries: "events that occurred in Q1"
 - Audit queries: "what happened at timestamp X"
 
-### Optional Text Index on `_raw`
+### Text Index on `_raw` (Default)
 
 ```sql
--- Full-text (ClickHouse 25.1+)
-INDEX idx_raw _raw TYPE full_text(0) GRANULARITY 1
-
--- N-gram bloom filter (older versions)
-INDEX idx_raw _raw TYPE ngrambf_v1(3, 256, 2, 0) GRANULARITY 4
+-- Standard: text index (GA in ClickHouse 26.2+, required by hard deck)
+INDEX idx_raw_text _raw TYPE text(tokenizer = 'default') GRANULARITY 64
 ```
+
+Auto-init creates this index on every `_raw` column unless `capture_mode`
+is `extracted_only` (in which case `_raw` is NULL and an index would be
+meaningless).
 
 **Trade-offs:**
 
 | Index Type | Pros | Cons |
 |------------|------|------|
-| `full_text` | Accurate, word-level | Higher storage |
-| `ngrambf_v1` | Lower storage | False positives |
-| None | Zero overhead | Full scan for text search |
+| `text` (default) | GA in 26.2+, accurate, no false positives | ~50% insert overhead on `_raw` |
+| `ngrambf_v1` (legacy) | Lower storage | False positives; no reason to prefer on 26.2+ |
+| None | Zero overhead | Full scan for text search — use `capture_mode = "extracted_only"` instead |
+
+If you don't need full-text search on the raw payload, set
+`capture_mode = "extracted_only"` — `_raw` is NULL and the text index is
+skipped entirely.
 
 **Configuration:**
 
 ```toml
 [auto_init]
-create_text_index = true  # Enable text search index
+create_text_index = true  # Default: create text index on _raw
 ```
 
 ## Engine Selection
@@ -706,8 +715,7 @@ default_db = "common"
 default_table = "default"
 
 [metadata]
-capture_raw = true                 # Store _raw
-capture_json = true                # Store _json
+capture_mode = "full"              # full (default) | raw_only | extracted_only
 tags_fields = ["tags", "_tags", "meta", "metadata.tags"]
 tags_output = "_tags"
 drop_tags = false                  # Keep tags in _json after extraction
