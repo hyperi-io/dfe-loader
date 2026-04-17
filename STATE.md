@@ -559,3 +559,17 @@ serialise → insert). Port checks and startup probes produce misleading
 profile data — bad workload causes NEGATIVE PGO gain.
 
 See TODO.md → *Rust Release-Track Optimisation* for detailed action items.
+
+---
+
+## POLICY UPDATE 2026-04-17 — jemalloc-only
+
+DFE allocator policy standardised on jemalloc across all channels.
+Source: `hyperi-ai/standards/languages/RUST.md` → *Allocator Policy*.
+Verification guide: `hyperi-ci/docs/RUST-RELEASE-TRACK-OPTIMISATION.md`.
+
+This project has mimalloc feature + dep + main.rs fallback wiring that
+need removal (see TODO.md → *POLICY UPDATE 2026-04-17*). The published
+binary doesn't change — jemalloc has always won when both features were
+enabled, and CI only passes `--features jemalloc`. This is dead-code
+removal.

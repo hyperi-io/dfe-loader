@@ -686,3 +686,44 @@ given its hot path profile.**
       applied by hyperi-ci at release-channel CI time — the manual
       `cargo pgo build` / `cargo pgo optimize` commands documented there
       should be marked as "for local development / one-off profiling" only.
+
+---
+
+## POLICY UPDATE 2026-04-17 — Jemalloc at every channel, drop mimalloc
+
+**Allocator policy changed:** DFE binaries now standardise on jemalloc at
+**every** channel (spike/alpha/beta/release). mimalloc is no longer a
+supported option in DFE projects.
+
+See:
+- `hyperi-ai/standards/languages/RUST.md` — *Allocator Policy*
+- `hyperi-ci/docs/RUST-RELEASE-TRACK-OPTIMISATION.md` — consumer guide,
+  verification, troubleshooting, real binary-size numbers from canary work
+
+### Action items
+
+- [ ] Remove `mimalloc = ["dep:mimalloc"]` from `[features]` in `Cargo.toml`
+- [ ] Remove `mimalloc = { version = ">=0.1", optional = true }` from
+      `[dependencies]` in `Cargo.toml`
+- [ ] Remove `#[cfg(feature = "mimalloc"...)]` fallback block from
+      `src/main.rs` — keep only the jemalloc wiring
+- [ ] Update `src/main.rs` allocator doc comments (currently reference
+      "jemalloc or mimalloc" — change to jemalloc only)
+- [ ] `docs/PERFORMANCE.md`: remove or rework the mimalloc section
+      (currently recommends it for "mixed workloads")
+- [ ] `cargo build --release --features jemalloc` to verify build still works
+
+### Verification on next release
+
+Use `strings`, not `nm` — release binaries are stripped:
+```bash
+strings target/<target>/release/dfe-loader | grep -ciE 'jemalloc|je_mallctl'
+# Expected: > 0
+```
+Expect ~3.5% binary size increase (~500 KB on a 14 MB baseline per receiver
+canary learnings).
+
+### What changes in CI behaviour
+
+- Spike/alpha: was system allocator, now jemalloc. +10s compile, cached.
+- Beta/release: unchanged (already jemalloc + fat LTO).
