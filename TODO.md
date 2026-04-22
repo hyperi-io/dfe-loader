@@ -25,6 +25,169 @@ Stage 1 ships first, Stage 2 is a drop-in upgrade — same API, better protocol.
 
 ## Active
 
+### Canary 2: Dep-Install SSOT + BOLT release to R2 (NEXT)
+
+dfe-loader is **Canary 2** for the hyperi-ci dep-install SSOT + ARC
+runner image rollout. Canary 1 (dfe-receiver) completed 2026-04-22 —
+released v1.15.8 all the way to `downloads.hyperi.io/dfe-receiver/v1.15.8/`
+(amd64 15.2 MB, arm64 12.7 MB, BOLT+PGO green on both archs).
+
+**The bar: canary is not done until v?.?.? artifacts appear at
+`downloads.hyperi.io/dfe-loader/v?.?.?/`.** Branch CI skips the
+release-channel-gated PGO+BOLT path and proves nothing. Rule is in
+hyperi-ci `STATE.md` § *Canary not done until R2*.
+
+#### Pre-flight (do these BEFORE triggering the canary)
+
+- [ ] **Upgrade local hyperi-ci CLI to latest PyPI** — the runner
+      image bakes a specific version; local must match. Run
+      `uv tool upgrade hyperi-ci` and verify
+      `hyperi-ci --version` against <https://pypi.org/pypi/hyperi-ci/json>.
+      (At time of writing: v1.12.1 fixes a root/sudo bug in the
+      runner image bake — stale versions will fail or diverge.)
+- [ ] **Verify rustlib at latest stable** — current pin
+      `hyperi-rustlib = ">=2.5.4"` resolves to 2.5.4 in Cargo.lock
+      (matches crates.io max_stable). Before the canary, check
+      `curl -s https://crates.io/api/v1/crates/hyperi-rustlib | jq -r
+      .crate.max_stable_version` and bump the floor if there's a
+      newer stable. Run `cargo update -p hyperi-rustlib` + full test
+      suite afterwards.
+- [ ] **Proactively fix flaky-test candidates** — see next section.
+      Canary 1 was blocked twice by flakes we had to fix live under
+      CI pressure. Fix them first so the canary gets a clean signal.
+
+#### Canary run — what to watch for
+
+Same criteria as Canary 1, plus loader-specific:
+
+- [ ] `hyperi-ci v1.12.1+` on the runner image — confirmed via job
+      log line `llvm-bolt already installed (bolt-22)` at
+      `Install native dependencies` step. If you see a "sudoers"
+      error in the runner bake log, the image is stale or a
+      pre-v1.12.1 hyperi-ci sneaked in.
+- [ ] cargo-pgo BOLT step succeeding on both amd64 and arm64 builds
+      (the 2026-04-17 BOLT `strip=none` fix must still hold)
+- [ ] `ld.lld` unversioned shim at `~/.local/bin/ld.lld` during BOLT
+- [ ] apt never fetches multi-version toolchain packages at job time
+      (LLVM 19-22, GCC 13/14 all pre-baked). The per-project
+      native-deps (librdkafka, libssl, clang, zstd, protobuf) ARE
+      still installed at job time — that's Phase 1 by design.
+- [ ] ClickHouse client libs / Arrow — loader touches a broader apt
+      surface than receiver. If a new dep surfaces in the install
+      log that isn't in `config/native-deps/rust.yaml`, flag it for
+      hyperi-ci to bake.
+- [ ] R2: `curl -sI https://downloads.hyperi.io/dfe-loader/vX.Y.Z/dfe-loader-linux-amd64`
+      returns HTTP 200 with a plausible `content-length`. Same for
+      `-linux-arm64` and `checksums.sha256`.
+
+#### Trigger sequence (how dfe-receiver canary 1 was driven)
+
+Branch CI is insufficient (publish + release jobs are skipped on
+non-main pushes). The sequence that actually reaches R2:
+
+1. A real `fix:` (or `feat:`/`perf:`) commit on main — semantic-release
+   bumps the version and creates a new tag.
+2. `hyperi-ci release vX.Y.Z` — dispatches the publish workflow
+   which runs the full BOLT+PGO build for both archs and uploads to R2.
+3. `hyperi-ci watch` — blocks until success/failure.
+4. Verify R2 with `curl -I`.
+
+For a canary commit, something real + small is better than chore-only
+noise. Dfe-receiver used a doc-comment line in `src/main.rs`. Do NOT
+delete `GH Release` first and try to re-publish the same tag — the
+release handler refuses because GH Release already exists.
+
+#### No SEP — cross-project fix authority
+
+If the canary surfaces any issue, the canary owner has explicit
+authority to edit any of hyperi-ci / hyperi-infra / dfe-loader /
+hyperi-rustlib to fix it. Canary 1 required a hyperi-ci fix
+(v1.12.1 `_sudo_prefix()`) mid-canary. Be prepared for the same
+here; don't punt.
+
+### Flaky-Test Audit (do BEFORE Canary 2 triggers a release run)
+
+Canary 1 exposed that CI takes 30 min on Rust projects and flaky
+tests at that cost level are unacceptable. Dfe-receiver had two
+classes of flake surface live:
+
+1. **Blind sleep after spawning a TCP handler** — 500ms sleep then
+   POST → `ConnectionRefused` on busy ARC runners.
+2. **Transport backpressure contract ignored** — single bare `send()`
+   with a 256 KiB gRPC payload hit the transport's "backpressured"
+   error under parallel CI load.
+
+Fixes followed these patterns (hyperi-ci `STATE.md` § *Flaky Test =
+Fix the Test*):
+
+- **Replace blind sleep with port poll.** `wait_for_port(port)` polls
+  `tokio::net::TcpStream::connect` on a 5 s **hard** budget (100 × 50 ms
+  then panic with a useful message). Never a readiness poll without a
+  ceiling.
+- **Retry on contract-defined transient errors.** If the transport
+  documents backpressure as retryable (e.g. rustlib grpc sink),
+  wrap sends in a bounded retry helper, not a blind sleep.
+- **Rerun-and-hope is banned.** `gh run rerun --failed` is reserved
+  for genuine infra incidents (GitHub outage, Harbor 5xx). Not for
+  "test was flaky".
+
+#### Audit these 14 locations before Canary 2
+
+`grep -rn "tokio::time::sleep(Duration::from_millis" tests/integration/`
+lists 14 blind-sleep points today. Per file:
+
+- [ ] `tests/integration/inserter.rs` (3× 300 ms) — what are we
+      waiting for? Usually a ClickHouse insert to commit. If so,
+      use a row-count assertion with a deadline, not a sleep.
+- [ ] `tests/integration/clickhouse_inserter_e2e.rs` (200 ms) —
+      likely waiting for ClickHouse server. Use testcontainers'
+      `wait_for` or poll the readiness endpoint.
+- [ ] `tests/integration/schema.rs` (2500 ms) — long sleep is a red
+      flag. Probably waiting for schema cache background refresh.
+      Replace with event-driven signal or polling assertion.
+- [ ] `tests/integration/kafka_transport_e2e.rs` (100 ms) — likely
+      waiting for Kafka consumer group assignment. The consumer
+      itself has events for this.
+- [ ] `tests/integration/geoip_download_e2e.rs` (50 ms) — likely
+      harmless but should have a ceiling. Review intent.
+- [ ] `tests/integration/config.rs` (6 sites, 10–500 ms) — almost
+      certainly waiting for `ConfigReloader` to observe a file write.
+      Use the reloader's subscription API + timeout, not a sleep.
+
+Each `sleep` that survives the audit must be justified in a
+`// SLEEP-OK:` comment explaining why a readiness poll isn't possible.
+No unjustified survivors.
+
+#### Proactive checks for other flake classes
+
+- [ ] Any `spawn` followed by an immediate send to the spawned
+      task's endpoint — audit for bind/connect races.
+- [ ] Any bare transport `send()` where the transport documents a
+      backpressure error — wrap in retry.
+- [ ] Any unbounded `while` waiting for a condition — must have a
+      `tokio::time::timeout` wrapper so the test can't wedge the
+      runner for the whole workflow timeout (20-30 min).
+
+### Update hyperi-rustlib to Latest Stable
+
+Current pin: `hyperi-rustlib = { version = ">=2.5.4", features = [...] }`
+resolves to 2.5.4 in `Cargo.lock` (matches crates.io at time of
+writing). This needs a refresh check immediately before the canary.
+
+- [ ] Web-verify latest: `curl -s https://crates.io/api/v1/crates/hyperi-rustlib | jq -r .crate.max_stable_version`
+- [ ] If newer: bump the floor in `Cargo.toml`, run
+      `cargo update -p hyperi-rustlib`, and re-run tests:
+      `cargo nextest run --all-features`.
+- [ ] Audit new rustlib feature releases (check
+      `/projects/hyperi-rustlib/CHANGELOG.md` since 2.5.4) for
+      DFE-loader-relevant additions: new `metrics-dfe` groups,
+      ConfigReloader APIs, transport updates, resilience changes.
+      If relevant, adopt in same PR as the canary-trigger commit.
+- [ ] Per-hyperi-ai rule (`rules/rust.md`): web-search EVERY crate
+      version before the canary. Training data is stale; assume
+      nothing.
+- [ ] After bump, `cargo deny check` to clear advisory DB warnings.
+
 ### Performance Review
 
 Audit [docs/PERFORMANCE.md](docs/PERFORMANCE.md) — confirm what's still applied, decide what's worth wiring next.
