@@ -6,18 +6,13 @@
 // =============================================================================
 // Global Allocator Configuration
 // =============================================================================
-// Use jemalloc or mimalloc for better performance than system allocator.
-// Enable with: cargo build --release --features jemalloc
-//          or: cargo build --release --features mimalloc
-
-// When both are enabled (e.g. --all-features in CI), jemalloc wins
+// jemalloc — DFE policy 2026-04-17: jemalloc at every channel, no mimalloc.
+// hyperi-ci's release-track build adds `--features jemalloc` automatically on
+// every channel (spike/alpha/beta/release). For local builds, opt in with:
+//   cargo build --release --features jemalloc
 #[cfg(feature = "jemalloc")]
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
-
-#[cfg(all(feature = "mimalloc", not(feature = "jemalloc")))]
-#[global_allocator]
-static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use std::path::PathBuf;
 use std::sync::Arc;

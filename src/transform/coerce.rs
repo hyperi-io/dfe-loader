@@ -1369,7 +1369,7 @@ mod tests {
         // Result will be null because serde_json drops inf/NaN
         let val = result.unwrap();
         assert!(
-            val.is_null() || val.as_f64().map_or(false, |f| f.is_infinite()),
+            val.is_null() || val.as_f64().is_some_and(f64::is_infinite),
             "Infinity should either be null (JSON limitation) or parsed as inf: {val:?}"
         );
     }
@@ -1386,7 +1386,7 @@ mod tests {
             val.is_null()
                 || val
                     .as_f64()
-                    .map_or(false, |f| f.is_infinite() && f.is_sign_negative()),
+                    .is_some_and(|f| f.is_infinite() && f.is_sign_negative()),
             "-Infinity: {val:?}"
         );
     }

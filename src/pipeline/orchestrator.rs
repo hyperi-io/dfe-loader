@@ -914,8 +914,8 @@ impl Orchestrator {
         // Commit offsets independently per batch — Table A success/failure is isolated
         for ((result, offsets), batch_bytes) in results
             .into_iter()
-            .zip(per_batch_offsets.into_iter())
-            .zip(per_batch_bytes.into_iter())
+            .zip(per_batch_offsets)
+            .zip(per_batch_bytes)
         {
             // Release tracked memory regardless of insert outcome.
             // Success: data is in ClickHouse, memory freed.

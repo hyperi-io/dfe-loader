@@ -386,7 +386,7 @@ mod tests {
             "Processing valid JSON failed: {:?}",
             result.err()
         );
-        let processed = result.ok().expect("processed");
+        let processed = result.expect("processed");
         assert!(
             !processed.table.is_empty(),
             "Processed message should have a non-empty table"
@@ -459,7 +459,7 @@ mod tests {
         .expect("serialize");
         let msg = harness.make_msg(&payload);
 
-        let processed = proc.process(&msg).ok().expect("should succeed");
+        let processed = proc.process(&msg).expect("should succeed");
         assert_eq!(processed.table, "dfe.network");
     }
 
@@ -476,7 +476,7 @@ mod tests {
         let payload = serde_json::to_vec(&json!({"action": "test"})).expect("serialize");
         let msg = harness.make_msg(&payload);
 
-        let processed = proc.process(&msg).ok().expect("should succeed");
+        let processed = proc.process(&msg).expect("should succeed");
         assert_eq!(processed.table, "dfe.unrouted");
     }
 
@@ -504,7 +504,7 @@ mod tests {
         .expect("serialize");
         let msg = harness.make_msg(&payload);
 
-        let processed = proc.process(&msg).ok().expect("should succeed");
+        let processed = proc.process(&msg).expect("should succeed");
         assert_eq!(processed.table, "dfe.endpoint");
     }
 
@@ -530,7 +530,7 @@ mod tests {
         .expect("serialize");
         let msg = harness.make_msg(&payload);
 
-        let processed = proc.process(&msg).ok().expect("should succeed");
+        let processed = proc.process(&msg).expect("should succeed");
         assert!(
             processed.data.contains_key("_json"),
             "Full capture should inject _json field. Keys: {:?}",
@@ -556,7 +556,7 @@ mod tests {
         .expect("serialize");
         let msg = harness.make_msg(&payload);
 
-        let processed = proc.process(&msg).ok().expect("should succeed");
+        let processed = proc.process(&msg).expect("should succeed");
         assert!(
             !processed.data.contains_key("_json"),
             "ExtractedOnly should not have _json"
@@ -581,7 +581,7 @@ mod tests {
         msg.partition = 7;
         msg.offset = 42;
 
-        let processed = proc.process(&msg).ok().expect("should succeed");
+        let processed = proc.process(&msg).expect("should succeed");
         assert_eq!(processed.kafka_offset.partition, 7);
         assert_eq!(processed.kafka_offset.offset, 42);
         assert_eq!(&*processed.kafka_offset.topic, "test-events");
@@ -699,7 +699,7 @@ mod tests {
             "Deeply nested JSON should process: {:?}",
             result.err()
         );
-        let processed = result.ok().expect("processed");
+        let processed = result.expect("processed");
         assert!(
             processed.data.len() > 3,
             "Flattened data should have more than 3 fields, got {}",
@@ -728,7 +728,7 @@ mod tests {
             "Unicode payload should process: {:?}",
             result.err()
         );
-        let processed = result.ok().expect("processed");
+        let processed = result.expect("processed");
         assert!(processed.data.contains_key("message"));
     }
 
@@ -756,7 +756,7 @@ mod tests {
         let payload = serde_json::to_vec(&original_json).expect("serialize");
         let msg = harness.make_msg(&payload);
 
-        let processed = proc.process(&msg).ok().expect("should succeed");
+        let processed = proc.process(&msg).expect("should succeed");
 
         // _raw must contain the ENTIRE Kafka payload as UTF-8 string
         assert!(
@@ -795,7 +795,7 @@ mod tests {
         let payload = serde_json::to_vec(&json!({"event_category": "x"})).expect("serialize");
         let msg = harness.make_msg(&payload);
 
-        let processed = proc.process(&msg).ok().expect("should succeed");
+        let processed = proc.process(&msg).expect("should succeed");
         assert!(
             processed.raw_payload.is_none(),
             "RawOnly: raw_payload Arc should be None (legacy path)"
@@ -818,7 +818,7 @@ mod tests {
         .expect("serialize");
         let msg = harness.make_msg(&payload);
 
-        let processed = proc.process(&msg).ok().expect("should succeed");
+        let processed = proc.process(&msg).expect("should succeed");
 
         // Full mode injects _json (as string in legacy path)
         assert!(
@@ -915,7 +915,7 @@ mod tests {
         .expect("serialize");
         let msg = harness.make_msg(&payload);
 
-        let processed = proc.process(&msg).ok().expect("should succeed");
+        let processed = proc.process(&msg).expect("should succeed");
 
         // No enrichment components configured → no geo/rep/risk fields
         assert!(
@@ -974,11 +974,14 @@ mod tests {
         .expect("serialize");
         let msg = harness.make_msg(&payload);
 
-        let processed = proc.process(&msg).ok().expect("should succeed");
+        let processed = proc.process(&msg).expect("should succeed");
 
         // Tor detection was injected by the enrichment pipeline
         assert_eq!(
-            processed.data.get("rep_is_tor").and_then(|v| v.as_bool()),
+            processed
+                .data
+                .get("rep_is_tor")
+                .and_then(serde_json::Value::as_bool),
             Some(true),
             "Expected rep_is_tor=true. Keys: {:?}",
             processed.data.keys().collect::<Vec<_>>()
@@ -1003,7 +1006,7 @@ mod tests {
         .expect("serialize");
         let msg = harness.make_msg(&payload);
 
-        let processed = proc.process(&msg).ok().expect("should succeed");
+        let processed = proc.process(&msg).expect("should succeed");
         // Without a field mapping cache, fields pass through unchanged
         assert_eq!(
             processed
@@ -1031,12 +1034,15 @@ mod tests {
         .expect("serialize");
         let msg = harness.make_msg(&payload);
 
-        let processed = proc.process(&msg).ok().expect("should succeed");
+        let processed = proc.process(&msg).expect("should succeed");
 
         // With no computed columns configured, original fields untouched.
         // Other transforms may add _org_id, _timestamp_*, etc. (common header).
         assert_eq!(
-            processed.data.get("value").and_then(|v| v.as_i64()),
+            processed
+                .data
+                .get("value")
+                .and_then(serde_json::Value::as_i64),
             Some(42)
         );
     }
@@ -1064,7 +1070,7 @@ mod tests {
             let payload = serde_json::to_vec(&json!({"event_category": "x"})).expect("serialize");
             let msg = harness.make_msg(&payload);
 
-            let processed = proc.process(&msg).ok().expect("should succeed");
+            let processed = proc.process(&msg).expect("should succeed");
             assert!(
                 processed.raw_payload.is_none(),
                 "Legacy path raw_payload should always be None for mode {mode:?}"
@@ -1089,7 +1095,7 @@ mod tests {
         .expect("serialize");
         let msg = harness.make_msg(&payload);
 
-        let processed = proc.process(&msg).ok().expect("should succeed");
+        let processed = proc.process(&msg).expect("should succeed");
 
         assert!(
             !processed.data.contains_key("_json"),
@@ -1122,7 +1128,7 @@ mod tests {
             msg.partition = partition;
             msg.offset = offset;
 
-            let processed = proc.process(&msg).ok().expect("should succeed");
+            let processed = proc.process(&msg).expect("should succeed");
             assert_eq!(processed.kafka_offset.partition, partition);
             assert_eq!(processed.kafka_offset.offset, offset);
         }
@@ -1193,7 +1199,7 @@ mod tests {
         big["payload"] = json!("x".repeat(100_000));
         let payload = serde_json::to_vec(&big).expect("serialize");
         let msg = harness.make_msg(&payload);
-        let processed = proc.process(&msg).ok().expect("should succeed");
+        let processed = proc.process(&msg).expect("should succeed");
         // Should still produce a valid ProcessedMessage
         assert!(!processed.data.is_empty());
     }
@@ -1218,7 +1224,7 @@ mod tests {
         .expect("serialize");
         let msg = harness.make_msg(&payload);
 
-        let processed = proc.process(&msg).ok().expect("should succeed");
+        let processed = proc.process(&msg).expect("should succeed");
         // Table should be routed to deep_table
         assert!(
             processed.table.contains("deep_table"),
@@ -1240,7 +1246,7 @@ mod tests {
         .expect("serialize");
         let msg = harness.make_msg(&payload);
 
-        let processed = proc.process(&msg).ok().expect("should succeed");
+        let processed = proc.process(&msg).expect("should succeed");
         assert_eq!(
             processed.data.get("message").and_then(|v| v.as_str()),
             Some("Hello, 世界! 🔥")
@@ -1260,7 +1266,7 @@ mod tests {
         let mut msg = harness.make_msg(&payload);
         msg.topic = Arc::from("special-topic");
 
-        let processed = proc.process(&msg).ok().expect("should succeed");
+        let processed = proc.process(&msg).expect("should succeed");
         assert_eq!(&*processed.kafka_offset.topic, "special-topic");
     }
 
@@ -1272,7 +1278,7 @@ mod tests {
 
         let payload = b"{}";
         let msg = harness.make_msg(payload);
-        let processed = proc.process(&msg).ok().expect("should succeed");
+        let processed = proc.process(&msg).expect("should succeed");
         // Table should route to default
         assert!(!processed.table.is_empty());
     }

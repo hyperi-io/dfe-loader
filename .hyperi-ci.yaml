@@ -16,12 +16,12 @@ runners:
 # Quality checks
 quality:
   enabled: true
-  # Rust: test specific feature sets (avoids --all-features conflicts with mutually exclusive features)
+  # Rust: test specific feature sets (avoids --all-features conflicts).
+  # DFE policy 2026-04-17 — jemalloc only; mimalloc removed.
   rust:
     features:
       - "default"                    # Default features
       - "default,jemalloc"           # With jemalloc allocator
-      - "default,mimalloc"           # With mimalloc allocator
       - "default,testcontainers"     # With testcontainers integration tests
 
 # Testing
@@ -40,6 +40,20 @@ build:
     targets:
       - x86_64-unknown-linux-gnu
       - aarch64-unknown-linux-gnu
+    # Release-track build optimisation (hyperi-ci Tier 1/2).
+    # Channel-gated defaults apply automatically:
+    #   spike/alpha → jemalloc + thin LTO
+    #   beta        → jemalloc + fat LTO
+    #   release     → jemalloc + fat LTO + PGO/BOLT (opt-in below)
+    # See docs/PERFORMANCE.md and hyperi-ci's
+    # docs/RUST-RELEASE-TRACK-OPTIMISATION.md for the full contract.
+    optimize:
+      pgo:
+        enabled: true
+        workload_cmd: "bash scripts/pgo-workload.sh"
+        duration_secs: 300
+      bolt:
+        enabled: true  # Linux only; skipped on non-Linux targets
 
 # Publishing (on release)
 publish:

@@ -17,6 +17,15 @@ path = "src/lib.rs"
 name = "dfe-loader"
 path = "src/main.rs"
 
+# PGO workload driver — Kafka producer that drives realistic load against a
+# running dfe-loader during hyperi-ci Tier 2 PGO/BOLT builds.
+# `required-features` keeps it out of default builds; hyperi-ci ≥v1.9.2
+# respects this and skips the binary in detect-build-config.
+[[bin]]
+name = "pgo-driver"
+path = "src/bin/pgo-driver.rs"
+required-features = ["pgo-driver"]
+
 [dependencies]
 # Async runtime
 tokio = { version = ">=1.48", features = ["full"] }
@@ -51,12 +60,10 @@ anyhow = ">=1.0"
 tracing = ">=0.1"
 metrics = ">=0.24"
 
-# Memory management - alternative allocators for performance
-# jemalloc: Good for long-running servers with large allocations
+# Memory management - jemalloc allocator (DFE policy 2026-04-17: jemalloc only)
+# See hyperi-ai/standards/languages/RUST.md → Allocator Policy
 tikv-jemalloc-ctl = { version = ">=0.6", optional = true }
 tikv-jemallocator = { version = ">=0.6", optional = true }
-# mimalloc: Often faster for mixed workloads, better security hardening
-mimalloc = { version = ">=0.1", optional = true }
 
 # GeoIP enrichment (mmap for long-running apps, simdutf8 for SIMD UTF-8 validation)
 maxminddb = { version = ">=0.24", features = ["mmap", "simdutf8"] }
@@ -96,6 +103,10 @@ tokio-graceful-shutdown = ">=0.15"
 
 # Async traits
 trait-variant = ">=0.1"
+
+# PGO workload driver — Kafka producer for hyperi-ci Tier 2 PGO/BOLT builds.
+# Optional, gated by the `pgo-driver` feature. Main loader binary doesn't link it.
+rdkafka = { version = ">=0.39.0", features = ["dynamic-linking"], optional = true }
 
 [dev-dependencies]
 # Testing
@@ -189,6 +200,9 @@ strip = false
 # Tests require unsafe for env::set_var/remove_var (edition 2024).
 # Production code has zero unsafe blocks — the lib target is clean.
 unsafe_code = "allow"
+# `#[cfg(tarpaulin)]` is set by cargo-tarpaulin at coverage time. Declaring
+# it here silences `unexpected_cfgs` without a build.rs.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tarpaulin)'] }
 
 [lints.clippy]
 pedantic = { level = "warn", priority = -1 }
@@ -230,6 +244,24 @@ used_underscore_binding = "allow"
 large_futures = "allow"
 format_push_string = "allow"
 float_cmp = "allow"
+# Tests use `let mut cfg = X::default(); cfg.field = ...` for readability over
+# struct-init. Production code is unaffected.
+field_reassign_with_default = "allow"
+# Test data sometimes uses literal 3.14 etc. for clarity over `std::f64::consts::PI`.
+approx_constant = "allow"
+# A handful of test/utility helpers exceed the default 7-arg threshold.
+too_many_arguments = "allow"
+# Mostly affects internal types in benches/tests where TupleX is fine.
+type_complexity = "allow"
+# `&Option<T>` appears in a few config setters where call-site ergonomics
+# (`set_x(&self.x)`) outweigh the API guideline.
+ref_option = "allow"
+# Tests use `Duration::from_millis(30000)` etc. for symmetry with config
+# values stored in millis. Style-only.
+duration_suboptimal_units = "allow"
+# `.map(|x| ...).unwrap_or(false)` is clearer than `.is_ok_and()` for some
+# readers. Stylistic.
+map_unwrap_or = "allow"
 
 # =============================================================================
 # clickhouse-rs Fork Swap (hyperi-io/clickhouse-rs)
@@ -267,10 +299,12 @@ clickhouse = { git = "https://github.com/hyperi-io/clickhouse-rs.git", branch = 
 
 [features]
 default = []
-# Alternative allocators (choose one for production)
-jemalloc = ["dep:tikv-jemallocator", "dep:tikv-jemalloc-ctl"]  # Best for large allocations, long-running
-mimalloc = ["dep:mimalloc"]  # Often faster, better security, consistent performance
+# Allocator (DFE policy 2026-04-17: jemalloc at every channel, no mimalloc)
+jemalloc = ["dep:tikv-jemallocator", "dep:tikv-jemalloc-ctl"]
 # Transport backends
 transport-memory = ["hyperi-rustlib/transport-memory"]  # Memory transport for unit tests
 # Testing
 testcontainers = []  # Enable testcontainers for CI/CD (Docker required)
+# PGO workload driver (hyperi-ci Tier 2 — see scripts/pgo-workload.sh)
+# Pulls in rdkafka for the producer binary; main loader binary is unaffected.
+pgo-driver = ["dep:rdkafka"]
