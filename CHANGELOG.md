@@ -1,3 +1,11 @@
+## [1.17.5](https://github.com/hyperi-io/dfe-loader/compare/v1.17.4...v1.17.5) (2026-04-23)
+
+
+### Bug Fixes
+
+* **ci:** bump hyperi-ci pin to v1.12.1+ and switch publish-target to both ([2b17b71](https://github.com/hyperi-io/dfe-loader/commit/2b17b71baea7554de46b102dbcc151c47b8778f2))
+* switch publish.target internal -> both for release-channel PGO+BOLT ([c149caf](https://github.com/hyperi-io/dfe-loader/commit/c149caf4ebfdb3456e851288d9d25a3d694abe04))
+
 ## [1.17.4](https://github.com/hyperi-io/dfe-loader/compare/v1.17.3...v1.17.4) (2026-04-23)
 
 
