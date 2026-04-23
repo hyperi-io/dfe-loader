@@ -58,7 +58,9 @@ build:
 # Publishing (on release)
 publish:
   enabled: true
-  target: internal
+  # target=both maps to the release channel which unlocks Tier 2 PGO+BOLT
+  # (target=internal resolves to spike channel — Tier 1 only).
+  target: both
   binaries: both
   container:
     enabled: true
