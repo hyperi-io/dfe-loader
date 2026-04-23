@@ -172,7 +172,7 @@ async fn bool_string_coerced_and_inserted() {
         coercer.coerce_row(&mut row, &schema).expect("coerce");
         // Post-coercion, flag must be a Bool (not a string)
         assert!(
-            row.get("flag").map(Value::is_boolean).unwrap_or(false),
+            row.get("flag").is_some_and(Value::is_boolean),
             "flag should be coerced to Bool, got: {:?}",
             row.get("flag")
         );

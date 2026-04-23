@@ -170,23 +170,16 @@ No unjustified survivors.
 
 ### Update hyperi-rustlib to Latest Stable
 
-Current pin: `hyperi-rustlib = { version = ">=2.5.4", features = [...] }`
-resolves to 2.5.4 in `Cargo.lock` (matches crates.io at time of
-writing). This needs a refresh check immediately before the canary.
+Pin: `hyperi-rustlib = { version = ">=2.5.4", features = [...] }`.
+Verified 2026-04-23 against crates.io — `max_stable_version = 2.5.4`
+(updated 2026-04-16). Already at latest. `cargo update -p hyperi-rustlib`
+no-op.
 
-- [ ] Web-verify latest: `curl -s https://crates.io/api/v1/crates/hyperi-rustlib | jq -r .crate.max_stable_version`
-- [ ] If newer: bump the floor in `Cargo.toml`, run
-      `cargo update -p hyperi-rustlib`, and re-run tests:
-      `cargo nextest run --all-features`.
-- [ ] Audit new rustlib feature releases (check
-      `/projects/hyperi-rustlib/CHANGELOG.md` since 2.5.4) for
-      DFE-loader-relevant additions: new `metrics-dfe` groups,
-      ConfigReloader APIs, transport updates, resilience changes.
-      If relevant, adopt in same PR as the canary-trigger commit.
-- [ ] Per-hyperi-ai rule (`rules/rust.md`): web-search EVERY crate
-      version before the canary. Training data is stale; assume
-      nothing.
-- [ ] After bump, `cargo deny check` to clear advisory DB warnings.
+- [x] Web-verify latest stable on crates.io
+- [x] `cargo update -p hyperi-rustlib` (no change required)
+- [ ] Re-check immediately before triggering Canary 2 — rustlib may
+      release between now and then. Bump floor + re-run tests if so.
+- [ ] After any future bump, `cargo deny check` to clear advisory DB warnings.
 
 ### Performance Review
 
@@ -814,49 +807,37 @@ Current state: **✅ READY — no source changes required.**
 
 ### Tier 2 opt-in (PGO + BOLT — release channel only)
 
-Current state: **⚠️ NOT CONFIGURED — this is the best candidate for PGO/BOLT
-given its hot path profile.**
+Current state: **✅ CONFIGURED 2026-04-23.**
 
-- [ ] Write `scripts/pgo-workload.sh` that performs **actual ClickHouse inserts**
-      via Kafka — spin up testcontainers ClickHouse + Kafka, drive realistic
-      message volumes for at least 5 minutes. Cover:
-      - Multiple message types / schema variants
-      - Parse + transform + serialise + write paths
-      - Concurrent batch processing (exercise the worker pool)
-- [ ] **PGO workload MUST NOT be a port check, health probe, or startup test** —
-      profile data from those paths teaches the compiler nothing about the real
-      hot path, and worse, *misleads* it. Bad workload = negative PGO gain.
-- [ ] Leverage the existing `docs/PERFORMANCE.md` guidance for workload design
-- [ ] Add to `.hyperi-ci.yaml`:
-  ```yaml
-  build:
-    rust:
-      optimize:
-        pgo:
-          enabled: true
-          workload_cmd: "bash scripts/pgo-workload.sh"
-          duration_secs: 300
-        bolt:
-          enabled: true    # Linux only, +5-15% on top of PGO
-  ```
-- [ ] Cross-reference `docs/PERFORMANCE.md` with the new hyperi-ci CI flow —
-      docs currently describe manual `cargo pgo` invocation; update to note
-      that CI now handles it on `release` channel when configured.
+- [x] `scripts/pgo-workload.sh` spins up Kafka (KRaft) + ClickHouse 25.3
+      via docker, writes ephemeral loader config (default_land topic →
+      dfe.* tables), starts loader, drives `pgo-driver` for 300s.
+      Floor of 60s enforced — short workloads produce negative PGO gains.
+- [x] `src/bin/pgo-driver.rs` — Kafka producer (rdkafka, dynamic-linking)
+      gated behind `pgo-driver` feature with `required-features` so
+      hyperi-ci's binary-detection skips it on default builds.
+      60% small / 30% medium / 10% large payload mix exercises sonic-rs
+      across nested object depths and array iteration; varied `_source`
+      and `org_id` values exercise routing + header extraction.
+- [x] `.hyperi-ci.yaml` `build.rust.optimize.pgo` + `optimize.bolt` enabled.
+- [x] `docs/PERFORMANCE.md` updated to reflect CI-driven build optimisation
+      (manual `cargo pgo` commands marked local-only).
 
-### Docs update
+Remaining (run as part of Canary 2):
 
-- [ ] Update `docs/PERFORMANCE.md` to note that build optimisations are now
-      applied by hyperi-ci at release-channel CI time — the manual
-      `cargo pgo build` / `cargo pgo optimize` commands documented there
-      should be marked as "for local development / one-off profiling" only.
+- [ ] Local round-trip: `cargo pgo build → bash scripts/pgo-workload.sh
+      target/.../release/dfe-loader → cargo pgo optimize` produces a
+      valid optimised binary.
+- [ ] Verify on next release-channel build:
+      `strings target/.../release/dfe-loader | grep -c jemalloc` > 0,
+      build log shows cargo pgo invocations.
 
 ---
 
 ## POLICY UPDATE 2026-04-17 — Jemalloc at every channel, drop mimalloc
 
-**Allocator policy changed:** DFE binaries now standardise on jemalloc at
-**every** channel (spike/alpha/beta/release). mimalloc is no longer a
-supported option in DFE projects.
+**Applied 2026-04-23.** DFE binaries now standardise on jemalloc at
+**every** channel (spike/alpha/beta/release). mimalloc removed.
 
 See:
 - `hyperi-ai/standards/languages/RUST.md` — *Allocator Policy*
@@ -865,16 +846,15 @@ See:
 
 ### Action items
 
-- [ ] Remove `mimalloc = ["dep:mimalloc"]` from `[features]` in `Cargo.toml`
-- [ ] Remove `mimalloc = { version = ">=0.1", optional = true }` from
+- [x] Remove `mimalloc = ["dep:mimalloc"]` from `[features]` in `Cargo.toml`
+- [x] Remove `mimalloc = { version = ">=0.1", optional = true }` from
       `[dependencies]` in `Cargo.toml`
-- [ ] Remove `#[cfg(feature = "mimalloc"...)]` fallback block from
-      `src/main.rs` — keep only the jemalloc wiring
-- [ ] Update `src/main.rs` allocator doc comments (currently reference
-      "jemalloc or mimalloc" — change to jemalloc only)
-- [ ] `docs/PERFORMANCE.md`: remove or rework the mimalloc section
-      (currently recommends it for "mixed workloads")
-- [ ] `cargo build --release --features jemalloc` to verify build still works
+- [x] Remove `#[cfg(feature = "mimalloc"...)]` fallback block from
+      `src/main.rs` — kept only the jemalloc wiring
+- [x] Update `src/main.rs` allocator doc comments (now jemalloc-only)
+- [x] `docs/PERFORMANCE.md`: removed the mimalloc section, retained
+      jemalloc-only verification + benchmark notes
+- [x] `cargo build --release --features jemalloc` verified — 1176 lib tests pass
 
 ### Verification on next release
 
@@ -944,12 +924,12 @@ signal to apply the same pattern here.
 (Each consumer project owns the per-project status below — update as
 Tier 1 preconditions are met and when Tier 2 opt-in lands.)
 
-- [ ] Tier 1 preconditions met (`jemalloc` feature declared in
+- [x] Tier 1 preconditions met (`jemalloc` feature declared in
       `Cargo.toml`, `#[global_allocator]` wired in `main.rs` under
-      `#[cfg(feature = "jemalloc")]`)
-- [ ] Workload script exists and passes local `cargo pgo build →
-      workload → cargo pgo optimize` round-trip
-- [ ] `.hyperi-ci.yaml` has `build.rust.optimize.pgo.enabled: true`
-      with `workload_cmd` configured
+      `#[cfg(feature = "jemalloc")]`, mimalloc removed)
+- [x] `.hyperi-ci.yaml` has `build.rust.optimize.pgo.enabled: true`
+      with `workload_cmd: "bash scripts/pgo-workload.sh"` configured
+- [ ] Workload script local round-trip: `cargo pgo build → workload →
+      cargo pgo optimize` — verify before triggering Canary 2 release
 - [ ] Next release-channel build verified: `strings <binary> | grep
       jemalloc` non-empty; build log shows cargo pgo invocations

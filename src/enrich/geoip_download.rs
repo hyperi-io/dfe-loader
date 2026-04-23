@@ -304,7 +304,7 @@ struct BasicAuth {
 /// Build a reqwest client with reasonable timeouts
 fn http_client() -> Result<reqwest::Client, reqwest::Error> {
     reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(300))
+        .timeout(std::time::Duration::from_mins(5))
         .connect_timeout(std::time::Duration::from_secs(30))
         .user_agent("dfe-loader")
         .build()
@@ -390,7 +390,7 @@ async fn download_tar_gz(
             io::copy(&mut entry, &mut outfile)?;
             fs::rename(&tmp, dest)?;
 
-            let size = fs::metadata(dest).map(|m| m.len()).unwrap_or(0);
+            let size = fs::metadata(dest).map_or(0, |m| m.len());
             info!(
                 dest = %dest.display(),
                 size_mb = size / (1024 * 1024),

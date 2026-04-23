@@ -453,7 +453,7 @@ mod tests {
     #[test]
     fn test_parse_json_array_at_top_level() {
         // Top-level array
-        let payload = br#"[1, 2, 3]"#;
+        let payload = br"[1, 2, 3]";
         let value = parse_payload(payload).unwrap();
         assert!(value.is_array());
         assert_eq!(value.as_array().unwrap().len(), 3);

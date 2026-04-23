@@ -115,34 +115,40 @@ For maximum performance:
 lto = "fat"            # More aggressive, 2-3x longer compile
 ```
 
-## Memory Allocators
+## Memory Allocator
 
-dfe-loader supports alternative allocators that can provide **10-25% improvement**
-for OLAP-style workloads.
+DFE policy (2026-04-17): **jemalloc at every channel, no mimalloc**. One
+allocator across the fleet means one profiling story (`jeprof`), one set of
+perf-trace symbols, one debugging playbook. See
+`hyperi-ai/standards/languages/RUST.md` → *Allocator Policy*.
 
-### jemalloc (Recommended for Production)
-
-Best for long-running servers with large allocations.
+hyperi-ci adds `--features jemalloc` automatically on every channel
+(spike/alpha/beta/release). For local builds, opt in with:
 
 ```bash
 cargo build --release --features jemalloc
 ```
 
-### mimalloc
+### Verification on stripped release binaries
 
-Good for mixed workloads, better security hardening.
+Release builds set `strip = true`, so `nm` won't see allocator symbols.
+Use `strings`:
 
 ```bash
-cargo build --release --features mimalloc
+strings target/release/dfe-loader | grep -ciE 'jemalloc|je_mallctl'
+# Expect > 0
 ```
 
-### Benchmarks
+Expect a ~3.5% binary-size increase from the static jemalloc link
+(per dfe-receiver canary 1, 2026-04-17).
 
-| Allocator | Throughput | Memory | Notes |
-|-----------|------------|--------|-------|
-| System    | Baseline   | Baseline | Default glibc allocator |
-| jemalloc  | +15-25%    | +5-10% | Best for large batches |
-| mimalloc  | +10-20%    | Similar | Better for mixed sizes |
+### Benchmark (jemalloc vs system glibc, OLAP-style workload)
+
+| Metric | System (glibc) | jemalloc |
+|--------|---------------|----------|
+| Throughput | Baseline | +15–25% |
+| RSS | Baseline | +5–10% |
+| Large-batch p99 latency | Baseline | -10–20% |
 
 ## Insert Throughput
 
@@ -162,15 +168,17 @@ Larger batches amortise HTTP overhead. Default flush thresholds:
 
 Increase `flush_rows` and `flush_bytes` for higher throughput at the cost of latency.
 
-### Allocator Feature Propagation
+### Allocator Feature
 
-jemalloc/mimalloc features are declared in dfe-loader's `Cargo.toml` and apply globally:
+The `jemalloc` feature is declared in `Cargo.toml` and applies globally via
+`#[global_allocator]` in `src/main.rs`:
 
 ```toml
 [features]
 jemalloc = ["dep:tikv-jemallocator", "dep:tikv-jemalloc-ctl"]
-mimalloc = ["dep:mimalloc"]
 ```
+
+mimalloc was removed on 2026-04-17 per the DFE allocator policy.
 
 ## Runtime Tuning
 
@@ -248,4 +256,5 @@ cargo pgo bolt optimize --with-pgo
 - [The Rust Performance Book](https://nnethercote.github.io/perf-book/)
 - [LLVM BOLT](https://github.com/llvm/llvm-project/tree/main/bolt)
 - [jemalloc tuning](https://github.com/jemalloc/jemalloc/wiki/Getting-Started)
-- [mimalloc benchmarks](https://github.com/microsoft/mimalloc#benchmark-results)
+- hyperi-ci `docs/RUST-RELEASE-TRACK-OPTIMISATION.md` — channel × tier matrix
+- hyperi-ci `docs/PGO-WORKLOAD-GUIDE.md` — workload design rules

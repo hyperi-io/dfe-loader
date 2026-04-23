@@ -507,7 +507,7 @@ mod tests {
     fn test_legacy_buffer_pool_still_constructible() {
         // Deprecated, but must still build and default cleanly
         let _ = BufferPool::new();
-        let _ = BufferPool::default();
+        let _ = BufferPool;
     }
 
     #[test]

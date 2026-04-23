@@ -347,13 +347,13 @@ impl RiskScorer {
             + weights.privacy_weight as u32
             + weights.threat_weight as u32;
 
-        if total_weight > 0 {
-            let weighted_sum = (output.geo_risk_score as u32 * weights.geo_weight as u32)
-                + (output.reputation_risk_score as u32 * weights.reputation_weight as u32)
-                + (output.privacy_risk_score as u32 * weights.privacy_weight as u32)
-                + (output.threat_risk_score as u32 * weights.threat_weight as u32);
+        let weighted_sum = (output.geo_risk_score as u32 * weights.geo_weight as u32)
+            + (output.reputation_risk_score as u32 * weights.reputation_weight as u32)
+            + (output.privacy_risk_score as u32 * weights.privacy_weight as u32)
+            + (output.threat_risk_score as u32 * weights.threat_weight as u32);
 
-            output.risk_score = (weighted_sum / total_weight).min(100) as u8;
+        if let Some(divided) = weighted_sum.checked_div(total_weight) {
+            output.risk_score = divided.min(100) as u8;
         }
 
         output.risk_level = RiskLevel::from_score(output.risk_score);
