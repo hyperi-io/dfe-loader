@@ -1,3 +1,12 @@
+## [1.17.4](https://github.com/hyperi-io/dfe-loader/compare/v1.17.3...v1.17.4) (2026-04-23)
+
+
+### Bug Fixes
+
+* enable hyperi-ci Tier 2 (PGO+BOLT), drop mimalloc, clear rust 1.95 clippy ([867e34f](https://github.com/hyperi-io/dfe-loader/commit/867e34f421eaa084ee407b43f3283549f95ab6a4))
+* expand test coverage to 67.9% with non-trivial tests ([37bd551](https://github.com/hyperi-io/dfe-loader/commit/37bd5512dd2a9d3b8cd2ebbdaa8cc77a62c6e288))
+* push test coverage to 80.7% with integration + emulation tests ([e620c96](https://github.com/hyperi-io/dfe-loader/commit/e620c968527ac764408edb4e83a05b4b7a107136))
+
 ## [1.17.3](https://github.com/hyperi-io/dfe-loader/compare/v1.17.2...v1.17.3) (2026-04-16)
 
 
