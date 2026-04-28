@@ -66,7 +66,7 @@ tikv-jemalloc-ctl = { version = ">=0.6", optional = true }
 tikv-jemallocator = { version = ">=0.6", optional = true }
 
 # GeoIP enrichment (mmap for long-running apps, simdutf8 for SIMD UTF-8 validation)
-maxminddb = { version = ">=0.24", features = ["mmap", "simdutf8"] }
+maxminddb = { version = ">=0.28", features = ["mmap", "simdutf8"] }
 
 # GeoIP auto-download (HTTP + gzip decompression + tar extraction)
 # Pinned to 0.12 to match rustlib (reqwest-middleware/vaultrs don't support 0.13 yet)
