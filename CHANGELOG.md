@@ -1,3 +1,10 @@
+## [1.17.6](https://github.com/hyperi-io/dfe-loader/compare/v1.17.5...v1.17.6) (2026-04-28)
+
+
+### Bug Fixes
+
+* **security:** harden ClickHouse SQL identifier + WHERE handling ([9b7e734](https://github.com/hyperi-io/dfe-loader/commit/9b7e73484d4e5730411bba0a7fcd48dc2ea93113))
+
 ## [1.17.5](https://github.com/hyperi-io/dfe-loader/compare/v1.17.4...v1.17.5) (2026-04-23)
 
 
