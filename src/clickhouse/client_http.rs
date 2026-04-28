@@ -293,12 +293,25 @@ impl ClickHouseQueryClient {
     /// # Arguments
     ///
     /// * `table` - Table name (may include "db.table" format)
-    /// * `where_clause` - Optional WHERE condition (without "WHERE" keyword)
+    /// * `where_clause` - Optional WHERE condition (without "WHERE" keyword).
+    ///   Restricted to a conservative character set
+    ///   `[A-Za-z0-9_.,= <>!'%-]` and a length cap so SQL fragments cannot
+    ///   smuggle subqueries, semicolons, or comment markers. Anything
+    ///   richer must be expressed as parameter binding (this method is
+    ///   for internal/test usage only).
+    ///
+    /// # Errors
+    ///
+    /// Returns `ClickHouseError::Query` if the WHERE clause contains
+    /// characters outside the allow-list or exceeds 256 bytes.
     pub async fn query_count(&self, table: &str, where_clause: Option<&str>) -> Result<usize> {
         let (db, tbl) = parse_db_table(table, &self.database);
         let fq_table = format!("{}.{}", escape_identifier(&db), escape_identifier(&tbl));
         let sql = match where_clause {
-            Some(w) => format!("SELECT COUNT(*) AS count FROM {fq_table} WHERE {w}"),
+            Some(w) => {
+                validate_where_clause(w)?;
+                format!("SELECT COUNT(*) AS count FROM {fq_table} WHERE {w}")
+            }
             None => format!("SELECT COUNT(*) AS count FROM {fq_table}"),
         };
 
@@ -391,11 +404,61 @@ fn parse_db_table(table: &str, default_db: &str) -> (String, String) {
     }
 }
 
+/// Validate a `WHERE` fragment against a conservative allow-list before
+/// interpolating it into SQL. Used by `query_count()` (test/internal helper).
+///
+/// Permits identifier chars + comparison operators + quoted-string contents:
+/// `[A-Za-z0-9_.,= <>!'%-]`. Rejects: `;`, `(`, `)`, `--`, `/*`, `*/`, `\\`,
+/// backticks, newlines, tabs, and anything > 256 bytes.
+///
+/// This is defence-in-depth; the method is not currently called from
+/// production paths. Real query parameterisation should be used for any
+/// caller-controlled WHERE content.
+fn validate_where_clause(s: &str) -> Result<()> {
+    if s.len() > 256 {
+        return Err(ClickHouseError::Query(format!(
+            "WHERE clause too long ({} bytes, max 256)",
+            s.len()
+        )));
+    }
+    if s.contains(';')
+        || s.contains("--")
+        || s.contains("/*")
+        || s.contains("*/")
+        || s.contains('\\')
+        || s.contains('`')
+        || s.contains('\n')
+        || s.contains('\t')
+        || s.contains('\r')
+    {
+        return Err(ClickHouseError::Query(
+            "WHERE clause contains forbidden characters \
+             (`;`, `--`, `/*`, `*/`, `\\`, backtick, newline, tab)"
+                .into(),
+        ));
+    }
+    let allowed = |c: char| {
+        c.is_ascii_alphanumeric()
+            || matches!(
+                c,
+                '_' | '.' | ',' | '=' | ' ' | '<' | '>' | '!' | '\'' | '%' | '-'
+            )
+    };
+    if !s.chars().all(allowed) {
+        return Err(ClickHouseError::Query(
+            "WHERE clause contains characters outside the allow-list \
+             [A-Za-z0-9_.,= <>!'%-]"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Escape a ClickHouse identifier (database, table, column name) with backticks.
 ///
 /// Escapes backslashes, single quotes, backticks, tabs, and newlines inside
 /// the identifier. Mirrors the fork's `sql::escape::identifier()`.
-fn escape_identifier(name: &str) -> String {
+pub(crate) fn escape_identifier(name: &str) -> String {
     let mut out = String::with_capacity(name.len() + 2);
     out.push('`');
     for ch in name.chars() {
@@ -463,6 +526,44 @@ mod tests {
         assert_eq!(escape_identifier("back\\slash"), "`back\\\\slash`");
         // Tab character should be escaped
         assert_eq!(escape_identifier("tab\there"), "`tab\\\there`");
+    }
+
+    #[test]
+    fn test_validate_where_clause_accepts_safe_fragments() {
+        assert!(validate_where_clause("id = 42").is_ok());
+        assert!(validate_where_clause("name = 'alice'").is_ok());
+        assert!(validate_where_clause("ts >= 1700000000").is_ok());
+        assert!(validate_where_clause("status != 'deleted' AND age < 100").is_ok());
+        // Keyword-shaped fragments pass — the validator is character-class
+        // based, not keyword-aware. The point is to block punctuation and
+        // sequences that enable injection (`;`, `--`, `/*`).
+        assert!(validate_where_clause("name LIKE 'foo%'").is_ok());
+    }
+
+    #[test]
+    fn test_validate_where_clause_rejects_injection_attempts() {
+        // Stacked statements
+        assert!(validate_where_clause("1=1; DROP TABLE users").is_err());
+        // SQL line comments
+        assert!(validate_where_clause("1=1 -- and now whatever").is_err());
+        // SQL block comments
+        assert!(validate_where_clause("1=1 /* comment */").is_err());
+        // Backslash escapes
+        assert!(validate_where_clause("name = '\\' OR 1=1").is_err());
+        // Backticks (identifier abuse)
+        assert!(validate_where_clause("`users`.id = 42").is_err());
+        // Newlines
+        assert!(validate_where_clause("id = 1\nOR 1=1").is_err());
+    }
+
+    #[test]
+    fn test_validate_where_clause_length_cap() {
+        let big = "x".repeat(257);
+        assert!(validate_where_clause(&big).is_err());
+        let ok = "x".repeat(256);
+        // 256 'x' characters are all in the allow-list, so this passes the
+        // length check (and the chars-allowed check too).
+        assert!(validate_where_clause(&ok).is_ok());
     }
 
     #[test]

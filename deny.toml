@@ -4,9 +4,9 @@
 [advisories]
 # paste (dtolnay) marked unmaintained but has no replacement and is
 # deeply embedded in the Rust ecosystem. Ignore until a successor exists.
-# astral-tokio-tar: low-severity (1.7) transitive dev-dep via testcontainers.
-# No upstream fix available. Dismissed per Dependabot alert #3.
-ignore = ["RUSTSEC-2024-0436", "RUSTSEC-2026-0066"]
+# (RUSTSEC-2026-0066 was patched upstream as of astral-tokio-tar 0.6.1
+# — bump applied in commit d76e82c and ignore-entry removed.)
+ignore = ["RUSTSEC-2024-0436"]
 
 [licenses]
 allow = [

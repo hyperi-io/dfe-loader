@@ -170,24 +170,6 @@ impl Router {
         }
     }
 
-    /// Extract a field value from JSON payload using dot notation for nested access
-    ///
-    /// Tries each field in the list in order, returning the first match.
-    #[inline]
-    fn extract_first_match(&self, payload: &[u8], fields: &[String]) -> Option<String> {
-        for field in fields {
-            let value = if field.contains('.') {
-                extract_nested_field_json(payload, field)
-            } else {
-                extract_field_json(payload, field)
-            };
-            if value.is_some() {
-                return value;
-            }
-        }
-        None
-    }
-
     /// Extract the database name from the payload.
     ///
     /// Logic:
@@ -197,20 +179,10 @@ impl Router {
     /// 4. Otherwise → use `default_db`.
     #[inline]
     pub fn extract_db(&self, payload: &[u8]) -> String {
-        // db_fields empty = always use default (shared schema)
-        if self.db_fields.is_empty() {
-            return self.default_db.clone();
-        }
-
-        // Extract from db_fields and look up in org_routes
-        if let Some(org_id) = self.extract_first_match(payload, &self.db_fields)
-            && let Some(db) = self.org_routes.get(&org_id)
-        {
-            return db.clone();
-        }
-
-        // Fall back to default database
-        self.default_db.clone()
+        // Delegate to the Cow path — borrows from `self` or the payload
+        // when possible and only allocates on `into_owned()` for the
+        // legacy `String`-returning callers.
+        self.extract_db_cow(payload).into_owned()
     }
 
     /// Extract a single field from payload (helper for `org_id_field`)
@@ -226,16 +198,8 @@ impl Router {
     /// Extract the table name from the payload
     #[inline]
     pub fn extract_table(&self, payload: &[u8]) -> String {
-        let table = self
-            .extract_first_match(payload, &self.table_fields)
-            .unwrap_or_else(|| self.default_table.clone());
-
-        // Check legacy source_to_table mapping
-        if let Some(mapped) = self.source_to_table.get(&table) {
-            mapped.clone()
-        } else {
-            table
-        }
+        // Delegate to the Cow path — see `extract_db` for rationale.
+        self.extract_table_cow(payload).into_owned()
     }
 
     /// Route a message to db.table based on its payload (raw bytes)
