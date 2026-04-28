@@ -43,6 +43,7 @@ use tracing::{debug, error, info, trace, warn};
 use crate::Result;
 use crate::buffer::{FlushBatch, KafkaOffset};
 use crate::clickhouse::circuit_breaker::CircuitBreaker;
+use crate::clickhouse::client_http::escape_identifier;
 use crate::clickhouse::config::InsertFormat;
 use crate::clickhouse::error::{ClickHouseError, ErrorCategory, is_schema_drift_error};
 use crate::clickhouse::{ClickHouseQueryClient, SchemaCache};
@@ -524,7 +525,13 @@ impl Inserter {
             }
         }
 
-        let sql = format!("INSERT INTO {db}.{tbl} FORMAT JSONEachRow");
+        // Defence-in-depth: escape db/tbl identifiers even though both are
+        // operator-controlled (routing config + sanitised _source).
+        let sql = format!(
+            "INSERT INTO {}.{} FORMAT JSONEachRow",
+            escape_identifier(db),
+            escape_identifier(tbl)
+        );
         let body = Bytes::from(body); // Cheap clone for retries (ref-counted)
 
         let mut last_error = None;

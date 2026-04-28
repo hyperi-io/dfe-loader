@@ -203,6 +203,9 @@ unsafe_code = "allow"
 # `#[cfg(tarpaulin)]` is set by cargo-tarpaulin at coverage time. Declaring
 # it here silences `unexpected_cfgs` without a build.rs.
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tarpaulin)'] }
+# Some clippy allows below are 1.95+-only (e.g. `duration_suboptimal_units`).
+# 1.94 toolchains would otherwise fail with `unknown lint`.
+unknown_lints = "allow"
 
 [lints.clippy]
 pedantic = { level = "warn", priority = -1 }

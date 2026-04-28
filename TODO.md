@@ -64,52 +64,72 @@ From `/review` (3 parallel scans on v1.17.5 + post-d76e82c).
 FSL-1.1-ALv2, all sampled file headers correctly formatted, `cargo
 deny check licenses` passes with zero violations.
 
-**Security (Priority 2 / 🟡 — no Critical findings):**
+**Security (Priority 2 / 🟡 — no Critical findings) — DONE 2026-04-29:**
 
-- [ ] **`src/clickhouse/client_http.rs:301` — unescaped WHERE clause
-      in `query_count()`.** Method takes `Option<&str>` and interpolates
-      directly into SQL. Currently called only from tests, but the
-      pattern is a latent SQL-injection foot-gun. Fix: either document
-      the caller-must-sanitise contract on the method, or add a
-      validator that whitelists comparison operators + identifier
-      characters.
-- [ ] **`src/clickhouse/inserter.rs:527` — unescaped db/table
-      identifiers in `INSERT INTO {db}.{tbl}`.** db/tbl come from
-      routing config + `_source` field. Routing config is operator-
-      controlled and `_source` is sanitised upstream, so risk is low,
-      but defence-in-depth would call `escape_identifier()` (the
-      helper already exists in `client_http.rs`) on both before
-      formatting.
+- [x] **`src/clickhouse/client_http.rs:301` — unescaped WHERE clause
+      in `query_count()`.** Added `validate_where_clause()` allow-list
+      validator (256-byte cap; rejects `;`, `--`, `/*`/`*/`, `\`,
+      backtick, newlines, tabs; chars limited to
+      `[A-Za-z0-9_.,= <>!'%-]`). 3 unit tests cover safe fragments,
+      injection attempts, and the length cap.
+- [x] **`src/clickhouse/inserter.rs:527` — unescaped db/table
+      identifiers in `INSERT INTO {db}.{tbl}`.** Now wraps both with
+      `escape_identifier()` (lifted to `pub(crate)` in
+      `client_http.rs` so the inserter can re-use it).
 
-**Code quality (Priority 2 / 🟡):**
+**Code quality (Priority 2 / 🟡) — INTENTIONALLY DEFERRED:**
 
-- [ ] **`src/clickhouse/inserter.rs:327-476` — `insert_rows_rowbinary`
-      is 149 lines** of retry/backoff interleaved with row encoding.
-      Extract `with_schema_retry()` helper or generic
-      `retry_with_backoff<F, T>()` closure to drop the function to
-      ~60 lines.
-- [ ] **`src/clickhouse/inserter.rs:482-626` — `insert_rows_json` (144
-      lines)** mirrors the same retry pattern. Same fix as above —
-      both functions can share the helper.
-- [ ] **`src/enrich/{geoip,reputation,risk}.rs` —
-      `to_schema_map()` triplicated** (~95 lines × 3 = 285 LOC of
-      near-identical match-arm projection from optional fields to
-      JSON). Extract a `SchemaProjector` trait + generic builder.
-      Estimated saving: 285 → ~140 LOC with clearer per-enricher
-      schema.
-- [ ] **`src/config/loader.rs:183-284` — `apply_flat_env` is 101
-      lines** of identical `if let Some(v)` pattern (40+ instances,
-      one per env var). Replace with a declarative macro or
-      table-driven assignment.
+The four bigger refactors flagged by `/review` were assessed but not
+applied — each would replace clarity with cleverness without earning
+its keep:
 
-**Code quality (Priority 3 / 🟢):**
+- [skip] **`insert_rows_rowbinary` (149 lines) +
+      `insert_rows_json` (144 lines) — extract retry helper.** The two
+      functions look similar but their retry control flow is
+      legitimately different: rowbinary distinguishes write-time
+      schema-mismatch errors (need to break the inner write loop and
+      invalidate the partially-built `DynamicInsert`) from end-time
+      errors (the insert is already consumed; only the cache can be
+      invalidated). JSON path uses error-category dispatch
+      (Transient/Data/Fatal) for retry decisions. A unified helper
+      would either capture only one shape (leaving the other
+      copy-pasted) or accept a closure over both, where the closure
+      body would be longer than the current code. Skipping.
+- [skip] **`src/enrich/{geoip,reputation,risk}.rs` — triplicated
+      `to_schema_map()`.** The visual repetition hides per-domain
+      logic: geoip projects IP/asn/continent fields, reputation
+      projects threat-type counters, risk projects component scores
+      and weighted composites. A `SchemaProjector` trait would force
+      every enricher's domain-specific output through a generic
+      key→value abstraction, making the actual schema harder to read.
+      Skipping.
+- [skip] **`apply_flat_env` (101 lines, 40 env-var assignments).**
+      Each `if let Some(v) = env.get("DFE_LOADER_KAFKA_BROKERS") {
+      cfg.kafka.brokers = parse(v) }` block is one-line greppable —
+      a maintainer hunting "where does `DFE_LOADER_FOO` get applied"
+      finds the answer on a single line. A declarative macro or a
+      table+`let _ = field_set!(...)` macro would hide that mapping
+      behind one level of indirection that breaks `rg DFE_LOADER_FOO`
+      results. Skipping.
 
-- [ ] `src/router.rs:199-239` — `extract_db()/extract_table()` clone
-      `default_db/default_table` strings even when the caller could
-      borrow. Use existing `*_cow` variants more consistently.
-- [ ] `src/enrich/{geoip,reputation}.rs` — minor `.clone()` and
-      `String` parameters where `&str` would suffice in cache-write
-      paths. Tiny perf win.
+**Code quality (Priority 3 / 🟢) — DONE 2026-04-29:**
+
+- [x] `src/routing/router.rs` — `extract_db()/extract_table()` now
+      delegate to the existing `extract_db_cow/extract_table_cow`
+      paths via `.into_owned()`. Internal callers can use the cow
+      variants directly. Removed the now-dead `extract_first_match`
+      helper.
+- [skip] `src/enrich/{geoip,reputation}.rs` — minor `.clone()` and
+      `String` params in cache-write paths. Sub-microsecond per insert
+      against an LRU map; not on the dominant hot path. Skipping.
+
+**Renovate PR #37 (Ubuntu 24.04 → 26.04):** deferred. Dockerfile
+pins Confluent's `noble` apt source which won't yet serve 26.04
+packages. Needs a coordinated bump (base image + repo codename +
+verify librdkafka1/libssl3 availability). Tracked separately.
+
+**Stale `deny.toml` ignore — DONE 2026-04-29:** `RUSTSEC-2026-0066`
+removed (patched upstream by `astral-tokio-tar` 0.6.1 in d76e82c).
 
 **Negative findings (positive signal):**
 
