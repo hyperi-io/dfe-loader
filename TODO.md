@@ -25,6 +25,108 @@ Stage 1 ships first, Stage 2 is a drop-in upgrade — same API, better protocol.
 
 ## Active
 
+### Dependency + Code Review Findings (2026-04-29)
+
+`/deps` Phase 1 + `/review` skill outputs from a fresh sweep against
+v1.17.5. Phase 1 mechanical updates committed as `d76e82c`; review
+findings remain to triage.
+
+#### Dependency sweep — DONE (commit d76e82c)
+
+All 6 open Dependabot alerts cleared:
+
+| Crate | Before → After | Severity | Why |
+|---|---|---|---|
+| openssl | 0.10.77 → 0.10.78 | 4 high + 1 low | CVE-2026-41676/41677/41678/41898/41681 (buffer overflows + leaks). Transitive via reqwest's native-tls. |
+| rand | 0.8.5 → 0.8.6 | low | GHSA-cq8v-f236-94qc (rng() unsoundness with custom logger). |
+| astral-tokio-tar | 0.6.0 → 0.6.1 | (advisory) | GHSA-xx64-wwv2-hcqq (tar permission flaw, dev-dep only). |
+| maxminddb | 0.27.3 → 0.28.1 | (Renovate #38) | Perf: monomorphised search-tree + dedicated v4/v6 paths. Floor in `Cargo.toml` lifted to `>=0.28`. |
+| metrics | 0.24.3 → 0.24.4 | (Renovate #38) | Patch. |
+
+Plus full transitive `cargo update`. `cargo deny check advisories: ok`,
+1176 lib tests pass.
+
+- [x] Push commit d76e82c → main (will not trigger semantic-release —
+      `chore(deps):` doesn't bump version. If a release is desired,
+      land a follow-up `fix:` commit.)
+- [ ] **Renovate PR #37** (Ubuntu 24.04 → 26.04 in Dockerfile) —
+      deferred; 26.04 LTS is brand-new (~3 weeks). Decide whether to
+      adopt now or wait one more cycle.
+- [ ] **Renovate PR #38** — supersede via local commit, close PR.
+- [ ] Stale ignore in `deny.toml`: `RUSTSEC-2026-0066` matches no
+      current crate — remove from `ignore = [...]`.
+
+#### Code review findings — pending triage
+
+From `/review` (3 parallel scans on v1.17.5 + post-d76e82c).
+
+**License + headers + dep licenses: ✅ CLEAN.** LICENSE is correct
+FSL-1.1-ALv2, all sampled file headers correctly formatted, `cargo
+deny check licenses` passes with zero violations.
+
+**Security (Priority 2 / 🟡 — no Critical findings):**
+
+- [ ] **`src/clickhouse/client_http.rs:301` — unescaped WHERE clause
+      in `query_count()`.** Method takes `Option<&str>` and interpolates
+      directly into SQL. Currently called only from tests, but the
+      pattern is a latent SQL-injection foot-gun. Fix: either document
+      the caller-must-sanitise contract on the method, or add a
+      validator that whitelists comparison operators + identifier
+      characters.
+- [ ] **`src/clickhouse/inserter.rs:527` — unescaped db/table
+      identifiers in `INSERT INTO {db}.{tbl}`.** db/tbl come from
+      routing config + `_source` field. Routing config is operator-
+      controlled and `_source` is sanitised upstream, so risk is low,
+      but defence-in-depth would call `escape_identifier()` (the
+      helper already exists in `client_http.rs`) on both before
+      formatting.
+
+**Code quality (Priority 2 / 🟡):**
+
+- [ ] **`src/clickhouse/inserter.rs:327-476` — `insert_rows_rowbinary`
+      is 149 lines** of retry/backoff interleaved with row encoding.
+      Extract `with_schema_retry()` helper or generic
+      `retry_with_backoff<F, T>()` closure to drop the function to
+      ~60 lines.
+- [ ] **`src/clickhouse/inserter.rs:482-626` — `insert_rows_json` (144
+      lines)** mirrors the same retry pattern. Same fix as above —
+      both functions can share the helper.
+- [ ] **`src/enrich/{geoip,reputation,risk}.rs` —
+      `to_schema_map()` triplicated** (~95 lines × 3 = 285 LOC of
+      near-identical match-arm projection from optional fields to
+      JSON). Extract a `SchemaProjector` trait + generic builder.
+      Estimated saving: 285 → ~140 LOC with clearer per-enricher
+      schema.
+- [ ] **`src/config/loader.rs:183-284` — `apply_flat_env` is 101
+      lines** of identical `if let Some(v)` pattern (40+ instances,
+      one per env var). Replace with a declarative macro or
+      table-driven assignment.
+
+**Code quality (Priority 3 / 🟢):**
+
+- [ ] `src/router.rs:199-239` — `extract_db()/extract_table()` clone
+      `default_db/default_table` strings even when the caller could
+      borrow. Use existing `*_cow` variants more consistently.
+- [ ] `src/enrich/{geoip,reputation}.rs` — minor `.clone()` and
+      `String` parameters where `&str` would suffice in cache-write
+      paths. Tiny perf win.
+
+**Negative findings (positive signal):**
+
+- ✅ No hardcoded secrets / API keys / passwords in `src/`.
+- ✅ No command injection vectors.
+- ✅ No TLS verification disabled by default; `skip_verify` is opt-in
+      via config.
+- ✅ No blocking calls in async code (production paths).
+- ✅ No `unbounded_channel()` in production code — all bounded with
+      configurable capacity.
+- ✅ No mutex held across `.await`.
+- ✅ No 8+ argument functions, no >5-level nesting outside config
+      builders, no missing test modules.
+- ✅ Clippy clean across all production targets.
+
+---
+
 ### Canary 2: Dep-Install SSOT + BOLT release to R2 (NEXT)
 
 dfe-loader is **Canary 2** for the hyperi-ci dep-install SSOT + ARC
