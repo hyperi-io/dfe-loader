@@ -36,7 +36,7 @@ struct CompiledColumn {
     /// Destination column name
     destination: String,
     /// Pre-compiled CEL program
-    program: cel_interpreter::Program,
+    program: cel::Program,
     /// Origin for precedence resolution
     _origin: ComputedOrigin,
 }
@@ -258,24 +258,24 @@ pub fn parse_computed_directive(comment: &str) -> Option<String> {
 // ============================================================================
 
 /// Convert a CEL evaluation result to a `serde_json::Value`.
-fn cel_to_json(value: &cel_interpreter::Value) -> serde_json::Value {
+fn cel_to_json(value: &cel::Value) -> serde_json::Value {
     match value {
-        cel_interpreter::Value::Bool(b) => serde_json::Value::Bool(*b),
-        cel_interpreter::Value::Int(n) => serde_json::json!(*n),
-        cel_interpreter::Value::UInt(n) => serde_json::json!(*n),
-        cel_interpreter::Value::Float(f) => serde_json::json!(*f),
-        cel_interpreter::Value::String(s) => serde_json::Value::String(s.to_string()),
-        cel_interpreter::Value::Null => serde_json::Value::Null,
-        cel_interpreter::Value::List(items) => {
+        cel::Value::Bool(b) => serde_json::Value::Bool(*b),
+        cel::Value::Int(n) => serde_json::json!(*n),
+        cel::Value::UInt(n) => serde_json::json!(*n),
+        cel::Value::Float(f) => serde_json::json!(*f),
+        cel::Value::String(s) => serde_json::Value::String(s.to_string()),
+        cel::Value::Null => serde_json::Value::Null,
+        cel::Value::List(items) => {
             let arr: Vec<serde_json::Value> = items.iter().map(cel_to_json).collect();
             serde_json::Value::Array(arr)
         }
-        cel_interpreter::Value::Map(map) => {
+        cel::Value::Map(map) => {
             let obj: serde_json::Map<String, serde_json::Value> = map
                 .map
                 .iter()
                 .filter_map(|(k, v)| {
-                    if let cel_interpreter::objects::Key::String(s) = k {
+                    if let cel::objects::Key::String(s) = k {
                         Some((s.to_string(), cel_to_json(v)))
                     } else {
                         None
@@ -355,31 +355,31 @@ mod tests {
 
     #[test]
     fn test_cel_to_json_bool() {
-        let v = cel_interpreter::Value::Bool(true);
+        let v = cel::Value::Bool(true);
         assert_eq!(cel_to_json(&v), serde_json::json!(true));
     }
 
     #[test]
     fn test_cel_to_json_int() {
-        let v = cel_interpreter::Value::Int(42);
+        let v = cel::Value::Int(42);
         assert_eq!(cel_to_json(&v), serde_json::json!(42));
     }
 
     #[test]
     fn test_cel_to_json_float() {
-        let v = cel_interpreter::Value::Float(1.234);
+        let v = cel::Value::Float(1.234);
         assert_eq!(cel_to_json(&v), serde_json::json!(1.234));
     }
 
     #[test]
     fn test_cel_to_json_string() {
-        let v = cel_interpreter::Value::String(std::sync::Arc::new("hello".to_string()));
+        let v = cel::Value::String(std::sync::Arc::new("hello".to_string()));
         assert_eq!(cel_to_json(&v), serde_json::json!("hello"));
     }
 
     #[test]
     fn test_cel_to_json_null() {
-        let v = cel_interpreter::Value::Null;
+        let v = cel::Value::Null;
         assert_eq!(cel_to_json(&v), serde_json::Value::Null);
     }
 
