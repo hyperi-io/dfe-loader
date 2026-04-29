@@ -32,10 +32,10 @@ tokio = { version = ">=1.48", features = ["full"] }
 tokio-util = { version = ">=0.7", features = ["rt"] }
 
 # Shared library with transport abstraction
-hyperi-rustlib = { version = ">=2.5.4", features = ["transport-kafka", "transport-grpc", "dlq-kafka", "config", "config-reload", "deployment", "version-check", "scaling", "cli", "top", "logger", "metrics", "metrics-dfe", "expression", "memory", "worker"] }
+hyperi-rustlib = { version = ">=2.6.1", features = ["transport-kafka", "transport-grpc", "dlq-kafka", "config", "config-reload", "deployment", "version-check", "scaling", "cli-service", "top", "logger", "metrics", "metrics-dfe", "expression", "memory", "worker-batch"] }
 
 # CEL expression evaluation (same crate as rustlib uses, needed for Program type)
-cel-interpreter = { version = ">=0.10.0, <0.11", features = ["json"] }
+cel = { version = ">=0.13, <0.14", features = ["json"] }
 
 # JSON parsing (SIMD-accelerated)
 sonic-rs = ">=0.5"

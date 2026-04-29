@@ -28,7 +28,7 @@ use crate::payload::parse::{
 
 /// A pre-compiled CEL routing rule.
 struct CompiledRoutingRule {
-    program: cel_interpreter::Program,
+    program: cel::Program,
     target: String,
     db: Option<String>,
 }
@@ -339,7 +339,7 @@ impl Router {
         };
 
         for rule in &self.compiled_rules {
-            if let Ok(cel_interpreter::Value::Bool(true)) = rule.program.execute(&context) {
+            if let Ok(cel::Value::Bool(true)) = rule.program.execute(&context) {
                 let db = rule.db.as_deref().unwrap_or(&self.default_db);
                 return Some(RouteResult::Table(build_db_table_string(db, &rule.target)));
             }
