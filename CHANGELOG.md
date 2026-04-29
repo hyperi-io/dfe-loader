@@ -1,3 +1,10 @@
+# [1.18.0](https://github.com/hyperi-io/dfe-loader/compare/v1.17.6...v1.18.0) (2026-04-29)
+
+
+### Features
+
+* switch [patch.crates-io] to hyperi/connection-actor ([ce8e568](https://github.com/hyperi-io/dfe-loader/commit/ce8e568d7124ec4da6e7fd84c06959cc6d5aa865)), closes [#46681](https://github.com/hyperi-io/dfe-loader/issues/46681)
+
 ## [1.17.6](https://github.com/hyperi-io/dfe-loader/compare/v1.17.5...v1.17.6) (2026-04-28)
 
 
