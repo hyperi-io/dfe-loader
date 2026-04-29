@@ -295,7 +295,12 @@ map_unwrap_or = "allow"
 # Design spec: docs/specs/2026-03-18-clickhouse-rs-fork-swap.md
 #
 [patch.crates-io]
-clickhouse = { git = "https://github.com/hyperi-io/clickhouse-rs.git", branch = "hyperi/schema-cache-strong" }
+# hyperi/connection-actor stacks on hyperi/schema-cache-strong with the
+# socket-state actor work — every native-transport operation goes through
+# a background actor task with protocol-level Cancel-on-drop, full-duplex
+# INSERT exception detection, and idle keepalive. See the fork's
+# src/worker/ + src/native/connection_actor.rs for design + rationale.
+clickhouse = { git = "https://github.com/hyperi-io/clickhouse-rs.git", branch = "hyperi/connection-actor" }
 #
 # To revert: comment out or remove the [patch.crates-io] section above.
 # =============================================================================
