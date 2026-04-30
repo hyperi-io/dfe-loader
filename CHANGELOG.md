@@ -1,3 +1,10 @@
+## [1.18.1](https://github.com/hyperi-io/dfe-loader/compare/v1.18.0...v1.18.1) (2026-04-30)
+
+
+### Bug Fixes
+
+* **deps:** track rustlib 2.6.1 + cel-interpreter→cel rename ([b90726a](https://github.com/hyperi-io/dfe-loader/commit/b90726ad4ed60b064e8b1f805b2ca60613486a4d))
+
 # [1.18.0](https://github.com/hyperi-io/dfe-loader/compare/v1.17.6...v1.18.0) (2026-04-29)
 
 
