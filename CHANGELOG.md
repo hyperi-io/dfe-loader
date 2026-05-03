@@ -1,3 +1,11 @@
+## [1.18.2](https://github.com/hyperi-io/dfe-loader/compare/v1.18.1...v1.18.2) (2026-05-03)
+
+
+### Bug Fixes
+
+* **deployment:** wire DfeApp::deployment_contract trait hook + bump rustlib to >=2.7.0 ([49a62ff](https://github.com/hyperi-io/dfe-loader/commit/49a62ff7f48dcf0113cb5b5ca2310a367b13d919))
+* **tests:** make skip_if_no_clickhouse actually verify ClickHouse ([92e6e4f](https://github.com/hyperi-io/dfe-loader/commit/92e6e4f5744079dabab5471a2c82cf23faea0512))
+
 ## [1.18.1](https://github.com/hyperi-io/dfe-loader/compare/v1.18.0...v1.18.1) (2026-04-30)
 
 
