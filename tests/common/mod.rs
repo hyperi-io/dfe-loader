@@ -116,8 +116,21 @@ impl ClickHouseTestConfig {
         format!("{}:{}", self.host, self.native_port)
     }
 
+    /// Probe whether `ClickHouse` is actually responding (not just a TCP listener
+    /// on port 9000 — devex hosts often have *something* bound there that
+    /// false-positives a plain TCP probe).
+    ///
+    /// Tries the HTTP/HTTPS `/ping` endpoint which returns `Ok.\n` for live
+    /// `ClickHouse` instances. Both plain HTTP and HTTPS variants supported.
+    /// Sync (despite using reqwest::blocking) by isolating the blocking runtime
+    /// inside a `std::thread::spawn` — necessary because tests run inside
+    /// tokio runtimes that reject reqwest::blocking's internal runtime drop.
     pub fn is_reachable(&self) -> bool {
-        tcp_reachable(&self.native_addr())
+        clickhouse_http_ping_ok(&self.http_url())
+    }
+
+    pub fn http_addr(&self) -> String {
+        format!("{}:{}", self.host, self.http_port)
     }
 
     /// Generate CREATE TABLE DDL — adds ON CLUSTER for remote cluster, omits for Docker single-node.
@@ -528,4 +541,31 @@ fn tcp_reachable(addr: &str) -> bool {
         .ok()
         .and_then(|mut addrs| addrs.next())
         .is_some_and(|a| std::net::TcpStream::connect_timeout(&a, Duration::from_secs(3)).is_ok())
+}
+
+/// Probe `ClickHouse` HTTP/HTTPS `/ping` endpoint. Returns `true` only if a
+/// live `ClickHouse` is actually responding with `Ok.` body — rejects bare
+/// TCP listeners and other services that happen to be on the port.
+///
+/// Uses `reqwest::blocking` (a dev-only feature) inside a fresh
+/// `std::thread::spawn` to isolate the blocking runtime from the outer tokio
+/// runtime that `#[tokio::test]` provides. Without the thread isolation,
+/// reqwest's internal runtime would panic on drop.
+fn clickhouse_http_ping_ok(base_url: &str) -> bool {
+    let url = format!("{}/ping", base_url.trim_end_matches('/'));
+    std::thread::spawn(move || -> Option<bool> {
+        let client = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(3))
+            .build()
+            .ok()?;
+        let resp = client.get(&url).send().ok()?;
+        if !resp.status().is_success() {
+            return Some(false);
+        }
+        Some(resp.text().ok()?.trim() == "Ok.")
+    })
+    .join()
+    .ok()
+    .flatten()
+    .unwrap_or(false)
 }

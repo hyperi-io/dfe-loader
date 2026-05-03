@@ -115,6 +115,10 @@ proptest = ">=1.5"
 test-case = ">=3.3"
 rstest = ">=0.22"
 
+# Blocking HTTP for sync test reachability probes (skip_if_no_clickhouse macro).
+# Adds the `blocking` feature to the reqwest already-pinned by the lib.
+reqwest = { version = ">=0.12, <0.13", default-features = false, features = ["blocking", "rustls-tls-native-roots"] }
+
 # Integration test containers
 testcontainers = ">=0.26"
 testcontainers-modules = { version = ">=0.10", features = ["kafka", "clickhouse"] }
