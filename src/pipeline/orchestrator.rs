@@ -217,7 +217,12 @@ impl Orchestrator {
         let dlq_config = self.config.routing.dlq.to_rustlib_config();
         let transport_kafka_config = TransportAdapter::convert_config(&self.config.kafka);
         let dlq: Option<Arc<Dlq>> = if dlq_config.enabled {
-            match Dlq::with_kafka(&dlq_config, "loader", &transport_kafka_config) {
+            match Dlq::spawn(
+                &dlq_config,
+                "loader",
+                Some(&transport_kafka_config),
+                self.shutdown.clone(),
+            ) {
                 Ok(d) => {
                     info!(mode = ?dlq_config.mode, "DLQ enabled");
                     Some(Arc::new(d))
