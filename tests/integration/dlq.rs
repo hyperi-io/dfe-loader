@@ -67,11 +67,12 @@ fn test_dlq_file_backend_write() {
         .build()
         .unwrap();
 
-    let shutdown = tokio_util::sync::CancellationToken::new();
-    let dlq = hyperi_rustlib::dlq::Dlq::spawn(&rustlib_config, "loader", None, shutdown.clone())
-        .expect("create file-only DLQ");
-
     rt.block_on(async {
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let dlq =
+            hyperi_rustlib::dlq::Dlq::spawn(&rustlib_config, "loader", None, shutdown.clone())
+                .expect("create file-only DLQ");
+
         let entry =
             hyperi_rustlib::dlq::DlqEntry::new("loader", "parse_error", b"bad data".to_vec())
                 .with_destination("acme.auth")
