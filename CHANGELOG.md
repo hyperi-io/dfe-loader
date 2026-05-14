@@ -1,3 +1,14 @@
+## [1.18.3](https://github.com/hyperi-io/dfe-loader/compare/v1.18.2...v1.18.3) (2026-05-14)
+
+
+### Bug Fixes
+
+* adopt v2.7.1 DLQ API (Dlq::spawn + queue-admission send semantics) ([5f3d2af](https://github.com/hyperi-io/dfe-loader/commit/5f3d2affcd88e2e9c3103a0ff6f2584cdb69ba07))
+* complete v2.7.1 DLQ API migration in test files ([e410534](https://github.com/hyperi-io/dfe-loader/commit/e41053440f699a364fde6f607e58964dd37f8ebb))
+* complete v2.7.1 DLQ migration — runtime + fmt fixups ([a219b4c](https://github.com/hyperi-io/dfe-loader/commit/a219b4c22eea3e37c4d1e6d6335658f6ced391eb))
+* **deps:** bump hyperi-rustlib to >=2.7.1 ([36a7515](https://github.com/hyperi-io/dfe-loader/commit/36a751526581de395e791063acbbee45041d37bb))
+* **release:** force patch bump v1.18.3 ([e739697](https://github.com/hyperi-io/dfe-loader/commit/e739697ed46b14563030df427d38c294515cc30d))
+
 ## [1.18.2](https://github.com/hyperi-io/dfe-loader/compare/v1.18.1...v1.18.2) (2026-05-03)
 
 
