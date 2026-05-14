@@ -433,6 +433,7 @@ impl DlqConfig {
                 topic_suffix: self.topic_suffix.clone(),
                 ..hyperi_rustlib::dlq::KafkaDlqConfig::default()
             },
+            ..hyperi_rustlib::dlq::DlqConfig::default()
         }
     }
 }
