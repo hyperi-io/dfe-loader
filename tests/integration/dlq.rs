@@ -62,13 +62,14 @@ fn test_dlq_file_backend_write() {
     };
 
     let rustlib_config = config.to_rustlib_config();
-    let dlq = hyperi_rustlib::dlq::Dlq::file_only(&rustlib_config, "loader")
-        .expect("create file-only DLQ");
-
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .unwrap();
+
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let dlq = hyperi_rustlib::dlq::Dlq::spawn(&rustlib_config, "loader", None, shutdown.clone())
+        .expect("create file-only DLQ");
 
     rt.block_on(async {
         let entry =
@@ -77,6 +78,7 @@ fn test_dlq_file_backend_write() {
                 .with_source(hyperi_rustlib::dlq::DlqSource::kafka("events", 1, 42));
 
         dlq.send(entry).await.expect("DLQ send");
+        dlq.flush().await.expect("DLQ flush");
     });
 
     // Verify NDJSON file was created
