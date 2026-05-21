@@ -199,7 +199,6 @@ cargo test --test performance_example -- --nocapture
 - [tests/performance_example.rs](performance_example.rs) - Full working example
 - [tests/common/metrics.rs](common/metrics.rs) - Metrics snapshot implementation
 - [src/metrics/prometheus.rs](../src/metrics/prometheus.rs) - Available metrics
-- [CLAUDE.md](../CLAUDE.md#current-sprint-performance-optimisation) - Performance optimization sprint
 
 ## Troubleshooting
 

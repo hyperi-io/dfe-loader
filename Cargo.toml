@@ -7,7 +7,7 @@ description = "High-performance Kafka to ClickHouse data loader"
 license = "FSL-1.1-ALv2"
 repository = "https://github.com/hyperi-io/dfe-loader"
 rust-version = "1.94"
-exclude = [".claude/", "ai/", "ci/", "docs/", "reference/", "scripts/", "schemas/"]
+exclude = ["ci/", "docs/", "reference/", "scripts/", "schemas/"]
 
 [lib]
 name = "dfe_loader"
@@ -61,7 +61,6 @@ tracing = ">=0.1"
 metrics = ">=0.24"
 
 # Memory management - jemalloc allocator (DFE policy 2026-04-17: jemalloc only)
-# See hyperi-ai/standards/languages/RUST.md → Allocator Policy
 tikv-jemalloc-ctl = { version = ">=0.6", optional = true }
 tikv-jemallocator = { version = ">=0.6", optional = true }
 

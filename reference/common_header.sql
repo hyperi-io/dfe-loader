@@ -59,7 +59,6 @@ SETTINGS index_granularity = 8192;
 -- 2. Routing fields (event_category) determine the table name.
 --    - org_id determines database ONLY if in routed_orgs list
 --    - Default: all data goes to common.{table}
---    - See CLAUDE.md section "Dynamic db.table Routing" for details
 --
 -- 3. timestamp_load uses ClickHouse DEFAULT now64(3).
 --    All rows in an INSERT batch get the same timestamp (per-batch, not per-row).

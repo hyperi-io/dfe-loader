@@ -10,13 +10,8 @@ PGO/BOLT build optimizations and runtime tuning.
 > pgo bolt` commands documented below are now for **local development and
 > one-off profiling only** — CI handles them automatically when configured.
 >
-> See:
-> - `hyperi-ai/standards/languages/RUST.md` — *Release-Track Build
->   Optimisation (hyperi-ci)* for the full contract
-> - `hyperi-ai/standards/infrastructure/CI.md` — *Channel-Tiered Build
->   Optimisation* for the channel × tier table
-> - `TODO.md` — *Rust Release-Track Optimisation* for dfe-loader's specific
->   Tier 2 opt-in steps
+> See the project standards for the full contract and the channel × tier
+> table that governs CI build optimisation behaviour.
 >
 > The rest of this document remains relevant for:
 > - Understanding *why* each optimisation matters (the CI just automates them)
@@ -119,8 +114,7 @@ lto = "fat"            # More aggressive, 2-3x longer compile
 
 DFE policy (2026-04-17): **jemalloc at every channel, no mimalloc**. One
 allocator across the fleet means one profiling story (`jeprof`), one set of
-perf-trace symbols, one debugging playbook. See
-`hyperi-ai/standards/languages/RUST.md` → *Allocator Policy*.
+perf-trace symbols, one debugging playbook.
 
 hyperi-ci adds `--features jemalloc` automatically on every channel
 (spike/alpha/beta/release). For local builds, opt in with:

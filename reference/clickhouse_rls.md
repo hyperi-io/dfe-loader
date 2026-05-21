@@ -452,7 +452,6 @@ ORDER BY partition;
 - [ClickHouse Row Policies Documentation](https://clickhouse.com/docs/en/operations/access-rights#row-policy-management)
 - [ClickHouse Security Best Practices](https://clickhouse.com/docs/en/operations/security)
 - DFE Loader: `reference/common_header.sql` - Common header schema
-- DFE Loader: `CLAUDE.md` - Routing architecture
 
 ---
 
