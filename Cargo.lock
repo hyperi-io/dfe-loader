@@ -1819,9 +1819,9 @@ dependencies = [
 
 [[package]]
 name = "hyperi-rustlib"
-version = "2.7.1"
+version = "3.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9f694f01859fac9e0d70ba6ebd42e4a09bd2dd7be6cb4306dfcf48c80dacf77d"
+checksum = "9f86461a8c19c62933809836601235f393a4072e264bcee4136d5432e622abbb"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -3220,7 +3220,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "343d3bd7056eda839b03204e68deff7d1b13aba7af2b2fd16890697274262ee7"
 dependencies = [
  "heck",
- "itertools 0.14.0",
+ "itertools 0.13.0",
  "log",
  "multimap",
  "petgraph",
@@ -3241,7 +3241,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "27c6023962132f4b30eb4c172c91ce92d933da334c59c23cddee82358ddafb0b"
 dependencies = [
  "anyhow",
- "itertools 0.14.0",
+ "itertools 0.13.0",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
