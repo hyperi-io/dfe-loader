@@ -91,7 +91,7 @@ impl DfeApp for App {
 
             // Resolve env:/vault: credential specs on ClickHouse credentials before
             // anyone reads them. See src/config/credentials.rs for the spec syntax.
-            crate::config::credentials::resolve_clickhouse_credentials(&mut config.clickhouse)
+            dfe_loader::config::credentials::resolve_clickhouse_credentials(&mut config.clickhouse)
                 .await
                 .map_err(|e| CliError::Config(e.to_string()))?;
 
