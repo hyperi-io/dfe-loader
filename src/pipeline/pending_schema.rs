@@ -22,7 +22,11 @@ use crate::clickhouse::SchemaCache;
 use crate::kafka::KafkaMessage;
 
 /// Per-buffer configuration.
+///
+/// The `max_` prefix on every field is intentional and reads clearly at the
+/// call sites (`config.max_per_table`); the shared prefix is not noise here.
 #[derive(Debug, Clone)]
+#[allow(clippy::struct_field_names)]
 pub(crate) struct PendingSchemaConfig {
     pub max_per_table: usize,
     pub max_total: usize,
@@ -30,7 +34,6 @@ pub(crate) struct PendingSchemaConfig {
 }
 
 impl PendingSchemaConfig {
-    #[allow(dead_code)]
     pub fn from_schema_config(c: &crate::config::SchemaConfig) -> Self {
         Self {
             max_per_table: c.pending_max_per_table,
@@ -132,11 +135,12 @@ impl PendingSchemaBuffer {
         self.total_count += 1;
 
         // First time we see this table -> caller must request resolution.
-        if self.last_requested_at.contains_key(&table) {
-            Ok(EnqueueOutcome::Enqueued)
-        } else {
-            self.last_requested_at.insert(table, Instant::now());
-            Ok(EnqueueOutcome::NeedsResolution)
+        match self.last_requested_at.entry(table) {
+            std::collections::hash_map::Entry::Occupied(_) => Ok(EnqueueOutcome::Enqueued),
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                slot.insert(Instant::now());
+                Ok(EnqueueOutcome::NeedsResolution)
+            }
         }
     }
 
@@ -164,7 +168,6 @@ impl PendingSchemaBuffer {
 
     /// Return messages older than `config.max_age`, plus any global-cap
     /// evictions queued since the last call. Caller routes them to DLQ.
-    #[allow(dead_code)]
     pub fn expire(&mut self, now: Instant) -> Vec<(KafkaMessage, ExpireReason)> {
         let mut out: Vec<(KafkaMessage, ExpireReason)> = self.evicted.drain(..).collect();
 
@@ -198,7 +201,6 @@ impl PendingSchemaBuffer {
     }
 
     /// Drain all pending messages with `Shutdown` reason. Caller routes to DLQ.
-    #[allow(dead_code)]
     pub fn drain_all(&mut self) -> Vec<(KafkaMessage, ExpireReason)> {
         let mut out: Vec<(KafkaMessage, ExpireReason)> = self.evicted.drain(..).collect();
         for (table, queue) in self.per_table.drain() {
@@ -215,7 +217,6 @@ impl PendingSchemaBuffer {
     /// `interval`. Re-stamps them to `now`. The caller re-sends each to the
     /// resolver — so a table whose resolution failed (e.g. a transient
     /// ClickHouse outage) is retried instead of silently ageing out to DLQ.
-    #[allow(dead_code)]
     pub fn tables_needing_rerequest(&mut self, now: Instant, interval: Duration) -> Vec<String> {
         let due: Vec<String> = self
             .last_requested_at
