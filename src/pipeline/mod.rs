@@ -12,6 +12,7 @@ pub mod capture;
 pub mod coordinator;
 pub mod enrichment;
 pub mod orchestrator;
+pub(crate) mod pending_schema;
 pub mod processor;
 pub mod types;
 
