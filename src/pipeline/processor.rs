@@ -136,8 +136,18 @@ impl MessageProcessor<'_> {
         //
         // json_primary path: HeaderExtractor SIMD scan + zero-copy _json.
         // Legacy fallback: full flatten + Transformer path.
-        let json_primary_schema = if self.json_primary_mode && format == PayloadFormat::Json {
-            self.schema_cache.get(&table)
+
+        // json_primary + JSON: a schema cache miss is NOT a silent transformer
+        // fallback. Return SchemaPending so the coordinator buffers the message
+        // until the background resolver populates the schema (#36). The extractor
+        // is the only path that applies @renamed directives; the transformer path
+        // below would drop them, NULLing the renamed columns. MessagePack and
+        // legacy_flatten still use the transformer path.
+        let extractor_schema = if self.json_primary_mode && format == PayloadFormat::Json {
+            match self.schema_cache.get(&table) {
+                Some(schema) => Some(schema),
+                None => return Err(crate::Error::SchemaPending { table }),
+            }
         } else {
             None
         };
@@ -145,7 +155,7 @@ impl MessageProcessor<'_> {
         // Resolve capture mode for this table (DDL > per-table config > global).
         let capture_mode = self.capture_overrides.derive_config(&table).mode;
 
-        let (mut data, raw_payload) = if let Some(schema) = json_primary_schema {
+        let (mut data, raw_payload) = if let Some(schema) = extractor_schema {
             let promoted =
                 self.extractor
                     .extract(&msg.payload, &table, &schema, self.col_meta_cache);
@@ -342,6 +352,23 @@ mod tests {
                 extractor: &self.extractor,
                 format_detector: &self.format_detector,
                 json_primary_mode: false, // legacy path for unit tests (no schema)
+                enrichment: &self.enrichment,
+                schema_cache: &self.schema_cache,
+                col_meta_cache: &self.col_meta_cache,
+                field_mapping_cache: None,
+                computed_column_cache: &self.computed_column_cache,
+                capture_overrides: &self.capture_overrides,
+            }
+        }
+
+        fn processor_json_primary(&self) -> MessageProcessor<'_> {
+            MessageProcessor {
+                config: &self.config,
+                router: &self.router,
+                transformer: &self.transformer,
+                extractor: &self.extractor,
+                format_detector: &self.format_detector,
+                json_primary_mode: true,
                 enrichment: &self.enrichment,
                 schema_cache: &self.schema_cache,
                 col_meta_cache: &self.col_meta_cache,
@@ -1297,5 +1324,38 @@ mod tests {
         // depending on the non-object handling in transformer.
         // What matters: no panic.
         let _ = result;
+    }
+
+    // ========================================================================
+    // json_primary mode: SchemaPending on cache miss (#36)
+    // ========================================================================
+
+    #[test]
+    fn process_json_primary_cache_miss_returns_schema_pending() {
+        let harness = TestHarness::new();
+        let proc = harness.processor_json_primary();
+        // schema_cache is empty -> any routed table misses.
+        let msg = harness.make_msg(br#"{"event_category":"security","action":"login"}"#);
+        match proc.process(&msg) {
+            Err(crate::Error::SchemaPending { table }) => {
+                assert!(!table.is_empty(), "SchemaPending should carry the routed table");
+            }
+            Ok(_) => panic!("expected SchemaPending, got Ok(ProcessedMessage)"),
+            Err(e) => panic!("expected SchemaPending, got Err({e:?})"),
+        }
+    }
+
+    #[test]
+    fn process_legacy_flatten_does_not_return_schema_pending() {
+        // Default harness uses json_primary_mode = false (legacy transformer path).
+        let harness = TestHarness::new();
+        let proc = harness.processor();
+        let msg = harness.make_msg(br#"{"event_category":"security","action":"login"}"#);
+        let result = proc.process(&msg);
+        assert!(
+            result.is_ok(),
+            "legacy_flatten must not return SchemaPending: {:?}",
+            result.err()
+        );
     }
 }
