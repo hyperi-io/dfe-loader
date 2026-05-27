@@ -13,7 +13,7 @@
 //! `clickhouse::ClickHouseConfig`.
 
 use hyperi_rustlib::config::sensitive::SensitiveString;
-use hyperi_rustlib::credential::{resolve, CredentialError};
+use hyperi_rustlib::credential::{CredentialError, resolve};
 
 use crate::config::loader::ClickHouseConfig;
 
