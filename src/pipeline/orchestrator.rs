@@ -431,18 +431,54 @@ impl Orchestrator {
             "Pipeline running"
         );
 
-        // Pre-warm schema cache for all config-known tables so the first batch
-        // uses the extractor (json_primary) path. Dynamically-routed tables
-        // (via table_fields/db_fields) can't be pre-warmed — they hit the
-        // transformer path on first batch until background resolution completes.
-        pre_warm_schema_cache(
-            &self.config.routing,
-            &http_client,
-            &schema_cache,
-            &col_meta_cache,
-            &mut capture_overrides,
-        )
-        .await;
+        // Pre-warm the schema cache with bounded-backoff retry so a brief
+        // ClickHouse outage at startup recovers before the first message —
+        // failed tables otherwise fall to the silent-loss transformer path (#36).
+        // Tables still failing after the budget fall back to per-message
+        // queue-and-retry. Comments are collected and applied to capture
+        // overrides after the loop (capture_overrides is &mut and cannot be
+        // borrowed inside the warm closure's future).
+        {
+            let pre_warm_budget = Duration::from_secs(self.config.schema.pre_warm_retry_secs);
+            let tables = collect_pre_warm_tables(&self.config.routing);
+            let comments_cell: Arc<std::sync::Mutex<Vec<(String, String)>>> =
+                Arc::new(std::sync::Mutex::new(Vec::new()));
+            let report = {
+                let http = &http_client;
+                let sc = &schema_cache;
+                let cm = &col_meta_cache;
+                let comments = Arc::clone(&comments_cell);
+                pre_warm_with_retry(
+                    move |t| {
+                        let comments = Arc::clone(&comments);
+                        warm_tables_once_mutex(t, http, sc, cm, comments)
+                    },
+                    tables,
+                    pre_warm_budget,
+                    &self.shutdown,
+                )
+                .await
+            };
+            let collected = Arc::try_unwrap(comments_cell)
+                .unwrap_or_else(|a| std::sync::Mutex::new(a.lock().unwrap().clone()))
+                .into_inner()
+                .unwrap_or_default();
+            for (table, comment) in collected {
+                capture_overrides.update_from_comment(&table, &comment);
+            }
+            info!(
+                succeeded = report.succeeded.len(),
+                failed = report.failed.len(),
+                rounds = report.rounds,
+                "Schema cache pre-warm complete"
+            );
+            if !report.failed.is_empty() {
+                warn!(
+                    tables = ?report.failed,
+                    "Pre-warm gave up on some tables — will retry per-message"
+                );
+            }
+        }
 
         loop {
             tokio::select! {
@@ -1085,45 +1121,119 @@ fn warn_restart_required(old: &Config, new: &Config) {
     }
 }
 
-/// Pre-warm schema cache for all config-known tables in parallel.
-///
-/// Fetches schema, column comments, and table comments for each table
-/// concurrently so the first batch always uses the extractor (json_primary)
-/// path. Without this, messages arriving before background resolution
-/// completes fall through to the transformer path.
-async fn pre_warm_schema_cache(
-    routing: &crate::config::RoutingConfig,
-    http_client: &Arc<ClickHouseQueryClient>,
-    schema_cache: &SharedSchemaCache,
-    col_meta_cache: &Arc<ColumnMetaCache>,
-    capture_overrides: &mut CaptureOverrides,
-) {
-    use futures::future::join_all;
+/// Report from `pre_warm_with_retry`.
+#[derive(Debug, Default)]
+pub(crate) struct PreWarmReport {
+    pub succeeded: Vec<String>,
+    pub failed: Vec<String>,
+    pub rounds: usize,
+}
 
+/// Collect the config-known tables to pre-warm (default table + CEL rule
+/// targets + source_to_table targets), deduplicated.
+fn collect_pre_warm_tables(routing: &crate::config::RoutingConfig) -> Vec<String> {
     let default_db = &routing.default_db;
-    let mut tables: Vec<String> = Vec::new();
-
-    // Default table (always known)
-    tables.push(format!("{default_db}.{}", routing.default_table));
-
-    // CEL routing rule targets
+    let mut tables: Vec<String> = vec![format!("{default_db}.{}", routing.default_table)];
     for rule in &routing.rules {
         let db = rule.db.as_deref().unwrap_or(default_db);
         tables.push(format!("{db}.{}", rule.target));
     }
-
-    // source_to_table mapping targets
     for table in routing.source_to_table.values() {
         tables.push(format!("{default_db}.{table}"));
     }
-
     tables.sort();
     tables.dedup();
+    tables
+}
 
-    // Fetch all tables in parallel — each table's three queries are also concurrent.
-    let results: Vec<_> = join_all(tables.iter().map(|table| {
+/// Bounded-backoff retry over still-failing tables.
+///
+/// `warm` is invoked per round with the tables still needing a schema and
+/// returns per-table success. Backoff between rounds: 500ms, 1s, 2s, 4s, 8s,
+/// then 8s capped. Selects on `shutdown` so it never delays process exit.
+/// A `budget` of 0 means a single attempt with no retry.
+pub(crate) async fn pre_warm_with_retry<F, Fut>(
+    mut warm: F,
+    initial_tables: Vec<String>,
+    budget: Duration,
+    shutdown: &tokio_util::sync::CancellationToken,
+) -> PreWarmReport
+where
+    F: FnMut(Vec<String>) -> Fut,
+    Fut: std::future::Future<Output = Vec<(String, bool)>>,
+{
+    use std::time::Instant;
+
+    let deadline = Instant::now() + budget;
+    let mut report = PreWarmReport::default();
+    let mut to_warm = initial_tables;
+    let backoff_steps = [500u64, 1000, 2000, 4000, 8000];
+    let mut backoff_idx: usize = 0;
+
+    loop {
+        if shutdown.is_cancelled() {
+            report.failed.extend(to_warm);
+            return report;
+        }
+        report.rounds += 1;
+        let results = warm(to_warm.clone()).await;
+
+        let mut still_failing = Vec::new();
+        for (table, ok) in results {
+            if ok {
+                if !report.succeeded.contains(&table) {
+                    report.succeeded.push(table);
+                }
+            } else {
+                still_failing.push(table);
+            }
+        }
+
+        if still_failing.is_empty() {
+            return report;
+        }
+        if Instant::now() >= deadline {
+            report.failed = still_failing;
+            return report;
+        }
+
+        let sleep_ms = backoff_steps[backoff_idx.min(backoff_steps.len() - 1)];
+        backoff_idx = backoff_idx.saturating_add(1);
+        tokio::select! {
+            biased;
+            () = shutdown.cancelled() => {
+                report.failed = still_failing;
+                return report;
+            }
+            () = tokio::time::sleep(Duration::from_millis(sleep_ms)) => {}
+        }
+        to_warm = still_failing;
+    }
+}
+
+/// Production single-pass warm: fetch schema + column comments + table comment
+/// for each table, populate the schema cache and column-meta cache, and collect
+/// non-empty table comments into `comments_out` for the caller to apply to
+/// `CaptureOverrides` afterwards. Returns per-table success.
+///
+/// All borrowed parameters are SHARED references (the caches use interior
+/// mutability via `Arc`), so the returned future borrows the caller's scope —
+/// NOT a closure environment — which keeps `pre_warm_with_retry`'s closure
+/// bound satisfiable.
+///
+/// `comments_out` uses `Arc<Mutex<_>>` rather than `RefCell` so that the
+/// future is `Send` when the calling async task requires it.
+async fn warm_tables_once_mutex(
+    tables: Vec<String>,
+    http_client: &Arc<ClickHouseQueryClient>,
+    schema_cache: &SharedSchemaCache,
+    col_meta_cache: &Arc<ColumnMetaCache>,
+    comments_out: Arc<std::sync::Mutex<Vec<(String, String)>>>,
+) -> Vec<(String, bool)> {
+    use futures::future::join_all;
+
+    let results: Vec<_> = join_all(tables.into_iter().map(|table| {
         let client = Arc::clone(http_client);
-        let table = table.clone();
         async move {
             let (schema_res, comments_res, comment_res) = tokio::join!(
                 client.fetch_table_schema(&table),
@@ -1135,11 +1245,10 @@ async fn pre_warm_schema_cache(
     }))
     .await;
 
-    let mut warmed = 0usize;
+    let mut out = Vec::with_capacity(results.len());
     for (table, schema_res, comments_res, comment_res) in results {
         if let Ok(schema) = schema_res {
             schema_cache.insert(table.clone(), schema);
-
             if let Ok(comments) = comments_res {
                 let directives = comments
                     .into_iter()
@@ -1147,25 +1256,20 @@ async fn pre_warm_schema_cache(
                     .collect();
                 col_meta_cache.apply_ddl(&table, directives);
             }
-
             if let Ok(comment) = comment_res
                 && !comment.is_empty()
             {
-                capture_overrides.update_from_comment(&table, &comment);
+                if let Ok(mut guard) = comments_out.lock() {
+                    guard.push((table.clone(), comment));
+                }
             }
-
             debug!(table = %table, "Pre-warmed schema cache");
-            warmed += 1;
+            out.push((table, true));
         } else {
-            warn!(table = %table, "Failed to pre-warm schema, first batch will use transformer path");
+            out.push((table, false));
         }
     }
-
-    info!(
-        count = warmed,
-        total = tables.len(),
-        "Schema cache pre-warm complete"
-    );
+    out
 }
 
 #[cfg(test)]
@@ -1213,5 +1317,69 @@ mod tests {
         let updated = shared.read();
         assert_eq!(updated.buffer.flush_rows, 99999);
         assert_eq!(shared.version(), 1);
+    }
+
+    #[tokio::test]
+    async fn pre_warm_retry_succeeds_after_failures() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let calls = Arc::new(AtomicUsize::new(0));
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let calls_inner = Arc::clone(&calls);
+        let report = pre_warm_with_retry(
+            move |tables: Vec<String>| {
+                let calls = Arc::clone(&calls_inner);
+                async move {
+                    let n = calls.fetch_add(1, Ordering::SeqCst);
+                    // fail rounds 0 and 1, succeed from round 2 (3rd call)
+                    tables.into_iter().map(|t| (t, n >= 2)).collect()
+                }
+            },
+            vec!["dfe.late".to_string()],
+            Duration::from_secs(10),
+            &shutdown,
+        )
+        .await;
+        assert_eq!(report.succeeded, vec!["dfe.late".to_string()]);
+        assert!(report.failed.is_empty());
+        assert!(report.rounds >= 3);
+    }
+
+    #[tokio::test]
+    async fn pre_warm_retry_gives_up_at_budget() {
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let report = pre_warm_with_retry(
+            |tables: Vec<String>| async move {
+                tables.into_iter().map(|t| (t, false)).collect()
+            },
+            vec!["dfe.never".to_string()],
+            Duration::from_millis(800),
+            &shutdown,
+        )
+        .await;
+        assert!(report.succeeded.is_empty());
+        assert_eq!(report.failed, vec!["dfe.never".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn pre_warm_retry_cancels_on_shutdown() {
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let shutdown_clone = shutdown.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            shutdown_clone.cancel();
+        });
+        let t0 = std::time::Instant::now();
+        let report = pre_warm_with_retry(
+            |tables: Vec<String>| async move {
+                tables.into_iter().map(|t| (t, false)).collect()
+            },
+            vec!["dfe.x".to_string()],
+            Duration::from_secs(60),
+            &shutdown,
+        )
+        .await;
+        assert!(t0.elapsed() < Duration::from_secs(3), "should cancel quickly");
+        assert!(!report.failed.is_empty());
     }
 }
