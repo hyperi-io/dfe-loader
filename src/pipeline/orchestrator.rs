@@ -358,6 +358,13 @@ impl Orchestrator {
 
         let mut buffer_manager = BufferManager::new(&self.config.buffer);
 
+        // Pending-schema buffer — holds messages whose table schema is not yet cached.
+        // Drained when the background resolver populates the schema (later task).
+        let mut pending_schema_buffer =
+            super::pending_schema::PendingSchemaBuffer::new(
+                super::pending_schema::PendingSchemaConfig::from_schema_config(&self.config.schema),
+            );
+
         // Per-table capture overrides (_json/_raw disable via config + DDL tags)
         let mut capture_overrides = CaptureOverrides::new(&self.config.metadata);
 
@@ -720,6 +727,7 @@ impl Orchestrator {
                                 dlq_tx: &dlq_tx,
                                 dlq_enabled: dlq.is_some(),
                                 memory_guard: &self.memory_guard,
+                                pending_schema: &mut pending_schema_buffer,
                             };
                             // When pre-route is active, results only contain passing
                             // messages — build the matching message slice.

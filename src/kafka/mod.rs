@@ -28,3 +28,22 @@ pub struct KafkaMessage {
     pub key: Option<Vec<u8>>,
     pub timestamp_ms: Option<i64>,
 }
+
+impl KafkaMessage {
+    /// Clone for moving into the pending-schema buffer.
+    ///
+    /// The parallel processor borrows the original `&KafkaMessage`; a message
+    /// whose schema is missing must be owned by the buffer until its schema
+    /// resolves. Cheap `Arc` topic clone + payload `Vec` clone — only on the
+    /// cold cache-miss path, never on the hot path.
+    pub fn clone_for_pending(&self) -> KafkaMessage {
+        KafkaMessage {
+            payload: self.payload.clone(),
+            topic: Arc::clone(&self.topic),
+            partition: self.partition,
+            offset: self.offset,
+            key: self.key.clone(),
+            timestamp_ms: self.timestamp_ms,
+        }
+    }
+}
