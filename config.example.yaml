@@ -245,8 +245,12 @@ field_mapping:
 
 # Schema caching
 schema:
-  cache_ttl_secs: 300   # 5 minutes
-  refresh_on_error: true
+  cache_ttl_secs: 300            # TTL before background refresh marks schema stale
+  refresh_on_error: true          # refresh cache on insert errors
+  pre_warm_retry_secs: 60        # retry budget for initial schema fetch at startup
+  pending_max_per_table: 1000     # buffered messages per table while awaiting schema
+  pending_max_total: 10000        # total buffered across all tables (FIFO evict on overflow)
+  pending_max_age_secs: 30        # DLQ pending messages older than this
 
 # Hot-reload: watch config file for changes at runtime
 # Safe to reload: buffer, routing, metadata, field_sanitization, timestamp_dq, coercion
