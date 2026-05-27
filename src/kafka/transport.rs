@@ -337,7 +337,9 @@ mod memory_adapter {
                 ..Default::default()
             };
             Self {
-                transport: Arc::new(MemoryTransport::new(&config)),
+                transport: Arc::new(
+                    MemoryTransport::new(&config).expect("memory transport init for tests"),
+                ),
                 topic: Arc::from(topic),
             }
         }
@@ -346,7 +348,9 @@ mod memory_adapter {
         #[must_use]
         pub fn with_config(topic: &str, config: &MemoryConfig) -> Self {
             Self {
-                transport: Arc::new(MemoryTransport::new(config)),
+                transport: Arc::new(
+                    MemoryTransport::new(config).expect("memory transport init for tests"),
+                ),
                 topic: Arc::from(topic),
             }
         }
