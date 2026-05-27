@@ -213,7 +213,7 @@ async fn main() {
 
     if let Some(output) = &app.emit_helm {
         let contract = Config::deployment_contract();
-        if let Err(e) = hyperi_rustlib::deployment::generate_chart(&contract, output) {
+        if let Err(e) = hyperi_rustlib::deployment::generate_chart(&contract, output, None) {
             eprintln!("fatal: {e}");
             std::process::exit(1);
         }
@@ -223,7 +223,7 @@ async fn main() {
 
     if let Some(output) = &app.emit_dockerfile {
         let contract = Config::deployment_contract();
-        let content = hyperi_rustlib::deployment::generate_dockerfile(&contract);
+        let content = hyperi_rustlib::deployment::generate_dockerfile(&contract, None);
         if let Err(e) = std::fs::write(output, &content) {
             eprintln!("fatal: could not write Dockerfile: {e}");
             std::process::exit(1);

@@ -6,7 +6,7 @@ authors = ["HyperI <dev@hyperi.com.au>"]
 description = "High-performance Kafka to ClickHouse data loader"
 license = "FSL-1.1-ALv2"
 repository = "https://github.com/hyperi-io/dfe-loader"
-rust-version = "1.94"
+rust-version = "1.95"
 exclude = ["ci/", "docs/", "reference/", "scripts/", "schemas/"]
 
 [lib]
@@ -32,7 +32,7 @@ tokio = { version = ">=1.48", features = ["full"] }
 tokio-util = { version = ">=0.7", features = ["rt"] }
 
 # Shared library with transport abstraction
-hyperi-rustlib = { version = ">=2.7.1", features = ["transport-kafka", "transport-grpc", "dlq-kafka", "config", "config-reload", "deployment", "version-check", "scaling", "cli-service", "top", "logger", "metrics", "metrics-dfe", "expression", "memory", "worker-batch"] }
+hyperi-rustlib = { version = ">=2.8.0", features = ["transport-kafka", "transport-grpc", "dlq-kafka", "config", "config-reload", "deployment", "version-check", "scaling", "cli-service", "top", "logger", "metrics", "metrics-dfe", "expression", "memory", "worker-batch"] }
 
 # CEL expression evaluation (same crate as rustlib uses, needed for Program type)
 cel = { version = ">=0.13, <0.14", features = ["json"] }

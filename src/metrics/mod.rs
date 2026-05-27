@@ -22,7 +22,7 @@ use hyperi_rustlib::metrics::dfe_groups::{
     AppMetrics, BackpressureMetrics, BufferMetrics, CircuitBreakerMetrics, ConsumerMetrics,
     EnrichmentMetrics, SchemaCacheMetrics, SinkMetrics,
 };
-use hyperi_rustlib::metrics::{DfeMetrics, MetricsManager};
+use hyperi_rustlib::metrics::{DfeMetrics, MetricsManager, TransportKind};
 
 /// Application metrics backed by rustlib `MetricsManager`.
 ///
@@ -179,7 +179,7 @@ impl Metrics {
         self.rows_inserted.increment(rows as u64);
         self.insert_latency.record(latency_secs);
         self.sink.record_duration("clickhouse", latency_secs);
-        self.dfe.transport_sent("clickhouse", rows as u64);
+        self.dfe.transport_sent(TransportKind::Http, rows as u64);
         self.dfe.transport_send_duration("clickhouse", latency_secs);
     }
 
@@ -194,7 +194,7 @@ impl Metrics {
         )
         .record(latency_secs);
         self.sink.record_duration("clickhouse", latency_secs);
-        self.dfe.transport_sent("clickhouse", rows as u64);
+        self.dfe.transport_sent(TransportKind::Http, rows as u64);
         self.dfe.transport_send_duration("clickhouse", latency_secs);
     }
 
@@ -202,7 +202,7 @@ impl Metrics {
     pub fn record_error(&self) {
         self.insert_errors.increment(1);
         self.sink.record_error("clickhouse");
-        self.dfe.transport_send_errors("clickhouse", 1);
+        self.dfe.transport_send_errors(TransportKind::Http, 1);
     }
 
     /// Record a max_dynamic_paths limit hit on a JSON column.

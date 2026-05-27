@@ -20,7 +20,7 @@ fn contract() -> hyperi_rustlib::deployment::DeploymentContract {
 #[test]
 fn test_generated_dockerfile_matches_existing() {
     let contract = contract();
-    let generated = generate_dockerfile(&contract);
+    let generated = generate_dockerfile(&contract, None);
 
     // Verify key contract points are present
     assert!(
@@ -53,7 +53,7 @@ fn test_generated_dockerfile_matches_existing() {
 fn test_generated_chart_structure() {
     let contract = contract();
     let dir = tempfile::tempdir().unwrap();
-    generate_chart(&contract, dir.path()).unwrap();
+    generate_chart(&contract, dir.path(), None).unwrap();
 
     // Chart.yaml
     let chart = std::fs::read_to_string(dir.path().join("Chart.yaml")).unwrap();
@@ -100,7 +100,7 @@ fn test_generated_chart_structure() {
 fn test_generated_chart_helpers() {
     let contract = contract();
     let dir = tempfile::tempdir().unwrap();
-    generate_chart(&contract, dir.path()).unwrap();
+    generate_chart(&contract, dir.path(), None).unwrap();
 
     let helpers = std::fs::read_to_string(dir.path().join("templates/_helpers.tpl")).unwrap();
     assert!(
@@ -117,7 +117,7 @@ fn test_generated_chart_helpers() {
 fn test_generated_deployment_has_env_vars() {
     let contract = contract();
     let dir = tempfile::tempdir().unwrap();
-    generate_chart(&contract, dir.path()).unwrap();
+    generate_chart(&contract, dir.path(), None).unwrap();
 
     let deploy = std::fs::read_to_string(dir.path().join("templates/deployment.yaml")).unwrap();
     assert!(
@@ -150,7 +150,7 @@ fn test_generated_compose_fragment() {
 #[test]
 fn test_validate_generated_dockerfile() {
     let contract = contract();
-    let dockerfile = generate_dockerfile(&contract);
+    let dockerfile = generate_dockerfile(&contract, None);
 
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("Dockerfile");
@@ -168,7 +168,7 @@ fn test_validate_generated_dockerfile() {
 fn test_validate_generated_chart() {
     let contract = contract();
     let dir = tempfile::tempdir().unwrap();
-    generate_chart(&contract, dir.path()).unwrap();
+    generate_chart(&contract, dir.path(), None).unwrap();
 
     // Generated chart should pass validation against its own contract
     let result = validate_helm_values(&contract, dir.path().to_str().unwrap());
@@ -188,7 +188,7 @@ fn write_artifacts_to_tmp() {
     std::fs::create_dir_all(&base).unwrap();
 
     // Dockerfile
-    let dockerfile = generate_dockerfile(&contract);
+    let dockerfile = generate_dockerfile(&contract, None);
     std::fs::write(base.join("Dockerfile"), &dockerfile).unwrap();
 
     // Compose fragment
@@ -198,7 +198,7 @@ fn write_artifacts_to_tmp() {
     // Helm chart
     let chart_dir = base.join("chart");
     let _ = std::fs::remove_dir_all(&chart_dir);
-    generate_chart(&contract, &chart_dir).unwrap();
+    generate_chart(&contract, &chart_dir, None).unwrap();
 
     eprintln!("Generated artifacts written to: {}", base.display());
 }
