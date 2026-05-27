@@ -451,7 +451,7 @@ impl Orchestrator {
                 pre_warm_with_retry(
                     move |t| {
                         let comments = Arc::clone(&comments);
-                        warm_tables_once_mutex(t, http, sc, cm, comments)
+                        warm_tables_once(t, http, sc, cm, comments)
                     },
                     tables,
                     pre_warm_budget,
@@ -485,6 +485,23 @@ impl Orchestrator {
                 biased; // Prioritize shutdown check
 
                 () = self.shutdown.cancelled() => {
+                    // Drain the pending-schema buffer to DLQ — these messages
+                    // never received a schema and cannot be processed (#36).
+                    let drained = pending_schema_buffer.drain_all();
+                    let drained_n = drained.len() as u64;
+                    for (msg, reason) in drained {
+                        route_pending_to_dlq(
+                            &dlq_tx,
+                            dlq.is_some(),
+                            &self.memory_guard,
+                            msg,
+                            &reason,
+                        );
+                    }
+                    if drained_n > 0 {
+                        self.stats.messages_dlq += drained_n;
+                        warn!(count = drained_n, "Drained pending-schema buffer to DLQ on shutdown");
+                    }
                     info!("Shutdown requested, flushing remaining buffers");
                     break;
                 }
@@ -617,23 +634,70 @@ impl Orchestrator {
                         continue;
                     }
 
-                    match messages {
+                    // --- Pending-schema buffer maintenance (#36) ---
+                    // Expire stale / globally-evicted entries to DLQ, then
+                    // re-request resolution for tables still stuck (e.g. a failed
+                    // fetch during a transient ClickHouse outage). Runs every recv
+                    // tick regardless of whether a batch arrived.
+                    let now_pending = std::time::Instant::now();
+                    {
+                        let expired = pending_schema_buffer.expire(now_pending);
+                        let expired_n = expired.len() as u64;
+                        for (msg, reason) in expired {
+                            route_pending_to_dlq(
+                                &dlq_tx,
+                                dlq.is_some(),
+                                &self.memory_guard,
+                                msg,
+                                &reason,
+                            );
+                        }
+                        if expired_n > 0 {
+                            self.stats.messages_dlq += expired_n;
+                            warn!(count = expired_n, "Expired pending-schema messages to DLQ");
+                        }
+                        for table in pending_schema_buffer
+                            .tables_needing_rerequest(now_pending, PENDING_REREQUEST_INTERVAL)
+                        {
+                            let _ = resolve_tx.try_send(table);
+                        }
+                    }
+
+                    // Merge messages whose schema just resolved (re-processed via
+                    // the extractor path) ahead of the freshly received batch.
+                    // Their memory was counted on first receipt and is NOT
+                    // re-counted. take_ready only runs on a transport Ok, so
+                    // resolved messages are never dropped on a transport error.
+                    let combined: crate::Result<Vec<crate::kafka::KafkaMessage>> = match messages {
+                        Ok(mut fresh) => {
+                            for msg in &fresh {
+                                self.memory_guard.add_bytes(msg.payload.len() as u64);
+                            }
+                            self.stats.messages_received += fresh.len() as u64;
+                            if let Some(ref m) = self.metrics {
+                                for _ in 0..fresh.len() {
+                                    m.record_received();
+                                }
+                            }
+                            let ready = pending_schema_buffer.take_ready(&schema_cache);
+                            if ready.is_empty() {
+                                Ok(fresh)
+                            } else {
+                                let mut merged = Vec::with_capacity(ready.len() + fresh.len());
+                                merged.extend(ready);
+                                merged.append(&mut fresh);
+                                Ok(merged)
+                            }
+                        }
+                        Err(e) => Err(e),
+                    };
+
+                    match combined {
                         Ok(batch) if !batch.is_empty() => {
                             debug!(
                                 batch_size = batch.len(),
                                 "Batch received from transport"
                             );
-
-                            // Track memory for backpressure (pre-loop)
-                            for msg in &batch {
-                                self.memory_guard.add_bytes(msg.payload.len() as u64);
-                            }
-                            self.stats.messages_received += batch.len() as u64;
-                            if let Some(ref m) = self.metrics {
-                                for _ in 0..batch.len() {
-                                    m.record_received();
-                                }
-                            }
 
                             let batch_start = std::time::Instant::now();
 
@@ -781,6 +845,7 @@ impl Orchestrator {
                                 duration_ms = batch_elapsed.as_millis(),
                                 processed = outcome.processed,
                                 errors = outcome.errors,
+                                pending_schema = pending_schema_buffer.len(),
                                 "Batch processed"
                             );
 
@@ -845,6 +910,14 @@ impl Orchestrator {
                             // Results arrive in schema_result_rx (handled in select! arm below).
                             {
                                 let mut seen = FxHashSet::default();
+                                // Tables newly buffered for schema resolution (#36) —
+                                // kick off their first resolution request.
+                                for table in outcome.needs_resolution {
+                                    if seen.insert(table.clone())
+                                        && resolve_tx.try_send(table).is_err() {
+                                            debug!("Schema resolve channel full, will retry next tick");
+                                        }
+                                }
                                 for table in capture_overrides.take_pending() {
                                     if seen.insert(table.clone())
                                         && resolve_tx.try_send(table).is_err() {
@@ -1223,7 +1296,7 @@ where
 ///
 /// `comments_out` uses `Arc<Mutex<_>>` rather than `RefCell` so that the
 /// future is `Send` when the calling async task requires it.
-async fn warm_tables_once_mutex(
+async fn warm_tables_once(
     tables: Vec<String>,
     http_client: &Arc<ClickHouseQueryClient>,
     schema_cache: &SharedSchemaCache,
@@ -1258,10 +1331,9 @@ async fn warm_tables_once_mutex(
             }
             if let Ok(comment) = comment_res
                 && !comment.is_empty()
+                && let Ok(mut guard) = comments_out.lock()
             {
-                if let Ok(mut guard) = comments_out.lock() {
-                    guard.push((table.clone(), comment));
-                }
+                guard.push((table.clone(), comment));
             }
             debug!(table = %table, "Pre-warmed schema cache");
             out.push((table, true));
@@ -1270,6 +1342,60 @@ async fn warm_tables_once_mutex(
         }
     }
     out
+}
+
+/// Interval between resolution re-requests for tables still stuck in the
+/// pending-schema buffer (e.g. resolution failed due to a transient CH outage).
+const PENDING_REREQUEST_INTERVAL: Duration = Duration::from_secs(2);
+
+/// Human-readable DLQ reason string for an expired / evicted / shutdown-drained
+/// pending-schema message.
+fn format_pending_reason(reason: &super::pending_schema::ExpireReason) -> String {
+    use super::pending_schema::ExpireReason;
+    match reason {
+        ExpireReason::AgeExceeded { age_ms, table } => {
+            format!("schema_pending_timeout table={table} age_ms={age_ms}")
+        }
+        ExpireReason::GlobalCapEviction { table } => {
+            format!("pending_schema_global_overflow table={table}")
+        }
+        ExpireReason::Shutdown { table } => format!("schema_pending_shutdown table={table}"),
+    }
+}
+
+/// Security-event category label for a pending-schema DLQ reason.
+fn pending_reason_label(reason: &super::pending_schema::ExpireReason) -> &'static str {
+    use super::pending_schema::ExpireReason;
+    match reason {
+        ExpireReason::AgeExceeded { .. } => "schema_pending_timeout",
+        ExpireReason::GlobalCapEviction { .. } => "pending_schema_global_overflow",
+        ExpireReason::Shutdown { .. } => "schema_pending_shutdown",
+    }
+}
+
+/// Route a pending-schema message to the DLQ (with a security event) and
+/// release its tracked memory. Used by the per-tick expire sweep and the
+/// shutdown drain — these messages never received a schema, so the loss is
+/// surfaced (DLQ + security event), never silent (#36).
+fn route_pending_to_dlq(
+    dlq_tx: &mpsc::Sender<DlqEntry>,
+    dlq_enabled: bool,
+    memory_guard: &MemoryGuard,
+    msg: crate::kafka::KafkaMessage,
+    reason: &super::pending_schema::ExpireReason,
+) {
+    let reason_str = format_pending_reason(reason);
+    if dlq_enabled {
+        let entry = DlqEntry::new("loader", reason_str.clone(), msg.payload.clone())
+            .with_source(hyperi_rustlib::dlq::DlqSource::kafka(
+                &*msg.topic,
+                msg.partition,
+                msg.offset,
+            ));
+        let _ = dlq_tx.try_send(entry);
+    }
+    hyperi_rustlib::logger::security::record_dlq(pending_reason_label(reason), &reason_str, None);
+    memory_guard.release(msg.payload.len() as u64);
 }
 
 #[cfg(test)]
