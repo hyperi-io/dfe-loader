@@ -110,7 +110,10 @@ impl BatchCoordinator<'_> {
                     }
                 }
                 Err(crate::Error::SchemaPending { table }) => {
-                    match self.pending_schema.enqueue(table.clone(), msg.clone_for_pending()) {
+                    match self
+                        .pending_schema
+                        .enqueue(table.clone(), msg.clone_for_pending())
+                    {
                         Ok(EnqueueOutcome::Enqueued) => {
                             outcome.pending += 1;
                         }
@@ -128,16 +131,15 @@ impl BatchCoordinator<'_> {
                                 m.record_pending_schema_overflow();
                             }
                             if self.dlq_enabled {
-                                let entry = DlqEntry::new(
-                                    "loader",
-                                    format!("pending_schema_per_table_overflow table={t}"),
-                                    msg.payload.clone(),
-                                )
-                                .with_source(DlqSource::kafka(
-                                    &*msg.topic,
-                                    msg.partition,
-                                    msg.offset,
-                                ));
+                                let entry =
+                                    DlqEntry::new(
+                                        "loader",
+                                        format!("pending_schema_per_table_overflow table={t}"),
+                                        msg.payload.clone(),
+                                    )
+                                    .with_source(
+                                        DlqSource::kafka(&*msg.topic, msg.partition, msg.offset),
+                                    );
                                 let _ = self.dlq_tx.try_send(entry);
                             }
                             hyperi_rustlib::logger::security::record_dlq(
@@ -739,7 +741,9 @@ mod tests {
             );
             let messages = [make_kafka_message(b"a", "t", 0, 0)];
             let results: Vec<crate::Result<ProcessedMessage>> =
-                vec![Err(crate::Error::SchemaPending { table: "dfe.t1".into() })];
+                vec![Err(crate::Error::SchemaPending {
+                    table: "dfe.t1".into(),
+                })];
             coord.apply_results(results, &messages)
         };
 
@@ -788,8 +792,12 @@ mod tests {
                 make_kafka_message(b"b", "t", 0, 1),
             ];
             let results: Vec<crate::Result<ProcessedMessage>> = vec![
-                Err(crate::Error::SchemaPending { table: "dfe.t1".into() }),
-                Err(crate::Error::SchemaPending { table: "dfe.t1".into() }),
+                Err(crate::Error::SchemaPending {
+                    table: "dfe.t1".into(),
+                }),
+                Err(crate::Error::SchemaPending {
+                    table: "dfe.t1".into(),
+                }),
             ];
             coord.apply_results(results, &messages)
         };

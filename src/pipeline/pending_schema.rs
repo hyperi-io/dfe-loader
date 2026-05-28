@@ -205,7 +205,12 @@ impl PendingSchemaBuffer {
         let mut out: Vec<(KafkaMessage, ExpireReason)> = self.evicted.drain(..).collect();
         for (table, queue) in self.per_table.drain() {
             for p in queue {
-                out.push((p.msg, ExpireReason::Shutdown { table: table.clone() }));
+                out.push((
+                    p.msg,
+                    ExpireReason::Shutdown {
+                        table: table.clone(),
+                    },
+                ));
             }
         }
         self.total_count = 0;
@@ -402,7 +407,11 @@ mod tests {
         buf.enqueue("b".into(), make_msg(b"2")).unwrap();
         let drained = buf.drain_all();
         assert_eq!(drained.len(), 2);
-        assert!(drained.iter().all(|(_, r)| matches!(r, ExpireReason::Shutdown { .. })));
+        assert!(
+            drained
+                .iter()
+                .all(|(_, r)| matches!(r, ExpireReason::Shutdown { .. }))
+        );
         assert_eq!(buf.len(), 0);
     }
 
@@ -411,16 +420,18 @@ mod tests {
         let mut buf = PendingSchemaBuffer::new(small_cfg());
         buf.enqueue("dfe.t1".into(), make_msg(b"a")).unwrap();
         // Just enqueued -> not yet due.
-        assert!(buf
-            .tables_needing_rerequest(Instant::now(), Duration::from_secs(2))
-            .is_empty());
+        assert!(
+            buf.tables_needing_rerequest(Instant::now(), Duration::from_secs(2))
+                .is_empty()
+        );
         // After the interval -> due, and re-stamped.
         let later = Instant::now() + Duration::from_secs(3);
         let due = buf.tables_needing_rerequest(later, Duration::from_secs(2));
         assert_eq!(due, vec!["dfe.t1".to_string()]);
         // Immediately asking again at the same instant -> nothing (re-stamped).
-        assert!(buf
-            .tables_needing_rerequest(later, Duration::from_secs(2))
-            .is_empty());
+        assert!(
+            buf.tables_needing_rerequest(later, Duration::from_secs(2))
+                .is_empty()
+        );
     }
 }

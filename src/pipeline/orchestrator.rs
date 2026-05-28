@@ -360,10 +360,9 @@ impl Orchestrator {
 
         // Pending-schema buffer — holds messages whose table schema is not yet cached.
         // Drained when the background resolver populates the schema (later task).
-        let mut pending_schema_buffer =
-            super::pending_schema::PendingSchemaBuffer::new(
-                super::pending_schema::PendingSchemaConfig::from_schema_config(&self.config.schema),
-            );
+        let mut pending_schema_buffer = super::pending_schema::PendingSchemaBuffer::new(
+            super::pending_schema::PendingSchemaConfig::from_schema_config(&self.config.schema),
+        );
 
         // Per-table capture overrides (_json/_raw disable via config + DDL tags)
         let mut capture_overrides = CaptureOverrides::new(&self.config.metadata);
@@ -1406,12 +1405,9 @@ fn route_pending_to_dlq(
 ) {
     let reason_str = format_pending_reason(reason);
     if dlq_enabled {
-        let entry = DlqEntry::new("loader", reason_str.clone(), msg.payload.clone())
-            .with_source(hyperi_rustlib::dlq::DlqSource::kafka(
-                &*msg.topic,
-                msg.partition,
-                msg.offset,
-            ));
+        let entry = DlqEntry::new("loader", reason_str.clone(), msg.payload.clone()).with_source(
+            hyperi_rustlib::dlq::DlqSource::kafka(&*msg.topic, msg.partition, msg.offset),
+        );
         let _ = dlq_tx.try_send(entry);
     }
     hyperi_rustlib::logger::security::record_dlq(pending_reason_label(reason), &reason_str, None);
@@ -1501,9 +1497,7 @@ mod tests {
     async fn pre_warm_retry_gives_up_at_budget() {
         let shutdown = tokio_util::sync::CancellationToken::new();
         let report = pre_warm_with_retry(
-            |tables: Vec<String>| async move {
-                tables.into_iter().map(|t| (t, false)).collect()
-            },
+            |tables: Vec<String>| async move { tables.into_iter().map(|t| (t, false)).collect() },
             vec!["dfe.never".to_string()],
             Duration::from_millis(800),
             &shutdown,
@@ -1523,15 +1517,16 @@ mod tests {
         });
         let t0 = std::time::Instant::now();
         let report = pre_warm_with_retry(
-            |tables: Vec<String>| async move {
-                tables.into_iter().map(|t| (t, false)).collect()
-            },
+            |tables: Vec<String>| async move { tables.into_iter().map(|t| (t, false)).collect() },
             vec!["dfe.x".to_string()],
             Duration::from_secs(60),
             &shutdown,
         )
         .await;
-        assert!(t0.elapsed() < Duration::from_secs(3), "should cancel quickly");
+        assert!(
+            t0.elapsed() < Duration::from_secs(3),
+            "should cancel quickly"
+        );
         assert!(!report.failed.is_empty());
     }
 }

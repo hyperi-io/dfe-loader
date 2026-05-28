@@ -162,7 +162,9 @@ mod tests {
 
     #[test]
     fn error_display_schema_pending() {
-        let e = Error::SchemaPending { table: "dfe.events".into() };
+        let e = Error::SchemaPending {
+            table: "dfe.events".into(),
+        };
         let s = e.to_string();
         assert!(s.contains("schema pending"));
         assert!(s.contains("dfe.events"));
