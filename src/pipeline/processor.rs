@@ -1358,4 +1358,75 @@ mod tests {
             result.err()
         );
     }
+
+    /// Regression test for #36: a column with an `@renamed` directive must be
+    /// populated via the extractor path. The bug was that a schema cache miss
+    /// in json_primary mode silently fell through to the transformer (which
+    /// ignores `@renamed`), NULLing the renamed column. Now a miss buffers
+    /// (`SchemaPending`); once the schema is cached the extractor applies the
+    /// rename. This proves the previously-lost data is correct.
+    #[test]
+    fn json_primary_applies_renamed_after_schema_cached_36() {
+        use rustc_hash::FxHashMap;
+
+        use crate::clickhouse::{ColumnInfo, ParsedType, TableSchema};
+        use crate::column_meta::ColumnDirectives;
+
+        let harness = TestHarness::new();
+        let msg = harness.make_msg(br#"{"src_field":"hello"}"#);
+
+        // 1) Schema not cached → buffered (SchemaPending), NOT silently
+        //    transformed. Discover the routed table from the error.
+        let table = match harness.processor_json_primary().process(&msg) {
+            Err(crate::Error::SchemaPending { table }) => table,
+            Ok(_) => panic!("expected SchemaPending before schema cached, got Ok"),
+            Err(e) => panic!("expected SchemaPending, got Err({e:?})"),
+        };
+
+        // 2) Cache a schema whose `dst_field` column is @renamed from src_field.
+        let mut ddl = FxHashMap::default();
+        ddl.insert(
+            "dst_field".to_string(),
+            ColumnDirectives {
+                renamed: vec!["src_field".to_string()],
+                ..Default::default()
+            },
+        );
+        harness.col_meta_cache.apply_ddl(&table, ddl);
+
+        let (db, tbl) = table.split_once('.').expect("db.table");
+        let schema = TableSchema {
+            database: db.to_string(),
+            table: tbl.to_string(),
+            columns: vec![ColumnInfo {
+                name: "dst_field".to_string(),
+                type_name: "String".to_string(),
+                parsed_type: ParsedType::parse("String"),
+                position: 0,
+                default_kind: String::new(),
+                default_expression: String::new(),
+                comment: String::new(),
+                is_in_primary_key: false,
+                is_in_sorting_key: false,
+            }],
+            comment: String::new(),
+        };
+        harness.schema_cache.insert(table.clone(), schema);
+
+        // 3) Reprocess: extractor path applies @renamed → dst_field populated
+        //    from src_field. Before #36's fix this column would have been NULL.
+        let processed = harness
+            .processor_json_primary()
+            .process(&msg)
+            .expect("extractor path should succeed once schema is cached");
+        assert_eq!(
+            processed.data.get("dst_field"),
+            Some(&serde_json::Value::String("hello".to_string())),
+            "@renamed must map src_field → dst_field"
+        );
+        assert!(
+            !processed.data.contains_key("src_field"),
+            "source field should be renamed away, not left at top level"
+        );
+    }
 }
