@@ -1338,7 +1338,10 @@ mod tests {
         let msg = harness.make_msg(br#"{"event_category":"security","action":"login"}"#);
         match proc.process(&msg) {
             Err(crate::Error::SchemaPending { table }) => {
-                assert!(!table.is_empty(), "SchemaPending should carry the routed table");
+                assert!(
+                    !table.is_empty(),
+                    "SchemaPending should carry the routed table"
+                );
             }
             Ok(_) => panic!("expected SchemaPending, got Ok(ProcessedMessage)"),
             Err(e) => panic!("expected SchemaPending, got Err({e:?})"),
