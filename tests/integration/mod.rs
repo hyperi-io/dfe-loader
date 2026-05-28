@@ -24,4 +24,5 @@ mod property;
 mod resilience;
 mod rls;
 mod schema;
+mod schema_pending_e2e;
 mod transport;
