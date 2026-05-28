@@ -125,6 +125,7 @@ impl BatchCoordinator<'_> {
                             outcome.dlq += 1;
                             if let Some(m) = self.metrics {
                                 m.record_dlq();
+                                m.record_pending_schema_overflow();
                             }
                             if self.dlq_enabled {
                                 let entry = DlqEntry::new(

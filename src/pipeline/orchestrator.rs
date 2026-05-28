@@ -478,6 +478,13 @@ impl Orchestrator {
                     "Pre-warm gave up on some tables — will retry per-message"
                 );
             }
+            if let Some(ref m) = self.metrics {
+                m.update_schema_prewarm_failed_tables(report.failed.len());
+                // Rounds beyond the first are retries.
+                for _ in 1..report.rounds {
+                    m.record_schema_prewarm_retry();
+                }
+            }
         }
 
         loop {
@@ -494,6 +501,7 @@ impl Orchestrator {
                             &dlq_tx,
                             dlq.is_some(),
                             &self.memory_guard,
+                            &self.metrics,
                             msg,
                             &reason,
                         );
@@ -639,6 +647,13 @@ impl Orchestrator {
                     // re-request resolution for tables still stuck (e.g. a failed
                     // fetch during a transient ClickHouse outage). Runs every recv
                     // tick regardless of whether a batch arrived.
+                    //
+                    // Note: this sits below the memory-pressure `continue` above,
+                    // so under sustained pressure maintenance pauses (stuck tables
+                    // don't self-heal and aged entries don't expire until pressure
+                    // clears). That is intentional — nothing is lost (memory stays
+                    // accounted; the global cap still bounds the buffer via eviction
+                    // on enqueue), and we avoid doing work while shedding load.
                     let now_pending = std::time::Instant::now();
                     {
                         let expired = pending_schema_buffer.expire(now_pending);
@@ -648,6 +663,7 @@ impl Orchestrator {
                                 &dlq_tx,
                                 dlq.is_some(),
                                 &self.memory_guard,
+                                &self.metrics,
                                 msg,
                                 &reason,
                             );
@@ -876,6 +892,9 @@ impl Orchestrator {
                                     buf_stats.pending_bytes,
                                     buf_stats.pending_chunks,
                                 );
+
+                                // Messages held awaiting schema resolution (#36)
+                                m.update_pending_schema_messages(pending_schema_buffer.len());
 
                                 // Per-table buffer depth for monitoring individual table backlog
                                 for (table, rows, bytes) in buffer_manager.per_table_stats() {
@@ -1381,6 +1400,7 @@ fn route_pending_to_dlq(
     dlq_tx: &mpsc::Sender<DlqEntry>,
     dlq_enabled: bool,
     memory_guard: &MemoryGuard,
+    metrics: &Option<Metrics>,
     msg: crate::kafka::KafkaMessage,
     reason: &super::pending_schema::ExpireReason,
 ) {
@@ -1395,6 +1415,12 @@ fn route_pending_to_dlq(
         let _ = dlq_tx.try_send(entry);
     }
     hyperi_rustlib::logger::security::record_dlq(pending_reason_label(reason), &reason_str, None);
+    // Surface in Prometheus too — both the generic DLQ counter and the
+    // pending-schema-specific counter — so dashboards see this loss class (#36).
+    if let Some(m) = metrics {
+        m.record_dlq();
+        m.record_pending_schema_expired();
+    }
     memory_guard.release(msg.payload.len() as u64);
 }
 

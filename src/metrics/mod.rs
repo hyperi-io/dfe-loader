@@ -214,6 +214,33 @@ impl Metrics {
         .increment(1);
     }
 
+    /// Record a message DLQ'd because its pending-schema buffer hit a per-table
+    /// or global cap (#36).
+    pub fn record_pending_schema_overflow(&self) {
+        metrics::counter!("dfe_loader_pending_schema_overflow_total").increment(1);
+    }
+
+    /// Record a pending-schema message DLQ'd by the expire sweep (aged out,
+    /// globally evicted, or drained on shutdown) (#36).
+    pub fn record_pending_schema_expired(&self) {
+        metrics::counter!("dfe_loader_pending_schema_expired_total").increment(1);
+    }
+
+    /// Update the gauge of messages currently held in the pending-schema buffer.
+    pub fn update_pending_schema_messages(&self, n: usize) {
+        metrics::gauge!("dfe_loader_pending_schema_messages").set(n as f64);
+    }
+
+    /// Record a pre-warm retry round (counted once per round beyond the first).
+    pub fn record_schema_prewarm_retry(&self) {
+        metrics::counter!("dfe_loader_schema_prewarm_retries_total").increment(1);
+    }
+
+    /// Set the gauge of tables still failing pre-warm after the retry budget.
+    pub fn update_schema_prewarm_failed_tables(&self, n: usize) {
+        metrics::gauge!("dfe_loader_schema_prewarm_failed_tables").set(n as f64);
+    }
+
     /// Update aggregate buffer stats.
     pub fn update_buffer_stats(&self, rows: usize, bytes: usize, tables: usize) {
         self.buffer_rows.set(rows as f64);
@@ -365,6 +392,18 @@ mod tests {
             ScalingPressureConfig::default(),
             vec![],
         ))
+    }
+
+    // ---- pending-schema / pre-warm metrics ----
+
+    #[test]
+    fn pending_schema_and_prewarm_metrics_do_not_panic() {
+        let m = test_metrics();
+        m.record_pending_schema_overflow();
+        m.record_pending_schema_expired();
+        m.update_pending_schema_messages(42);
+        m.record_schema_prewarm_retry();
+        m.update_schema_prewarm_failed_tables(3);
     }
 
     // ---- ServerState tests ----
