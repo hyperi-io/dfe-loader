@@ -148,9 +148,12 @@ pub struct FailedRow {
 pub struct Inserter {
     /// HTTP client for DDL and schema queries only (no inserts)
     http_client: Arc<ClickHouseQueryClient>,
-    /// clickhouse-rs unified client -- dispatches to HTTP or native TCP.
-    /// `RowBinary` inserts work on both transports. `JSONEachRow` is HTTP-only.
-    ch_client: clickhouse::UnifiedClient,
+    /// The fork client -- HTTP or native TCP per config. RowBinary inserts
+    /// dispatch by transport; `JSONEachRow` is HTTP-only.
+    ch_client: clickhouse::Client,
+    /// Schema cache for the dynamic RowBinary path, shared across
+    /// `DynamicInsert` instances and invalidated on schema-mismatch recovery.
+    dynamic_schema_cache: Arc<crate::clickhouse_ext::DynamicSchemaCache>,
     /// Insert format — `RowBinary` (schema-reflected) or `JSONEachRow`
     insert_format: InsertFormat,
     max_retries: u32,
@@ -176,7 +179,7 @@ impl Inserter {
     /// DDL and schema queries.
     pub fn new(
         http_client: Arc<ClickHouseQueryClient>,
-        ch_client: clickhouse::UnifiedClient,
+        ch_client: clickhouse::Client,
         config: InserterConfig,
     ) -> Self {
         let semaphore = if config.max_concurrent_inserts > 0 {
@@ -188,6 +191,9 @@ impl Inserter {
         Self {
             http_client,
             ch_client,
+            dynamic_schema_cache: crate::clickhouse_ext::DynamicSchemaCache::new(
+                std::time::Duration::from_secs(300),
+            ),
             insert_format: InsertFormat::default(),
             max_retries: config.max_retries,
             base_retry_delay_ms: config.base_retry_delay_ms,
@@ -288,9 +294,11 @@ impl Inserter {
         self.circuit_breaker.as_ref()
     }
 
-    /// Get connection pool stats (native transport only, `None` for HTTP).
-    pub fn pool_stats(&self) -> Option<clickhouse::PoolStats> {
-        self.ch_client.pool_stats()
+    /// Get connection pool stats. Currently always `None`: the hyperi-port
+    /// TCP pool does not expose its status publicly yet (see
+    /// `client_http::PoolStats`).
+    pub fn pool_stats(&self) -> Option<crate::clickhouse::PoolStats> {
+        None
     }
 
     /// Insert rows into a table with error-aware retry.
@@ -348,7 +356,12 @@ impl Inserter {
 
         let mut last_error = None;
         for attempt in 0..=self.max_retries {
-            let mut insert = self.ch_client.dynamic_insert(db, tbl);
+            let mut insert = crate::clickhouse_ext::DynamicInsert::new(
+                self.ch_client.clone(),
+                db,
+                tbl,
+                Arc::clone(&self.dynamic_schema_cache),
+            );
 
             let mut write_failed = false;
             for (i, row) in rows.iter().enumerate() {
@@ -373,7 +386,7 @@ impl Inserter {
                 };
                 if let Err(e) = write_result {
                     // Schema mismatch — invalidate both fork and loader caches, then retry
-                    if matches!(e, clickhouse::dynamic::DynamicError::SchemaMismatch { .. }) {
+                    if matches!(e, crate::clickhouse_ext::DynamicError::SchemaMismatch { .. }) {
                         insert.invalidate_schema();
                         if let Some(cache) = &self.schema_cache {
                             cache.invalidate(table);
@@ -430,7 +443,7 @@ impl Inserter {
                     );
                     return Ok(count as usize);
                 }
-                Err(clickhouse::dynamic::DynamicError::SchemaMismatch { .. }) => {
+                Err(crate::clickhouse_ext::DynamicError::SchemaMismatch { .. }) => {
                     // Invalidate loader's schema cache alongside the fork's
                     if let Some(cache) = &self.schema_cache {
                         cache.invalidate(table);
@@ -536,16 +549,11 @@ impl Inserter {
 
         let mut last_error = None;
         for attempt in 0..=self.max_retries {
-            // JSONEachRow is HTTP-only. Get the underlying HTTP client.
-            let http = self.ch_client.as_http().ok_or_else(|| {
-                crate::Error::ClickHouse(
-                    "JSONEachRow insert format requires HTTP transport, \
-                     but native transport is configured. Set transport = 'http' \
-                     or use insert_format = 'rowbinary'."
-                        .into(),
-                )
-            })?;
-            let mut insert = http.insert_formatted_with(sql.clone());
+            // JSONEachRow uses the HTTP InsertFormatted path. On a TCP-only
+            // client this surfaces as a transport error at send() time (the
+            // client has no HTTP url); RowBinary is the default and works on
+            // both transports via insert_native_with_columns.
+            let mut insert = self.ch_client.insert_formatted_with(sql.clone());
 
             if let Err(e) = insert.send(body.clone()).await {
                 // Bytes clone is O(1)

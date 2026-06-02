@@ -77,7 +77,7 @@ tar = ">=0.4"
 # rustls-tls: HTTPS for HTTP transport
 # native-transport + native-tls-rustls: native TCP with TLS
 # rustls-tls-native-roots: uses system trust store for internal CAs
-clickhouse = { version = ">=0.14", features = ["lz4", "time", "rustls-tls", "rustls-tls-native-roots", "native-transport", "native-tls-rustls"] }
+clickhouse = { version = ">=0.14", features = ["lz4", "time", "rustls-tls", "rustls-tls-native-roots", "tcp", "native-tls-rustls", "inserter"] }
 time = ">=0.3"
 
 # Utilities
@@ -126,7 +126,7 @@ testcontainers-modules = { version = ">=0.10", features = ["kafka", "clickhouse"
 rdkafka = { version = ">=0.39.0", features = ["dynamic-linking"] }
 
 # ClickHouse crate (HyperI fork) — integration tests need all features
-clickhouse = { version = ">=0.14", features = ["lz4", "time", "rustls-tls", "rustls-tls-native-roots", "native-transport", "native-tls-rustls"] }
+clickhouse = { version = ">=0.14", features = ["lz4", "time", "rustls-tls", "rustls-tls-native-roots", "tcp", "native-tls-rustls", "inserter"] }
 time = ">=0.3"
 
 # Async test utilities
@@ -303,7 +303,7 @@ map_unwrap_or = "allow"
 # a background actor task with protocol-level Cancel-on-drop, full-duplex
 # INSERT exception detection, and idle keepalive. See the fork's
 # src/worker/ + src/native/connection_actor.rs for design + rationale.
-clickhouse = { git = "https://github.com/hyperi-io/clickhouse-rs.git", branch = "hyperi/connection-actor" }
+clickhouse = { git = "https://github.com/hyperi-io/clickhouse-rs.git", branch = "hyperi-port/06d-tcp-tls-new" }
 #
 # To revert: comment out or remove the [patch.crates-io] section above.
 # =============================================================================

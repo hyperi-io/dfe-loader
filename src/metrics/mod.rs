@@ -307,7 +307,7 @@ impl Metrics {
     ///
     /// Call periodically (e.g., every 5s). No-op if `stats` is `None`
     /// (HTTP transport has no managed pool).
-    pub fn update_pool_stats(&self, stats: Option<clickhouse::PoolStats>) {
+    pub fn update_pool_stats(&self, stats: Option<crate::clickhouse::PoolStats>) {
         if let Some(s) = stats {
             self.pool_max.set(s.max_size as f64);
             self.pool_active.set(s.size as f64);
@@ -636,7 +636,7 @@ mod tests {
     #[test]
     fn metrics_update_pool_stats_some() {
         let m = test_metrics();
-        m.update_pool_stats(Some(clickhouse::PoolStats {
+        m.update_pool_stats(Some(crate::clickhouse::PoolStats {
             max_size: 10,
             size: 5,
             available: 3,

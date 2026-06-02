@@ -40,7 +40,7 @@ pub mod inserter;
 pub mod schema;
 
 // Re-export core types
-pub use client_http::{ClickHouseQueryClient, SharedQueryClient};
+pub use client_http::{ClickHouseQueryClient, PoolStats, SharedQueryClient};
 pub use config::{ClickHouseConfig, InsertFormat, Transport};
 pub use error::{ClickHouseError, ErrorCategory};
 pub use types::{

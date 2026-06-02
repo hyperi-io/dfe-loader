@@ -466,6 +466,112 @@ mod tests {
     }
 
     // ========================================================================
+    // capture_mode: verify the ACTION (which columns the processor writes)
+    // ALIGNS with the cascade setting -- not merely that the config parsed.
+    // Offline: asserts the produced row, no ClickHouse required.
+    // ========================================================================
+
+    fn config_with_capture_mode(mode: CaptureMode) -> Config {
+        let mut config = Config::default();
+        config.metadata.capture_mode = mode;
+        config
+    }
+
+    fn capture_sample_payload() -> Vec<u8> {
+        serde_json::to_vec(&json!({
+            "event_category": "security",
+            "action": "login",
+            "user": "alice"
+        }))
+        .expect("serialize")
+    }
+
+    #[test]
+    fn capture_mode_full_action_populates_json() {
+        let harness = TestHarness::with_config(config_with_capture_mode(CaptureMode::Full));
+        let proc = harness.processor();
+        let processed = proc
+            .process(&harness.make_msg(&capture_sample_payload()))
+            .expect("processed");
+        assert!(
+            processed.data.contains_key("_json"),
+            "capture_mode=full must populate _json in the written row"
+        );
+    }
+
+    #[test]
+    fn capture_mode_raw_only_action_sets_raw_not_json() {
+        let harness = TestHarness::with_config(config_with_capture_mode(CaptureMode::RawOnly));
+        let proc = harness.processor();
+        let payload = capture_sample_payload();
+        let processed = proc.process(&harness.make_msg(&payload)).expect("processed");
+
+        assert!(
+            !processed.data.contains_key("_json"),
+            "capture_mode=raw_only must NOT populate _json"
+        );
+        let raw = processed
+            .data
+            .get("_raw")
+            .and_then(|v| v.as_str())
+            .expect("capture_mode=raw_only must populate _raw");
+        assert_eq!(
+            raw.as_bytes(),
+            payload.as_slice(),
+            "_raw must be the full original payload"
+        );
+    }
+
+    #[test]
+    fn capture_mode_extracted_only_action_sets_neither() {
+        let harness =
+            TestHarness::with_config(config_with_capture_mode(CaptureMode::ExtractedOnly));
+        let proc = harness.processor();
+        let processed = proc
+            .process(&harness.make_msg(&capture_sample_payload()))
+            .expect("processed");
+        assert!(
+            !processed.data.contains_key("_json"),
+            "capture_mode=extracted_only must NOT populate _json"
+        );
+        assert!(
+            !processed.data.contains_key("_raw"),
+            "capture_mode=extracted_only must NOT populate _raw"
+        );
+    }
+
+    // ========================================================================
+    // routing: verify the routing config drives the ACTUAL landing table,
+    // not just that the fields parsed. Offline.
+    // ========================================================================
+
+    #[test]
+    fn routing_config_drives_actual_table() {
+        let mut config = Config::default();
+        config.routing.db_fields = vec![]; // shared schema -> default_db
+        config.routing.table_fields = vec!["event_category".to_string()];
+        config.routing.default_db = "dfe".to_string();
+        config.routing.default_table = "fallback".to_string();
+        let harness = TestHarness::with_config(config);
+        let proc = harness.processor();
+
+        let routed = serde_json::to_vec(&json!({"event_category": "auth", "action": "x"}))
+            .expect("serialize");
+        let processed = proc.process(&harness.make_msg(&routed)).expect("processed");
+        assert_eq!(
+            processed.table, "dfe.auth",
+            "table_fields=event_category must route to dfe.auth"
+        );
+
+        let unrouted = serde_json::to_vec(&json!({"action": "x"})).expect("serialize");
+        let fallback = proc.process(&harness.make_msg(&unrouted)).expect("processed");
+        assert_eq!(
+            fallback.table, "dfe.fallback",
+            "missing table field must fall back to default_table"
+        );
+    }
+
+    // ========================================================================
     // Routing
     // ========================================================================
 

@@ -150,7 +150,7 @@ impl Orchestrator {
         let transport = TransportBackend::from_config(&self.config).await?;
         info!(transport = transport.name(), "Transport initialized");
 
-        // Validate ClickHouse config (transport/port mismatch, native not yet supported)
+        // Validate ClickHouse config (transport/port mismatch, JSONEachRow+native)
         let ch_config: crate::clickhouse::ClickHouseConfig = (&self.config.clickhouse).into();
         match ch_config.validate() {
             Err(e) => return Err(crate::Error::Config(e)),
@@ -167,39 +167,11 @@ impl Orchestrator {
                 .map_err(|e| crate::Error::ClickHouse(e.to_string()))?,
         );
 
-        // Build unified client for inserts -- same transport as the query client.
-        // RowBinary (DynamicInsert) works on both HTTP and native.
-        // JSONEachRow (InsertFormatted) is HTTP-only and will error on native.
-        let ch_client = {
-            use crate::clickhouse::Transport;
-            let host = ch_config
-                .primary_endpoint()
-                .unwrap_or_else(|| "localhost:8123".to_string());
-            match ch_config.transport {
-                Transport::Http => {
-                    let scheme = if ch_config.tls { "https" } else { "http" };
-                    clickhouse::UnifiedClient::http()
-                        .with_url(format!("{scheme}://{host}"))
-                        .with_user(&ch_config.username)
-                        .with_password(&ch_config.password)
-                        .with_database(&ch_config.database)
-                        .build()
-                }
-                Transport::Native => {
-                    let mut builder = clickhouse::UnifiedClient::native()
-                        .with_addr(&*host)
-                        .with_user(&ch_config.username)
-                        .with_password(&ch_config.password)
-                        .with_database(&ch_config.database)
-                        .with_lz4();
-                    if ch_config.tls {
-                        let hostname = host.split(':').next().unwrap_or(&host);
-                        builder = builder.with_tls(hostname);
-                    }
-                    builder.build()
-                }
-            }
-        };
+        // Build the insert client -- same transport as the query client.
+        // RowBinary (DynamicInsert) dispatches HTTP/TCP via insert_native_with_columns;
+        // JSONEachRow (InsertFormatted) is HTTP-only.
+        let ch_client = crate::clickhouse::client_http::build_client(&ch_config)
+            .map_err(|e| crate::Error::ClickHouse(e.to_string()))?;
 
         let insert_format = ch_config.insert_format;
         info!(format = %insert_format, "Insert format configured");

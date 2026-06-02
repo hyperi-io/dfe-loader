@@ -11,9 +11,9 @@
 
 //! `ClickHouse` client for DDL, schema queries, and health checks.
 //!
-//! Uses `clickhouse::UnifiedClient` (from the `HyperI` fork) for runtime
-//! transport dispatch -- HTTP or native TCP based on config. Data inserts
-//! go through `DynamicInsert` (`RowBinary`) or `InsertFormatted` (`JSONEachRow`)
+//! Uses a single `clickhouse::Client` (from the `HyperI` fork) -- HTTP or
+//! native TCP based on config. Data inserts go through `DynamicInsert`
+//! (`RowBinary`, via `clickhouse_ext`) or `InsertFormatted` (`JSONEachRow`)
 //! -- see `Inserter` for insert dispatch.
 //!
 //! This client handles:
@@ -36,13 +36,85 @@ pub type Result<T> = std::result::Result<T, ClickHouseError>;
 
 /// `ClickHouse` client for DDL, schema queries, and health checks.
 ///
-/// Wraps `clickhouse::UnifiedClient` for runtime transport dispatch.
-/// Data inserts are handled by `Inserter` via `DynamicInsert` or `InsertFormatted`.
+/// Wraps a single `clickhouse::Client` (HTTP or TCP per config). Data inserts
+/// are handled by `Inserter` via `DynamicInsert` (RowBinary) or
+/// `InsertFormatted` (JSONEachRow).
 pub struct ClickHouseQueryClient {
-    /// Unified client -- dispatches to HTTP or native TCP based on config.
-    ch_client: clickhouse::UnifiedClient,
+    /// The fork client -- HTTP or native TCP depending on config transport.
+    ch_client: clickhouse::Client,
     /// Database name.
     database: String,
+}
+
+/// Connection-pool statistics for the native TCP transport.
+///
+/// The hyperi-port chain's deadpool TCP pool does not yet expose its status
+/// publicly (the pool handle is crate-private), so `Inserter::pool_stats`
+/// returns `None` and these gauges stay flat. Follow-up: surface deadpool
+/// `Status` on the fork `Client`, then map it here.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PoolStats {
+    /// Configured maximum pool size.
+    pub max_size: usize,
+    /// Current number of connections managed by the pool.
+    pub size: usize,
+    /// Connections currently idle and available.
+    pub available: usize,
+    /// Callers waiting for a connection.
+    pub waiting: usize,
+}
+
+/// Build a `clickhouse::Client` from config, selecting HTTP or native TCP
+/// transport. Shared by the query client and the inserter so both use an
+/// identically-configured client.
+///
+/// # Errors
+///
+/// Returns an error if the config has no hosts.
+pub(crate) fn build_client(config: &ClickHouseConfig) -> Result<clickhouse::Client> {
+    use super::config::Transport;
+
+    let endpoint = config
+        .primary_endpoint()
+        .ok_or_else(|| ClickHouseError::Connection("No ClickHouse hosts configured".into()))?;
+
+    let client = match config.transport {
+        Transport::Http => {
+            let scheme = if config.tls { "https" } else { "http" };
+            let mut c = clickhouse::Client::default()
+                .with_url(format!("{scheme}://{endpoint}"))
+                .with_user(&config.username)
+                .with_database(&config.database);
+            if !config.password.is_empty() {
+                c = c.with_password(&config.password);
+            }
+            c
+        }
+        Transport::Native => {
+            // Strip the port for the TLS SNI server name.
+            let host = endpoint.split(':').next().unwrap_or(&endpoint).to_string();
+            let mut c = if config.tls {
+                clickhouse::Client::tcp_tls(endpoint.clone(), host)
+            } else {
+                clickhouse::Client::tcp(endpoint.clone())
+            };
+            c = c
+                .with_user(&config.username)
+                .with_database(&config.database)
+                .with_compression(clickhouse::Compression::Lz4);
+            if !config.password.is_empty() {
+                c = c.with_password(&config.password);
+            }
+            // Multi-host failover: the pool round-robins the endpoint list and
+            // skips a refusing endpoint within one acquire pass.
+            if config.hosts.len() > 1 {
+                c = c.with_tcp_addrs(config.hosts.iter().cloned());
+            }
+            c
+        }
+    };
+
+    Ok(client)
 }
 
 /// Row type for system.columns queries.
@@ -83,57 +155,7 @@ impl ClickHouseQueryClient {
     ///
     /// Returns an error if the config has no hosts.
     pub fn new(config: &ClickHouseConfig) -> Result<Self> {
-        use super::config::Transport;
-
-        let endpoint = config
-            .primary_endpoint()
-            .ok_or_else(|| ClickHouseError::Connection("No ClickHouse hosts configured".into()))?;
-
-        let ch_client = match config.transport {
-            Transport::Http => {
-                let scheme = if config.tls { "https" } else { "http" };
-                let mut builder = clickhouse::UnifiedClient::http()
-                    .with_url(format!("{scheme}://{endpoint}"))
-                    .with_user(&config.username)
-                    .with_database(&config.database);
-                if !config.password.is_empty() {
-                    builder = builder.with_password(&config.password);
-                }
-                builder.build()
-            }
-            Transport::Native => {
-                let mut builder = clickhouse::UnifiedClient::native()
-                    .with_addr(&*endpoint)
-                    .with_user(&config.username)
-                    .with_database(&config.database)
-                    .with_lz4();
-                if !config.password.is_empty() {
-                    builder = builder.with_password(&config.password);
-                }
-                if config.tls {
-                    // Extract hostname for SNI (strip port if present).
-                    let host = endpoint.split(':').next().unwrap_or(&endpoint);
-                    builder = builder.with_tls(host);
-                }
-                // Wire additional hosts for failover (native transport supports
-                // multi-host via with_addrs — reconnects to next host on failure).
-                if config.hosts.len() > 1 {
-                    let addrs: Vec<std::net::SocketAddr> = config
-                        .hosts
-                        .iter()
-                        .filter_map(|h| {
-                            use std::net::ToSocketAddrs;
-                            h.to_socket_addrs().ok()?.next()
-                        })
-                        .collect();
-                    if addrs.len() > 1 {
-                        builder = builder.with_addrs(addrs);
-                    }
-                }
-                builder.build()
-            }
-        };
-
+        let ch_client = build_client(config)?;
         Ok(Self {
             ch_client,
             database: config.database.clone(),
@@ -378,11 +400,7 @@ impl ClickHouseQueryClient {
             escape_identifier(&db),
             escape_identifier(&tbl)
         );
-        let mut insert = self
-            .ch_client
-            .insert_formatted_with(sql)
-            .map_err(|e| ClickHouseError::Insert(format!("{e}")))?
-            .buffered();
+        let mut insert = self.ch_client.insert_formatted_with(sql).buffered();
 
         insert.write_buffered(&body);
 
