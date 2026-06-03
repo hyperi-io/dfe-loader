@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: FSL-1.1-ALv2
+// SPDX-License-Identifier: BUSL-1.1
 // Copyright (c) 2026 HYPERI PTY LIMITED
 
 //! Shared test utilities and fixtures.
@@ -515,7 +515,7 @@ pub async fn drop_http_test_table(
 // Test Data Generators
 // ============================================================================
 
-/// Create a unique test table name
+/// Create a unique test table name (bare, no database).
 pub fn unique_table_name(prefix: &str) -> String {
     format!(
         "{}_{}_{}",
@@ -523,6 +523,18 @@ pub fn unique_table_name(prefix: &str) -> String {
         std::process::id(),
         chrono::Utc::now().timestamp_millis()
     )
+}
+
+/// Unique test table name qualified with the configured database.
+///
+/// The `Inserter` resolves a bare table name to the `default` database
+/// (`parse_db_table`), while DDL run through the query client lands in the
+/// connection's configured database (`benchmark` on the devex cluster). Tests
+/// that create a table AND drive the `Inserter` against it must agree on the
+/// database, so they qualify the name with `ClickHouseTestConfig::database`.
+pub fn unique_qualified_table_name(prefix: &str) -> String {
+    let db = ClickHouseTestConfig::from_env().database;
+    format!("{db}.{}", unique_table_name(prefix))
 }
 
 /// Generate sample event JSON for testing

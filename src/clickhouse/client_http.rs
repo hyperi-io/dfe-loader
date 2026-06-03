@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: FSL-1.1-ALv2
+// SPDX-License-Identifier: BUSL-1.1
 // Copyright (c) 2026 HYPERI PTY LIMITED
 
 // Project:   dfe-loader
@@ -6,7 +6,7 @@
 // Purpose:   ClickHouse HTTP client for DDL, schema queries, and health checks
 // Language:  Rust
 //
-// License:   FSL-1.1-ALv2
+// License:   BUSL-1.1
 // Copyright: (c) 2026 HYPERI PTY LIMITED
 
 //! `ClickHouse` client for DDL, schema queries, and health checks.
@@ -145,6 +145,10 @@ struct TableName {
 /// Row type for scalar count queries.
 #[derive(Debug, Deserialize, clickhouse::Row)]
 struct CountRow {
+    // Aliased `_dfe_count` (not `count`) so a user table column named `count`
+    // referenced in the WHERE does not collide with the aggregate alias --
+    // ClickHouse otherwise rejects it as "aggregate function in WHERE" (code 184).
+    #[serde(rename = "_dfe_count")]
     count: u64,
 }
 
@@ -332,9 +336,9 @@ impl ClickHouseQueryClient {
         let sql = match where_clause {
             Some(w) => {
                 validate_where_clause(w)?;
-                format!("SELECT COUNT(*) AS count FROM {fq_table} WHERE {w}")
+                format!("SELECT COUNT(*) AS _dfe_count FROM {fq_table} WHERE {w}")
             }
-            None => format!("SELECT COUNT(*) AS count FROM {fq_table}"),
+            None => format!("SELECT COUNT(*) AS _dfe_count FROM {fq_table}"),
         };
 
         let row: CountRow = self

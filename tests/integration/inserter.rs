@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: FSL-1.1-ALv2
+// SPDX-License-Identifier: BUSL-1.1
 // Copyright (c) 2026 HYPERI PTY LIMITED
 
 //! Inserter integration tests
@@ -15,7 +15,8 @@ use dfe_loader::clickhouse::config::InsertFormat;
 use dfe_loader::clickhouse::{Inserter, InserterConfig};
 
 use crate::common::{
-    create_ch_test_client, create_http_test_client, drop_http_test_table, unique_table_name,
+    create_ch_test_client, create_http_test_client, drop_http_test_table,
+    unique_qualified_table_name, unique_table_name,
 };
 use crate::{skip_if_docker, skip_if_no_clickhouse};
 
@@ -49,7 +50,7 @@ async fn test_inserter_basic_insert() {
         eprintln!("Could not create HTTP client");
         return;
     };
-    let table_name = unique_table_name("test_inserter_basic");
+    let table_name = unique_qualified_table_name("test_inserter_basic");
     let oc = crate::common::on_cluster_clause();
 
     // Create test table
@@ -137,7 +138,7 @@ async fn test_inserter_large_batch() {
         Some(c) => Arc::new(c),
         None => return,
     };
-    let table_name = unique_table_name("test_large_batch");
+    let table_name = unique_qualified_table_name("test_large_batch");
     let oc = crate::common::on_cluster_clause();
 
     // Create test table
@@ -271,7 +272,7 @@ async fn test_circuit_breaker_with_inserter() {
         Some(c) => Arc::new(c),
         None => return,
     };
-    let table_name = unique_table_name("test_cb_inserter");
+    let table_name = unique_qualified_table_name("test_cb_inserter");
     let oc = crate::common::on_cluster_clause();
 
     // Create test table
@@ -336,7 +337,7 @@ async fn test_concurrent_inserts() {
         Some(c) => Arc::new(c),
         None => return,
     };
-    let table_name = unique_table_name("test_concurrent");
+    let table_name = unique_qualified_table_name("test_concurrent");
     let oc = crate::common::on_cluster_clause();
 
     // Create test table
@@ -418,7 +419,7 @@ async fn test_inserter_batch_salvage() {
         Some(c) => Arc::new(c),
         None => return,
     };
-    let table_name = unique_table_name("test_salvage");
+    let table_name = unique_qualified_table_name("test_salvage");
     let oc = crate::common::on_cluster_clause();
 
     // Create test table

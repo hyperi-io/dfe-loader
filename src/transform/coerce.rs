@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: FSL-1.1-ALv2
+// SPDX-License-Identifier: BUSL-1.1
 // Copyright (c) 2026 HYPERI PTY LIMITED
 
 //! Type coercion to match `ClickHouse` schema
@@ -719,7 +719,16 @@ impl Coercer {
             .trim_end_matches('}')
             .trim_start_matches("urn:uuid:");
 
-        let hex: String = s.chars().filter(char::is_ascii_hexdigit).collect();
+        // Canonical UUID form is lowercase. `is_ascii_hexdigit` also accepts
+        // A-F, so an uppercase input would otherwise pass through uppercase --
+        // lowercase as we collect so the normalised string matches ClickHouse's
+        // canonical representation (matters for JSONEachRow and round-trip
+        // comparisons; RowBinary is case-insensitive on the bytes either way).
+        let hex: String = s
+            .chars()
+            .filter(char::is_ascii_hexdigit)
+            .map(|c| c.to_ascii_lowercase())
+            .collect();
 
         if hex.len() != 32 {
             return Err(crate::Error::Coercion(format!(
@@ -933,6 +942,17 @@ mod tests {
     fn test_coerce_uuid_no_hyphens() {
         let c = default_coercer();
         let v = serde_json::json!("550e8400e29b41d4a716446655440000");
+        let result = c.coerce_uuid(&v).unwrap();
+        assert_eq!(
+            result.as_str(),
+            Some("550e8400-e29b-41d4-a716-446655440000")
+        );
+    }
+
+    #[test]
+    fn test_coerce_uuid_uppercase_normalised_to_lowercase() {
+        let c = default_coercer();
+        let v = serde_json::json!("550E8400-E29B-41D4-A716-446655440000");
         let result = c.coerce_uuid(&v).unwrap();
         assert_eq!(
             result.as_str(),
