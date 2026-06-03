@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: FSL-1.1-ALv2
+// SPDX-License-Identifier: BUSL-1.1
 // Copyright (c) 2026 HYPERI PTY LIMITED
 
 // Project:   dfe-loader
@@ -6,7 +6,7 @@
 // Purpose:   Project JSON fields to match ClickHouse schema
 // Language:  Rust
 //
-// License:   FSL-1.1-ALv2
+// License:   BUSL-1.1
 // Copyright: (c) 2026 HyperI
 
 //! Schema projection - filter JSON fields to match `ClickHouse` schema
