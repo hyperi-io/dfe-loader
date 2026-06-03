@@ -3,7 +3,7 @@
 
 // Project:   dfe-loader
 // File:      src/clickhouse_ext/insert.rs
-// Purpose:   DynamicInsert adapter over the clickhouse-rs InsertNative sink
+// Purpose:   DynamicInsert adapter over the clickhouse-rs RowBinary/Native sinks
 // Language:  Rust
 //
 // License:   BUSL-1.1
@@ -13,16 +13,19 @@
 //!
 //! `DynamicInsert` fetches the table schema from `system.columns` on first
 //! write, encodes each `Map<String, Value>` against it, and ships the rows
-//! through the new clickhouse-rs chain's `InsertNative::with_columns` seam (the
-//! sink). On a schema-mismatch error it invalidates the cached schema so the
-//! next insert re-fetches.
+//! through a clickhouse-rs sink. On a schema-mismatch error it invalidates the
+//! cached schema so the next insert re-fetches.
 //!
 //! # Sink abstraction
 //!
-//! Today the sink is `InsertNative::with_columns`, which uses the HTTP
-//! transport (FORMAT Native, runtime column headers). When the fork grows a
-//! TCP runtime-column constructor (clickhouse-rs#14), only the
-//! `open_sink`/`Sink` internals here change -- the encoder and the public
+//! The active sink is `Client::insert_formatted_with(... FORMAT RowBinary)`
+//! (HTTP), fed row-wise `encode()` bytes -- the path proven against the live
+//! cluster. FORMAT Native over HTTP (`InsertNative::with_columns`) mis-frames
+//! the block on this server and is tracked as clickhouse-rs#15.
+//!
+//! The native/TCP sink (`insert_native_with_columns` -> `with_columns_tcp`,
+//! clickhouse-rs#14) is selected by transport once #15 lands; only the
+//! `ensure_sink` internals here change -- the encoder and the public
 //! `write_map` API are unaffected.
 
 use std::sync::Arc;

@@ -1,64 +1,98 @@
-# gRPC Transport Design
+<!--
+  Project:      dfe-loader
+  File:         docs/transport/GRPC.md
+  Purpose:      gRPC transport design: proto, config, modes, K8s integration
+  Language:     Markdown
 
-**Purpose:** Replace `ZenohTransport` with `GrpcTransport` in hyperi-rustlib and all dfe- projects.
+  License:      BUSL-1.1
+  Copyright:    (c) 2026 HYPERI PTY LIMITED
+-->
 
-**Wire protocol:** gRPC (Protobuf over HTTP/2) via `tonic` 0.14.x (Rust)
+# gRPC transport
 
-**Scope:** rustlib transport module + dfe-loader, dfe-archiver, dfe-receiver
+The transports themselves -- Kafka, gRPC, Memory -- live in hyperi-rustlib.
+The loader does not implement them; it wires the rustlib `Transport` trait into
+its pipeline via a thin adapter. This page documents the gRPC transport: the
+wire protocol, the proto schema, the config surface, and how the loader consumes
+it.
 
----
+gRPC replaced the old Zenoh transport in rustlib. It gives the loader (and
+dfe-archiver) a server that receives event batches, and gives dfe-receiver (and
+transformers) a client that pushes batches directly -- a Kafka-less path when you
+want one.
 
-## Design Principles
+- **Wire protocol:** gRPC (Protobuf over HTTP/2) via `tonic` 0.14.x.
+- **Scope:** rustlib transport module + dfe-loader, dfe-archiver, dfe-receiver.
+- **Feature flag:** `transport-grpc` (optional `tonic` + `prost` deps).
 
-1. **Same `Transport` trait** — `GrpcTransport` implements the existing trait, no trait changes
-2. **ACK = response** — gRPC response is the acknowledgement, no custom protocol
-3. **Dual mode** — server (loader/archiver receives) AND client (receiver/transformer sends)
-4. **Batch-first** — `PushEvents` sends batches, not individual messages
-5. **Feature-gated** — `transport-grpc` feature flag, optional `tonic` + `prost` deps
-6. **K8s native** — standard gRPC health protocol, Service discovery
-7. **v1/v2 evolution** — v1 proto includes mesh-ready fields (unused), v2 activates them
+```mermaid
+flowchart LR
+    R["dfe-receiver<br/>(gRPC client)"]
+    T["transformer<br/>(bidirectional)"]
+    L["dfe-loader<br/>(gRPC server)"]
+    CH[("ClickHouse")]
 
----
+    R -->|PushEvents| L
+    R -->|PushEvents| T
+    T -->|PushEvents| L
+    L --> CH
+    L -.PushEventsResponse = ACK.-> R
+```
 
-## Proto Evolution: v1 → v2
+## Design principles
 
-The proto is designed with forward-compatible fields so the wire format doesn't change
-when we add mesh capabilities. Protobuf ignores unknown/empty fields by design.
+1. **Same `Transport` trait** -- `GrpcTransport` implements the existing rustlib
+   trait. No trait changes.
+2. **ACK = response** -- the gRPC response is the acknowledgement. No custom
+   protocol on top.
+3. **Dual mode** -- server (loader/archiver receives) AND client
+   (receiver/transformer sends).
+4. **Batch-first** -- `PushEvents` sends batches, not individual messages.
+5. **Feature-gated** -- `transport-grpc` flag, optional `tonic` + `prost` deps.
+6. **K8s native** -- standard gRPC health protocol, Service discovery.
+7. **v1/v2 evolution** -- v1 proto includes mesh-ready fields (unused); v2
+   activates them.
 
-### What v1 Implements (Now — Dev/Test + Point-to-Point Production)
+## Proto evolution: v1 -> v2
 
-- Unary `PushEvents` RPC — client sends batch, server responds with ACK
-- `origin` field on Event — **present but empty** (ignored by v1 consumers)
-- `accepted_origins` on Response — **present but empty** (ignored by v1 callers)
-- Client → server topology only (no multi-hop)
-- No WAL, no fan-out routing, no topology negotiation
-- `PushEventsStream` — defined in proto but **not implemented** in v1
+The proto is designed with forward-compatible fields so the wire format does not
+change when mesh capabilities are added. Protobuf ignores unknown/empty fields by
+design.
 
-### What v2 Activates (Future — Kafka-less Mesh)
+### What v1 implements (now -- dev/test + point-to-point production)
 
-- `origin` populated by sources, **passed through** transforms untouched
-- `accepted_origins` populated by sinks, used for **end-to-end ACK** across hops
-- `PushEventsStream` streaming RPC for high-throughput pipelines
-- Multi-hop ACK propagation (receiver → transformer → loader → CH → ACK chain)
-- Receiver WAL integration (at-least-once without Kafka)
-- Fan-out topology support (multiple downstream targets)
+- Unary `PushEvents` RPC -- client sends a batch, server responds with an ACK.
+- `origin` field on Event -- **present but empty** (ignored by v1 consumers).
+- `accepted_origins` on Response -- **present but empty** (ignored by v1 callers).
+- Client -> server topology only (no multi-hop).
+- No WAL, no fan-out routing, no topology negotiation.
+- `PushEventsStream` -- defined in proto but **not implemented** in v1.
 
-### Why This Works
+### What v2 activates (future -- Kafka-less mesh)
 
-Protobuf is forward-compatible. v1 clients/servers ignore fields they don't use.
-v2 clients/servers populate the same fields. No proto version bump, no breaking change.
-The only change is application logic — the wire format is identical.
+- `origin` populated by sources, **passed through** transforms untouched.
+- `accepted_origins` populated by sinks, used for **end-to-end ACK** across hops.
+- `PushEventsStream` streaming RPC for high-throughput pipelines.
+- Multi-hop ACK propagation
+  (receiver -> transformer -> loader -> CH -> ACK chain).
+- Receiver WAL integration (at-least-once without Kafka).
+- Fan-out topology support (multiple downstream targets).
 
-**Vector.dev did exactly this:** Their v2 source/sink protocol uses gRPC with
-application-level acknowledgement. Events carry metadata (batch notifier references)
-through the pipeline. The "worst status wins" pattern across fan-out sinks ensures
-the source only ACKs when all copies succeed.
+### Why this works
 
-Reference: [Vector End-to-End Acknowledgements](https://vector.dev/docs/architecture/end-to-end-acknowledgements/)
+Protobuf is forward-compatible. v1 clients/servers ignore fields they do not use.
+v2 clients/servers populate the same fields. No proto version bump, no breaking
+change. The only change is application logic -- the wire format is identical.
 
----
+**Vector.dev did exactly this:** their v2 source/sink protocol uses gRPC with
+application-level acknowledgement. Events carry metadata (batch notifier
+references) through the pipeline. The "worst status wins" pattern across fan-out
+sinks ensures the source only ACKs when all copies succeed.
 
-## Proto Definition
+Reference:
+[Vector End-to-End Acknowledgements](https://vector.dev/docs/architecture/end-to-end-acknowledgements/)
+
+## Proto definition
 
 File: `proto/dfe/transport/v1/transport.proto` (in rustlib)
 
@@ -81,7 +115,7 @@ service DfeTransport {
     rpc PushEvents(PushEventsRequest) returns (PushEventsResponse);
 
     // Streaming variant for high-throughput pipelines.
-    // Each request gets a response — bidirectional streaming.
+    // Each request gets a response -- bidirectional streaming.
     // v1: Defined but not implemented. Reserved for v2 mesh.
     rpc PushEventsStream(stream PushEventsRequest) returns (stream PushEventsResponse);
 }
@@ -120,7 +154,7 @@ message Event {
     //     Echoed back in PushEventsResponse.accepted_origins to enable
     //     multi-hop end-to-end ACK without Kafka.
     //
-    // Conceptually similar to Vector.dev's EventFinalizer — the origin
+    // Conceptually similar to Vector.dev's EventFinalizer -- the origin
     // travels with the event through the pipeline and is returned to the
     // source when the event reaches its final destination.
     //
@@ -198,72 +232,72 @@ enum ErrorCode {
 }
 ```
 
-### Proto Design Decisions
+### Proto design decisions
 
 **`bytes origin` on Event:**
-Opaque bytes, not a structured message. The source and the final consumer agree on
-encoding. Intermediate hops (transforms) pass it through without parsing. This avoids
-coupling the proto schema to the origin tracking format — it can evolve independently.
+Opaque bytes, not a structured message. The source and the final consumer agree
+on encoding. Intermediate hops (transforms) pass it through without parsing. This
+avoids coupling the proto schema to the origin tracking format -- it can evolve
+independently.
 
 **`repeated bytes accepted_origins` on Response:**
-Not `repeated Event` — we don't echo back the full event. Just the origin bytes.
+Not `repeated Event` -- the full event is not echoed back. Just the origin bytes.
 The caller already knows what events it sent; it just needs to know which ones
 were accepted to update its WAL/ACK state.
 
 **`PushEventsStream` defined but not implemented:**
-Defining it in v1 proto reserves the RPC method number. Implementing it in v2
-is additive — no proto change needed.
+Defining it in v1 proto reserves the RPC method number. Implementing it in v2 is
+additive -- no proto change needed.
 
 **`dfe.transport.v1` package naming:**
 v2 mesh features use the SAME package. The `v1` is the proto package version
-(wire format), not the feature version. Origin/accepted_origins are part of the
-v1 wire format — they're just empty in v1 implementations.
+(wire format), not the feature version. origin/accepted_origins are part of the
+v1 wire format -- they are just empty in v1 implementations.
 
 ### Compression
 
-Payload-level compression (LZ4/zstd) is optional and applies to the event payloads,
-not the gRPC frame. gRPC transport-level compression (gzip) is also available via
-`tonic::codec::CompressionEncoding` and can be enabled independently. Both can be
-used together — payload compression for CPU efficiency, gRPC compression for wire.
+Payload-level compression (LZ4/zstd) is optional and applies to the event
+payloads, not the gRPC frame. gRPC transport-level compression (gzip) is also
+available via `tonic::codec::CompressionEncoding` and can be enabled
+independently. Both can be used together -- payload compression for CPU
+efficiency, gRPC compression for wire.
 
-### Why Not Streaming-Only?
+### Why not streaming-only?
 
-Unary `PushEvents` is simpler and sufficient for point-to-point. The streaming variant
-adds value in mesh deployments where connection lifecycle matters. Starting with unary
-means fewer moving parts for v1.
+Unary `PushEvents` is simpler and sufficient for point-to-point. The streaming
+variant adds value in mesh deployments where connection lifecycle matters.
+Starting with unary means fewer moving parts for v1.
 
----
+## rustlib implementation
 
-## rustlib Implementation
-
-### New Files
+### New files
 
 ```
 src/transport/
-├── grpc/
-│   ├── mod.rs          # GrpcTransport (client + server)
-│   ├── config.rs       # GrpcConfig
-│   ├── token.rs        # GrpcToken (CommitToken impl)
-│   ├── server.rs       # tonic server (receives events)
-│   └── client.rs       # tonic client (sends events)
+|- grpc/
+|  |- mod.rs          # GrpcTransport (client + server)
+|  |- config.rs       # GrpcConfig
+|  |- token.rs        # GrpcToken (CommitToken impl)
+|  |- server.rs       # tonic server (receives events)
+|  |- client.rs       # tonic client (sends events)
 proto/
-└── dfe/
-    └── transport/
-        └── v1/
-            └── transport.proto
+|- dfe/
+   |- transport/
+      |- v1/
+         |- transport.proto
 ```
 
-### Removed Files
+### Removed files
 
 ```
 src/transport/
-├── zenoh/              # REMOVED entirely
-│   ├── mod.rs
-│   ├── config.rs
-│   └── token.rs
+|- zenoh/              # REMOVED entirely
+   |- mod.rs
+   |- config.rs
+   |- token.rs
 ```
 
-### build.rs (Proto Codegen)
+### build.rs (proto codegen)
 
 ```rust
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -282,9 +316,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-**Note:** Generated code is checked into the repo (`out_dir`), not generated at build time.
-This avoids requiring `protoc` on every build machine and in CI. Regenerate with
-`cargo build --features transport-grpc` when the proto changes.
+**Note:** Generated code is checked into the repo (`out_dir`), not generated at
+build time. This avoids requiring `protoc` on every build machine and in CI.
+Regenerate with `cargo build --features transport-grpc` when the proto changes.
 
 Reference: [tonic-build docs](https://docs.rs/tonic-build)
 
@@ -300,10 +334,10 @@ pub struct GrpcConfig {
 
     /// Target server address (e.g., "dfe-loader:50051")
     /// Set to None for server-only mode.
-    /// Supports K8s Service names — DNS resolution handled by tonic Channel.
+    /// Supports K8s Service names -- DNS resolution handled by tonic Channel.
     pub target: Option<String>,
 
-    /// Topics/keys to subscribe to (server mode — filters incoming events by key prefix)
+    /// Topics/keys to subscribe to (server mode -- filters incoming events by key prefix)
     pub subscribe: Vec<String>,
 
     /// Connection timeout in milliseconds
@@ -333,7 +367,7 @@ pub struct GrpcConfig {
 
     /// Maximum message size in bytes (default: 16MB).
     /// Applies to both encode and decode limits.
-    /// tonic default decode limit is 4MB — we override to 16MB.
+    /// tonic default decode limit is 4MB -- we override to 16MB.
     pub max_message_size: usize,
 
     /// Number of retry attempts on transient failure (UNAVAILABLE, DEADLINE_EXCEEDED)
@@ -422,7 +456,7 @@ impl GrpcConfig {
         }
     }
 
-    /// Client + server (for transformer — receives from receiver, sends to loader)
+    /// Client + server (for transformer -- receives from receiver, sends to loader)
     pub fn bidirectional(listen: &str, target: &str, subscribe: Vec<String>) -> Self {
         Self {
             listen: Some(listen.to_string()),
@@ -432,7 +466,7 @@ impl GrpcConfig {
         }
     }
 
-    /// Dev/test preset — localhost, no TLS, short timeouts, minimal retries
+    /// Dev/test preset -- localhost, no TLS, short timeouts, minimal retries
     pub fn devtest(listen: &str, target: &str) -> Self {
         Self {
             listen: Some(listen.to_string()),
@@ -472,9 +506,11 @@ impl Display for GrpcToken {
 
 The transport operates in one of three modes:
 
-- **Client mode** (`target` set, `listen` not set): Sends events via `PushEvents` RPC
-- **Server mode** (`listen` set, `target` not set): Receives events, buffers in channel
-- **Bidirectional** (both set): Transformer pattern — receives AND sends
+- **Client mode** (`target` set, `listen` not set): sends events via `PushEvents`
+  RPC.
+- **Server mode** (`listen` set, `target` not set): receives events, buffers in
+  channel.
+- **Bidirectional** (both set): transformer pattern -- receives AND sends.
 
 ```rust
 pub struct GrpcTransport {
@@ -519,7 +555,7 @@ impl Transport for GrpcTransport {
     /// Client mode: always returns empty (no inbound events).
     async fn recv(&self, max: usize) -> TransportResult<Vec<Message<Self::Token>>>;
 
-    /// Commit is a no-op for gRPC v1 — ACK already sent via response.
+    /// Commit is a no-op for gRPC v1 -- ACK already sent via response.
     /// v2 (future): Will update health reporter and propagate ACK upstream.
     async fn commit(&self, _tokens: &[Self::Token]) -> TransportResult<()>;
 
@@ -534,7 +570,7 @@ impl Transport for GrpcTransport {
 }
 ```
 
-### `is_healthy()` — Downstream State Propagation
+### `is_healthy()` -- downstream state propagation
 
 ```rust
 fn is_healthy(&self) -> bool {
@@ -543,13 +579,13 @@ fn is_healthy(&self) -> bool {
     }
     // Server mode: always healthy if not closed (accepting connections)
     // Client mode: check if downstream is reachable
-    // This enables mesh readiness propagation in v2 — a transformer's
+    // This enables mesh readiness propagation in v2 -- a transformer's
     // readiness depends on whether its downstream (loader) is reachable.
     true // Refine with Channel state checking in implementation
 }
 ```
 
-### Batch Send (Client Side)
+### Batch send (client side)
 
 For efficiency, `GrpcTransport` also exposes a batch send method:
 
@@ -567,7 +603,7 @@ impl GrpcTransport {
 }
 ```
 
-### Server Handler
+### Server handler
 
 The tonic service implementation buffers received events into the mpsc channel:
 
@@ -648,7 +684,7 @@ impl DfeTransport for TransportServiceHandler {
 }
 ```
 
-### Server Setup (with Health + Reflection)
+### Server setup (with health + reflection)
 
 ```rust
 impl GrpcTransport {
@@ -691,7 +727,7 @@ impl GrpcTransport {
             builder = builder.concurrency_limit_per_connection(config.concurrency_limit);
         }
         if config.load_shed {
-            // Note: load_shed consumes the builder — tonic API
+            // Note: load_shed consumes the builder -- tonic API
         }
         if config.keepalive_interval_secs > 0 {
             builder = builder
@@ -723,9 +759,7 @@ impl GrpcTransport {
 }
 ```
 
----
-
-## Feature Flags (rustlib Cargo.toml)
+## Feature flags (rustlib Cargo.toml)
 
 ### Before
 
@@ -757,20 +791,18 @@ prost = { version = "0.13", optional = true }
 
 [build-dependencies]
 tonic-build = { version = "0.14" }
-# Note: tonic-build is NOT optional — always available for proto regen.
+# Note: tonic-build is NOT optional -- always available for proto regen.
 # Proto output is checked in; build.rs only runs when proto changes.
 ```
 
-### Removed Dependencies
+### Removed dependencies
 
 ```toml
 # REMOVED
 # zenoh = { version = ">=1.7.2, <2", optional = true }
 ```
 
----
-
-## TransportType Enum Update
+## TransportType enum update
 
 ### Before
 
@@ -794,7 +826,7 @@ pub enum TransportType {
 }
 ```
 
-### TransportConfig Update
+### TransportConfig update
 
 ```rust
 pub struct TransportConfig {
@@ -809,11 +841,9 @@ pub struct TransportConfig {
 }
 ```
 
----
+## dfe-loader migration
 
-## dfe-loader Migration
-
-### Cargo.toml Changes
+### Cargo.toml changes
 
 ```toml
 # Before
@@ -827,7 +857,7 @@ transport-grpc = ["hyperi-rustlib/transport-grpc"]
 transport-memory = ["hyperi-rustlib/transport-memory"]
 ```
 
-### Config Changes (loader.rs)
+### Config changes (loader.rs)
 
 Remove `ZenohConfig`, add `GrpcConfig`:
 
@@ -858,7 +888,7 @@ grpc:
 
 ENV override: `DFE_LOADER__GRPC__LISTEN="0.0.0.0:50051"`
 
-### Transport Adapter (transport.rs)
+### Transport adapter (transport.rs)
 
 Remove `ZenohTransportAdapter`, add `GrpcTransportAdapter`:
 
@@ -889,7 +919,7 @@ mod grpc_adapter {
 }
 ```
 
-### TransportBackend Enum
+### TransportBackend enum
 
 ```rust
 // Before
@@ -911,11 +941,9 @@ pub enum TransportBackend {
 }
 ```
 
----
+## dfe-archiver migration
 
-## dfe-archiver Migration
-
-Minimal — swap the feature flag:
+Minimal -- swap the feature flag:
 
 ```toml
 # Before (Cargo.toml)
@@ -931,17 +959,15 @@ hyperi-rustlib = { version = ">=2.0", features = [
 ] }
 ```
 
-No adapter code exists in dfe-archiver — it uses rustlib's transport directly.
+No adapter code exists in dfe-archiver -- it uses rustlib's transport directly.
 
----
+## dfe-receiver migration
 
-## dfe-receiver Migration
-
-dfe-receiver currently has no Zenoh support. The gRPC transport adds the ability to
-send directly to dfe-loader without Kafka:
+dfe-receiver previously had no Zenoh support. The gRPC transport adds the ability
+to send directly to dfe-loader without Kafka:
 
 ```toml
-# Cargo.toml — add transport-grpc
+# Cargo.toml -- add transport-grpc
 hyperi-rustlib = { version = ">=2.0", features = [
     "config", "config-reload", "logger", "metrics", "http-server",
     "transport-kafka", "transport-grpc",
@@ -949,7 +975,7 @@ hyperi-rustlib = { version = ">=2.0", features = [
 ] }
 ```
 
-Receiver uses gRPC client mode to push events to loader:
+Receiver uses gRPC client mode to push events to the loader:
 
 ```yaml
 # config.yaml
@@ -961,52 +987,50 @@ loader:
     retry_max_attempts: 3
 ```
 
----
-
-## Migration Sequence
+## Migration sequence
 
 ### Phase 1: rustlib (hyperi-rustlib)
 
-1. Create `proto/dfe/transport/v1/transport.proto`
-2. Add `tonic-build` to build deps, write `build.rs` for proto codegen
-3. Generate code, check into `src/transport/grpc/generated/`
-4. Create `src/transport/grpc/` module (config, token, client, server, mod)
-5. Implement `GrpcTransport` with Transport trait
-6. Wire up `tonic-health` for gRPC health protocol
-7. Update `TransportType` enum (Zenoh → Grpc)
-8. Update `TransportConfig` struct
-9. Update feature flags in Cargo.toml
-10. Remove `src/transport/zenoh/` directory
-11. Remove `zenoh` dependency from Cargo.toml
-12. Write unit tests (config, token, round-trip, bidirectional, backpressure, shutdown)
-13. Publish to Artifactory (major bump — v2.0.0)
+1. Create `proto/dfe/transport/v1/transport.proto`.
+2. Add `tonic-build` to build deps, write `build.rs` for proto codegen.
+3. Generate code, check into `src/transport/grpc/generated/`.
+4. Create `src/transport/grpc/` module (config, token, client, server, mod).
+5. Implement `GrpcTransport` with the Transport trait.
+6. Wire up `tonic-health` for the gRPC health protocol.
+7. Update `TransportType` enum (Zenoh -> Grpc).
+8. Update `TransportConfig` struct.
+9. Update feature flags in Cargo.toml.
+10. Remove `src/transport/zenoh/` directory.
+11. Remove `zenoh` dependency from Cargo.toml.
+12. Write unit tests (config, token, round-trip, bidirectional, backpressure,
+    shutdown).
+13. Publish (major bump -- v2.0.0).
 
 ### Phase 2: dfe-loader
 
-1. Update Cargo.toml — `transport-zenoh` → `transport-grpc`
-2. Update `src/config/` — remove `ZenohConfig`, add `GrpcConfig`
-3. Update `src/kafka/transport.rs` — remove `ZenohTransportAdapter`, add `GrpcTransportAdapter`
-4. Update `TransportBackend` enum
-5. Update config examples and docs
-6. Run tests, verify CI passes
+1. Update Cargo.toml -- `transport-zenoh` -> `transport-grpc`.
+2. Update `src/config/` -- remove `ZenohConfig`, add `GrpcConfig`.
+3. Update `src/kafka/transport.rs` -- remove `ZenohTransportAdapter`, add
+   `GrpcTransportAdapter`.
+4. Update `TransportBackend` enum.
+5. Update config examples and docs.
+6. Run tests, verify CI passes.
 
 ### Phase 3: dfe-archiver
 
-1. Update Cargo.toml — swap `transport-zenoh` for `transport-grpc`
-2. No code changes needed (uses rustlib transport directly)
+1. Update Cargo.toml -- swap `transport-zenoh` for `transport-grpc`.
+2. No code changes needed (uses rustlib transport directly).
 
 ### Phase 4: dfe-receiver
 
-1. Add `transport-grpc` to Cargo.toml features
-2. Add gRPC client config to `LoaderConfig`
-3. Wire up gRPC client for direct-to-loader delivery
-4. Test: receiver → gRPC → loader → ClickHouse
+1. Add `transport-grpc` to Cargo.toml features.
+2. Add gRPC client config to `LoaderConfig`.
+3. Wire up gRPC client for direct-to-loader delivery.
+4. Test: receiver -> gRPC -> loader -> ClickHouse.
 
----
+## K8s integration
 
-## K8s Integration
-
-### Service Definition
+### Service definition
 
 ```yaml
 apiVersion: v1
@@ -1025,10 +1049,10 @@ spec:
       targetPort: 9090
 ```
 
-### Health Probes
+### Health probes
 
-tonic-health implements the standard `grpc.health.v1.Health` protocol.
-K8s 1.24+ supports native gRPC health probes (no sidecar needed):
+tonic-health implements the standard `grpc.health.v1.Health` protocol. K8s 1.24+
+supports native gRPC health probes (no sidecar needed):
 
 ```yaml
 livenessProbe:
@@ -1044,19 +1068,19 @@ readinessProbe:
   periodSeconds: 5
 ```
 
-For older K8s, use `grpc-health-probe` binary or HTTP health endpoints on the
+For older K8s, use the `grpc-health-probe` binary or HTTP health endpoints on the
 metrics port (which dfe-loader already serves on :9090).
 
 Reference: [tonic-health](https://docs.rs/tonic-health)
 
-### KEDA Scaling
+### KEDA scaling
 
 KEDA can scale on gRPC metrics via Prometheus. The transport exposes:
 
-- `grpc_requests_total` — total PushEvents calls
-- `grpc_events_accepted_total` — events successfully buffered
-- `grpc_events_rejected_total` — events rejected (backpressure)
-- `grpc_request_duration_seconds` — PushEvents latency histogram
+- `grpc_requests_total` -- total PushEvents calls.
+- `grpc_events_accepted_total` -- events successfully buffered.
+- `grpc_events_rejected_total` -- events rejected (backpressure).
+- `grpc_request_duration_seconds` -- PushEvents latency histogram.
 
 ```yaml
 triggers:
@@ -1067,60 +1091,55 @@ triggers:
       threshold: "10000"
 ```
 
----
+## Testing strategy
 
-## Testing Strategy
+### Unit tests (rustlib)
 
-### Unit Tests (rustlib)
+1. Config construction (client, server, bidirectional, devtest presets).
+2. Token creation and Display formatting.
+3. Client send + server recv round-trip (localhost).
+4. Batch send/recv with multiple events.
+5. **Bidirectional mode** -- receive events, transform, send to another target.
+   (This validates the transformer topology works from day one.)
+6. Backpressure (full buffer -> RESOURCE_EXHAUSTED status).
+7. Connection failure handling (unreachable target -> error).
+8. Close/shutdown behaviour (graceful shutdown signal).
+9. Health check service (tonic-health status reporting).
+10. Subscribe filter matching (key prefix filtering).
+11. Origin passthrough -- verify origin bytes survive round-trip unchanged.
+    (Empty in v1, but the plumbing is tested.)
 
-1. Config construction (client, server, bidirectional, devtest presets)
-2. Token creation and Display formatting
-3. Client send + server recv round-trip (localhost)
-4. Batch send/recv with multiple events
-5. **Bidirectional mode** — receive events, transform, send to another target
-   (This validates the transformer topology works from day one)
-6. Backpressure (full buffer → RESOURCE_EXHAUSTED status)
-7. Connection failure handling (unreachable target → error)
-8. Close/shutdown behaviour (graceful shutdown signal)
-9. Health check service (tonic-health status reporting)
-10. Subscribe filter matching (key prefix filtering)
-11. Origin passthrough — verify origin bytes survive round-trip unchanged
-    (Empty in v1, but the plumbing is tested)
+### Integration tests (dfe-loader)
 
-### Integration Tests (dfe-loader)
+1. gRPC transport adapter creation from config.
+2. Receive events via gRPC, process through pipeline, insert to ClickHouse.
+3. Error propagation (bad payload -> error response with EventError).
+4. Backpressure (slow ClickHouse -> RESOURCE_EXHAUSTED to caller).
 
-1. gRPC transport adapter creation from config
-2. Receive events via gRPC, process through pipeline, insert to ClickHouse
-3. Error propagation (bad payload → error response with EventError)
-4. Backpressure (slow ClickHouse → RESOURCE_EXHAUSTED to caller)
+### End-to-end (multi-process)
 
-### End-to-End (multi-process)
+1. dfe-receiver -> gRPC -> dfe-loader -> ClickHouse.
+2. Loader restart -> receiver retries to new pod.
+3. Multiple receivers -> single loader (fan-in).
+4. Multiple loaders behind a K8s Service (load balancing).
 
-1. dfe-receiver → gRPC → dfe-loader → ClickHouse
-2. Loader restart → receiver retries to new pod
-3. Multiple receivers → single loader (fan-in)
-4. Multiple loaders behind K8s Service (load balancing)
+## Version strategy
 
----
+This is a **breaking change** to rustlib's transport module (removing Zenoh,
+adding gRPC).
 
-## Version Strategy
+- rustlib: bump to **2.0.0** (breaking: removed `transport-zenoh` feature).
+- dfe-loader: update dep to `>=2.0.0`.
+- dfe-archiver: update dep to `>=2.0.0`.
+- dfe-receiver: update dep to `>=2.0.0`.
 
-This is a **breaking change** to rustlib's transport module (removing Zenoh, adding gRPC).
+Clean break -- all internal projects, no external consumers of `transport-zenoh`.
 
-- rustlib: Bump to **2.0.0** (breaking: removed `transport-zenoh` feature)
-- dfe-loader: Update dep to `>=2.0.0`
-- dfe-archiver: Update dep to `>=2.0.0`
-- dfe-receiver: Update dep to `>=2.0.0`
-
-Clean break — all internal projects, no external consumers of `transport-zenoh`.
-
----
-
-## v1 → v2 Mesh Readiness Checklist
+## v1 -> v2 mesh readiness checklist
 
 Decisions made now in v1 that keep the door open for v2 mesh:
 
-| Decision | Where | v1 Behaviour | v2 Behaviour | Cost Now |
+| Decision | Where | v1 behaviour | v2 behaviour | Cost now |
 |----------|-------|-------------|-------------|----------|
 | `bytes origin` on Event | Proto | Empty, ignored | Source tracking context, passed through | One empty field |
 | `repeated bytes accepted_origins` on Response | Proto | Empty, ignored | Echoed origins for multi-hop ACK | One empty list |
@@ -1131,42 +1150,44 @@ Decisions made now in v1 that keep the door open for v2 mesh:
 | Multi-instance (no singleton) | Architecture | One GrpcTransport per target | Fan-out via multiple instances | Already correct |
 | `tonic-health` integration | Server | Reports serving/not-serving | Downstream-aware health (v2) | Health service |
 
-**None of these add complexity to v1.** They're empty fields, a test, and a health check.
-The mesh implementation itself (WAL, origin tracking logic, fan-out routing) is entirely v2 scope.
+**None of these add complexity to v1.** They are empty fields, a test, and a
+health check. The mesh implementation itself (WAL, origin tracking logic, fan-out
+routing) is entirely v2 scope.
 
----
+## Open questions (resolved)
 
-## Open Questions (Resolved)
-
-1. **Unix Domain Sockets**: tonic supports UDS via `serve_with_incoming` + `UnixListener`
-   (server) and `connect_with_connector` + `UnixStream` (client). Not needed for v1.
-   Add UDS as a `listen` address variant (e.g., `unix:///var/run/dfe.sock`) in v2 if
-   same-node latency matters.
+1. **Unix Domain Sockets:** tonic supports UDS via `serve_with_incoming` +
+   `UnixListener` (server) and `connect_with_connector` + `UnixStream` (client).
+   Not needed for v1. Add UDS as a `listen` address variant (e.g.,
+   `unix:///var/run/dfe.sock`) in v2 if same-node latency matters.
    Reference: [tonic UDS example](https://github.com/hyperium/tonic/blob/master/examples/src/uds/server.rs)
 
-2. **Streaming vs Unary**: v1 implements unary only. `PushEventsStream` is defined in
-   proto but not implemented. Add in v2 when benchmarks show connection lifecycle overhead.
+2. **Streaming vs unary:** v1 implements unary only. `PushEventsStream` is defined
+   in proto but not implemented. Add in v2 when benchmarks show connection
+   lifecycle overhead.
 
-3. **Proto location**: Proto lives in rustlib (`proto/dfe/transport/v1/`). Generated code
-   checked into `src/transport/grpc/generated/`. All projects import via rustlib dep.
+3. **Proto location:** Proto lives in rustlib (`proto/dfe/transport/v1/`).
+   Generated code checked into `src/transport/grpc/generated/`. All projects
+   import via the rustlib dep.
 
-4. **Receiver WAL**: Separate from transport. gRPC transport works without WAL (at-most-once).
-   WAL adds at-least-once on top. WAL + origin tracking = end-to-end ACK (v2).
+4. **Receiver WAL:** Separate from transport. The gRPC transport works without WAL
+   (at-most-once). WAL adds at-least-once on top. WAL + origin tracking =
+   end-to-end ACK (v2).
 
-5. **Proto codegen strategy**: Use `tonic-build` with `out_dir` to check in generated code.
-   Avoids requiring `protoc` on every build machine. Regen when proto changes.
-   Reference: [tonic-build docs](https://docs.rs/tonic-build), [prost codegen](https://github.com/tokio-rs/prost)
-
----
+5. **Proto codegen strategy:** Use `tonic-build` with `out_dir` to check in
+   generated code. Avoids requiring `protoc` on every build machine. Regen when
+   proto changes.
+   Reference: [tonic-build docs](https://docs.rs/tonic-build),
+   [prost codegen](https://github.com/tokio-rs/prost)
 
 ## Sources
 
-- [tonic — Rust gRPC framework](https://github.com/hyperium/tonic) (0.14.x, 171M+ downloads)
-- [tonic-health — gRPC health checking](https://docs.rs/tonic-health)
-- [tonic-build — proto codegen](https://docs.rs/tonic-build)
+- [tonic -- Rust gRPC framework](https://github.com/hyperium/tonic) (0.14.x, 171M+ downloads)
+- [tonic-health -- gRPC health checking](https://docs.rs/tonic-health)
+- [tonic-build -- proto codegen](https://docs.rs/tonic-build)
 - [tonic UDS example](https://github.com/hyperium/tonic/blob/master/examples/src/uds/server.rs)
 - [tonic Server configuration](https://docs.rs/tonic/latest/tonic/transport/struct.Server.html)
-- [prost — Protocol Buffers for Rust](https://github.com/tokio-rs/prost)
+- [prost -- Protocol Buffers for Rust](https://github.com/tokio-rs/prost)
 - [Vector v2 source/sink protocol](https://vector.dev/highlights/2021-08-24-vector-source-sink/)
 - [Vector End-to-End Acknowledgements](https://vector.dev/docs/architecture/end-to-end-acknowledgements/)
 - [Vector deployment architecture](https://vector.dev/docs/setup/going-to-prod/architecting/)
@@ -1177,7 +1198,8 @@ The mesh implementation itself (WAL, origin tracking logic, fan-out routing) is 
 ---
 
 **Status:** v1 shipped. `GrpcTransportAdapter` lives in
-[src/kafka/transport.rs](../src/kafka/transport.rs) and the `transport-grpc`
-feature is enabled in `Cargo.toml`. v2 mesh fields (`cell_id`, `routing_hints`)
-are present in the proto but unused.
-**Proto version:** v1 (mesh-ready fields present but unused)
+[../../src/kafka/transport.rs](../../src/kafka/transport.rs) and the
+`transport-grpc` feature is enabled in `Cargo.toml`. v2 mesh fields (`cell_id`,
+`routing_hints`) are present in the proto but unused.
+
+**Proto version:** v1 (mesh-ready fields present but unused).

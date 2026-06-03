@@ -1,12 +1,39 @@
-# dfe-schemas — Shared Schema Definitions
+<!--
+  Project:      dfe-loader
+  File:         docs/deployment/SCHEMAS.md
+  Purpose:      Loader-side reference for the shared dfe-schemas definitions
+  Language:     Markdown
 
-> **Canonical documentation:** [`dfe-schemas/README.md`](https://github.com/hyperi-io/dfe-schemas)
->
-> This file is a loader-specific supplement. The full schema format reference,
-> versioning system, column definitions, and DDL expressions are documented
-> in the dfe-schemas repo README.
+  License:      BUSL-1.1
+  Copyright:    (c) 2026 HYPERI PTY LIMITED
+-->
 
-## Quick Reference for Loader
+# Shared schema definitions
+
+dfe-loader does not own its table schemas -- they come from the shared
+`dfe-schemas` repo, checked out as a submodule. This page is the loader-specific
+supplement: how the loader resolves the schema directory, how it reads
+per-file versions, and how DFE `expr` directives map to DDL. The full schema
+format reference, versioning system, column definitions, and DDL expressions
+live in the dfe-schemas repo.
+
+> **Canonical documentation:**
+> [`dfe-schemas/README.md`](https://github.com/hyperi-io/dfe-schemas)
+
+```mermaid
+flowchart TB
+    ENV{"DFE_SCHEMAS_DIR set?"}
+    SUB{"schemas/common-header/<br/>exists?"}
+    FALL["schemas/profiles/<br/>bundled fallback"]
+    DIR[("Resolved profiles dir")]
+
+    ENV -->|yes| EDIR["{dir}/common-header/"] --> DIR
+    ENV -->|no| SUB
+    SUB -->|yes| SDIR["schemas/common-header/<br/>submodule checkout"] --> DIR
+    SUB -->|no| FALL --> DIR
+```
+
+## Quick reference for the loader
 
 ### Submodule setup
 
@@ -18,9 +45,9 @@ git submodule update --init --recursive
 ### Resolution order
 
 ```
-1. DFE_SCHEMAS_DIR env var  →  {dir}/common-header/
-2. schemas/common-header/   →  submodule checkout
-3. schemas/profiles/        →  bundled fallback
+1. DFE_SCHEMAS_DIR env var  ->  {dir}/common-header/
+2. schemas/common-header/   ->  submodule checkout
+3. schemas/profiles/        ->  bundled fallback
 ```
 
 ### Rust resolution
@@ -42,13 +69,13 @@ fn resolve_profiles_dir() -> PathBuf {
 
 ### Per-file versioning (version tree)
 
-Schema YAML files use a **version tree** — each version entry contains a
+Schema YAML files use a **version tree** -- each version entry contains a
 complete column snapshot under `versions.<ver>.columns`. The loader should:
 
 1. Parse `current` from the YAML file as the default version
 2. When a version pin is specified (from Source config), read columns from
    `versions.<pinned_version>.columns` directly
-3. Files without `versions` key use the flat `columns:` list (backward compat)
+3. Files without a `versions` key use the flat `columns:` list (backward compat)
 
 ```yaml
 current: "1.0.0"
@@ -76,19 +103,20 @@ human-readable descriptions only.
 When both are present, the DDL COMMENT combines them:
 
 ```sql
-COMMENT '@source: timestamp | now() — Event timestamp from source data'
+COMMENT '@source: timestamp | now() -- Event timestamp from source data'
 ```
 
 | Directive | Action |
 |-----------|--------|
-| `@generated: expr` | Loader omits — ClickHouse DEFAULT handles it |
+| `@generated: expr` | Loader omits -- ClickHouse DEFAULT handles it |
 | `@source: field` | Extract from source data |
 | `@source: field \| fallback` | Extract with fallback expression |
 | `@source: first(a/b/c)` | First match from multiple fields |
 | `@captured: what` | Capture from raw payload before transforms |
 | `@captured: what as TYPE` | Capture and cast (e.g. `as JSON`) |
 
-See [DDL-EXPRESSION.md](./DDL-EXPRESSION.md) for the full expression reference.
+See [DDL-DIRECTIVES.md](../clickhouse/DDL-DIRECTIVES.md) for the full expression
+reference.
 
 ### Bundled fallback sync
 
@@ -97,6 +125,6 @@ so `cargo install dfe-loader` works without a submodule checkout.
 
 ## Related docs
 
-- [COMMON-HEADER.md](./COMMON-HEADER.md) — detailed common header column reference and DDL
-- [DDL-EXPRESSION.md](./DDL-EXPRESSION.md) — field mapping expression language
-- [dfe-schemas README](https://github.com/hyperi-io/dfe-schemas) — canonical schema documentation
+- [COMMON-HEADER.md](../transport/COMMON-HEADER.md) -- detailed common header column reference and DDL
+- [DDL-DIRECTIVES.md](../clickhouse/DDL-DIRECTIVES.md) -- field mapping expression language
+- [dfe-schemas README](https://github.com/hyperi-io/dfe-schemas) -- canonical schema documentation

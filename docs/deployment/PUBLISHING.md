@@ -1,50 +1,70 @@
 <!--
   Project:      dfe-loader
-  File:         docs/CONTAINER-PUBLISHING.md
-  Purpose:      Spec for container image + Helm chart publishing via CI
+  File:         docs/deployment/PUBLISHING.md
+  Purpose:      Container image + Helm chart publishing via CI
   Language:     Markdown
 
-  License:      FSL-1.1-ALv2
+  License:      BUSL-1.1
   Copyright:    (c) 2026 HYPERI PTY LIMITED
 -->
 
-# Container Image Publishing — dfe-loader
+# Container and chart publishing
 
-## Goal
+dfe-loader ships as a multi-arch container image and a Helm chart, built and
+pushed by CI on every release. Downstream projects (dfe-docker, dfe-operator)
+reference an immutable OCI tag instead of building from source or downloading
+loose binaries. This page covers the publishing mechanics: the Dockerfile, the
+`.hyperi-ci.yaml` config, the tags CI generates, and how consumers pull.
 
-Publish multi-arch container images and Helm charts for dfe-loader on every
-release, so downstream projects (dfe-docker, dfe-operator) can reference an
-OCI tag instead of building from source or downloading binaries.
+The current registry is GHCR (`ghcr.io/hyperi-io/dfe-loader`), wired via
+`registry: ghcr` in `.hyperi-ci.yaml` and authenticated automatically with
+`GITHUB_TOKEN`. JFrog (`hyperi-docker-local` / `hyperi-helm-local`) is legacy
+and no longer the publishing path; its mechanics are retained below for
+reference only.
 
-Default registry is JFrog (internal: `hyperi-docker-local`,
-`hyperi-helm-local`). GHCR remains available as an opt-in alternative for
-public images via `registry: ghcr` in `.hyperi-ci.yaml`.
+```mermaid
+flowchart TB
+    REL["Release tag (vX.Y.Z)"]
+    BIN["CI cross-build<br/>linux/amd64 + linux/arm64 binaries"]
+    DOCK["Build Dockerfile<br/>wraps pre-built binary"]
+    PUSH["Push image<br/>semver tags"]
+    HELM["Package + push Helm chart<br/>OCI artifact"]
+    VER["Verify both artefacts"]
+    REG[("GHCR<br/>ghcr.io/hyperi-io/dfe-loader")]
 
-## How It Works
+    REL --> BIN --> DOCK --> PUSH --> REG
+    BIN --> HELM --> REG
+    PUSH --> VER
+    HELM --> VER
+```
 
-The CI submodule has built-in container + Helm publishing. On release, it:
+## How it works
+
+The CI submodule has built-in container and Helm publishing. On release, it:
 
 1. Builds the Dockerfile for `linux/amd64` and `linux/arm64`
 2. Pushes to the configured registry with semantic version tags
 3. Packages and pushes the Helm chart as an OCI artifact
 4. Verifies both artefacts
 
-JFrog publishing uses a scoped token in `ARTIFACTORY_TOKEN`. GHCR uses
-`GITHUB_TOKEN` automatically.
+GHCR uses `GITHUB_TOKEN` automatically. (Legacy: JFrog publishing used a scoped
+token in `ARTIFACTORY_TOKEN`.)
 
-## Tags Generated
+## Tags generated
 
-For a release `v1.6.13` on JFrog:
+For a release `v1.6.13` on GHCR, CI emits tags under
+`ghcr.io/hyperi-io/dfe-loader`:
 
-- `hypersec.jfrog.io/hyperi-docker-local/dfe-loader:1.6.13`
-- `hypersec.jfrog.io/hyperi-docker-local/dfe-loader:1.6`
-- `hypersec.jfrog.io/hyperi-docker-local/dfe-loader:1`
-- `hypersec.jfrog.io/hyperi-docker-local/dfe-loader:latest`
-- `hypersec.jfrog.io/hyperi-docker-local/dfe-loader:sha-<commit>`
-
-GHCR emits equivalent tags under `ghcr.io/hyperi-io/dfe-loader`.
+- `ghcr.io/hyperi-io/dfe-loader:1.6.13`
+- `ghcr.io/hyperi-io/dfe-loader:1.6`
+- `ghcr.io/hyperi-io/dfe-loader:1`
+- `ghcr.io/hyperi-io/dfe-loader:latest`
+- `ghcr.io/hyperi-io/dfe-loader:sha-<commit>`
 
 Pre-release versions (e.g. `1.6.13-beta.1`) only get the full version tag.
+
+(Legacy: the equivalent JFrog tags were published under
+`hypersec.jfrog.io/hyperi-docker-local/dfe-loader`.)
 
 ## Implementation
 
@@ -54,7 +74,7 @@ Create `Dockerfile` in the repo root. The binary is already cross-compiled in
 CI for both amd64 and arm64, so the Dockerfile wraps the pre-built binary
 rather than compiling from source.
 
-**Option A — Download from JFrog at build time:**
+**Option A -- Download from the release at build time:**
 
 ```dockerfile
 FROM debian:bookworm-slim
@@ -88,7 +108,7 @@ ENTRYPOINT ["dfe-loader"]
 CMD ["--config", "/etc/dfe/loader.yaml"]
 ```
 
-**Option B — COPY from CI build artifact (recommended):**
+**Option B -- COPY from CI build artifact (recommended):**
 
 ```dockerfile
 FROM debian:bookworm-slim
@@ -113,7 +133,7 @@ CMD ["--config", "/etc/dfe/loader.yaml"]
 ```
 
 **Recommended:** Option B (COPY from CI artifact). The CI publish workflow
-already builds the binary before the container step runs — no circular
+already builds the binary before the container step runs -- no circular
 dependency.
 
 ### 2. Update `.hyperi-ci.yaml`
@@ -128,7 +148,7 @@ publish:
 
   container:
     enabled: true
-    registry: jfrog          # or ghcr for public images
+    registry: ghcr          # current path; legacy: jfrog
     dockerfile: Dockerfile
     platforms:
       - linux/amd64
@@ -136,12 +156,13 @@ publish:
 
   helm:
     enabled: true
-    registry: jfrog
+    registry: ghcr
 ```
 
-JFrog publishes to `hyperi-docker-local` (containers) and `hyperi-helm-local`
-(charts). Both repos must be `packageType: docker` with `enableDockerSupport: true`
-for OCI push — helm-type repos do not support OCI.
+(Legacy note: JFrog published to `hyperi-docker-local` (containers) and
+`hyperi-helm-local` (charts). Both repos had to be `packageType: docker` with
+`enableDockerSupport: true` for OCI push -- helm-type repos do not support OCI.
+JFrog is no longer the publishing path.)
 
 ### 3. Update CI submodule
 
@@ -168,7 +189,7 @@ docker run --rm ghcr.io/hyperi-io/dfe-loader:1.6.13 --help
 docker manifest inspect ghcr.io/hyperi-io/dfe-loader:1.6.13
 ```
 
-## Consumer Usage
+## Consumer usage
 
 ### Docker Compose (dfe-docker)
 
@@ -192,7 +213,7 @@ containers:
       - containerPort: 9090
 ```
 
-## Container Checklist
+## Container checklist
 
 Per HyperI Docker standards:
 

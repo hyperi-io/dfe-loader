@@ -45,7 +45,7 @@ build:
     #   spike/alpha → jemalloc + thin LTO
     #   beta        → jemalloc + fat LTO
     #   release     → jemalloc + fat LTO + PGO/BOLT (opt-in below)
-    # See docs/PERFORMANCE.md and hyperi-ci's
+    # See docs/performance/OVERVIEW.md and hyperi-ci's
     # docs/RUST-RELEASE-TRACK-OPTIMISATION.md for the full contract.
     optimize:
       pgo:

@@ -97,7 +97,7 @@ impl TableFieldMapping {
     /// - Rename: `data.remove()` for zero-copy ownership transfer.
     /// - Copy: `data.get().cloned()` since source is retained.
     ///
-    /// Matches `@renamed` semantics from DDL-EXPRESSION.md.
+    /// Matches `@renamed` semantics from docs/clickhouse/DDL-DIRECTIVES.md.
     pub fn apply(&self, data: &mut Map<String, Value>) {
         if self.rules.is_empty() {
             return;
