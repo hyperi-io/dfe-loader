@@ -1,48 +1,3 @@
-.idea/
-.vscode/
-*.swp
-*.swo
-*~
-.DS_Store
-Thumbs.db
-.env
-.env.local
-.env.*.local
-*.log
-dist/
-dist-bin/
-build/
-out/
-test-results/
-coverage/
-.tmp/
-
-
-# Added by cargo
-
-/target
-target/
-**/*.rs.bk
-*.pdb
-*.profraw
-*.profdata
-coverage-html/
-coverage.lcov
-tarpaulin-report.json
-cobertura.xml
-.cargo/
-!.cargo/config.toml
-
-# Local working files (not committed)
-docs/superpowers/
-.claude/
-hyperi-ai/
-.mcp.json
-CLAUDE.md
-STATE.md
-TODO.md
-.ai-version
-
 # OS junk (never useful in repo)
 .DS_Store
 Thumbs.db
@@ -60,16 +15,18 @@ Thumbs.db
 !.env.example
 !.env.example.*
 
-# here.
-docs/superpowers/
-.mcp.json
-TODO.md
-.ai-version
+# Logs and ad-hoc output
+*.log
+dist/
+dist-bin/
+build/
+out/
+test-results/
+coverage/
+.tmp/
 
-# Git worktrees (local dev convenience)
-.worktrees/
-
-# Rust build artefacts
+# Rust / cargo build artefacts
+/target
 target/
 **/*.rs.bk
 *.pdb
@@ -79,7 +36,24 @@ coverage-html/
 coverage.lcov
 tarpaulin-report.json
 cobertura.xml
-
-# cargo
 .cargo/
 !.cargo/config.toml
+
+# Git worktrees (local dev convenience)
+.worktrees/
+
+# AI tooling and local working files (not committed -- mirrored in .git/info/exclude)
+docs/superpowers/
+.mcp.json
+.ai-version
+hyperi-ai/
+CLAUDE.md
+STATE.md
+TODO.md
+AGENTS.md
+GEMINI.md
+.cursorrules
+.claude/
+.codex/
+.cursor/
+.gemini/
