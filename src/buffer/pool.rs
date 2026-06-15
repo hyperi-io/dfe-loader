@@ -183,7 +183,7 @@ impl Poolable for PooledMap {
     }
 }
 
-/// Pooled Vec<KafkaOffset>
+/// Pooled `Vec<KafkaOffset>`
 pub type PooledOffsets = Vec<KafkaOffset>;
 
 impl Poolable for PooledOffsets {

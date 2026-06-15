@@ -132,7 +132,7 @@ async fn test_kafka_transport_creation() {
 
     let config = get_test_config();
     let start = std::time::Instant::now();
-    let result = TransportAdapter::new(&config).await;
+    let result = TransportAdapter::new(&config, None).await;
 
     match result {
         Ok(transport) => {

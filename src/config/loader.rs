@@ -1040,12 +1040,13 @@ clickhouse:
     }
 
     #[test]
-    fn test_kafka_default_disables_stats() {
+    fn test_kafka_default_enables_stats() {
         let config = KafkaConfig::default();
         assert_eq!(
             config.librdkafka_overrides.get("statistics.interval.ms"),
-            Some(&"0".to_string()),
-            "stats must be disabled by default to prevent log spam"
+            Some(&"5000".to_string()),
+            "stats must be enabled by default so the scaling engine's Kafka \
+             assigned-lag inbound term reads a real value (not 0)"
         );
     }
 

@@ -36,7 +36,7 @@ use clickhouse::Client;
 
 use super::encode::{ColumnDef, DynamicRow};
 use super::error::DynamicError;
-use super::schema::{fetch_dynamic_schema, DynamicSchema, DynamicSchemaCache};
+use super::schema::{DynamicSchema, DynamicSchemaCache, fetch_dynamic_schema};
 
 /// The clickhouse-rs setting that makes the server read a length-prefixed
 /// string as a JSON value, which is how the dynamic encoder writes JSON
@@ -120,10 +120,13 @@ impl DynamicInsert {
         if self.sink.is_some() {
             return Ok(());
         }
-        let schema = self.schema.as_ref().ok_or_else(|| DynamicError::EncodingError {
-            column: String::new(),
-            message: "schema not available after fetch".to_string(),
-        })?;
+        let schema = self
+            .schema
+            .as_ref()
+            .ok_or_else(|| DynamicError::EncodingError {
+                column: String::new(),
+                message: "schema not available after fetch".to_string(),
+            })?;
 
         let columns = select_columns(row, raw_names, schema);
         if columns.is_empty() {
@@ -186,7 +189,8 @@ impl DynamicInsert {
         let raw_names: Vec<&str> = raw_columns.iter().map(|(n, _)| *n).collect();
         self.ensure_schema().await?;
         self.ensure_sink(row, &raw_names).await?;
-        self.encode_and_write(row, raw_columns.first().copied()).await
+        self.encode_and_write(row, raw_columns.first().copied())
+            .await
     }
 
     /// Build the dynamic row (with optional raw passthrough) and write it.
@@ -199,20 +203,27 @@ impl DynamicInsert {
         // insert_columns ends before borrowing self.sink mutably.
         let bytes = {
             let columns =
-                self.insert_columns.as_ref().ok_or_else(|| DynamicError::EncodingError {
-                    column: String::new(),
-                    message: "insert columns not initialised".to_string(),
-                })?;
+                self.insert_columns
+                    .as_ref()
+                    .ok_or_else(|| DynamicError::EncodingError {
+                        column: String::new(),
+                        message: "insert columns not initialised".to_string(),
+                    })?;
             let dyn_row = match raw {
-                Some((json_col, raw_bytes)) => DynamicRow::with_raw(row, columns, raw_bytes, json_col),
+                Some((json_col, raw_bytes)) => {
+                    DynamicRow::with_raw(row, columns, raw_bytes, json_col)
+                }
                 None => DynamicRow::new(row, columns),
             };
             dyn_row.encode()?
         };
-        let sink = self.sink.as_mut().ok_or_else(|| DynamicError::EncodingError {
-            column: String::new(),
-            message: "sink not initialised".to_string(),
-        })?;
+        let sink = self
+            .sink
+            .as_mut()
+            .ok_or_else(|| DynamicError::EncodingError {
+                column: String::new(),
+                message: "sink not initialised".to_string(),
+            })?;
         sink.write_buffered(&bytes);
         self.rows_written += 1;
         Ok(())
@@ -270,7 +281,9 @@ fn select_columns(
     schema
         .columns
         .iter()
-        .filter(|c| row.contains_key(&c.name) || raw_names.contains(&c.name.as_str()) || !c.has_default)
+        .filter(|c| {
+            row.contains_key(&c.name) || raw_names.contains(&c.name.as_str()) || !c.has_default
+        })
         .cloned()
         .collect()
 }

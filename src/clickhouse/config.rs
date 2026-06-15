@@ -511,7 +511,12 @@ mod tests {
         // the port/transport check.
         let cases = [
             (Transport::Native, InsertFormat::RowBinary, "ch:9000", true),
-            (Transport::Native, InsertFormat::JsonEachRow, "ch:9000", false),
+            (
+                Transport::Native,
+                InsertFormat::JsonEachRow,
+                "ch:9000",
+                false,
+            ),
             (Transport::Http, InsertFormat::RowBinary, "ch:8123", true),
             (Transport::Http, InsertFormat::JsonEachRow, "ch:8123", true),
         ];

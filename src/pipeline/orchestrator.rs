@@ -12,7 +12,6 @@
 //! `JSONEachRow` HTTP inserts to `ClickHouse`.
 
 use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
 use std::time::Duration;
 
 use tokio::sync::mpsc;
@@ -23,8 +22,10 @@ use tracing::{debug, error, info, trace, warn};
 use rustc_hash::FxHashSet;
 
 use hyperi_rustlib::ScalingPressure;
+use hyperi_rustlib::SelfRegulationGovernor;
 use hyperi_rustlib::dlq::{Dlq, DlqEntry};
 use hyperi_rustlib::memory::{MemoryGuard, MemoryGuardConfig};
+use hyperi_rustlib::scaling::ScalingSignalsCell;
 
 use crate::Result;
 use crate::buffer::{BufferManager, FlushBatch, KafkaOffset};
@@ -67,13 +68,40 @@ pub struct Orchestrator {
     stats: PipelineStats,
     metrics: Option<Metrics>,
     scaling: Option<Arc<ScalingPressure>>,
+    /// Cgroup-aware memory guard. In production this is the runtime's shared
+    /// guard (the SAME one feeding the self-regulation governor and the worker
+    /// pool), set via [`with_memory_guard`](Self::with_memory_guard); a
+    /// stand-alone guard is built only as a test/default fallback. Accounting
+    /// here (`add_bytes` on recv, `release` after flush) drives the inbound
+    /// pause-partitions brake.
     memory_guard: Arc<MemoryGuard>,
+    /// Self-regulation governor (default-on). When `Some`, its Kafka
+    /// pause-partitions gate is attached to the receive transport so inbound
+    /// intake brakes under memory pressure. `None` when self-regulation is
+    /// disabled (`self_regulation.enabled = false`).
+    governor: Option<SelfRegulationGovernor>,
     worker_pool: Option<Arc<hyperi_rustlib::worker::AdaptiveWorkerPool>>,
     batch_engine: Option<Arc<hyperi_rustlib::worker::BatchEngine>>,
+    /// Per-pod scaling-signal cell from the runtime (2.8.10). The horizontal
+    /// scaling-pressure engine reads it each tick. The orchestrator pushes the
+    /// Kafka assigned-partition lag (inbound term) and the ClickHouse sink's
+    /// circuit-open state (the composite gate) from the recv/flush loop. `None`
+    /// in test/default construction.
+    scaling_signals: Option<Arc<ScalingSignalsCell>>,
+    /// Lightweight ClickHouse sink-health latch driving `set_circuit_open`.
+    /// Set when a whole flush cycle fails with zero successful inserts (sink
+    /// unreachable); cleared the moment any insert succeeds. This is the real,
+    /// observable "sink dead" signal — the loader's per-table CircuitBreaker is
+    /// not wired into the inserter, so we derive the gate from insert outcomes.
+    sink_circuit_open: bool,
 }
 
 impl Orchestrator {
-    /// Create a new orchestrator with config
+    /// Create a new orchestrator with config.
+    ///
+    /// Builds a stand-alone memory guard as a test/default fallback. In
+    /// production the runtime's shared guard is injected via
+    /// [`with_memory_guard`](Self::with_memory_guard).
     pub fn new(config: Config) -> Self {
         let memory_guard = Arc::new(MemoryGuard::new(memory_guard_config(&config)));
         Self {
@@ -84,12 +112,19 @@ impl Orchestrator {
             metrics: None,
             scaling: None,
             memory_guard,
+            governor: None,
             worker_pool: None,
             batch_engine: None,
+            scaling_signals: None,
+            sink_circuit_open: false,
         }
     }
 
-    /// Create a new orchestrator with config and metrics
+    /// Create a new orchestrator with config and metrics.
+    ///
+    /// Builds a stand-alone memory guard as a test/default fallback. In
+    /// production the runtime's shared guard is injected via
+    /// [`with_memory_guard`](Self::with_memory_guard).
     pub fn with_metrics(config: Config, metrics: Metrics) -> Self {
         let memory_guard = Arc::new(MemoryGuard::new(memory_guard_config(&config)));
         Self {
@@ -100,9 +135,22 @@ impl Orchestrator {
             metrics: Some(metrics),
             scaling: None,
             memory_guard,
+            governor: None,
             worker_pool: None,
             batch_engine: None,
+            scaling_signals: None,
+            sink_circuit_open: false,
         }
+    }
+
+    /// Set the per-pod scaling-signal cell (2.8.10 horizontal scaling engine).
+    ///
+    /// The orchestrator pushes the Kafka assigned-partition lag and the
+    /// ClickHouse sink circuit-open state into this cell from its loops; the
+    /// runtime's `ScalingEngine` reads it each tick.
+    pub fn with_scaling_signals(mut self, signals: Arc<ScalingSignalsCell>) -> Self {
+        self.scaling_signals = Some(signals);
+        self
     }
 
     /// Set shared config for hot-reload support
@@ -132,6 +180,27 @@ impl Orchestrator {
         self
     }
 
+    /// Inject the runtime's shared cgroup-aware memory guard.
+    ///
+    /// This replaces the stand-alone fallback guard so the orchestrator accounts
+    /// in-flight bytes on the SAME guard that feeds the self-regulation governor
+    /// and the worker pool — without it the inbound brake would read a guard the
+    /// pipeline never touches.
+    pub fn with_memory_guard(mut self, guard: Arc<MemoryGuard>) -> Self {
+        self.memory_guard = guard;
+        self
+    }
+
+    /// Set the self-regulation governor (default-on).
+    ///
+    /// When `Some`, its Kafka pause-partitions inbound gate is attached to the
+    /// receive transport in [`run`](Self::run). `None` disables self-regulation
+    /// (byte-identical to the pre-governor data path).
+    pub fn with_governor(mut self, governor: Option<SelfRegulationGovernor>) -> Self {
+        self.governor = governor;
+        self
+    }
+
     /// Access the memory guard (for worker pool integration in main.rs).
     pub fn memory_guard(&self) -> &Arc<MemoryGuard> {
         &self.memory_guard
@@ -146,9 +215,17 @@ impl Orchestrator {
     pub async fn run(&mut self) -> Result<()> {
         info!("Starting pipeline orchestrator");
 
-        // Initialize transport backend (Kafka based on config)
-        let transport = TransportBackend::from_config(&self.config).await?;
-        info!(transport = transport.name(), "Transport initialized");
+        // Initialize transport backend (Kafka based on config). When a
+        // self-regulation governor is present, its Kafka pause-partitions inbound
+        // gate is attached to the receiver so intake brakes under memory pressure
+        // (the gate is evaluated automatically inside recv). The outbound
+        // ClickHouse insert drain is NEVER gated — gating the sink would deadlock.
+        let transport = TransportBackend::from_config(&self.config, self.governor.as_ref()).await?;
+        info!(
+            transport = transport.name(),
+            governed = self.governor.is_some(),
+            "Transport initialized"
+        );
 
         // Validate ClickHouse config (transport/port mismatch, JSONEachRow+native)
         let ch_config: crate::clickhouse::ClickHouseConfig = (&self.config.clickhouse).into();
@@ -549,6 +626,19 @@ impl Orchestrator {
                         }
                     }
 
+                    // Push the per-pod Kafka inbound scaling signal (2.8.10).
+                    // assigned_lag() sums lag over THIS pod's ASSIGNED partitions
+                    // (scale-invariant). gRPC has no broker lag -> None -> the
+                    // engine's inbound term stays 0 (CPU-only). The flush tick
+                    // (every flush_age_secs, default 5s) is fresher than the
+                    // engine's 15s tick. The circuit-open gate is pushed from the
+                    // flush path on every insert outcome.
+                    if let Some(ref signals) = self.scaling_signals
+                        && let Some(lag) = transport.assigned_lag()
+                    {
+                        signals.set_kafka_assigned_lag(lag as f64);
+                    }
+
                     // Check for buffers ready to flush
                     let batches = buffer_manager.get_ready_for_flush();
                     if !batches.is_empty() {
@@ -592,26 +682,43 @@ impl Orchestrator {
                     }
                 }
 
-                // Receive batch of messages from transport
-                // Zero-copy: payload is moved (not copied), topic is Arc<str> clone (refcount only)
-                messages = transport.recv(RECV_BATCH_SIZE) => {
-                    // Memory pressure gate (Pattern B): skip processing when under pressure.
-                    // Messages stay in Kafka (not committed) — consumer lag rises, KEDA scales.
-                    if self.memory_guard.under_pressure() {
-                        static PRESSURE_TS: AtomicU64 = AtomicU64::new(0);
-                        if hyperi_rustlib::logger::log_debounced(&PRESSURE_TS, 5000) {
-                            let current = self.memory_guard.current_bytes();
-                            let limit = self.memory_guard.limit_bytes();
-                            warn!(
-                                current_bytes = current,
-                                limit_bytes = limit,
-                                ratio = format_args!("{:.1}%", if limit > 0 { current as f64 / limit as f64 * 100.0 } else { 0.0 }),
-                                "Memory pressure HIGH — pausing consumption (max 1 per 5s)"
-                            );
+                // Receive batch of messages from transport.
+                // Zero-copy: payload Bytes is moved, topic is an Arc<str> clone
+                // (refcount only).
+                //
+                // Inbound memory backpressure is handled by the self-regulation
+                // governor, NOT a hand-rolled pause loop here: the Kafka
+                // pause-partitions gate (attached to the receive transport) pauses
+                // the consumer's ASSIGNED partitions under pressure — the member
+                // stays in the group (no rebalance), consumer lag rises, KEDA
+                // scales up. The gate is evaluated automatically inside recv, so
+                // recv simply returns an empty batch while paused. We never gate
+                // the outbound ClickHouse drain — gating the sink would deadlock.
+                received = transport.recv(RECV_BATCH_SIZE) => {
+                    // Surface any inbound-filter DLQ entries (no silent drop). The
+                    // loader configures no inbound rustlib filters, so this is
+                    // normally empty, but the contract is honoured regardless.
+                    let messages = match received {
+                        Ok(batch) => {
+                            for entry in batch.dlq_entries {
+                                if dlq.is_some() {
+                                    let dlq_entry = DlqEntry::new(
+                                        "loader",
+                                        entry.reason,
+                                        entry.payload,
+                                    );
+                                    if dlq_tx.try_send(dlq_entry).is_ok() {
+                                        self.stats.messages_dlq += 1;
+                                    }
+                                    if let Some(ref m) = self.metrics {
+                                        m.record_dlq();
+                                    }
+                                }
+                            }
+                            Ok(batch.messages)
                         }
-                        tokio::time::sleep(Duration::from_millis(100)).await;
-                        continue;
-                    }
+                        Err(e) => Err(e),
+                    };
 
                     // --- Pending-schema buffer maintenance (#36) ---
                     // Expire stale / globally-evicted entries to DLQ, then
@@ -619,12 +726,14 @@ impl Orchestrator {
                     // fetch during a transient ClickHouse outage). Runs every recv
                     // tick regardless of whether a batch arrived.
                     //
-                    // Note: this sits below the memory-pressure `continue` above,
-                    // so under sustained pressure maintenance pauses (stuck tables
-                    // don't self-heal and aged entries don't expire until pressure
-                    // clears). That is intentional — nothing is lost (memory stays
-                    // accounted; the global cap still bounds the buffer via eviction
-                    // on enqueue), and we avoid doing work while shedding load.
+                    // Note: with inbound backpressure now handled at the transport
+                    // (the governor's pause-partitions gate), there is no
+                    // memory-pressure `continue` short-circuiting this block — recv
+                    // simply returns an empty batch every poll while partitions are
+                    // paused. Maintenance therefore keeps running under sustained
+                    // pressure: stuck tables still re-request and aged entries still
+                    // expire, while no new payload bytes are admitted. The global
+                    // cap still bounds the buffer via eviction on enqueue.
                     let now_pending = std::time::Instant::now();
                     {
                         let expired = pending_schema_buffer.expire(now_pending);
@@ -1014,14 +1123,31 @@ impl Orchestrator {
             })
             .collect();
 
+        // Inserter in-flight / queue depth (2.8.10 audit): the number of insert
+        // tasks the inserter runs concurrently this cycle (bounded by its
+        // semaphore). A high steady value means inserts are the bottleneck.
+        if let Some(ref m) = self.metrics {
+            m.set_inserter_inflight(batch_count as u64);
+        }
+
         let start = Instant::now();
         let results = inserter.insert_batches(batches_for_insert).await;
         let latency = start.elapsed().as_secs_f64();
+
+        // Drain the in-flight gauge once the concurrent inserts complete.
+        if let Some(ref m) = self.metrics {
+            m.set_inserter_inflight(0);
+        }
 
         // Update scaling pressure with insert latency
         if let Some(ref scaling) = self.scaling {
             scaling.set_component("insert_latency", latency);
         }
+
+        // Track per-cycle insert outcomes to derive the ClickHouse sink
+        // circuit-open scaling gate (sink dead == whole cycle failed).
+        let mut cycle_ok = 0usize;
+        let mut cycle_err = 0usize;
 
         // Commit offsets independently per batch — Table A success/failure is isolated
         for ((result, offsets), batch_bytes) in results
@@ -1036,10 +1162,13 @@ impl Orchestrator {
 
             match result {
                 Ok(count) => {
+                    cycle_ok += 1;
                     self.stats.rows_inserted += count as u64;
                     if let Some(ref m) = self.metrics {
                         m.record_flush(count, latency);
                         m.record_insert_quantities(batch_bytes, 1);
+                        // ClickHouse flush-size (bytes) distribution (2.8.10 audit).
+                        m.record_flush_bytes(batch_bytes);
                     }
                     if !offsets.is_empty() {
                         match transport.commit(&offsets).await {
@@ -1060,13 +1189,35 @@ impl Orchestrator {
                     }
                 }
                 Err(e) => {
+                    cycle_err += 1;
                     error!(error = %e, "Batch insert failed — offsets withheld, messages will re-deliver");
                     self.stats.errors += 1;
                     if let Some(ref m) = self.metrics {
                         m.record_error();
+                        // ClickHouse-specific terminal insert error (2.8.10 audit).
+                        m.record_clickhouse_insert_error();
                     }
                 }
             }
+        }
+
+        // Refresh the ClickHouse rows-per-second gauge once per flush cycle.
+        if let Some(ref m) = self.metrics {
+            m.update_clickhouse_rows_per_sec();
+        }
+
+        // Drive the ClickHouse sink circuit-open scaling gate (2.8.10). The
+        // sink is "dead" when a whole flush cycle failed with zero successes;
+        // it recovers the moment any insert succeeds. The engine zeroes the
+        // composite while circuit_open is true (more pods can't relieve a dead
+        // sink) — exactly the right behaviour for a non-rustlib outbound.
+        if cycle_ok > 0 {
+            self.sink_circuit_open = false;
+        } else if cycle_err > 0 {
+            self.sink_circuit_open = true;
+        }
+        if let Some(ref signals) = self.scaling_signals {
+            signals.set_circuit_open(self.sink_circuit_open);
         }
 
         self.stats.batches_flushed += batch_count as u64;

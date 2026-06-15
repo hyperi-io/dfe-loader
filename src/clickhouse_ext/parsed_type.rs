@@ -269,8 +269,9 @@ impl ParsedType {
             return result;
         }
 
-        // Simple type
-        result.base = type_str.to_string();
+        // Simple type — `type_str` is the owned, unwrapped `String` and is not
+        // used after this, so move it rather than clone.
+        result.base = type_str;
         result.tag = TypeTag::from_base(&result.base);
         result
     }

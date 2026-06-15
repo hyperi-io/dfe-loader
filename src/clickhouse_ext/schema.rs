@@ -286,11 +286,16 @@ mod tests {
 
     #[test]
     fn cache_respects_ttl() {
-        let cache = DynamicSchemaCache::new(Duration::from_millis(1));
+        // Generous margins: a 1ms TTL flaked under concurrent test load because
+        // the scheduler could deschedule this thread for >1ms between insert and
+        // the freshness assertion, expiring the entry early. A 100ms TTL keeps
+        // the "present immediately after insert" check reliable, and a 250ms
+        // sleep is comfortably past expiry without racing scheduler jitter.
+        let cache = DynamicSchemaCache::new(Duration::from_millis(100));
         let schema = DynamicSchema::from_columns("db.t", vec![col("id", "UInt64", "")]);
         cache.insert("db.t", schema);
         assert!(cache.get("db.t").is_some());
-        std::thread::sleep(Duration::from_millis(10));
+        std::thread::sleep(Duration::from_millis(250));
         assert!(cache.get("db.t").is_none());
     }
 

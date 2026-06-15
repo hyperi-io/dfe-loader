@@ -58,8 +58,8 @@ use serde_json::{Map, Value};
 use super::error::DynamicError;
 use super::parsed_type::{ParsedType, TypeTag};
 
-use clickhouse::Row;
 use clickhouse::_priv::RowKind;
+use clickhouse::Row;
 
 /// A single resolved column for a dynamic insert.
 #[derive(Debug, Clone)]
@@ -750,7 +750,8 @@ fn datetime64_to_ticks(value: &Value, precision: u8, col: &str) -> Result<i64, D
             let base = secs
                 .checked_mul(multiplier)
                 .ok_or_else(|| enc_err(col, "DateTime64 epoch overflow"))?;
-            let frac_scaled = i64::from(frac_nanos) / 10i64.pow(9u32.saturating_sub(u32::from(precision)));
+            let frac_scaled =
+                i64::from(frac_nanos) / 10i64.pow(9u32.saturating_sub(u32::from(precision)));
             base.checked_add(frac_scaled)
                 .ok_or_else(|| enc_err(col, "DateTime64 epoch overflow"))
         }
@@ -827,15 +828,14 @@ fn parse_datetime_str(s: &str) -> Result<(i64, u32), String> {
     let month: u32 = s[5..7].parse().map_err(|_| "invalid month".to_string())?;
     let day: u32 = s[8..10].parse().map_err(|_| "invalid day".to_string())?;
     let hour: u32 = s[11..13].parse().map_err(|_| "invalid hour".to_string())?;
-    let min: u32 = s[14..16].parse().map_err(|_| "invalid minute".to_string())?;
-    let sec: u32 = s[17..19].parse().map_err(|_| "invalid second".to_string())?;
+    let min: u32 = s[14..16]
+        .parse()
+        .map_err(|_| "invalid minute".to_string())?;
+    let sec: u32 = s[17..19]
+        .parse()
+        .map_err(|_| "invalid second".to_string())?;
 
-    if !(1..=12).contains(&month)
-        || !(1..=31).contains(&day)
-        || hour > 23
-        || min > 59
-        || sec > 59
-    {
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) || hour > 23 || min > 59 || sec > 59 {
         return Err("invalid DateTime string".into());
     }
 
@@ -908,10 +908,8 @@ fn encode_uuid(value: &Value, col: &str, buf: &mut Vec<u8>) -> Result<(), Dynami
         return Err(enc_err(col, "invalid UUID length"));
     }
     // ClickHouse RowBinary UUID: two little-endian u64, high word first.
-    let high =
-        u64::from_str_radix(&hex[..16], 16).map_err(|_| enc_err(col, "invalid UUID hex"))?;
-    let low =
-        u64::from_str_radix(&hex[16..], 16).map_err(|_| enc_err(col, "invalid UUID hex"))?;
+    let high = u64::from_str_radix(&hex[..16], 16).map_err(|_| enc_err(col, "invalid UUID hex"))?;
+    let low = u64::from_str_radix(&hex[16..], 16).map_err(|_| enc_err(col, "invalid UUID hex"))?;
     buf.extend_from_slice(&high.to_le_bytes());
     buf.extend_from_slice(&low.to_le_bytes());
     Ok(())
@@ -1012,7 +1010,10 @@ mod tests {
 
     #[test]
     fn string_from_number() {
-        assert_eq!(enc(json!({"s": 42}), &[("s", "String")]), vec![2, b'4', b'2']);
+        assert_eq!(
+            enc(json!({"s": 42}), &[("s", "String")]),
+            vec![2, b'4', b'2']
+        );
     }
 
     #[test]
@@ -1052,7 +1053,10 @@ mod tests {
 
     #[test]
     fn signed_widths() {
-        assert_eq!(enc(json!({"x": -5}), &[("x", "Int8")]), (-5i8).to_le_bytes());
+        assert_eq!(
+            enc(json!({"x": -5}), &[("x", "Int8")]),
+            (-5i8).to_le_bytes()
+        );
         assert_eq!(
             enc(json!({"x": -300}), &[("x", "Int16")]),
             (-300i16).to_le_bytes()
@@ -1335,7 +1339,10 @@ mod tests {
     fn enum8_and_enum16_numeric() {
         // Enum values are written as the underlying int discriminant. The
         // numeric discriminant is taken from the value directly.
-        assert_eq!(enc(json!({"e": 2}), &[("e", "Enum8('a'=1,'b'=2)")]), vec![2]);
+        assert_eq!(
+            enc(json!({"e": 2}), &[("e", "Enum8('a'=1,'b'=2)")]),
+            vec![2]
+        );
         assert_eq!(
             enc(json!({"e": 200}), &[("e", "Enum16('x'=100,'y'=200)")]),
             200i16.to_le_bytes()
@@ -1346,7 +1353,10 @@ mod tests {
     fn enum8_string_mapping() {
         // String maps to its discriminant from the type definition.
         assert_eq!(
-            enc(json!({"e": "high"}), &[("e", "Enum8('low'=1, 'medium'=2, 'high'=3)")]),
+            enc(
+                json!({"e": "high"}),
+                &[("e", "Enum8('low'=1, 'medium'=2, 'high'=3)")]
+            ),
             vec![3]
         );
         assert_eq!(
@@ -1358,14 +1368,20 @@ mod tests {
     #[test]
     fn enum_unknown_string_errors() {
         let e = enc_err_of(json!({"e": "nope"}), &[("e", "Enum8('a'=1)")]);
-        assert!(matches!(e, DynamicError::EncodingError { .. }), "got: {e:?}");
+        assert!(
+            matches!(e, DynamicError::EncodingError { .. }),
+            "got: {e:?}"
+        );
     }
 
     // ---- Nullable ----
 
     #[test]
     fn nullable_null() {
-        assert_eq!(enc(json!({"n": null}), &[("n", "Nullable(String)")]), vec![1]);
+        assert_eq!(
+            enc(json!({"n": null}), &[("n", "Nullable(String)")]),
+            vec![1]
+        );
     }
 
     #[test]
@@ -1391,10 +1407,7 @@ mod tests {
 
     #[test]
     fn non_nullable_null_gets_default() {
-        assert_eq!(
-            enc(json!({}), &[("x", "UInt32")]),
-            0u32.to_le_bytes()
-        );
+        assert_eq!(enc(json!({}), &[("x", "UInt32")]), 0u32.to_le_bytes());
         // Variable-length default is an empty string.
         assert_eq!(enc(json!({}), &[("s", "String")]), vec![0]);
     }
@@ -1445,29 +1458,20 @@ mod tests {
     #[test]
     fn array_nested() {
         // Array(Array(UInt8)): outer len 2, each inner len + bytes.
-        let bytes = enc(
-            json!({"a": [[1, 2], [3]]}),
-            &[("a", "Array(Array(UInt8))")],
-        );
+        let bytes = enc(json!({"a": [[1, 2], [3]]}), &[("a", "Array(Array(UInt8))")]);
         assert_eq!(bytes, vec![2, /*inner0*/ 2, 1, 2, /*inner1*/ 1, 3]);
     }
 
     #[test]
     fn array_nullable_elements() {
         // Array(Nullable(UInt8)): len 2, then per element null-marker + value.
-        let bytes = enc(
-            json!({"a": [5, null]}),
-            &[("a", "Array(Nullable(UInt8))")],
-        );
+        let bytes = enc(json!({"a": [5, null]}), &[("a", "Array(Nullable(UInt8))")]);
         assert_eq!(bytes, vec![2, 0, 5, 1]);
     }
 
     #[test]
     fn map_string_uint32() {
-        let bytes = enc(
-            json!({"m": {"a": 1}}),
-            &[("m", "Map(String, UInt32)")],
-        );
+        let bytes = enc(json!({"m": {"a": 1}}), &[("m", "Map(String, UInt32)")]);
         let mut expected = vec![1u8]; // count
         expected.extend_from_slice(&[1, b'a']); // key "a"
         expected.extend_from_slice(&1u32.to_le_bytes()); // value
@@ -1478,7 +1482,10 @@ mod tests {
 
     #[test]
     fn json_from_object() {
-        let bytes = enc(json!({"data": {"key": "value", "num": 42}}), &[("data", "JSON")]);
+        let bytes = enc(
+            json!({"data": {"key": "value", "num": 42}}),
+            &[("data", "JSON")],
+        );
         let json_str = r#"{"key":"value","num":42}"#;
         let mut expected = Vec::new();
         write_varint(json_str.len() as u64, &mut expected);
@@ -1498,10 +1505,7 @@ mod tests {
 
     #[test]
     fn nullable_json_null_and_non_null() {
-        assert_eq!(
-            enc(json!({"t": null}), &[("t", "Nullable(JSON)")]),
-            vec![1]
-        );
+        assert_eq!(enc(json!({"t": null}), &[("t", "Nullable(JSON)")]), vec![1]);
         let bytes = enc(json!({"t": {"env": "prod"}}), &[("t", "Nullable(JSON)")]);
         let json_str = r#"{"env":"prod"}"#;
         let mut expected = vec![0u8];
@@ -1570,19 +1574,28 @@ mod tests {
     #[test]
     fn tuple_is_unsupported() {
         let e = enc_err_of(json!({"t": [1, 2]}), &[("t", "Tuple(UInt8, UInt8)")]);
-        assert!(matches!(e, DynamicError::UnsupportedType { .. }), "got: {e:?}");
+        assert!(
+            matches!(e, DynamicError::UnsupportedType { .. }),
+            "got: {e:?}"
+        );
     }
 
     #[test]
     fn variant_is_unsupported() {
         let e = enc_err_of(json!({"v": 1}), &[("v", "Variant(UInt8, String)")]);
-        assert!(matches!(e, DynamicError::UnsupportedType { .. }), "got: {e:?}");
+        assert!(
+            matches!(e, DynamicError::UnsupportedType { .. }),
+            "got: {e:?}"
+        );
     }
 
     #[test]
     fn point_is_unsupported() {
         let e = enc_err_of(json!({"p": [1.0, 2.0]}), &[("p", "Point")]);
-        assert!(matches!(e, DynamicError::UnsupportedType { .. }), "got: {e:?}");
+        assert!(
+            matches!(e, DynamicError::UnsupportedType { .. }),
+            "got: {e:?}"
+        );
     }
 
     // ---- varint ----

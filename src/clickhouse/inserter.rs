@@ -386,7 +386,10 @@ impl Inserter {
                 };
                 if let Err(e) = write_result {
                     // Schema mismatch — invalidate both fork and loader caches, then retry
-                    if matches!(e, crate::clickhouse_ext::DynamicError::SchemaMismatch { .. }) {
+                    if matches!(
+                        e,
+                        crate::clickhouse_ext::DynamicError::SchemaMismatch { .. }
+                    ) {
                         insert.invalidate_schema();
                         if let Some(cache) = &self.schema_cache {
                             cache.invalidate(table);

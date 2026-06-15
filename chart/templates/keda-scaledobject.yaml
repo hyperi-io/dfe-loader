@@ -32,4 +32,15 @@ spec:
       metadata:
         value: {{ .Values.keda.cpu.threshold | quote }}
     {{- end }}
+    {{- if .Values.keda.scalingPressure.enabled }}
+    # Correlated-composite scaling pressure (rustlib ScalingEngine).
+    # The composite is a capped per-pod 0-100 score: query avg()s it across
+    # pods and metricType Value scales proportionally to hold avg <= threshold.
+    - type: prometheus
+      metricType: Value
+      metadata:
+        serverAddress: {{ .Values.keda.scalingPressure.serverAddress | quote }}
+        query: {{ .Values.keda.scalingPressure.query | quote }}
+        threshold: {{ .Values.keda.scalingPressure.threshold | quote }}
+    {{- end }}
 {{- end }}

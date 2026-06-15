@@ -161,7 +161,7 @@ use std::sync::Arc;
 
 /// Pre-computed flattened key for a field path.
 ///
-/// Uses Arc<str> for zero-copy reuse across multiple messages.
+/// Uses `Arc<str>` for zero-copy reuse across multiple messages.
 #[derive(Debug, Clone)]
 struct KeyMapping {
     /// Original field name at this level

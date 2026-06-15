@@ -25,9 +25,15 @@ kafka:
   client_id: clickhouse-loader
 
   # Raw librdkafka overrides (highest priority, override all other settings).
-  # Stats disabled by default to prevent log spam.
+  # NOTE: this map REPLACES the built-in defaults wholesale (serde does not
+  # merge maps), so anything the loader relies on must be repeated here.
+  # statistics.interval.ms drives the per-pod Kafka assigned-partition lag that
+  # feeds the horizontal scaling engine's inbound term — keep it > 0 (the
+  # built-in default is "5000"). Set to "0" only if you deliberately want NO
+  # Kafka-lag-driven scale-out (the engine then falls back to CPU + the
+  # ClickHouse sink circuit gate).
   librdkafka_overrides:
-    statistics.interval.ms: "0"
+    statistics.interval.ms: "5000"
 
   # SASL authentication (optional)
   # sasl:
@@ -152,6 +158,50 @@ memory:
 metrics:
   enabled: true
   address: "0.0.0.0:9090"
+
+# =============================================================================
+# Horizontal scaling-pressure engine (hyperi-rustlib 2.8.10, ENGAGED since 2.8.11)
+# =============================================================================
+# The engine computes a correlated composite pressure from this pod's LOCAL
+# context (CPU + Kafka assigned-partition lag + ClickHouse sink circuit state)
+# and emits it as `dfe_loader_scaling_pressure{name="default"}` plus the gratis
+# `dfe_loader_transport_inbound_pressure_ratio` / `_outbound_` and
+# `dfe_loader_scaling_circuit_open`. KEDA's Prometheus scaler reads these.
+#
+# This `scaling:` section is SHARED with the legacy weighted ScalingPressure
+# (loader_scaling_pressure 0-100). Both deserialise from the same key and ignore
+# each other's fields. The legacy weighted knobs (weight_*, saturation_*,
+# memory_gate_threshold) keep their defaults unless overridden here.
+#
+# WIRING STATUS (read before tuning):
+#   - rustlib 2.8.11's run_app populates the global config cascade from this
+#     --config file BEFORE the ServiceRuntime build, so the engine now actually
+#     reads `transport.inbound: kafka` below and builds with inbound=Kafka (it
+#     was silently defaulting to inbound=Other / CPU-only on 2.8.10).
+#   - The ClickHouse sink circuit-open GATE is LIVE: the orchestrator pushes
+#     sink health to scaling_signals.set_circuit_open(...), so a dead sink
+#     zeroes the emitted pressure (more pods can't relieve a dead sink).
+#   - The Kafka assigned-lag term is LIVE (orchestrator pushes
+#     set_kafka_assigned_lag(...) from the recv loop, sourced from librdkafka
+#     statistics which the loader now enables by default). The inbound term
+#     uses it as a RATIO against `params.lag_target`; with lag_target unset the
+#     term degrades to the context-aware smart default (CPU + circuit gate)
+#     rather than mis-scaling — set lag_target (see below) to scale on backlog.
+scaling:
+  enabled: true
+  interval_secs: 15            # engine evaluation period (off the data hot-path)
+  transport:
+    inbound: kafka             # picks the Kafka assigned-lag inbound pressure term
+    outbound: other            # ClickHouse is NOT a rustlib transport -> no outbound term
+  params:
+    cpu_target: 0.70           # CPU utilisation that counts as "full" for scale-out
+    # lag_target: <PER-POD>    # INTENTIONALLY OMITTED — needs sizing. PER-POD =
+    #   sustained_msgs_per_sec_per_pod * tolerable_backlog_seconds. Until sized,
+    #   the Kafka lag term contributes 0 (smart default = CPU + circuit gate)
+    #   rather than mis-scaling on an arbitrary number.
+  pressures: []                # empty => the context-aware smart default:
+                               #   circuit_open ? 0 : 100 * min(1, max(
+                               #     cpu_ratio / cpu_target, inbound_pressure_ratio))
 
 logging:
   level: info    # trace, debug, info, warn, error

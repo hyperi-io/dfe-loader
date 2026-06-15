@@ -10,6 +10,18 @@ use dfe_loader::pipeline::capture::CaptureOverrides;
 
 use hyperi_rustlib::worker::{AdaptiveWorkerPool, WorkerPoolConfig};
 
+/// Detected parallelism available to this process.
+///
+/// rustlib's `WorkerPoolConfig::resolve_max_threads` caps the configured
+/// `max_threads` at `available_parallelism()` and then validates
+/// `min_threads <= max_threads` — so a hard-coded `min_threads` above the
+/// core count makes `AdaptiveWorkerPool::new` panic. Sizing the pool from this
+/// figure keeps the config valid on single-core CI shards and constrained test
+/// runners while still exercising real parallelism wherever cores exist.
+fn available() -> usize {
+    std::thread::available_parallelism().map_or(1, std::num::NonZero::get)
+}
+
 /// Verify that process_batch uses multiple threads.
 ///
 /// Creates a worker pool with 4 threads, processes 40 messages, and checks
@@ -21,9 +33,13 @@ use hyperi_rustlib::worker::{AdaptiveWorkerPool, WorkerPoolConfig};
 /// instead of failing in that case.
 #[test]
 fn test_process_batch_uses_multiple_threads() {
+    // Size to the available cores (cap at 4). rustlib clamps max_threads to
+    // available_parallelism, so a fixed 4 would make min_threads > max_threads
+    // on a single-core runner and panic in AdaptiveWorkerPool::new.
+    let threads = available().min(4);
     let config = WorkerPoolConfig {
-        min_threads: 4,
-        max_threads: 4,
+        min_threads: threads,
+        max_threads: threads,
         ..Default::default()
     };
     let pool = AdaptiveWorkerPool::new(config);
@@ -42,13 +58,15 @@ fn test_process_batch_uses_multiple_threads() {
     assert_eq!(results.len(), 40);
     let unique_threads = thread_ids.lock().len();
 
-    // Tarpaulin (coverage) constrains thread scheduling — parallelism
-    // may not manifest under instrumentation. Skip the assertion there.
+    // Only assert real parallelism when more than one core is available.
+    // Tarpaulin (coverage) also constrains thread scheduling, so skip there.
     #[cfg(not(tarpaulin))]
-    assert!(
-        unique_threads > 1,
-        "Expected multiple threads, got {unique_threads} — parallelism not working"
-    );
+    if threads > 1 {
+        assert!(
+            unique_threads > 1,
+            "Expected multiple threads, got {unique_threads} — parallelism not working"
+        );
+    }
     #[cfg(tarpaulin)]
     if unique_threads <= 1 {
         eprintln!(
@@ -64,9 +82,14 @@ fn test_process_batch_uses_multiple_threads() {
 /// should be active simultaneously.
 #[test]
 fn test_semaphore_throttle_limits_concurrency() {
+    // The semaphore admits at most `min_threads` concurrent tasks. Size both
+    // from available cores so the config stays valid on a single-core runner
+    // (where max_threads clamps to 1): with 1 core, min == max == 1.
+    let max_threads = available().min(4);
+    let min_threads = (max_threads / 2).max(1);
     let config = WorkerPoolConfig {
-        min_threads: 2,
-        max_threads: 4,
+        min_threads,
+        max_threads,
         ..Default::default()
     };
     let pool = AdaptiveWorkerPool::new(config);
@@ -87,8 +110,8 @@ fn test_semaphore_throttle_limits_concurrency() {
 
     let observed = max_concurrent.load(Ordering::SeqCst);
     assert!(
-        observed <= 2,
-        "Expected max 2 concurrent (semaphore), got {observed}"
+        observed <= min_threads,
+        "Expected at most {min_threads} concurrent (semaphore floor), got {observed}"
     );
 }
 
@@ -101,9 +124,12 @@ fn test_capture_derive_config_parallel_safety() {
     let metadata = dfe_loader::config::MetadataConfig::default();
     let overrides = CaptureOverrides::new(&metadata);
 
+    // Size to available cores (cap at 4) so the config is valid on a
+    // single-core runner; this test asserts correctness, not parallelism.
+    let threads = available().min(4);
     let config = WorkerPoolConfig {
-        min_threads: 4,
-        max_threads: 4,
+        min_threads: threads,
+        max_threads: threads,
         ..Default::default()
     };
     let pool = AdaptiveWorkerPool::new(config);

@@ -3,8 +3,8 @@
 
 //! Parallel-safe message processor.
 //!
-//! [`MessageProcessor`] holds only `&` references to immutable dependencies.
-//! Its [`process`](MessageProcessor::process) method is pure computation — no
+//! `MessageProcessor` holds only `&` references to immutable dependencies.
+//! Its `process` method is pure computation — no
 //! mutable state, no I/O, no `.await`. Safe for rayon `par_iter` via
 //! [`AdaptiveWorkerPool::process_batch`](hyperi_rustlib::worker::AdaptiveWorkerPool::process_batch).
 //!
@@ -504,7 +504,9 @@ mod tests {
         let harness = TestHarness::with_config(config_with_capture_mode(CaptureMode::RawOnly));
         let proc = harness.processor();
         let payload = capture_sample_payload();
-        let processed = proc.process(&harness.make_msg(&payload)).expect("processed");
+        let processed = proc
+            .process(&harness.make_msg(&payload))
+            .expect("processed");
 
         assert!(
             !processed.data.contains_key("_json"),
@@ -564,7 +566,9 @@ mod tests {
         );
 
         let unrouted = serde_json::to_vec(&json!({"action": "x"})).expect("serialize");
-        let fallback = proc.process(&harness.make_msg(&unrouted)).expect("processed");
+        let fallback = proc
+            .process(&harness.make_msg(&unrouted))
+            .expect("processed");
         assert_eq!(
             fallback.table, "dfe.fallback",
             "missing table field must fall back to default_table"

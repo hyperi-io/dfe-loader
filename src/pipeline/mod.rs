@@ -4,8 +4,8 @@
 //! Pipeline orchestration with parallel message processing.
 //!
 //! Architecture:
-//! - [`processor::MessageProcessor`] — pure, parallel-safe computation (rayon)
-//! - [`coordinator::BatchCoordinator`] — sequential state mutation (buffer, DLQ)
+//! - `processor::MessageProcessor` — pure, parallel-safe computation (rayon)
+//! - `coordinator::BatchCoordinator` — sequential state mutation (buffer, DLQ)
 //! - [`orchestrator::Orchestrator`] — thin event loop coordinator
 
 pub mod capture;

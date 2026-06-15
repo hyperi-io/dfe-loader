@@ -40,4 +40,4 @@ pub use encode::{ColumnDef, DynamicRow};
 pub use error::DynamicError;
 pub use insert::DynamicInsert;
 pub use parsed_type::{ParsedType, ParsedTypeExt, TypeTag};
-pub use schema::{fetch_dynamic_schema, DynamicSchema, DynamicSchemaCache};
+pub use schema::{DynamicSchema, DynamicSchemaCache, fetch_dynamic_schema};

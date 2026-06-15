@@ -25,6 +25,14 @@ pub struct KafkaConfig {
     pub sasl: Option<SaslConfig>,
     pub tls: Option<TlsConfig>,
 
+    /// Opt in to an unencrypted Kafka transport (`plaintext` / `sasl_plaintext`)
+    /// in production. rustlib (>=2.8) rejects unencrypted transports under a
+    /// production profile at transport construction unless this is set —
+    /// data and SASL/PLAIN credentials would otherwise ship in the clear. Leave
+    /// `false` (the default) and configure TLS, or set `true` only when the
+    /// in-cluster traffic is already mesh-encrypted.
+    pub allow_insecure_transport: bool,
+
     /// Raw librdkafka configuration overrides (highest priority).
     pub librdkafka_overrides: HashMap<String, String>,
 }
@@ -32,9 +40,16 @@ pub struct KafkaConfig {
 impl Default for KafkaConfig {
     fn default() -> Self {
         let mut overrides = HashMap::new();
-        // Disable rdkafka statistics by default — dfe-loader doesn't use
-        // StatsContext so the stats just spam the log at INFO level.
-        overrides.insert("statistics.interval.ms".to_string(), "0".to_string());
+        // Enable rdkafka statistics every 5s. rustlib's KafkaTransport consumes
+        // these to compute `kafka_consumer_group_lag` (summed over this pod's
+        // ASSIGNED partitions) and the loader pushes that into the scaling
+        // engine's Kafka inbound term via `set_kafka_assigned_lag` (2.8.10+).
+        // With stats disabled ("0") the lag snapshot is always empty so the
+        // inbound scaling term silently reads 0 — the engine would never scale
+        // out on Kafka backlog. 5s is well off the data hot-path and matches the
+        // engine's 15s evaluation tick. rustlib routes the StatsContext output to
+        // its own metrics, not the INFO log, so this no longer spams.
+        overrides.insert("statistics.interval.ms".to_string(), "5000".to_string());
 
         Self {
             brokers: vec!["localhost:9092".to_string()],
@@ -44,6 +59,7 @@ impl Default for KafkaConfig {
             client_id: "clickhouse-loader".to_string(),
             sasl: None,
             tls: None,
+            allow_insecure_transport: false,
             librdkafka_overrides: overrides,
         }
     }

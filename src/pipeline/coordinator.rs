@@ -5,7 +5,7 @@
 //!
 //! Applies results from the parallel processing phase to mutable state:
 //! buffer push, mark_pending, stats, DLQ routing. Called after
-//! [`super::processor::MessageProcessor`] completes and its borrows are released.
+//! `super::processor::MessageProcessor` completes and its borrows are released.
 
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
