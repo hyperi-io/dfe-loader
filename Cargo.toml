@@ -303,7 +303,9 @@ map_unwrap_or = "allow"
 # a background actor task with protocol-level Cancel-on-drop, full-duplex
 # INSERT exception detection, and idle keepalive. See the fork's
 # src/worker/ + src/native/connection_actor.rs for design + rationale.
-clickhouse = { git = "https://github.com/hyperi-io/clickhouse-rs.git", branch = "hyperi-port/06d-tcp-tls-new" }
+# Pinned to the hyperi-port/06d-tcp-tls-new branch tip for a reproducible
+# build (a sha, not a floating branch ref).
+clickhouse = { git = "https://github.com/hyperi-io/clickhouse-rs.git", rev = "6f9acd9694acc9c596ff687c908aa215af100887" }
 #
 # To revert: comment out or remove the [patch.crates-io] section above.
 # =============================================================================
