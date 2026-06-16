@@ -25,7 +25,7 @@ use hyperi_rustlib::SelfRegulationGovernor;
 use hyperi_rustlib::transport::filter::FilteredDlqEntry;
 use hyperi_rustlib::transport::{
     GrpcConfig as TransportGrpcConfig, GrpcTransport, KafkaConfig as TransportKafkaConfig,
-    KafkaToken, KafkaTransport, TransportBase, TransportError, TransportReceiver,
+    KafkaRole, KafkaToken, KafkaTransport, TransportBase, TransportError, TransportReceiver,
 };
 use tracing::{debug, trace};
 
@@ -88,6 +88,10 @@ impl TransportAdapter {
     /// Convert local `KafkaConfig` to hyperi-rustlib `TransportKafkaConfig`.
     pub fn convert_config(config: &KafkaConfig) -> TransportKafkaConfig {
         let mut transport_config = TransportKafkaConfig {
+            // loader is consume-only (Kafka -> ClickHouse); the Consumer role
+            // means rustlib builds no idle producer (#44). The DLQ uses rustlib's
+            // standalone KafkaProducer, not this transport.
+            role: KafkaRole::Consumer,
             brokers: config.brokers.clone(),
             group: config.group.clone(),
             client_id: config.client_id.clone(),
