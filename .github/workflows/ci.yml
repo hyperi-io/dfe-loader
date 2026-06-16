@@ -19,8 +19,19 @@ on:
     inputs:
       tag:
         type: string
-        required: true
-        description: "Tag to publish (e.g. v1.15.2)"
+        required: false
+        default: ""
+        description: "Tag to re-publish (existing tag). Omit + set from-head to release HEAD."
+      from-head:
+        type: string
+        required: false
+        default: ""
+        description: "'true' to release/retry the current HEAD (issue #35)."
+      bump:
+        type: string
+        required: false
+        default: "auto"
+        description: "from-head version: auto | patch | minor | X.Y.Z (exact)."
 
 permissions:
   contents: write
@@ -30,10 +41,12 @@ permissions:
 
 jobs:
   ci:
-    uses: hyperi-io/hyperi-ci/.github/workflows/rust-ci.yml@fec23fd91679f582d4e117a9069ba951750c750e # main
+    uses: hyperi-io/hyperi-ci/.github/workflows/rust-ci.yml@main
     with:
       # `both` → release-channel publish on tagged dispatch (unlocks Tier 2 PGO+BOLT).
       # On non-tag pushes the build channel is `spike` regardless (HYPERCI_CHANNEL='').
       publish-target: both
       tag: ${{ inputs.tag || '' }}
+      from-head: ${{ inputs.from-head || '' }}
+      bump: ${{ inputs.bump || 'auto' }}
     secrets: inherit
