@@ -24,6 +24,7 @@
 //! let mut rx = shared.subscribe();
 //! ```
 
+pub mod credentials;
 pub mod kafka;
 pub mod loader;
 pub mod pipeline;

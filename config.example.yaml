@@ -53,7 +53,10 @@ clickhouse:
   hosts:
     - localhost:9000
   database: default
+  # username may be a literal value, env:VAR, or vault:path:key
   username: default
+  # password may be a literal value, env:VAR, or vault:path:key
+  # (vault: requires the `secrets` feature, which the loader does not enable today)
   password: ""
   # Protocol: "native" (default) - HTTP not supported in Rust version
   # Native protocol is required for performance
@@ -69,6 +72,11 @@ clickhouse:
   #   ca_cert_file: /certs/ca.pem        # Optional: custom CA cert
   #   skip_verify: false
 
+# Example using env vars (uncomment to use):
+# clickhouse:
+#   username: env:CLICKHOUSE_USERNAME
+#   password: env:CLICKHOUSE_PASSWORD
+
 # =============================================================================
 # ClickHouse Cloud Configuration
 # =============================================================================
@@ -77,7 +85,7 @@ clickhouse:
 #     - your-instance.region.clickhouse.cloud:9440
 #   database: default
 #   username: default
-#   password: "your-cloud-password"
+#   password: env:CLICKHOUSE_CLOUD_PASSWORD
 #   protocol: native
 #   tls:
 #     enabled: true

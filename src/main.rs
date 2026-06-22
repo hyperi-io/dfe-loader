@@ -87,6 +87,14 @@ impl DfeApp for App {
         let config_path = self.common_args().config.as_deref().map(String::from);
 
         async move {
+            let mut config = config;
+
+            // Resolve env:/vault: credential specs on ClickHouse credentials before
+            // anyone reads them. See src/config/credentials.rs for the spec syntax.
+            dfe_loader::config::credentials::resolve_clickhouse_credentials(&mut config.clickhouse)
+                .await
+                .map_err(|e| CliError::Config(e.to_string()))?;
+
             // Fire-and-forget version check
             hyperi_rustlib::VersionCheck::new(hyperi_rustlib::VersionCheckConfig {
                 product: "dfe-loader".into(),
