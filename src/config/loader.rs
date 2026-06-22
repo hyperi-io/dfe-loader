@@ -308,13 +308,14 @@ fn apply_figment_env(config: &mut Config) -> Result<()> {
     use figment::providers::{Env, Serialized};
     use hyperi_rustlib::expose_during;
 
-    let extracted: std::result::Result<Config, figment::Error> = expose_during(|| {
+    let extracted = expose_during(|| {
         Figment::from(Serialized::defaults(&*config))
             .merge(Env::prefixed(&format!("{ENV_PREFIX}_")).split("__"))
-            .extract()
+            .extract::<Config>()
+            .map_err(|e| crate::Error::Config(e.to_string()))
     });
 
-    *config = extracted.map_err(|e| crate::Error::Config(e.to_string()))?;
+    *config = extracted?;
     Ok(())
 }
 
