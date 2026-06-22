@@ -129,6 +129,20 @@ impl ClickHouseTestConfig {
         clickhouse_http_ping_ok(&self.http_url())
     }
 
+    /// Probe whether the connected `ClickHouse`'s `default` database uses the
+    /// `Replicated` engine.
+    ///
+    /// Tests that create `ReplicatedMergeTree()` tables with no explicit
+    /// ZooKeeper path rely on the Replicated database engine to expand the
+    /// `{uuid}` macro and auto-fill that path. Against a single-node Atomic
+    /// `default` database the server rejects the DDL (error 36), so such tests
+    /// must skip. This is capability-based (queries `system.databases`) rather
+    /// than mode-based, so it also catches `remote` mode falling back to a
+    /// single-node localhost `ClickHouse` when no `.env` is configured.
+    pub fn has_replicated_default_db(&self) -> bool {
+        clickhouse_default_db_is_replicated(&self.http_url(), &self.user, &self.password)
+    }
+
     pub fn http_addr(&self) -> String {
         format!("{}:{}", self.host, self.http_port)
     }
@@ -334,6 +348,32 @@ macro_rules! skip_if_docker {
         if $crate::common::TestMode::detect() == $crate::common::TestMode::Docker {
             eprintln!(
                 "Skipping: test requires replicated cluster (TEST_MODE=docker is single-node)"
+            );
+            return;
+        }
+    };
+}
+
+/// Skip test unless the connected `ClickHouse`'s `default` database is the
+/// `Replicated` engine.
+///
+/// Capability-based replacement for `skip_if_docker!` on tests that create
+/// `ReplicatedMergeTree()` tables with no ZooKeeper path: those need the
+/// `Replicated` database engine so the `{uuid}` macro expands. Unlike the
+/// mode-based `skip_if_docker!`, this also skips when `remote` mode falls back
+/// to a single-node localhost `ClickHouse` (no `.env`), where the DDL would
+/// otherwise fail with server error 36. Call after `skip_if_no_clickhouse!`,
+/// which guarantees the probe target is reachable.
+#[macro_export]
+macro_rules! skip_if_not_replicated {
+    () => {
+        let ch = $crate::common::ClickHouseTestConfig::from_env();
+        if !ch.has_replicated_default_db() {
+            eprintln!(
+                "Skipping: test requires a Replicated-cluster ClickHouse at {} (TEST_MODE={}); \
+                 the default database is not the Replicated engine",
+                ch.http_addr(),
+                $crate::common::TestMode::detect()
             );
             return;
         }
@@ -596,6 +636,43 @@ fn clickhouse_http_ping_ok(base_url: &str) -> bool {
             return Some(false);
         }
         Some(resp.text().ok()?.trim() == "Ok.")
+    })
+    .join()
+    .ok()
+    .flatten()
+    .unwrap_or(false)
+}
+
+/// Query `system.databases` over HTTP and report whether the `default` database
+/// uses the `Replicated` engine. Returns `false` on any error (unreachable,
+/// auth failure, non-Replicated engine).
+///
+/// Same thread-isolated `reqwest::blocking` pattern as `clickhouse_http_ping_ok`
+/// — the fresh `std::thread::spawn` keeps reqwest's internal runtime from
+/// panicking on drop inside the outer `#[tokio::test]` runtime.
+fn clickhouse_default_db_is_replicated(base_url: &str, user: &str, password: &str) -> bool {
+    let url = base_url.trim_end_matches('/').to_string();
+    let user = user.to_string();
+    let password = password.to_string();
+    std::thread::spawn(move || -> Option<bool> {
+        let client = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(3))
+            .build()
+            .ok()?;
+        let resp = client
+            .get(&url)
+            .header("X-ClickHouse-User", user)
+            .header("X-ClickHouse-Key", password)
+            .query(&[(
+                "query",
+                "SELECT engine FROM system.databases WHERE name = 'default'",
+            )])
+            .send()
+            .ok()?;
+        if !resp.status().is_success() {
+            return Some(false);
+        }
+        Some(resp.text().ok()?.trim() == "Replicated")
     })
     .join()
     .ok()

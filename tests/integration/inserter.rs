@@ -18,7 +18,7 @@ use crate::common::{
     create_ch_test_client, create_http_test_client, drop_http_test_table,
     unique_qualified_table_name, unique_table_name,
 };
-use crate::{skip_if_docker, skip_if_no_clickhouse};
+use crate::{skip_if_no_clickhouse, skip_if_not_replicated};
 
 /// Helper: create JSON rows for testing
 fn make_test_rows(count: usize) -> Vec<Map<String, Value>> {
@@ -509,7 +509,7 @@ fn test_circuit_breaker_config_validation() {
 #[tokio::test]
 async fn test_rowbinary_json_from_raw_payload() {
     skip_if_no_clickhouse!();
-    skip_if_docker!();
+    skip_if_not_replicated!();
 
     let client = if let Some(c) = create_http_test_client() {
         Arc::new(c)
@@ -604,7 +604,7 @@ async fn test_rowbinary_json_from_raw_payload() {
 #[tokio::test]
 async fn test_raw_only_mode_raw_populated_json_null() {
     skip_if_no_clickhouse!();
-    skip_if_docker!();
+    skip_if_not_replicated!();
 
     let client = if let Some(c) = create_http_test_client() {
         Arc::new(c)
@@ -688,7 +688,7 @@ async fn test_raw_only_mode_raw_populated_json_null() {
 #[tokio::test]
 async fn test_extracted_only_mode_both_null() {
     skip_if_no_clickhouse!();
-    skip_if_docker!();
+    skip_if_not_replicated!();
 
     let client = if let Some(c) = create_http_test_client() {
         Arc::new(c)
