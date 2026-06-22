@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: FSL-1.1-ALv2
+// SPDX-License-Identifier: BUSL-1.1
 // Copyright (c) 2026 HYPERI PTY LIMITED
 
 // Project:   dfe-loader
@@ -6,7 +6,7 @@
 // Purpose:   ClickHouse connection configuration
 // Language:  Rust
 //
-// License:   FSL-1.1-ALv2
+// License:   BUSL-1.1
 // Copyright: (c) 2026 HYPERI PTY LIMITED
 
 //! `ClickHouse` connection configuration.
@@ -275,6 +275,19 @@ impl ClickHouseConfig {
     pub fn validate(&self) -> Result<Vec<String>, String> {
         let mut warnings = Vec::new();
 
+        // JSONEachRow is HTTP-only: the dynamic insert path sends JSONEachRow
+        // through `Client::insert_formatted_with` (HTTP). A native-transport
+        // client has no HTTP endpoint, so this combination fails at insert
+        // time. Reject it at config time so `config-check` catches it.
+        if self.transport == Transport::Native && self.insert_format == InsertFormat::JsonEachRow {
+            return Err(
+                "insert_format 'json_each_row' requires transport 'http' (JSONEachRow is \
+                 sent over HTTP). Set transport = 'http', or use insert_format = 'rowbinary' \
+                 which works on both transports."
+                    .to_string(),
+            );
+        }
+
         // Detect port/transport mismatch
         if let Some(host) = self.hosts.first()
             && let Some(port_str) = host.rsplit(':').next()
@@ -489,5 +502,51 @@ mod tests {
         let warnings = result.unwrap();
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("HTTP port 8123"));
+    }
+
+    #[test]
+    fn validate_transport_insert_format_matrix() {
+        // (transport, insert_format, host, expect_ok). Hosts use the matching
+        // port so this isolates the transport x insert_format interaction from
+        // the port/transport check.
+        let cases = [
+            (Transport::Native, InsertFormat::RowBinary, "ch:9000", true),
+            (
+                Transport::Native,
+                InsertFormat::JsonEachRow,
+                "ch:9000",
+                false,
+            ),
+            (Transport::Http, InsertFormat::RowBinary, "ch:8123", true),
+            (Transport::Http, InsertFormat::JsonEachRow, "ch:8123", true),
+        ];
+        for (transport, insert_format, host, expect_ok) in cases {
+            let config = ClickHouseConfig {
+                hosts: vec![host.to_string()],
+                transport,
+                insert_format,
+                ..Default::default()
+            };
+            let result = config.validate();
+            assert_eq!(
+                result.is_ok(),
+                expect_ok,
+                "transport={transport} insert_format={insert_format}: got {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_native_json_each_row_error_is_actionable() {
+        let config = ClickHouseConfig {
+            hosts: vec!["ch:9000".to_string()],
+            transport: Transport::Native,
+            insert_format: InsertFormat::JsonEachRow,
+            ..Default::default()
+        };
+        let err = config.validate().unwrap_err();
+        assert!(err.contains("json_each_row"), "message: {err}");
+        assert!(err.contains("http"), "message: {err}");
+        assert!(err.contains("rowbinary"), "message: {err}");
     }
 }

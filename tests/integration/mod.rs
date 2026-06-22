@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: FSL-1.1-ALv2
+// SPDX-License-Identifier: BUSL-1.1
 // Copyright (c) 2026 HYPERI PTY LIMITED
 
 //! Integration tests
@@ -24,4 +24,5 @@ mod property;
 mod resilience;
 mod rls;
 mod schema;
+mod schema_pending_e2e;
 mod transport;

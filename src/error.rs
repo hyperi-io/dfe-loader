@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: FSL-1.1-ALv2
+// SPDX-License-Identifier: BUSL-1.1
 // Copyright (c) 2026 HYPERI PTY LIMITED
 
 //! Error types for the loader
@@ -28,6 +28,9 @@ pub enum Error {
 
     #[error("Schema error: {0}")]
     Schema(String),
+
+    #[error("schema pending for table {table}")]
+    SchemaPending { table: String },
 
     #[error("Buffer error: {0}")]
     Buffer(String),
@@ -155,5 +158,15 @@ mod tests {
         let e = Error::Buffer("x".into());
         let d = format!("{e:?}");
         assert!(d.contains("Buffer"));
+    }
+
+    #[test]
+    fn error_display_schema_pending() {
+        let e = Error::SchemaPending {
+            table: "dfe.events".into(),
+        };
+        let s = e.to_string();
+        assert!(s.contains("schema pending"));
+        assert!(s.contains("dfe.events"));
     }
 }

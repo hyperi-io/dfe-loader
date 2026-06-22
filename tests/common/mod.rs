@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: FSL-1.1-ALv2
+// SPDX-License-Identifier: BUSL-1.1
 // Copyright (c) 2026 HYPERI PTY LIMITED
 
 //! Shared test utilities and fixtures.
@@ -457,11 +457,11 @@ pub fn create_http_test_client() -> Option<dfe_loader::clickhouse::ClickHouseQue
     dfe_loader::clickhouse::ClickHouseQueryClient::new(&ch_config).ok()
 }
 
-/// Create a clickhouse-rs fork `UnifiedClient` for integration tests.
+/// Create a clickhouse-rs fork `Client` for integration tests.
 ///
 /// Used by `Inserter` tests that need `DynamicInsert` or `InsertFormatted`.
 /// Defaults to HTTP transport for test compatibility.
-pub fn create_ch_test_client() -> Option<clickhouse::UnifiedClient> {
+pub fn create_ch_test_client() -> Option<clickhouse::Client> {
     let ch = ClickHouseTestConfig::from_env();
     if !ch.is_reachable() {
         return None;
@@ -471,13 +471,34 @@ pub fn create_ch_test_client() -> Option<clickhouse::UnifiedClient> {
     let url = format!("{scheme}://{}:{}", ch.host, ch.http_port);
 
     Some(
-        clickhouse::UnifiedClient::http()
+        clickhouse::Client::default()
             .with_url(&url)
             .with_user(&ch.user)
             .with_password(&ch.password)
-            .with_database(&ch.database)
-            .build(),
+            .with_database(&ch.database),
     )
+}
+
+/// Create a native-TCP fork `Client` for integration tests (port 9000/9440).
+///
+/// Exercises the RowBinary-over-TCP insert path
+/// (`with_columns_tcp`, clickhouse-rs#14). TLS uses the host as the SNI name.
+pub fn create_ch_test_client_tcp() -> Option<clickhouse::Client> {
+    let ch = ClickHouseTestConfig::from_env();
+    if !ch.is_reachable() {
+        return None;
+    }
+    let addr = ch.native_addr();
+    let mut client = if ch.tls {
+        clickhouse::Client::tcp_tls(addr, ch.host.clone())
+    } else {
+        clickhouse::Client::tcp(addr)
+    };
+    client = client.with_user(&ch.user).with_database(&ch.database);
+    if !ch.password.is_empty() {
+        client = client.with_password(&ch.password);
+    }
+    Some(client)
 }
 
 /// Drop a test table — uses ON CLUSTER for remote cluster, plain for Docker.
@@ -494,7 +515,7 @@ pub async fn drop_http_test_table(
 // Test Data Generators
 // ============================================================================
 
-/// Create a unique test table name
+/// Create a unique test table name (bare, no database).
 pub fn unique_table_name(prefix: &str) -> String {
     format!(
         "{}_{}_{}",
@@ -502,6 +523,18 @@ pub fn unique_table_name(prefix: &str) -> String {
         std::process::id(),
         chrono::Utc::now().timestamp_millis()
     )
+}
+
+/// Unique test table name qualified with the configured database.
+///
+/// The `Inserter` resolves a bare table name to the `default` database
+/// (`parse_db_table`), while DDL run through the query client lands in the
+/// connection's configured database (`benchmark` on the devex cluster). Tests
+/// that create a table AND drive the `Inserter` against it must agree on the
+/// database, so they qualify the name with `ClickHouseTestConfig::database`.
+pub fn unique_qualified_table_name(prefix: &str) -> String {
+    let db = ClickHouseTestConfig::from_env().database;
+    format!("{db}.{}", unique_table_name(prefix))
 }
 
 /// Generate sample event JSON for testing

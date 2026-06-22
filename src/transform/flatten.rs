@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: FSL-1.1-ALv2
+// SPDX-License-Identifier: BUSL-1.1
 // Copyright (c) 2026 HYPERI PTY LIMITED
 
 //! JSON flattening (nested objects → dot notation)
@@ -161,7 +161,7 @@ use std::sync::Arc;
 
 /// Pre-computed flattened key for a field path.
 ///
-/// Uses Arc<str> for zero-copy reuse across multiple messages.
+/// Uses `Arc<str>` for zero-copy reuse across multiple messages.
 #[derive(Debug, Clone)]
 struct KeyMapping {
     /// Original field name at this level

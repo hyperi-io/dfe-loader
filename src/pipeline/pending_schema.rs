@@ -1,0 +1,437 @@
+// SPDX-License-Identifier: BUSL-1.1
+// Copyright (c) 2026 HYPERI PTY LIMITED
+
+//! Pending-schema buffer.
+//!
+//! Holds messages whose destination table's schema is not yet cached.
+//! Drained when the background resolver populates the schema. Caps and
+//! age limits route overflow / stale messages to DLQ with security events.
+//!
+//! `last_requested_at` drives two things: the first-request signal
+//! (`EnqueueOutcome::NeedsResolution`) so the caller kicks off resolution,
+//! and periodic re-requests (added in a later task) so a table whose
+//! resolution failed — e.g. a transient ClickHouse outage — is retried
+//! instead of silently ageing out to the DLQ.
+
+use std::collections::VecDeque;
+use std::time::{Duration, Instant};
+
+use rustc_hash::FxHashMap;
+
+use crate::clickhouse::SchemaCache;
+use crate::kafka::KafkaMessage;
+
+/// Per-buffer configuration.
+///
+/// The `max_` prefix on every field is intentional and reads clearly at the
+/// call sites (`config.max_per_table`); the shared prefix is not noise here.
+#[derive(Debug, Clone)]
+#[allow(clippy::struct_field_names)]
+pub(crate) struct PendingSchemaConfig {
+    pub max_per_table: usize,
+    pub max_total: usize,
+    pub max_age: Duration,
+}
+
+impl PendingSchemaConfig {
+    pub fn from_schema_config(c: &crate::config::SchemaConfig) -> Self {
+        Self {
+            max_per_table: c.pending_max_per_table,
+            max_total: c.pending_max_total,
+            max_age: Duration::from_secs(c.pending_max_age_secs),
+        }
+    }
+}
+
+/// Outcome of a successful `enqueue` call.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum EnqueueOutcome {
+    /// Enqueued; resolution has already been requested for this table.
+    Enqueued,
+    /// Enqueued; caller must push the table to the resolver channel.
+    NeedsResolution,
+}
+
+/// Error returned by `enqueue` when caps are hit.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum PendingOverflow {
+    /// Per-table cap exceeded for this table.
+    PerTable(String),
+}
+
+/// Reason a message was returned by `expire` / `drain_all`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ExpireReason {
+    AgeExceeded { age_ms: u128, table: String },
+    GlobalCapEviction { table: String },
+    Shutdown { table: String },
+}
+
+struct PendingMsg {
+    msg: KafkaMessage,
+    table: String,
+    enqueued_at: Instant,
+}
+
+pub(crate) struct PendingSchemaBuffer {
+    per_table: FxHashMap<String, VecDeque<PendingMsg>>,
+    /// Last time resolution was requested for a table. Drives the
+    /// first-request signal AND periodic re-requests. Cleared for a table
+    /// when `take_ready` drains it.
+    last_requested_at: FxHashMap<String, Instant>,
+    total_count: usize,
+    /// Messages evicted by global-cap overflow, drained on the next
+    /// `expire()` call (added in a later task).
+    evicted: VecDeque<(KafkaMessage, ExpireReason)>,
+    config: PendingSchemaConfig,
+}
+
+impl PendingSchemaBuffer {
+    pub fn new(config: PendingSchemaConfig) -> Self {
+        Self {
+            per_table: FxHashMap::default(),
+            last_requested_at: FxHashMap::default(),
+            total_count: 0,
+            evicted: VecDeque::new(),
+            config,
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.total_count
+    }
+
+    pub fn len_per_table(&self, table: &str) -> usize {
+        self.per_table.get(table).map_or(0, VecDeque::len)
+    }
+
+    /// Enqueue a message awaiting schema resolution.
+    ///
+    /// Returns `NeedsResolution` the first time a table is seen (caller must
+    /// push the table to the resolver channel); `Enqueued` otherwise.
+    ///
+    /// Per-table cap: returns `Err(PerTable)` and does NOT enqueue — the
+    /// caller routes the current message to DLQ. Global cap: evicts the
+    /// oldest message across all tables (queued in `evicted`) before inserting.
+    pub fn enqueue(
+        &mut self,
+        table: String,
+        msg: KafkaMessage,
+    ) -> Result<EnqueueOutcome, PendingOverflow> {
+        if self.len_per_table(&table) >= self.config.max_per_table {
+            return Err(PendingOverflow::PerTable(table));
+        }
+
+        if self.total_count >= self.config.max_total {
+            self.evict_oldest();
+        }
+
+        let queue = self.per_table.entry(table.clone()).or_default();
+        queue.push_back(PendingMsg {
+            msg,
+            table: table.clone(),
+            enqueued_at: Instant::now(),
+        });
+        self.total_count += 1;
+
+        // First time we see this table -> caller must request resolution.
+        match self.last_requested_at.entry(table) {
+            std::collections::hash_map::Entry::Occupied(_) => Ok(EnqueueOutcome::Enqueued),
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                slot.insert(Instant::now());
+                Ok(EnqueueOutcome::NeedsResolution)
+            }
+        }
+    }
+
+    /// Drain messages whose table now has a cached schema.
+    ///
+    /// Clears the per-table request timestamp so a later miss for the same
+    /// table triggers a fresh resolution request.
+    pub fn take_ready(&mut self, schema_cache: &SchemaCache) -> Vec<KafkaMessage> {
+        let mut out = Vec::new();
+        let ready_tables: Vec<String> = self
+            .per_table
+            .keys()
+            .filter(|t| schema_cache.get(t).is_some())
+            .cloned()
+            .collect();
+        for table in ready_tables {
+            if let Some(queue) = self.per_table.remove(&table) {
+                self.total_count -= queue.len();
+                self.last_requested_at.remove(&table);
+                out.extend(queue.into_iter().map(|p| p.msg));
+            }
+        }
+        out
+    }
+
+    /// Return messages older than `config.max_age`, plus any global-cap
+    /// evictions queued since the last call. Caller routes them to DLQ.
+    pub fn expire(&mut self, now: Instant) -> Vec<(KafkaMessage, ExpireReason)> {
+        let mut out: Vec<(KafkaMessage, ExpireReason)> = self.evicted.drain(..).collect();
+
+        let max_age = self.config.max_age;
+        let mut empty_tables = Vec::new();
+        for (table, queue) in &mut self.per_table {
+            while let Some(front) = queue.front() {
+                let age = now.saturating_duration_since(front.enqueued_at);
+                if age < max_age {
+                    break;
+                }
+                let p = queue.pop_front().expect("front checked above");
+                self.total_count -= 1;
+                out.push((
+                    p.msg,
+                    ExpireReason::AgeExceeded {
+                        age_ms: age.as_millis(),
+                        table: p.table,
+                    },
+                ));
+            }
+            if queue.is_empty() {
+                empty_tables.push(table.clone());
+            }
+        }
+        for t in empty_tables {
+            self.per_table.remove(&t);
+            self.last_requested_at.remove(&t);
+        }
+        out
+    }
+
+    /// Drain all pending messages with `Shutdown` reason. Caller routes to DLQ.
+    pub fn drain_all(&mut self) -> Vec<(KafkaMessage, ExpireReason)> {
+        let mut out: Vec<(KafkaMessage, ExpireReason)> = self.evicted.drain(..).collect();
+        for (table, queue) in self.per_table.drain() {
+            for p in queue {
+                out.push((
+                    p.msg,
+                    ExpireReason::Shutdown {
+                        table: table.clone(),
+                    },
+                ));
+            }
+        }
+        self.total_count = 0;
+        self.last_requested_at.clear();
+        out
+    }
+
+    /// Tables still pending whose last resolution request is older than
+    /// `interval`. Re-stamps them to `now`. The caller re-sends each to the
+    /// resolver — so a table whose resolution failed (e.g. a transient
+    /// ClickHouse outage) is retried instead of silently ageing out to DLQ.
+    pub fn tables_needing_rerequest(&mut self, now: Instant, interval: Duration) -> Vec<String> {
+        let due: Vec<String> = self
+            .last_requested_at
+            .iter()
+            .filter(|&(_, &ts)| now.saturating_duration_since(ts) >= interval)
+            .map(|(t, _)| t.clone())
+            .collect();
+        for t in &due {
+            self.last_requested_at.insert(t.clone(), now);
+        }
+        due
+    }
+
+    /// Evict the oldest message across all tables into the eviction queue.
+    /// Drained by `expire()` (added in a later task).
+    fn evict_oldest(&mut self) {
+        let oldest_table = self
+            .per_table
+            .iter()
+            .filter_map(|(t, q)| q.front().map(|m| (t.clone(), m.enqueued_at)))
+            .min_by_key(|(_, ts)| *ts)
+            .map(|(t, _)| t);
+
+        if let Some(table) = oldest_table
+            && let Some(queue) = self.per_table.get_mut(&table)
+            && let Some(p) = queue.pop_front()
+        {
+            self.total_count -= 1;
+            self.evicted
+                .push_back((p.msg, ExpireReason::GlobalCapEviction { table: p.table }));
+            if queue.is_empty() {
+                self.per_table.remove(&table);
+                self.last_requested_at.remove(&table);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::clickhouse::schema::SchemaCache;
+    use crate::clickhouse::{ColumnInfo, ParsedType, TableSchema};
+
+    fn make_msg(payload: &[u8]) -> KafkaMessage {
+        KafkaMessage {
+            payload: payload.to_vec(),
+            topic: Arc::from("t"),
+            partition: 0,
+            offset: 0,
+            key: None,
+            timestamp_ms: None,
+        }
+    }
+
+    fn small_cfg() -> PendingSchemaConfig {
+        PendingSchemaConfig {
+            max_per_table: 3,
+            max_total: 10,
+            max_age: Duration::from_secs(30),
+        }
+    }
+
+    fn dummy_schema(table: &str) -> TableSchema {
+        let (db, t) = table.split_once('.').unwrap_or(("default", table));
+        TableSchema {
+            database: db.into(),
+            table: t.into(),
+            columns: vec![ColumnInfo {
+                name: "c".into(),
+                type_name: "String".into(),
+                parsed_type: ParsedType::parse("String"),
+                position: 0,
+                default_kind: String::new(),
+                default_expression: String::new(),
+                comment: String::new(),
+                is_in_primary_key: false,
+                is_in_sorting_key: false,
+            }],
+            comment: String::new(),
+        }
+    }
+
+    #[test]
+    fn enqueue_first_time_needs_resolution() {
+        let mut buf = PendingSchemaBuffer::new(small_cfg());
+        let out = buf.enqueue("dfe.t1".into(), make_msg(b"a")).unwrap();
+        assert_eq!(out, EnqueueOutcome::NeedsResolution);
+        assert_eq!(buf.len(), 1);
+        assert_eq!(buf.len_per_table("dfe.t1"), 1);
+    }
+
+    #[test]
+    fn enqueue_second_time_returns_enqueued() {
+        let mut buf = PendingSchemaBuffer::new(small_cfg());
+        buf.enqueue("dfe.t1".into(), make_msg(b"a")).unwrap();
+        let out = buf.enqueue("dfe.t1".into(), make_msg(b"b")).unwrap();
+        assert_eq!(out, EnqueueOutcome::Enqueued);
+        assert_eq!(buf.len(), 2);
+    }
+
+    #[test]
+    fn take_ready_drains_when_schema_present() {
+        let mut buf = PendingSchemaBuffer::new(small_cfg());
+        buf.enqueue("dfe.t1".into(), make_msg(b"a")).unwrap();
+        buf.enqueue("dfe.t1".into(), make_msg(b"b")).unwrap();
+        buf.enqueue("dfe.t2".into(), make_msg(b"c")).unwrap();
+
+        let cache = SchemaCache::new(300);
+        cache.insert("dfe.t1".into(), dummy_schema("dfe.t1"));
+
+        let ready = buf.take_ready(&cache);
+        assert_eq!(ready.len(), 2);
+        assert_eq!(buf.len(), 1); // t2 still pending
+        assert_eq!(buf.len_per_table("dfe.t1"), 0);
+
+        // Re-enqueue t1 -> resolution must be requested again.
+        let out = buf.enqueue("dfe.t1".into(), make_msg(b"d")).unwrap();
+        assert_eq!(out, EnqueueOutcome::NeedsResolution);
+    }
+
+    #[test]
+    fn enqueue_per_table_overflow_returns_err() {
+        let mut buf = PendingSchemaBuffer::new(small_cfg()); // max_per_table = 3
+        buf.enqueue("dfe.t1".into(), make_msg(b"a")).unwrap();
+        buf.enqueue("dfe.t1".into(), make_msg(b"b")).unwrap();
+        buf.enqueue("dfe.t1".into(), make_msg(b"c")).unwrap();
+        let err = buf.enqueue("dfe.t1".into(), make_msg(b"d")).unwrap_err();
+        assert_eq!(err, PendingOverflow::PerTable("dfe.t1".into()));
+        assert_eq!(buf.len(), 3); // unchanged
+    }
+
+    #[test]
+    fn enqueue_global_overflow_evicts_oldest_across_tables() {
+        let cfg = PendingSchemaConfig {
+            max_per_table: 100,
+            max_total: 3,
+            max_age: Duration::from_secs(30),
+        };
+        let mut buf = PendingSchemaBuffer::new(cfg);
+        buf.enqueue("a".into(), make_msg(b"1")).unwrap();
+        std::thread::sleep(Duration::from_millis(2));
+        buf.enqueue("b".into(), make_msg(b"2")).unwrap();
+        std::thread::sleep(Duration::from_millis(2));
+        buf.enqueue("a".into(), make_msg(b"3")).unwrap();
+        // Full. Next enqueue evicts the oldest (table "a", payload b"1").
+        buf.enqueue("c".into(), make_msg(b"4")).unwrap();
+        assert_eq!(buf.len(), 3);
+
+        // The eviction is drained via expire().
+        let expired = buf.expire(Instant::now());
+        assert_eq!(expired.len(), 1);
+        let (msg, reason) = &expired[0];
+        assert_eq!(msg.payload, b"1");
+        assert!(matches!(reason, ExpireReason::GlobalCapEviction { table } if table == "a"));
+    }
+
+    #[test]
+    fn expire_returns_messages_older_than_max_age() {
+        let cfg = PendingSchemaConfig {
+            max_per_table: 100,
+            max_total: 100,
+            max_age: Duration::from_millis(20),
+        };
+        let mut buf = PendingSchemaBuffer::new(cfg);
+        buf.enqueue("a".into(), make_msg(b"old")).unwrap();
+        std::thread::sleep(Duration::from_millis(40));
+        buf.enqueue("a".into(), make_msg(b"new")).unwrap();
+
+        let expired = buf.expire(Instant::now());
+        assert_eq!(expired.len(), 1);
+        assert_eq!(expired[0].0.payload, b"old");
+        assert!(matches!(expired[0].1, ExpireReason::AgeExceeded { .. }));
+        assert_eq!(buf.len(), 1); // "new" still pending
+    }
+
+    #[test]
+    fn drain_all_returns_everything_with_shutdown_reason() {
+        let mut buf = PendingSchemaBuffer::new(small_cfg());
+        buf.enqueue("a".into(), make_msg(b"1")).unwrap();
+        buf.enqueue("b".into(), make_msg(b"2")).unwrap();
+        let drained = buf.drain_all();
+        assert_eq!(drained.len(), 2);
+        assert!(
+            drained
+                .iter()
+                .all(|(_, r)| matches!(r, ExpireReason::Shutdown { .. }))
+        );
+        assert_eq!(buf.len(), 0);
+    }
+
+    #[test]
+    fn tables_needing_rerequest_after_interval() {
+        let mut buf = PendingSchemaBuffer::new(small_cfg());
+        buf.enqueue("dfe.t1".into(), make_msg(b"a")).unwrap();
+        // Just enqueued -> not yet due.
+        assert!(
+            buf.tables_needing_rerequest(Instant::now(), Duration::from_secs(2))
+                .is_empty()
+        );
+        // After the interval -> due, and re-stamped.
+        let later = Instant::now() + Duration::from_secs(3);
+        let due = buf.tables_needing_rerequest(later, Duration::from_secs(2));
+        assert_eq!(due, vec!["dfe.t1".to_string()]);
+        // Immediately asking again at the same instant -> nothing (re-stamped).
+        assert!(
+            buf.tables_needing_rerequest(later, Duration::from_secs(2))
+                .is_empty()
+        );
+    }
+}

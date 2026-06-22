@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: FSL-1.1-ALv2
+// SPDX-License-Identifier: BUSL-1.1
 // Copyright (c) 2026 HYPERI PTY LIMITED
 
 //! End-to-end integration tests for `KafkaTransportAdapter` and
@@ -147,7 +147,7 @@ async fn recv_until(
             .recv(want.saturating_sub(collected.len()).max(1))
             .await
         {
-            Ok(batch) => collected.extend(batch),
+            Ok(batch) => collected.extend(batch.messages),
             Err(e) => {
                 eprintln!("recv error (retrying): {e}");
                 tokio::time::sleep(Duration::from_millis(100)).await;
@@ -166,7 +166,7 @@ async fn test_kafka_transport_construction() {
     let (_infra, _bootstrap, config) =
         spin_up_kafka("construction-group", vec!["construction-topic".to_string()]).await;
 
-    let adapter = TransportAdapter::new(&config)
+    let adapter = TransportAdapter::new(&config, None)
         .await
         .expect("TransportAdapter should build against a live broker");
 
@@ -195,12 +195,18 @@ async fn test_kafka_transport_recv_empty() {
     // Pre-create the topic so the subscription has something to attach to.
     ensure_topic(&bootstrap, topic).await;
 
-    let adapter = TransportAdapter::new(&config).await.expect("adapter build");
+    let adapter = TransportAdapter::new(&config, None)
+        .await
+        .expect("adapter build");
 
     // Consumer needs a moment to join the group and fetch metadata. A single
     // recv(n) call should return an empty batch rather than hang or error.
     let start = std::time::Instant::now();
-    let messages = adapter.recv(10).await.expect("recv should not error");
+    let messages = adapter
+        .recv(10)
+        .await
+        .expect("recv should not error")
+        .messages;
     let elapsed = start.elapsed();
 
     assert!(
@@ -235,7 +241,9 @@ async fn test_kafka_transport_send_recv_roundtrip() {
     let producer = make_producer(&bootstrap);
     produce(&producer, topic, &payloads).await;
 
-    let adapter = TransportAdapter::new(&config).await.expect("adapter build");
+    let adapter = TransportAdapter::new(&config, None)
+        .await
+        .expect("adapter build");
 
     let messages = recv_until(&adapter, 5, Duration::from_secs(30)).await;
     assert_eq!(
@@ -297,7 +305,9 @@ async fn test_kafka_transport_commit_offset() {
     produce(&producer, topic, &payloads).await;
 
     // --- First consumer: read 3, commit their offsets ---
-    let adapter_a = TransportAdapter::new(&config).await.expect("first adapter");
+    let adapter_a = TransportAdapter::new(&config, None)
+        .await
+        .expect("first adapter");
 
     let first_batch = recv_until(&adapter_a, 6, Duration::from_secs(30)).await;
     assert!(
@@ -326,7 +336,9 @@ async fn test_kafka_transport_commit_offset() {
     adapter_a.close().await.expect("close first adapter");
 
     // Empty-offset commit is a no-op — exercise the early-return branch.
-    let adapter_noop = TransportAdapter::new(&config).await.expect("noop adapter");
+    let adapter_noop = TransportAdapter::new(&config, None)
+        .await
+        .expect("noop adapter");
     adapter_noop
         .commit(&[])
         .await
@@ -334,7 +346,7 @@ async fn test_kafka_transport_commit_offset() {
     adapter_noop.close().await.expect("close noop adapter");
 
     // --- Second consumer, same group: should NOT see the first 3 ---
-    let adapter_b = TransportAdapter::new(&config)
+    let adapter_b = TransportAdapter::new(&config, None)
         .await
         .expect("second adapter");
 
@@ -371,7 +383,9 @@ async fn test_kafka_transport_max_messages_limit() {
     let producer = make_producer(&bootstrap);
     produce(&producer, topic, &payloads).await;
 
-    let adapter = TransportAdapter::new(&config).await.expect("adapter build");
+    let adapter = TransportAdapter::new(&config, None)
+        .await
+        .expect("adapter build");
 
     // Accumulate up to 3 messages via a bounded recv loop. Subsequent batches
     // top us up until we hit the cap — this is how the orchestrator calls the
@@ -380,7 +394,7 @@ async fn test_kafka_transport_max_messages_limit() {
     let mut got = Vec::new();
     while got.len() < 3 && std::time::Instant::now() < deadline {
         let batch = adapter.recv(3 - got.len()).await.expect("recv");
-        for m in batch {
+        for m in batch.messages {
             got.push(m);
             if got.len() == 3 {
                 break;
@@ -401,7 +415,7 @@ async fn test_kafka_transport_max_messages_limit() {
     let deadline = std::time::Instant::now() + Duration::from_secs(30);
     while remaining.len() < 7 && std::time::Instant::now() < deadline {
         let batch = adapter.recv(100).await.expect("recv remaining");
-        remaining.extend(batch);
+        remaining.extend(batch.messages);
     }
     assert!(
         remaining.len() >= 7,
@@ -427,7 +441,7 @@ async fn test_kafka_transport_auto_create_topic() {
     let producer = make_producer(&bootstrap);
     produce(&producer, &topic, &[b"first-message".to_vec()]).await;
 
-    let adapter = TransportAdapter::new(&config)
+    let adapter = TransportAdapter::new(&config, None)
         .await
         .expect("adapter build after topic auto-create");
 
@@ -459,7 +473,7 @@ async fn test_transport_backend_kafka_dispatch() {
         ..Default::default()
     };
 
-    let backend = TransportBackend::from_config(&config)
+    let backend = TransportBackend::from_config(&config, None)
         .await
         .expect("from_config should build Kafka backend against live broker");
 
@@ -502,7 +516,7 @@ async fn test_kafka_invalid_brokers() {
 
     // Must return an error, not panic. rdkafka may accept a nonsense hostname
     // and only fail later on recv; both outcomes are acceptable.
-    match TransportAdapter::new(&config).await {
+    match TransportAdapter::new(&config, None).await {
         Ok(adapter) => {
             // Construction succeeded — recv should fail or return empty within
             // a reasonable window. We tolerate either, but it must NOT panic.
@@ -529,7 +543,7 @@ async fn test_kafka_invalid_brokers() {
         kafka: config,
         ..Default::default()
     };
-    match TransportBackend::from_config(&full_config).await {
+    match TransportBackend::from_config(&full_config, None).await {
         Ok(backend) => {
             let _ = backend.close().await;
         }

@@ -1,57 +1,72 @@
-# Common Header Schema v2
+<!--
+  Project:      dfe-loader
+  File:         docs/transport/COMMON-HEADER.md
+  Purpose:      Common header schema injected into every event table
+  Language:     Markdown
 
-The standardised common header for all event tables in the DFE (Data Fusion Engine) pipeline.
+  License:      BUSL-1.1
+  Copyright:    (c) 2026 HYPERI PTY LIMITED
+-->
+
+# Common header schema v2
+
+Every event the loader writes -- regardless of the transport it arrived on
+(Kafka, gRPC, Memory) -- gets a standardised common header injected before
+insert. This is the base schema shared by all event tables in the DFE (Data
+Fusion Engine) pipeline. This page documents the full field set, the DDL, and the
+ORDER BY / PARTITION BY / codec / index decisions behind it.
 
 ## Overview
 
 Every event table shares a common header that provides:
 
-1. **Temporal ordering** - Multiple timestamp fields for different use cases
-2. **Multi-tenancy** - Organisation ID for row-level security (RLS)
-3. **Deduplication** - Time-ordered UUIDs for uniqueness
-4. **Auditability** - Original payload preservation
-5. **Extensibility** - Dynamic metadata via JSON fields
+1. **Temporal ordering** -- multiple timestamp fields for different use cases.
+2. **Multi-tenancy** -- organisation ID for row-level security (RLS).
+3. **Deduplication** -- time-ordered UUIDs for uniqueness.
+4. **Auditability** -- original payload preservation.
+5. **Extensibility** -- dynamic metadata via JSON fields.
 
-## Common Header vs Complete Table Schema
+## Common header vs complete table schema
 
-The common header is the **base** of every table's schema — not the complete
+The common header is the **base** of every table's schema -- not the complete
 schema itself. The loader injects these system fields into every event.
 
-- **Default table** (`dfe.default`): Schema IS just the common header. This is the
+- **Default table** (`dfe.default`): schema IS just the common header. This is the
   catch-all for unrouted events and the only table auto-created by the loader.
-- **Non-default tables** (e.g., `dfe.auth`, `dfe.metrics`): Schema = common header
-  - data-specific columns. These tables are created externally (by DBAs or IaC)
+- **Non-default tables** (e.g., `dfe.auth`, `dfe.metrics`): schema = common header
+  + data-specific columns. These tables are created externally (by DBAs or IaC)
   with their own columns alongside the common header.
 
 ```text
-┌──────────────────────────────────┐
-│   default table (dfe.default)    │  ← schema = common header ONLY
-│  ┌────────────────────────────┐  │
-│  │      common header         │  │
-│  │  (_timestamp, _org_id, …)  │  │
-│  └────────────────────────────┘  │
-└──────────────────────────────────┘
++----------------------------------+
+|   default table (dfe.default)    |   <- schema = common header ONLY
+|  +----------------------------+  |
+|  |      common header         |  |
+|  |  (_timestamp, _org_id, ...) |  |
+|  +----------------------------+  |
++----------------------------------+
 
-┌──────────────────────────────────┐
-│  non-default table (dfe.auth)    │  ← schema = common header + data columns
-│  ┌────────────────────────────┐  │
-│  │      common header         │  │
-│  │  (_timestamp, _org_id, …)  │  │
-│  ├────────────────────────────┤  │
-│  │    data columns            │  │
-│  │  (user_id, action, ip, …)  │  │
-│  └────────────────────────────┘  │
-└──────────────────────────────────┘
++----------------------------------+
+|  non-default table (dfe.auth)    |   <- schema = common header + data columns
+|  +----------------------------+  |
+|  |      common header         |  |
+|  |  (_timestamp, _org_id, ...) |  |
+|  +----------------------------+  |
+|  |    data columns            |  |
+|  |  (user_id, action, ip, ...) |  |
+|  +----------------------------+  |
++----------------------------------+
 ```
 
 The profile system (see `schemas/profiles/*.yaml`) controls which common header
-fields are injected. The profile does NOT define data-specific columns — those
+fields are injected. The profile does NOT define data-specific columns -- those
 come from the source data or are defined in the table's own DDL.
 
-## Common Header DDL (Default Table)
+## Common header DDL (default table)
 
-The following DDL shows the common header as used for the default table. Non-default
-tables would include these columns alongside their own data-specific columns.
+The following DDL shows the common header as used for the default table.
+Non-default tables would include these columns alongside their own data-specific
+columns.
 
 ```sql
 CREATE TABLE IF NOT EXISTS {db}.{table}
@@ -85,7 +100,7 @@ PARTITION BY (toYYYYMM(_timestamp_load), _org_id)
 SETTINGS index_granularity = 8192
 ```
 
-## Column Reference
+## Column reference
 
 ### `_timestamp_load`
 
@@ -101,16 +116,16 @@ SETTINGS index_granularity = 8192
 
 **Rationale:**
 
-- Primary query filter for operational dashboards ("show me events from the last hour")
-- More reliable than event timestamp for time-windowed queries
-- ClickHouse generates via DEFAULT - loader omits this field
-- All rows in a batch get the same load timestamp (acceptable trade-off)
+- Primary query filter for operational dashboards ("show me events from the last hour").
+- More reliable than event timestamp for time-windowed queries.
+- ClickHouse generates via DEFAULT -- loader omits this field.
+- All rows in a batch get the same load timestamp (acceptable trade-off).
 
 **Why first in ORDER BY after `_org_id`:**
 
-- Every dashboard query filters by recent time window
-- Combined with `_org_id`, provides excellent query locality
-- Enables efficient "tail -f" style queries
+- Every dashboard query filters by recent time window.
+- Combined with `_org_id`, provides excellent query locality.
+- Enables efficient "tail -f" style queries.
 
 ### `_timestamp`
 
@@ -126,23 +141,23 @@ SETTINGS index_granularity = 8192
 
 **Rationale:**
 
-- Event time semantics for analytics and time-series analysis
-- May differ significantly from load time (buffered, delayed, replayed events)
-- Fallback to `now()` ensures no NULL values in non-nullable column
-- minmax index enables efficient range scans
+- Event time semantics for analytics and time-series analysis.
+- May differ significantly from load time (buffered, delayed, replayed events).
+- Fallback to `now()` ensures no NULL values in non-nullable column.
+- minmax index enables efficient range scans.
 
 **Field resolution order:**
 
-1. `timestamp` field in source data
-2. `@timestamp` field (common in log formats)
-3. `event_time` field
-4. Fallback to `now()` if all missing/invalid
+1. `timestamp` field in source data.
+2. `@timestamp` field (common in log formats).
+3. `event_time` field.
+4. Fallback to `now()` if all missing/invalid.
 
 **Validation:**
 
-- Must be within reasonable bounds (not before 1970, not far in future)
-- Millisecond precision preserved
-- Auto-detection of epoch seconds/millis/micros/nanos
+- Must be within reasonable bounds (not before 1970, not far in future).
+- Millisecond precision preserved.
+- Auto-detection of epoch seconds/millis/micros/nanos.
 
 ### `_timestamp_received`
 
@@ -158,16 +173,16 @@ SETTINGS index_granularity = 8192
 
 **Rationale:**
 
-- Useful for latency analysis (time from generation to receipt)
-- Only present if source includes this timestamp
-- Nullable because most sources don't provide this
-- Distinct from `_timestamp_load` which is insert time
+- Useful for latency analysis (time from generation to receipt).
+- Only present if source includes this timestamp.
+- Nullable because most sources do not provide this.
+- Distinct from `_timestamp_load` which is insert time.
 
 **Use cases:**
 
-- Pipeline latency monitoring: `_timestamp_load - _timestamp_received`
-- Event age at receipt: `_timestamp_received - _timestamp`
-- SLA compliance tracking
+- Pipeline latency monitoring: `_timestamp_load - _timestamp_received`.
+- Event age at receipt: `_timestamp_received - _timestamp`.
+- SLA compliance tracking.
 
 ### `_uuid`
 
@@ -183,10 +198,10 @@ SETTINGS index_granularity = 8192
 
 **Rationale:**
 
-- UUIDv7 is time-ordered (millisecond precision + random suffix)
-- Sortable within timestamp - useful for deterministic ordering
-- Generated by ClickHouse DEFAULT - no client-side generation needed
-- Last in ORDER BY to ensure uniqueness within (org_id, timestamp_load)
+- UUIDv7 is time-ordered (millisecond precision + random suffix).
+- Sortable within timestamp -- useful for deterministic ordering.
+- Generated by ClickHouse DEFAULT -- no client-side generation needed.
+- Last in ORDER BY to ensure uniqueness within (org_id, timestamp_load).
 
 **Why UUIDv7 over other options:**
 
@@ -223,10 +238,10 @@ generateUUIDv7NonMonotonic()
 
 **Rationale:**
 
-- First in ORDER BY - every query has org_id filter (RLS)
-- LowCardinality for dictionary encoding (orgs are highly repeated)
-- Required field - cannot be NULL
-- Extracted from source and stored for query-time filtering
+- First in ORDER BY -- every query has an org_id filter (RLS).
+- LowCardinality for dictionary encoding (orgs are highly repeated).
+- Required field -- cannot be NULL.
+- Extracted from source and stored for query-time filtering.
 
 **Row-Level Security (RLS):**
 
@@ -249,9 +264,9 @@ TO analytics_users;
 
 **Why LowCardinality:**
 
-- Typical deployment has <1000 unique orgs
-- Dictionary encoding reduces storage 10-100x for this column
-- Faster equality comparisons (dictionary index lookup)
+- Typical deployment has <1000 unique orgs.
+- Dictionary encoding reduces storage 10-100x for this column.
+- Faster equality comparisons (dictionary index lookup).
 
 ### `_raw`
 
@@ -263,18 +278,18 @@ TO analytics_users;
 | Codec | `ZSTD(3)` |
 | Source | `@captured: raw_payload` |
 
-**Purpose:** Original raw data as received — the data as it would appear in a tailed log
-file or a database row, BEFORE any RFC/format parsing.
+**Purpose:** Original raw data as received -- the data as it would appear in a
+tailed log file or a database row, BEFORE any RFC/format parsing.
 
-**NOT the same as `_json`:** `_raw` is the original wire format (e.g., raw syslog RFC
-3164/5424 line), while `_json` is the parsed/structured result.
+**NOT the same as `_json`:** `_raw` is the original wire format (e.g., raw syslog
+RFC 3164/5424 line), while `_json` is the parsed/structured result.
 
 **Rationale:**
 
-- Captured BEFORE any transformation or parsing
-- Enables "grep-like" full-text searches across the original payload
-- Nullable — can be disabled globally or per-table to save storage
-- Higher ZSTD level (3) for better compression of text
+- Captured BEFORE any transformation or parsing.
+- Enables "grep-like" full-text searches across the original payload.
+- Nullable -- can be disabled globally or per-table to save storage.
+- Higher ZSTD level (3) for better compression of text.
 
 **Text search index (default, included in Common Header v2.1):**
 
@@ -283,19 +298,19 @@ INDEX idx_raw_text _raw TYPE text(tokenizer = 'default') GRANULARITY 64
 ```
 
 The `text` index (GA in ClickHouse 26.2+) provides deterministic full-text search
-with no false positives. Supported query functions: `hasToken()`, `hasAnyTokens()`,
-`hasAllTokens()`, `LIKE`, `ILIKE`. Insert overhead ~50%.
+with no false positives. Supported query functions: `hasToken()`,
+`hasAnyTokens()`, `hasAllTokens()`, `LIKE`, `ILIKE`. Insert overhead ~50%.
 
 `_raw` without the index has no reason to exist. To avoid the overhead, disable
-`_raw` entirely via `capture_mode` — don't keep the column without the index.
+`_raw` entirely via `capture_mode` -- do not keep the column without the index.
 
 **Capture modes** control `_raw` and `_json` population:
 
 | `capture_mode` | `_json` | `_raw` | Use case |
 |---|---|---|---|
 | `full` (default) | Full payload (JSON type) | Extracted from `raw_source_fields` | Full observability |
-| `raw_only` | NULL | Full Kafka payload (String) | CH CPU saving — no JSON type overhead |
-| `extracted_only` | NULL | NULL | Minimal — only promoted schema fields |
+| `raw_only` | NULL | Full Kafka payload (String) | CH CPU saving -- no JSON type overhead |
+| `extracted_only` | NULL | NULL | Minimal -- only promoted schema fields |
 
 All three modes extract promoted fields to schema columns. Configurable at global,
 per-table, and DDL levels. See `metadata.capture_mode` in config.
@@ -315,31 +330,31 @@ path-based queries.
 
 **`max_dynamic_paths`:** Default raised to 2048 (from ClickHouse default 1024) to
 cover multi-Beats deployments (ECS + Winlogbeat + Sysmon generates 500-1500 unique
-paths). Per-column DDL only — cannot be changed after data is inserted. Hard max
+paths). Per-column DDL only -- cannot be changed after data is inserted. Hard max
 10,000. Paths exceeding the limit are stored in shared data (slower queries, data
 not lost).
 
-**NOT the same as `_raw`:** `_json` is the parsed/structured result stored as native
-columnar JSON. `_raw` is the original wire format before parsing.
+**NOT the same as `_raw`:** `_json` is the parsed/structured result stored as
+native columnar JSON. `_raw` is the original wire format before parsing.
 
 **Rationale:**
 
-- Captured BEFORE any transformation (preserves original structure)
-- ClickHouse JSON type — each JSON path stored as a native subcolumn
-- Enables ad-hoc queries on any field without schema changes
-- Nullable — can be disabled to save storage
+- Captured BEFORE any transformation (preserves original structure).
+- ClickHouse JSON type -- each JSON path stored as a native subcolumn.
+- Enables ad-hoc queries on any field without schema changes.
+- Nullable -- can be disabled to save storage.
 
 **ClickHouse JSON type benefits:**
 
-- Columnar storage within JSON (not stored as string blob)
-- Type inference per JSON path
-- Efficient queries: `SELECT _json.user.id, _json.action FROM events`
-- Supports nested objects and arrays
-- ClickHouse stores each path as a dense subcolumn with compression
+- Columnar storage within JSON (not stored as a string blob).
+- Type inference per JSON path.
+- Efficient queries: `SELECT _json.user.id, _json.action FROM events`.
+- Supports nested objects and arrays.
+- ClickHouse stores each path as a dense subcolumn with compression.
 
 **Requirements:**
 
-- ClickHouse 26.2+ for GA JSON type + `text` skip index (hard deck)
+- ClickHouse 26.2+ for GA JSON type + `text` skip index (hard deck).
 
 **Configuration:**
 
@@ -348,9 +363,9 @@ columnar JSON. `_raw` is the original wire format before parsing.
 capture_mode = "full"  # full (default) | raw_only | extracted_only
 ```
 
-`capture_mode` controls `_json` and `_raw` population — see the Capture Modes
-section below. Legacy booleans `capture_json` / `capture_raw` are still
-accepted for backwards compatibility and mapped onto `capture_mode`.
+`capture_mode` controls `_json` and `_raw` population -- see the Capture Modes
+section below. Legacy booleans `capture_json` / `capture_raw` are still accepted
+for backwards compatibility and mapped onto `capture_mode`.
 
 ### `_tags`
 
@@ -366,17 +381,17 @@ accepted for backwards compatibility and mapped onto `capture_mode`.
 
 **Rationale:**
 
-- Config-driven source field list (first match wins)
-- Stored as JSON for flexible querying
-- Contains collector metadata, enrichment tags, routing info
-- Nullable - not all events have tags
+- Config-driven source field list (first match wins).
+- Stored as JSON for flexible querying.
+- Contains collector metadata, enrichment tags, routing info.
+- Nullable -- not all events have tags.
 
 **Field resolution order:**
 
-1. `tags` field
-2. `_tags` field
-3. `meta` field
-4. `metadata.tags` nested path
+1. `tags` field.
+2. `_tags` field.
+3. `meta` field.
+4. `metadata.tags` nested path.
 
 **Configuration:**
 
@@ -387,16 +402,17 @@ tags_output = "_tags"
 drop_tags = false  # Remove source tags after extraction
 ```
 
-## Underscore Prefix Convention
+## Underscore prefix convention
 
-All common header fields use underscore prefix (`_timestamp`, `_org_id`, `_uuid`, etc.).
+All common header fields use an underscore prefix (`_timestamp`, `_org_id`,
+`_uuid`, etc.).
 
 **Rationale:**
 
-- Avoids collision with source data fields
+- Avoids collision with source data fields.
 - Source data often contains `timestamp`, `id`, `tags` etc.
-- Clear visual distinction between system and data fields
-- Consistent with ClickHouse system columns (`_part`, `_partition_id`)
+- Clear visual distinction between system and data fields.
+- Consistent with ClickHouse system columns (`_part`, `_partition_id`).
 
 **Example collision prevention:**
 
@@ -415,30 +431,30 @@ All common header fields use underscore prefix (`_timestamp`, `_org_id`, `_uuid`
 // + all original fields preserved in _json
 ```
 
-## ORDER BY Design
+## ORDER BY design
 
 ```sql
 ORDER BY (_org_id, _timestamp_load, _uuid)
 ```
 
-### Column Order Rationale
+### Column order rationale
 
 1. **`_org_id` first:**
-   - Every query has org_id filter (RLS enforcement)
-   - Data physically grouped by organisation
-   - Partition pruning works with org_id in ORDER BY
+   - Every query has an org_id filter (RLS enforcement).
+   - Data physically grouped by organisation.
+   - Partition pruning works with org_id in ORDER BY.
 
 2. **`_timestamp_load` second:**
-   - Primary time filter for operational queries
-   - Recent data queries are most common
-   - Good data locality for time-windowed dashboards
+   - Primary time filter for operational queries.
+   - Recent data queries are most common.
+   - Good data locality for time-windowed dashboards.
 
 3. **`_uuid` last:**
-   - Ensures uniqueness within (org_id, timestamp_load)
-   - Deterministic ordering for reproducible queries
-   - Enables efficient point lookups by UUID
+   - Ensures uniqueness within (org_id, timestamp_load).
+   - Deterministic ordering for reproducible queries.
+   - Enables efficient point lookups by UUID.
 
-### Query Patterns Optimized
+### Query patterns optimised
 
 ```sql
 -- Pattern 1: Recent events for an org (most common)
@@ -463,7 +479,7 @@ WHERE _org_id = 'acme' AND _timestamp BETWEEN '...' AND '...'
 -- Uses: org_id prefix, minmax index on _timestamp
 ```
 
-## PARTITION BY Design
+## PARTITION BY design
 
 ```sql
 PARTITION BY (toYYYYMM(_timestamp_load), _org_id)
@@ -472,16 +488,16 @@ PARTITION BY (toYYYYMM(_timestamp_load), _org_id)
 ### Rationale
 
 1. **Monthly partitions by load time:**
-   - Natural TTL boundary (drop old months)
-   - Reasonable partition count (~12-24 active)
-   - Aligns with typical retention policies
+   - Natural TTL boundary (drop old months).
+   - Reasonable partition count (~12-24 active).
+   - Aligns with typical retention policies.
 
 2. **Includes `_org_id`:**
-   - Enables per-org partition pruning
-   - Efficient org-level data management
-   - Only acceptable for <100 orgs (partition cardinality limit)
+   - Enables per-org partition pruning.
+   - Efficient org-level data management.
+   - Only acceptable for <100 orgs (partition cardinality limit).
 
-### Partition Management
+### Partition management
 
 ```sql
 -- View partitions
@@ -500,25 +516,25 @@ ALTER TABLE common.events DROP PARTITION ('*', 'acme');
 ALTER TABLE common.events MODIFY TTL _timestamp_load + INTERVAL 90 DAY;
 ```
 
-### Cardinality Considerations
+### Cardinality considerations
 
 | Orgs | Months | Partitions | Status |
 |------|--------|------------|--------|
 | 10 | 12 | 120 | Excellent |
 | 50 | 12 | 600 | Good |
 | 100 | 12 | 1,200 | Acceptable |
-| 500 | 12 | 6,000 | Too many - use shared schema |
+| 500 | 12 | 6,000 | Too many -- use shared schema |
 
-**For >100 orgs:** Use shared schema without org in partition:
+**For >100 orgs:** use shared schema without org in partition:
 
 ```sql
 PARTITION BY toYYYYMM(_timestamp_load)
 -- RLS handles isolation, not partitioning
 ```
 
-## Codec Selection
+## Codec selection
 
-### Delta + ZSTD(1) for Timestamps
+### Delta + ZSTD(1) for timestamps
 
 ```sql
 `_timestamp_load` DateTime64(3) CODEC(Delta, ZSTD(1))
@@ -526,14 +542,14 @@ PARTITION BY toYYYYMM(_timestamp_load)
 
 **Rationale:**
 
-- Delta encoding exploits monotonic timestamp nature
-- Adjacent timestamps differ by small amounts
-- ZSTD(1) compresses the delta-encoded values
-- Level 1 balances speed and compression
+- Delta encoding exploits the monotonic timestamp nature.
+- Adjacent timestamps differ by small amounts.
+- ZSTD(1) compresses the delta-encoded values.
+- Level 1 balances speed and compression.
 
-**Compression ratio:** Typically 10-20x for timestamp columns
+**Compression ratio:** typically 10-20x for timestamp columns.
 
-### ZSTD(3) for Text/JSON
+### ZSTD(3) for text/JSON
 
 ```sql
 `_raw` Nullable(String) CODEC(ZSTD(3))
@@ -542,14 +558,14 @@ PARTITION BY toYYYYMM(_timestamp_load)
 
 **Rationale:**
 
-- Higher level (3) for better compression of text
-- Text/JSON has high redundancy (field names, common values)
-- Slightly slower compression but faster decompression
-- Worth the trade-off for storage-heavy columns
+- Higher level (3) for better compression of text.
+- Text/JSON has high redundancy (field names, common values).
+- Slightly slower compression but faster decompression.
+- Worth the trade-off for storage-heavy columns.
 
-**Compression ratio:** Typically 5-15x for JSON, 3-8x for raw text
+**Compression ratio:** typically 5-15x for JSON, 3-8x for raw text.
 
-### No Codec for UUID
+### No codec for UUID
 
 ```sql
 `_uuid` UUID DEFAULT generateUUIDv7()
@@ -557,13 +573,13 @@ PARTITION BY toYYYYMM(_timestamp_load)
 
 **Rationale:**
 
-- UUID is already 16 bytes (compact binary format)
-- UUIDv7 has some entropy that doesn't compress well
-- Codec overhead not worth minimal compression gain
+- UUID is already 16 bytes (compact binary format).
+- UUIDv7 has some entropy that does not compress well.
+- Codec overhead not worth the minimal compression gain.
 
-## Index Strategy
+## Index strategy
 
-### Primary Index (Sparse)
+### Primary index (sparse)
 
 The ORDER BY clause creates a sparse primary index:
 
@@ -571,52 +587,51 @@ The ORDER BY clause creates a sparse primary index:
 ORDER BY (_org_id, _timestamp_load, _uuid)
 ```
 
-- Index entry every `index_granularity` rows (default: 8192)
-- ~1 index entry per 8KB-64KB of data
-- Extremely memory-efficient for large tables
+- Index entry every `index_granularity` rows (default: 8192).
+- ~1 index entry per 8KB-64KB of data.
+- Extremely memory-efficient for large tables.
 
-### minmax Index on `_timestamp`
+### minmax index on `_timestamp`
 
 ```sql
 INDEX idx_timestamp _timestamp TYPE minmax GRANULARITY 1
 ```
 
-**Purpose:** Efficient time range queries on event time (not load time).
+**Purpose:** efficient time range queries on event time (not load time).
 
 **How it works:**
 
-- Stores min/max `_timestamp` per granule
-- Query `WHERE _timestamp BETWEEN x AND y` skips granules outside range
-- GRANULARITY 1 = one min/max per index granularity (8192 rows)
+- Stores min/max `_timestamp` per granule.
+- Query `WHERE _timestamp BETWEEN x AND y` skips granules outside range.
+- GRANULARITY 1 = one min/max per index granularity (8192 rows).
 
 **When it helps:**
 
-- Queries filtering on event time, not load time
-- Analytics queries: "events that occurred in Q1"
-- Audit queries: "what happened at timestamp X"
+- Queries filtering on event time, not load time.
+- Analytics queries: "events that occurred in Q1".
+- Audit queries: "what happened at timestamp X".
 
-### Text Index on `_raw` (Default)
+### Text index on `_raw` (default)
 
 ```sql
 -- Standard: text index (GA in ClickHouse 26.2+, required by hard deck)
 INDEX idx_raw_text _raw TYPE text(tokenizer = 'default') GRANULARITY 64
 ```
 
-Auto-init creates this index on every `_raw` column unless `capture_mode`
-is `extracted_only` (in which case `_raw` is NULL and an index would be
-meaningless).
+Auto-init creates this index on every `_raw` column unless `capture_mode` is
+`extracted_only` (in which case `_raw` is NULL and an index would be meaningless).
 
 **Trade-offs:**
 
-| Index Type | Pros | Cons |
+| Index type | Pros | Cons |
 |------------|------|------|
 | `text` (default) | GA in 26.2+, accurate, no false positives | ~50% insert overhead on `_raw` |
 | `ngrambf_v1` (legacy) | Lower storage | False positives; no reason to prefer on 26.2+ |
-| None | Zero overhead | Full scan for text search — use `capture_mode = "extracted_only"` instead |
+| None | Zero overhead | Full scan for text search -- use `capture_mode = "extracted_only"` instead |
 
-If you don't need full-text search on the raw payload, set
-`capture_mode = "extracted_only"` — `_raw` is NULL and the text index is
-skipped entirely.
+If you do not need full-text search on the raw payload, set
+`capture_mode = "extracted_only"` -- `_raw` is NULL and the text index is skipped
+entirely.
 
 **Configuration:**
 
@@ -625,53 +640,53 @@ skipped entirely.
 create_text_index = true  # Default: create text index on _raw
 ```
 
-## Engine Selection
+## Engine selection
 
 The schema supports three MergeTree variants:
 
-### SharedMergeTree (Recommended)
+### SharedMergeTree (recommended)
 
 ```sql
 ENGINE = SharedMergeTree()
 ```
 
-**Requirements:** ClickHouse Cloud or 24.1+ with shared storage
+**Requirements:** ClickHouse Cloud or 24.1+ with shared storage.
 
 **Benefits:**
 
-- Automatic replication without ZooKeeper
-- Seamless horizontal scaling
-- No replica configuration needed
+- Automatic replication without ZooKeeper.
+- Seamless horizontal scaling.
+- No replica configuration needed.
 
-### ReplicatedMergeTree (Clustered)
+### ReplicatedMergeTree (clustered)
 
 ```sql
 ENGINE = ReplicatedMergeTree('/clickhouse/tables/{shard}/{db}/{table}', '{replica}')
 ```
 
-**Requirements:** ZooKeeper or ClickHouse Keeper
+**Requirements:** ZooKeeper or ClickHouse Keeper.
 
 **Benefits:**
 
-- Traditional replication with explicit control
-- Well-tested, stable
-- Works with any ClickHouse version
+- Traditional replication with explicit control.
+- Well-tested, stable.
+- Works with any ClickHouse version.
 
-### MergeTree (Single-Node)
+### MergeTree (single-node)
 
 ```sql
 ENGINE = MergeTree()
 ```
 
-**Use case:** Development, testing, single-node deployments
+**Use case:** development, testing, single-node deployments.
 
 **Benefits:**
 
-- Simplest configuration
-- No external dependencies
-- Fastest for local development
+- Simplest configuration.
+- No external dependencies.
+- Fastest for local development.
 
-### Auto-Detection
+### Auto-detection
 
 The loader auto-detects the best engine:
 
@@ -687,9 +702,9 @@ pub fn best_engine(&self) -> TableEngine {
 }
 ```
 
-## Source Field Mapping
+## Source field mapping
 
-Using the DDL Expression Language (see [DDL-EXPRESSION.md](./DDL-EXPRESSION.md)):
+Using the DDL Expression Language (see [../clickhouse/DDL-DIRECTIVES.md](../clickhouse/DDL-DIRECTIVES.md)):
 
 | Column | Expression | Description |
 |--------|------------|-------------|
@@ -702,9 +717,9 @@ Using the DDL Expression Language (see [DDL-EXPRESSION.md](./DDL-EXPRESSION.md))
 | `_json` | `@captured: raw_payload as JSON` | Pre-transform as JSON |
 | `_tags` | `@source: first(tags/_tags/meta/metadata.tags)` | First match wins |
 
-## Configuration Reference
+## Configuration reference
 
-### Loader Config
+### Loader config
 
 ```toml
 [routing]
@@ -726,7 +741,7 @@ fallback = "now()"                 # Fallback if missing
 formats = ["rfc3339", "epoch_ms", "epoch_s", "epoch_us", "epoch_ns"]
 ```
 
-### Auto-Initialization
+### Auto-initialisation
 
 ```toml
 [auto_init]
@@ -739,13 +754,13 @@ topic_partitions = 3
 topic_replication_factor = 1
 ```
 
-## Implementation Files
+## Implementation files
 
 | File | Purpose |
 |------|---------|
-| `schemas/common-header/timeseries.yaml` | Default profile — full common header (via [dfe-schemas](DFE_SCHEMAS.md) submodule) |
-| `schemas/common-header/minimal.yaml` | Minimal profile — no _raw,_tags, _source (via dfe-schemas submodule) |
-| `schemas/common-header/passthrough.yaml` | Passthrough profile — no field injection (via dfe-schemas submodule) |
+| `schemas/common-header/timeseries.yaml` | Default profile -- full common header (via [dfe-schemas](../deployment/SCHEMAS.md) submodule) |
+| `schemas/common-header/minimal.yaml` | Minimal profile -- no _raw,_tags, _source (via dfe-schemas submodule) |
+| `schemas/common-header/passthrough.yaml` | Passthrough profile -- no field injection (via dfe-schemas submodule) |
 | `schemas/profiles/` | Bundled fallback profiles (kept in sync with submodule) |
 | `src/schema/profile.rs` | Profile types, registry, DDL generation, migration |
 | `src/schema/mod.rs` | Schema parsing, table tags, capability detection |
@@ -757,25 +772,25 @@ topic_replication_factor = 1
 
 ## Migration from v1
 
-### Breaking Changes
+### Breaking changes
 
-1. **Underscore prefix:** All system fields now prefixed with `_`
-   - `timestamp` → `_timestamp`
-   - `uuid` → `_uuid`
-   - `org_id` → `_org_id`
-   - `tags` → `_tags`
+1. **Underscore prefix:** all system fields now prefixed with `_`.
+   - `timestamp` -> `_timestamp`
+   - `uuid` -> `_uuid`
+   - `org_id` -> `_org_id`
+   - `tags` -> `_tags`
 
 2. **New fields:**
-   - `_timestamp_load` (load time, was implicit)
-   - `_timestamp_received` (optional received time)
-   - `_raw` (raw payload, was `logoriginal`)
-   - `_json` (JSON payload, was `logjson`)
+   - `_timestamp_load` (load time, was implicit).
+   - `_timestamp_received` (optional received time).
+   - `_raw` (raw payload, was `logoriginal`).
+   - `_json` (JSON payload, was `logjson`).
 
 3. **ORDER BY change:**
    - v1: `ORDER BY (timestamp, uuid)`
    - v2: `ORDER BY (_org_id, _timestamp_load, _uuid)`
 
-### Migration Script
+### Migration script
 
 ```sql
 -- Create new table with v2 schema
@@ -804,10 +819,10 @@ RENAME TABLE common.events TO common.events_v1,
 
 ## Profiles
 
-The common header is controlled by **profiles** — named, versioned YAML
+The common header is controlled by **profiles** -- named, versioned YAML
 definitions that specify which system fields to inject and how to populate them.
 
-| Profile | Fields | Use Case |
+| Profile | Fields | Use case |
 |---------|--------|----------|
 | `timeseries` (default) | 9 | Full common header for event ingestion |
 | `minimal` | 5 | High-volume structured data (no _raw,_tags, _source) |
@@ -815,17 +830,17 @@ definitions that specify which system fields to inject and how to populate them.
 
 Profiles define:
 
-- **Field set**: which common header columns to inject
-- **Field behaviour**: source expression for each field (how it's populated)
-- **DDL structure**: ORDER BY, PARTITION BY, indexes (for default table creation)
+- **Field set**: which common header columns to inject.
+- **Field behaviour**: source expression for each field (how it is populated).
+- **DDL structure**: ORDER BY, PARTITION BY, indexes (for default table creation).
 
-Profiles do NOT define data-specific columns. Those come from the source data
-or are defined in the table's own DDL.
+Profiles do NOT define data-specific columns. Those come from the source data or
+are defined in the table's own DDL.
 
-### Profile Versioning
+### Profile versioning
 
-Tables created by auto-init are tagged with their profile name and version
-in the table comment:
+Tables created by auto-init are tagged with their profile name and version in the
+table comment:
 
 ```sql
 COMMENT '@schema_source: core | @schema_version: 2 | @profile: timeseries | @profile_version: 1'
@@ -835,7 +850,7 @@ The migration tooling (`ProfileDiff`) can compare a profile's current version
 against an existing table's tagged version and generate safe `ALTER TABLE ADD
 COLUMN` statements for any missing common header fields.
 
-### Custom Profiles
+### Custom profiles
 
 User-defined profiles can be loaded from YAML files:
 
@@ -848,7 +863,7 @@ profiles:
     dfe.metrics: minimal
 ```
 
-## Version History
+## Version history
 
 | Version | Date | Changes |
 |---------|------|---------|
@@ -857,7 +872,7 @@ profiles:
 
 ## References
 
-- [DDL-EXPRESSION.md](./DDL-EXPRESSION.md) - Field mapping expression language
+- [../clickhouse/DDL-DIRECTIVES.md](../clickhouse/DDL-DIRECTIVES.md) -- field mapping expression language
 - [ClickHouse MergeTree](https://clickhouse.com/docs/en/engines/table-engines/mergetree-family/mergetree)
 - [ClickHouse JSON Type](https://clickhouse.com/docs/en/sql-reference/data-types/json)
 - [Row-Level Security](https://clickhouse.com/docs/en/guides/sre/user-management/row-level-security)

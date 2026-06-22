@@ -1,13 +1,21 @@
-.idea/
-.vscode/
+# OS junk (never useful in repo)
+.DS_Store
+Thumbs.db
 *.swp
 *.swo
 *~
-.DS_Store
-Thumbs.db
+
+# Editor / IDE local state
+.idea/
+.vscode/
+
+# Local environment files (never commit -- contain secrets)
 .env
-.env.local
-.env.*.local
+.env.*
+!.env.example
+!.env.example.*
+
+# Logs and ad-hoc output
 *.log
 dist/
 dist-bin/
@@ -17,9 +25,7 @@ test-results/
 coverage/
 .tmp/
 
-
-# Added by cargo
-
+# Rust / cargo build artefacts
 /target
 target/
 **/*.rs.bk
@@ -33,12 +39,21 @@ cobertura.xml
 .cargo/
 !.cargo/config.toml
 
-# Local working files (not committed)
+# Git worktrees (local dev convenience)
+.worktrees/
+
+# AI tooling and local working files (not committed -- mirrored in .git/info/exclude)
 docs/superpowers/
-.claude/
-hyperi-ai/
 .mcp.json
+.ai-version
+hyperi-ai/
 CLAUDE.md
 STATE.md
 TODO.md
-.ai-version
+AGENTS.md
+GEMINI.md
+.cursorrules
+.claude/
+.codex/
+.cursor/
+.gemini/

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: FSL-1.1-ALv2
+// SPDX-License-Identifier: BUSL-1.1
 // Copyright (c) 2026 HYPERI PTY LIMITED
 
 //! Metrics via hyperi-rustlib `MetricsManager` + DFE metric groups.
@@ -22,7 +22,7 @@ use hyperi_rustlib::metrics::dfe_groups::{
     AppMetrics, BackpressureMetrics, BufferMetrics, CircuitBreakerMetrics, ConsumerMetrics,
     EnrichmentMetrics, SchemaCacheMetrics, SinkMetrics,
 };
-use hyperi_rustlib::metrics::{DfeMetrics, MetricsManager};
+use hyperi_rustlib::metrics::{DfeMetrics, MetricsManager, TransportKind};
 
 /// Application metrics backed by rustlib `MetricsManager`.
 ///
@@ -59,6 +59,26 @@ pub struct Metrics {
     eps_counter: Arc<AtomicU64>,
     eps_last_update: Arc<parking_lot::Mutex<Instant>>,
     eps_last_count: Arc<AtomicU64>,
+
+    // ClickHouse sink domain metrics (scaling-signal gap audit, rustlib 2.8.10).
+    // The engine can only correlate signals that EXIST — these surface the
+    // ClickHouse sink's load (latency, errors, throughput, backlog, batch size)
+    // so they can drive a domain scaling pressure or KEDA Prometheus trigger.
+    /// Insert wall-clock latency distribution (seconds).
+    pub ch_insert_duration: Histogram,
+    /// Rows inserted per flush — count distribution (flush size).
+    pub ch_flush_rows: Histogram,
+    /// Uncompressed bytes per flush — byte distribution (flush size).
+    pub ch_flush_bytes: Histogram,
+    /// In-flight concurrent insert tasks (inserter queue/concurrency depth).
+    pub ch_inserter_inflight: Gauge,
+    /// Insert errors (terminal, after retry/salvage).
+    pub ch_insert_errors: Counter,
+    /// Rows inserted per second — live gauge (sink throughput).
+    pub ch_rows_per_sec: Gauge,
+    ch_rows_counter: Arc<AtomicU64>,
+    ch_rows_last_update: Arc<parking_lot::Mutex<Instant>>,
+    ch_rows_last_count: Arc<AtomicU64>,
 
     // Legacy loader_* metrics (dual-emit — remove after dashboard migration)
     pub messages_received: Counter,
@@ -146,6 +166,36 @@ impl Metrics {
             eps_counter: Arc::new(AtomicU64::new(0)),
             eps_last_update: Arc::new(parking_lot::Mutex::new(Instant::now())),
             eps_last_count: Arc::new(AtomicU64::new(0)),
+
+            // ClickHouse sink domain metrics (scaling-signal gap audit, 2.8.10)
+            ch_insert_duration: manager.histogram(
+                "clickhouse_insert_duration_seconds",
+                "ClickHouse insert batch latency",
+            ),
+            ch_flush_rows: manager.histogram_count(
+                "clickhouse_flush_rows",
+                "Rows per flush to ClickHouse (flush size)",
+            ),
+            ch_flush_bytes: manager.histogram_with_unit(
+                "clickhouse_flush_bytes",
+                "Uncompressed bytes per flush to ClickHouse (flush size)",
+                metrics::Unit::Bytes,
+            ),
+            ch_inserter_inflight: manager.gauge(
+                "clickhouse_inserter_inflight",
+                "In-flight concurrent ClickHouse insert tasks (inserter queue depth)",
+            ),
+            ch_insert_errors: manager.counter(
+                "clickhouse_insert_errors_total",
+                "Terminal ClickHouse insert errors (after retry/salvage)",
+            ),
+            ch_rows_per_sec: manager.gauge(
+                "clickhouse_rows_per_second",
+                "Rows inserted to ClickHouse per second (sink throughput)",
+            ),
+            ch_rows_counter: Arc::new(AtomicU64::new(0)),
+            ch_rows_last_update: Arc::new(parking_lot::Mutex::new(Instant::now())),
+            ch_rows_last_count: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -179,8 +229,30 @@ impl Metrics {
         self.rows_inserted.increment(rows as u64);
         self.insert_latency.record(latency_secs);
         self.sink.record_duration("clickhouse", latency_secs);
-        self.dfe.transport_sent("clickhouse", rows as u64);
+        self.dfe.transport_sent(TransportKind::Http, rows as u64);
         self.dfe.transport_send_duration("clickhouse", latency_secs);
+
+        // ClickHouse sink domain metrics (2.8.10 scaling-signal gap audit):
+        // latency distribution, flush-size (rows), and throughput accounting.
+        self.ch_insert_duration.record(latency_secs);
+        self.ch_flush_rows.record(rows as f64);
+        self.ch_rows_counter
+            .fetch_add(rows as u64, Ordering::Relaxed);
+    }
+
+    /// Record the uncompressed byte size of a flushed batch (flush-size distribution).
+    pub fn record_flush_bytes(&self, bytes: u64) {
+        self.ch_flush_bytes.record(bytes as f64);
+    }
+
+    /// Record a terminal ClickHouse insert error (after retry/salvage exhausted).
+    pub fn record_clickhouse_insert_error(&self) {
+        self.ch_insert_errors.increment(1);
+    }
+
+    /// Set the in-flight concurrent insert count (inserter queue/concurrency depth).
+    pub fn set_inserter_inflight(&self, inflight: u64) {
+        self.ch_inserter_inflight.set(inflight as f64);
     }
 
     /// Record a batch flush for a specific table.
@@ -194,7 +266,7 @@ impl Metrics {
         )
         .record(latency_secs);
         self.sink.record_duration("clickhouse", latency_secs);
-        self.dfe.transport_sent("clickhouse", rows as u64);
+        self.dfe.transport_sent(TransportKind::Http, rows as u64);
         self.dfe.transport_send_duration("clickhouse", latency_secs);
     }
 
@@ -202,7 +274,7 @@ impl Metrics {
     pub fn record_error(&self) {
         self.insert_errors.increment(1);
         self.sink.record_error("clickhouse");
-        self.dfe.transport_send_errors("clickhouse", 1);
+        self.dfe.transport_send_errors(TransportKind::Http, 1);
     }
 
     /// Record a max_dynamic_paths limit hit on a JSON column.
@@ -212,6 +284,33 @@ impl Metrics {
             "table" => table.to_string()
         )
         .increment(1);
+    }
+
+    /// Record a message DLQ'd because its pending-schema buffer hit a per-table
+    /// or global cap (#36).
+    pub fn record_pending_schema_overflow(&self) {
+        metrics::counter!("dfe_loader_pending_schema_overflow_total").increment(1);
+    }
+
+    /// Record a pending-schema message DLQ'd by the expire sweep (aged out,
+    /// globally evicted, or drained on shutdown) (#36).
+    pub fn record_pending_schema_expired(&self) {
+        metrics::counter!("dfe_loader_pending_schema_expired_total").increment(1);
+    }
+
+    /// Update the gauge of messages currently held in the pending-schema buffer.
+    pub fn update_pending_schema_messages(&self, n: usize) {
+        metrics::gauge!("dfe_loader_pending_schema_messages").set(n as f64);
+    }
+
+    /// Record a pre-warm retry round (counted once per round beyond the first).
+    pub fn record_schema_prewarm_retry(&self) {
+        metrics::counter!("dfe_loader_schema_prewarm_retries_total").increment(1);
+    }
+
+    /// Set the gauge of tables still failing pre-warm after the retry budget.
+    pub fn update_schema_prewarm_failed_tables(&self, n: usize) {
+        metrics::gauge!("dfe_loader_schema_prewarm_failed_tables").set(n as f64);
     }
 
     /// Update aggregate buffer stats.
@@ -276,11 +375,26 @@ impl Metrics {
         }
     }
 
+    /// Update the ClickHouse rows-per-second gauge from the inserted-rows counter
+    /// delta. Call periodically (e.g. every flush tick alongside `update_eps`).
+    pub fn update_clickhouse_rows_per_sec(&self) {
+        let current = self.ch_rows_counter.load(Ordering::Relaxed);
+        let previous = self.ch_rows_last_count.swap(current, Ordering::Relaxed);
+        let mut last = self.ch_rows_last_update.lock();
+        let elapsed = last.elapsed().as_secs_f64();
+        *last = Instant::now();
+
+        if elapsed > 0.0 {
+            let delta = current.saturating_sub(previous);
+            self.ch_rows_per_sec.set(delta as f64 / elapsed);
+        }
+    }
+
     /// Update ClickHouse connection pool gauges from `PoolStats`.
     ///
     /// Call periodically (e.g., every 5s). No-op if `stats` is `None`
     /// (HTTP transport has no managed pool).
-    pub fn update_pool_stats(&self, stats: Option<clickhouse::PoolStats>) {
+    pub fn update_pool_stats(&self, stats: Option<crate::clickhouse::PoolStats>) {
         if let Some(s) = stats {
             self.pool_max.set(s.max_size as f64);
             self.pool_active.set(s.size as f64);
@@ -365,6 +479,18 @@ mod tests {
             ScalingPressureConfig::default(),
             vec![],
         ))
+    }
+
+    // ---- pending-schema / pre-warm metrics ----
+
+    #[test]
+    fn pending_schema_and_prewarm_metrics_do_not_panic() {
+        let m = test_metrics();
+        m.record_pending_schema_overflow();
+        m.record_pending_schema_expired();
+        m.update_pending_schema_messages(42);
+        m.record_schema_prewarm_retry();
+        m.update_schema_prewarm_failed_tables(3);
     }
 
     // ---- ServerState tests ----
@@ -597,7 +723,7 @@ mod tests {
     #[test]
     fn metrics_update_pool_stats_some() {
         let m = test_metrics();
-        m.update_pool_stats(Some(clickhouse::PoolStats {
+        m.update_pool_stats(Some(crate::clickhouse::PoolStats {
             max_size: 10,
             size: 5,
             available: 3,

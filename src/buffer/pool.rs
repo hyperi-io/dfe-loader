@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: FSL-1.1-ALv2
+// SPDX-License-Identifier: BUSL-1.1
 // Copyright (c) 2026 HYPERI PTY LIMITED
 
 //! Object pool for memory reuse
@@ -183,7 +183,7 @@ impl Poolable for PooledMap {
     }
 }
 
-/// Pooled Vec<KafkaOffset>
+/// Pooled `Vec<KafkaOffset>`
 pub type PooledOffsets = Vec<KafkaOffset>;
 
 impl Poolable for PooledOffsets {

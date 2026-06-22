@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: FSL-1.1-ALv2
+// SPDX-License-Identifier: BUSL-1.1
 // Copyright (c) 2026 HYPERI PTY LIMITED
 
 //! Startup smoke tests — catch init panics before they reach production.
@@ -130,7 +130,7 @@ fn smoke_deployment_contract() {
 fn smoke_helm_generation() {
     let contract = Config::deployment_contract();
     let tmp = tempfile::tempdir().expect("tempdir");
-    let result = hyperi_rustlib::deployment::generate_chart(&contract, tmp.path());
+    let result = hyperi_rustlib::deployment::generate_chart(&contract, tmp.path(), None);
     assert!(
         result.is_ok(),
         "chart generation should succeed: {result:?}"
@@ -141,7 +141,7 @@ fn smoke_helm_generation() {
 #[test]
 fn smoke_dockerfile_generation() {
     let contract = Config::deployment_contract();
-    let content = hyperi_rustlib::deployment::generate_dockerfile(&contract);
+    let content = hyperi_rustlib::deployment::generate_dockerfile(&contract, None);
     assert!(
         content.contains("FROM"),
         "Dockerfile should contain FROM directive"

@@ -1,10 +1,10 @@
-// SPDX-License-Identifier: FSL-1.1-ALv2
+// SPDX-License-Identifier: BUSL-1.1
 // Copyright (c) 2026 HYPERI PTY LIMITED
 
 //! Parallel-safe message processor.
 //!
-//! [`MessageProcessor`] holds only `&` references to immutable dependencies.
-//! Its [`process`](MessageProcessor::process) method is pure computation — no
+//! `MessageProcessor` holds only `&` references to immutable dependencies.
+//! Its `process` method is pure computation — no
 //! mutable state, no I/O, no `.await`. Safe for rayon `par_iter` via
 //! [`AdaptiveWorkerPool::process_batch`](hyperi_rustlib::worker::AdaptiveWorkerPool::process_batch).
 //!
@@ -136,8 +136,18 @@ impl MessageProcessor<'_> {
         //
         // json_primary path: HeaderExtractor SIMD scan + zero-copy _json.
         // Legacy fallback: full flatten + Transformer path.
-        let json_primary_schema = if self.json_primary_mode && format == PayloadFormat::Json {
-            self.schema_cache.get(&table)
+
+        // json_primary + JSON: a schema cache miss is NOT a silent transformer
+        // fallback. Return SchemaPending so the coordinator buffers the message
+        // until the background resolver populates the schema (#36). The extractor
+        // is the only path that applies @renamed directives; the transformer path
+        // below would drop them, NULLing the renamed columns. MessagePack and
+        // legacy_flatten still use the transformer path.
+        let extractor_schema = if self.json_primary_mode && format == PayloadFormat::Json {
+            match self.schema_cache.get(&table) {
+                Some(schema) => Some(schema),
+                None => return Err(crate::Error::SchemaPending { table }),
+            }
         } else {
             None
         };
@@ -145,7 +155,7 @@ impl MessageProcessor<'_> {
         // Resolve capture mode for this table (DDL > per-table config > global).
         let capture_mode = self.capture_overrides.derive_config(&table).mode;
 
-        let (mut data, raw_payload) = if let Some(schema) = json_primary_schema {
+        let (mut data, raw_payload) = if let Some(schema) = extractor_schema {
             let promoted =
                 self.extractor
                     .extract(&msg.payload, &table, &schema, self.col_meta_cache);
@@ -351,6 +361,23 @@ mod tests {
             }
         }
 
+        fn processor_json_primary(&self) -> MessageProcessor<'_> {
+            MessageProcessor {
+                config: &self.config,
+                router: &self.router,
+                transformer: &self.transformer,
+                extractor: &self.extractor,
+                format_detector: &self.format_detector,
+                json_primary_mode: true,
+                enrichment: &self.enrichment,
+                schema_cache: &self.schema_cache,
+                col_meta_cache: &self.col_meta_cache,
+                field_mapping_cache: None,
+                computed_column_cache: &self.computed_column_cache,
+                capture_overrides: &self.capture_overrides,
+            }
+        }
+
         fn make_msg(&self, payload: &[u8]) -> KafkaMessage {
             KafkaMessage {
                 payload: payload.to_vec(),
@@ -436,6 +463,116 @@ mod tests {
 
         let result = proc.process(&msg);
         assert!(result.is_err(), "Truncated JSON should fail parsing");
+    }
+
+    // ========================================================================
+    // capture_mode: verify the ACTION (which columns the processor writes)
+    // ALIGNS with the cascade setting -- not merely that the config parsed.
+    // Offline: asserts the produced row, no ClickHouse required.
+    // ========================================================================
+
+    fn config_with_capture_mode(mode: CaptureMode) -> Config {
+        let mut config = Config::default();
+        config.metadata.capture_mode = mode;
+        config
+    }
+
+    fn capture_sample_payload() -> Vec<u8> {
+        serde_json::to_vec(&json!({
+            "event_category": "security",
+            "action": "login",
+            "user": "alice"
+        }))
+        .expect("serialize")
+    }
+
+    #[test]
+    fn capture_mode_full_action_populates_json() {
+        let harness = TestHarness::with_config(config_with_capture_mode(CaptureMode::Full));
+        let proc = harness.processor();
+        let processed = proc
+            .process(&harness.make_msg(&capture_sample_payload()))
+            .expect("processed");
+        assert!(
+            processed.data.contains_key("_json"),
+            "capture_mode=full must populate _json in the written row"
+        );
+    }
+
+    #[test]
+    fn capture_mode_raw_only_action_sets_raw_not_json() {
+        let harness = TestHarness::with_config(config_with_capture_mode(CaptureMode::RawOnly));
+        let proc = harness.processor();
+        let payload = capture_sample_payload();
+        let processed = proc
+            .process(&harness.make_msg(&payload))
+            .expect("processed");
+
+        assert!(
+            !processed.data.contains_key("_json"),
+            "capture_mode=raw_only must NOT populate _json"
+        );
+        let raw = processed
+            .data
+            .get("_raw")
+            .and_then(|v| v.as_str())
+            .expect("capture_mode=raw_only must populate _raw");
+        assert_eq!(
+            raw.as_bytes(),
+            payload.as_slice(),
+            "_raw must be the full original payload"
+        );
+    }
+
+    #[test]
+    fn capture_mode_extracted_only_action_sets_neither() {
+        let harness =
+            TestHarness::with_config(config_with_capture_mode(CaptureMode::ExtractedOnly));
+        let proc = harness.processor();
+        let processed = proc
+            .process(&harness.make_msg(&capture_sample_payload()))
+            .expect("processed");
+        assert!(
+            !processed.data.contains_key("_json"),
+            "capture_mode=extracted_only must NOT populate _json"
+        );
+        assert!(
+            !processed.data.contains_key("_raw"),
+            "capture_mode=extracted_only must NOT populate _raw"
+        );
+    }
+
+    // ========================================================================
+    // routing: verify the routing config drives the ACTUAL landing table,
+    // not just that the fields parsed. Offline.
+    // ========================================================================
+
+    #[test]
+    fn routing_config_drives_actual_table() {
+        let mut config = Config::default();
+        config.routing.db_fields = vec![]; // shared schema -> default_db
+        config.routing.table_fields = vec!["event_category".to_string()];
+        config.routing.default_db = "dfe".to_string();
+        config.routing.default_table = "fallback".to_string();
+        let harness = TestHarness::with_config(config);
+        let proc = harness.processor();
+
+        let routed = serde_json::to_vec(&json!({"event_category": "auth", "action": "x"}))
+            .expect("serialize");
+        let processed = proc.process(&harness.make_msg(&routed)).expect("processed");
+        assert_eq!(
+            processed.table, "dfe.auth",
+            "table_fields=event_category must route to dfe.auth"
+        );
+
+        let unrouted = serde_json::to_vec(&json!({"action": "x"})).expect("serialize");
+        let fallback = proc
+            .process(&harness.make_msg(&unrouted))
+            .expect("processed");
+        assert_eq!(
+            fallback.table, "dfe.fallback",
+            "missing table field must fall back to default_table"
+        );
     }
 
     // ========================================================================
@@ -1297,5 +1434,112 @@ mod tests {
         // depending on the non-object handling in transformer.
         // What matters: no panic.
         let _ = result;
+    }
+
+    // ========================================================================
+    // json_primary mode: SchemaPending on cache miss (#36)
+    // ========================================================================
+
+    #[test]
+    fn process_json_primary_cache_miss_returns_schema_pending() {
+        let harness = TestHarness::new();
+        let proc = harness.processor_json_primary();
+        // schema_cache is empty -> any routed table misses.
+        let msg = harness.make_msg(br#"{"event_category":"security","action":"login"}"#);
+        match proc.process(&msg) {
+            Err(crate::Error::SchemaPending { table }) => {
+                assert!(
+                    !table.is_empty(),
+                    "SchemaPending should carry the routed table"
+                );
+            }
+            Ok(_) => panic!("expected SchemaPending, got Ok(ProcessedMessage)"),
+            Err(e) => panic!("expected SchemaPending, got Err({e:?})"),
+        }
+    }
+
+    #[test]
+    fn process_legacy_flatten_does_not_return_schema_pending() {
+        // Default harness uses json_primary_mode = false (legacy transformer path).
+        let harness = TestHarness::new();
+        let proc = harness.processor();
+        let msg = harness.make_msg(br#"{"event_category":"security","action":"login"}"#);
+        let result = proc.process(&msg);
+        assert!(
+            result.is_ok(),
+            "legacy_flatten must not return SchemaPending: {:?}",
+            result.err()
+        );
+    }
+
+    /// Regression test for #36: a column with an `@renamed` directive must be
+    /// populated via the extractor path. The bug was that a schema cache miss
+    /// in json_primary mode silently fell through to the transformer (which
+    /// ignores `@renamed`), NULLing the renamed column. Now a miss buffers
+    /// (`SchemaPending`); once the schema is cached the extractor applies the
+    /// rename. This proves the previously-lost data is correct.
+    #[test]
+    fn json_primary_applies_renamed_after_schema_cached_36() {
+        use rustc_hash::FxHashMap;
+
+        use crate::clickhouse::{ColumnInfo, ParsedType, TableSchema};
+        use crate::column_meta::ColumnDirectives;
+
+        let harness = TestHarness::new();
+        let msg = harness.make_msg(br#"{"src_field":"hello"}"#);
+
+        // 1) Schema not cached → buffered (SchemaPending), NOT silently
+        //    transformed. Discover the routed table from the error.
+        let table = match harness.processor_json_primary().process(&msg) {
+            Err(crate::Error::SchemaPending { table }) => table,
+            Ok(_) => panic!("expected SchemaPending before schema cached, got Ok"),
+            Err(e) => panic!("expected SchemaPending, got Err({e:?})"),
+        };
+
+        // 2) Cache a schema whose `dst_field` column is @renamed from src_field.
+        let mut ddl = FxHashMap::default();
+        ddl.insert(
+            "dst_field".to_string(),
+            ColumnDirectives {
+                renamed: vec!["src_field".to_string()],
+                ..Default::default()
+            },
+        );
+        harness.col_meta_cache.apply_ddl(&table, ddl);
+
+        let (db, tbl) = table.split_once('.').expect("db.table");
+        let schema = TableSchema {
+            database: db.to_string(),
+            table: tbl.to_string(),
+            columns: vec![ColumnInfo {
+                name: "dst_field".to_string(),
+                type_name: "String".to_string(),
+                parsed_type: ParsedType::parse("String"),
+                position: 0,
+                default_kind: String::new(),
+                default_expression: String::new(),
+                comment: String::new(),
+                is_in_primary_key: false,
+                is_in_sorting_key: false,
+            }],
+            comment: String::new(),
+        };
+        harness.schema_cache.insert(table.clone(), schema);
+
+        // 3) Reprocess: extractor path applies @renamed → dst_field populated
+        //    from src_field. Before #36's fix this column would have been NULL.
+        let processed = harness
+            .processor_json_primary()
+            .process(&msg)
+            .expect("extractor path should succeed once schema is cached");
+        assert_eq!(
+            processed.data.get("dst_field"),
+            Some(&serde_json::Value::String("hello".to_string())),
+            "@renamed must map src_field → dst_field"
+        );
+        assert!(
+            !processed.data.contains_key("src_field"),
+            "source field should be renamed away, not left at top level"
+        );
     }
 }

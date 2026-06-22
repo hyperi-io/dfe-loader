@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: FSL-1.1-ALv2
+// SPDX-License-Identifier: BUSL-1.1
 // Copyright (c) 2026 HYPERI PTY LIMITED
 
 //! Transport adapters for hyperi-rustlib transport abstraction.
@@ -21,13 +21,28 @@
 use crate::Result;
 use crate::buffer::KafkaOffset;
 use crate::config::KafkaConfig;
+use hyperi_rustlib::SelfRegulationGovernor;
+use hyperi_rustlib::transport::filter::FilteredDlqEntry;
 use hyperi_rustlib::transport::{
     GrpcConfig as TransportGrpcConfig, GrpcTransport, KafkaConfig as TransportKafkaConfig,
-    KafkaToken, KafkaTransport, TransportBase, TransportError, TransportReceiver,
+    KafkaRole, KafkaToken, KafkaTransport, TransportBase, TransportError, TransportReceiver,
 };
 use tracing::{debug, trace};
 
 use super::KafkaMessage;
+
+/// A received block: the passing messages plus any inbound-filter DLQ entries.
+///
+/// The DLQ entries are surfaced (never silently dropped) so the orchestrator
+/// can route them onward. The loader configures no inbound rustlib filters, so
+/// `dlq_entries` is empty in practice -- but the no-silent-drop contract is
+/// honoured regardless.
+pub struct ReceivedBatch {
+    /// Passing messages, in the same order as the source records.
+    pub messages: Vec<KafkaMessage>,
+    /// Inbound-filter DLQ entries carried forward from the transport.
+    pub dlq_entries: Vec<FilteredDlqEntry>,
+}
 
 /// Adapter that wraps hyperi-rustlib `KafkaTransport` for local use.
 ///
@@ -42,12 +57,30 @@ impl TransportAdapter {
     ///
     /// Rustlib's `KafkaTransport::new()` handles auto-discovery when
     /// `config.topics` is empty — no app-side resolver needed.
-    pub async fn new(config: &KafkaConfig) -> Result<Self> {
+    ///
+    /// When `governor` is `Some`, the self-regulation inbound brake is attached
+    /// to the Kafka receiver: under memory pressure the consumer's ASSIGNED
+    /// partitions are paused (the member stays in the group — no rebalance) and
+    /// resumed once pressure clears. This is the pause-partitions gate for a
+    /// Kafka-source stage; nothing on the outbound ClickHouse insert drain is
+    /// gated (gating the drain would deadlock the pipeline). When `governor` is
+    /// `None` (self-regulation disabled) construction is byte-identical to before.
+    pub async fn new(
+        config: &KafkaConfig,
+        governor: Option<&SelfRegulationGovernor>,
+    ) -> Result<Self> {
         let transport_config = Self::convert_config(config);
 
         let transport = KafkaTransport::new(&transport_config)
             .await
             .map_err(|e| crate::Error::Kafka(format!("Transport error: {e}")))?;
+
+        // Attach the self-regulation pause-partitions gate over the runtime's
+        // shared pressure (the gate is evaluated automatically inside `recv`).
+        let transport = match governor {
+            Some(gov) => gov.attach_kafka_gate(transport),
+            None => transport,
+        };
 
         Ok(Self { transport })
     }
@@ -55,11 +88,19 @@ impl TransportAdapter {
     /// Convert local `KafkaConfig` to hyperi-rustlib `TransportKafkaConfig`.
     pub fn convert_config(config: &KafkaConfig) -> TransportKafkaConfig {
         let mut transport_config = TransportKafkaConfig {
+            // loader is consume-only (Kafka -> ClickHouse); the Consumer role
+            // means rustlib builds no idle producer (#44). The DLQ uses rustlib's
+            // standalone KafkaProducer, not this transport.
+            role: KafkaRole::Consumer,
             brokers: config.brokers.clone(),
             group: config.group.clone(),
             client_id: config.client_id.clone(),
             topics: config.topics.clone(),
             auto_discover: config.topics.is_empty(),
+            // rustlib (>=2.8) rejects an unencrypted transport under a production
+            // profile at construction unless this is explicitly set. Secure by
+            // default; operators opt in for mesh-encrypted in-cluster traffic.
+            allow_insecure_transport: config.allow_insecure_transport,
             librdkafka_overrides: config.librdkafka_overrides.clone(),
             ..Default::default()
         };
@@ -106,54 +147,69 @@ impl TransportAdapter {
         transport_config
     }
 
-    /// Receive up to `max` messages from the transport.
+    /// Receive a batch from Kafka as a `WorkBatch`, reshaped into the loader's
+    /// per-message `KafkaMessage` model plus any inbound-filter DLQ entries.
     ///
-    /// Converts transport `Message<KafkaToken>` to local `KafkaMessage`.
-    /// This is the hot path - Arc<str> is shared, payload is moved (no copy).
-    pub async fn recv(&self, max: usize) -> Result<Vec<KafkaMessage>> {
-        let messages = self
+    /// The transport yields a `WorkBatch<KafkaToken>` whose `records` and
+    /// `commit_tokens` are 1:1 and in the same order (one Kafka record produces
+    /// one record + one commit token), so they are zipped back into individual
+    /// `KafkaMessage`s — preserving the per-message offset tracking the buffer
+    /// relies on for at-least-once commit. The payload `Bytes` is moved into the
+    /// `KafkaMessage` (one copy out of the shared arena). Inbound-filter DLQ
+    /// entries are surfaced for the caller to route onward (no silent drop).
+    pub async fn recv(&self, max: usize) -> Result<ReceivedBatch> {
+        let batch = self
             .transport
             .recv(max)
             .await
             .map_err(|e| crate::Error::Kafka(format!("Recv error: {e}")))?;
 
-        let converted: Vec<KafkaMessage> = messages
+        // `records[i]` corresponds to `commit_tokens[i]` (the transport builds
+        // both in the same order from each Kafka record). Zip them back into the
+        // per-message model the buffer uses.
+        let messages: Vec<KafkaMessage> = batch
+            .records
             .into_iter()
-            .map(|msg| {
+            .zip(batch.commit_tokens)
+            .map(|(record, token)| {
                 if tracing::enabled!(tracing::Level::TRACE) {
                     trace!(
-                        topic = %msg.token.topic,
-                        partition = msg.token.partition,
-                        offset = msg.token.offset,
-                        payload_bytes = msg.payload.len(),
+                        topic = %token.topic,
+                        partition = token.partition,
+                        offset = token.offset,
+                        payload_bytes = record.payload.len(),
                         "Message received"
                     );
                 }
                 KafkaMessage {
-                    payload: msg.payload,
-                    topic: msg.token.topic.clone(), // Arc<str> clone is cheap
-                    partition: msg.token.partition,
-                    offset: msg.token.offset,
-                    key: None, // Transport doesn't preserve key - OK for our use case
-                    timestamp_ms: msg.timestamp_ms,
+                    payload: record.payload.to_vec(),
+                    topic: token.topic.clone(), // Arc<str> clone is cheap
+                    partition: token.partition,
+                    offset: token.offset,
+                    key: None, // Transport doesn't preserve the partition key — OK for our use case
+                    timestamp_ms: record.metadata.timestamp_ms,
                 }
             })
             .collect();
 
-        if !converted.is_empty() {
+        if !messages.is_empty() {
             // Collect unique topics for the batch debug log
             let mut topics: rustc_hash::FxHashSet<&str> = rustc_hash::FxHashSet::default();
-            for msg in &converted {
+            for msg in &messages {
                 topics.insert(&msg.topic);
             }
             debug!(
-                count = converted.len(),
+                count = messages.len(),
+                dlq = batch.dlq_entries.len(),
                 topics = ?topics.into_iter().collect::<Vec<_>>(),
                 "Kafka batch received"
             );
         }
 
-        Ok(converted)
+        Ok(ReceivedBatch {
+            messages,
+            dlq_entries: batch.dlq_entries,
+        })
     }
 
     /// Commit offsets for processed messages.
@@ -196,6 +252,19 @@ impl TransportAdapter {
     /// Get transport name.
     pub fn name(&self) -> &'static str {
         self.transport.name()
+    }
+
+    /// Total consumer lag summed over THIS pod's ASSIGNED partitions.
+    ///
+    /// rdkafka reports `consumer_lag` only for assigned partitions, so the sum
+    /// is inherently PER-POD and scale-invariant (the 2.8.10 scaling engine
+    /// consumes it as the Kafka inbound pressure term via
+    /// `scaling_signals.set_kafka_assigned_lag`). Requires librdkafka statistics
+    /// to be enabled (`statistics.interval.ms` > 0); with stats disabled the
+    /// snapshot is empty and this returns 0.
+    pub fn assigned_lag(&self) -> i64 {
+        use hyperi_rustlib::transport::kafka::total_consumer_lag;
+        total_consumer_lag(&self.transport.stats()).max(0)
     }
 }
 
@@ -249,30 +318,41 @@ impl GrpcTransportAdapter {
         })
     }
 
-    /// Receive up to `max` messages from incoming gRPC Push RPCs.
+    /// Receive a batch from incoming gRPC Push RPCs as a `WorkBatch`, reshaped
+    /// into the loader's per-message `KafkaMessage` model plus any inbound-filter
+    /// DLQ entries.
     ///
-    /// The sender sets the topic via gRPC metadata field "topic". If absent,
-    /// `default_topic` is used as the routing key.
-    pub async fn recv(&self, max: usize) -> Result<Vec<KafkaMessage>> {
-        let messages = self
+    /// The sender sets the topic via the gRPC metadata routing key
+    /// (`record.key`). If absent, `default_topic` is used. `records` and
+    /// `commit_tokens` are 1:1 in the same order; the per-token sequence becomes
+    /// the message offset.
+    pub async fn recv(&self, max: usize) -> Result<ReceivedBatch> {
+        let batch = self
             .transport
             .recv(max)
             .await
             .map_err(|e| crate::Error::Kafka(format!("gRPC recv error: {e}")))?;
 
         let default = self.default_topic.clone();
-        Ok(messages
+        let messages = batch
+            .records
             .into_iter()
-            .map(|msg| KafkaMessage {
-                payload: msg.payload,
+            .zip(batch.commit_tokens)
+            .map(|(record, token)| KafkaMessage {
+                payload: record.payload.to_vec(),
                 // Use sender-provided topic from metadata, or fall back to default.
-                topic: msg.key.unwrap_or_else(|| default.clone()),
+                topic: record.key.unwrap_or_else(|| default.clone()),
                 partition: 0, // gRPC has no partition concept
-                offset: msg.token.seq as i64,
+                offset: token.seq as i64,
                 key: None,
-                timestamp_ms: msg.timestamp_ms,
+                timestamp_ms: record.metadata.timestamp_ms,
             })
-            .collect())
+            .collect();
+
+        Ok(ReceivedBatch {
+            messages,
+            dlq_entries: batch.dlq_entries,
+        })
     }
 
     /// Commit (no-op — gRPC ACK is the Push RPC response itself).
@@ -337,7 +417,9 @@ mod memory_adapter {
                 ..Default::default()
             };
             Self {
-                transport: Arc::new(MemoryTransport::new(&config)),
+                transport: Arc::new(
+                    MemoryTransport::new(&config).expect("memory transport init for tests"),
+                ),
                 topic: Arc::from(topic),
             }
         }
@@ -346,7 +428,9 @@ mod memory_adapter {
         #[must_use]
         pub fn with_config(topic: &str, config: &MemoryConfig) -> Self {
             Self {
-                transport: Arc::new(MemoryTransport::new(config)),
+                transport: Arc::new(
+                    MemoryTransport::new(config).expect("memory transport init for tests"),
+                ),
                 topic: Arc::from(topic),
             }
         }
@@ -371,23 +455,28 @@ mod memory_adapter {
 
         /// Receive up to `max` messages.
         ///
-        /// Converts to local `KafkaMessage` type for compatibility with pipeline.
+        /// Maps the transport's `WorkBatch` into the local `KafkaMessage` type
+        /// for compatibility with the pipeline (records and commit tokens are
+        /// 1:1, in order). DLQ entries are not surfaced here — the memory
+        /// transport configures no inbound filters.
         pub async fn recv(&self, max: usize) -> Result<Vec<KafkaMessage>> {
-            let messages = self
+            let batch = self
                 .transport
                 .recv(max)
                 .await
                 .map_err(|e| crate::Error::Kafka(format!("Recv error: {e}")))?;
 
-            Ok(messages
+            Ok(batch
+                .records
                 .into_iter()
-                .map(|msg| KafkaMessage {
-                    payload: msg.payload,
+                .zip(batch.commit_tokens)
+                .map(|(record, token)| KafkaMessage {
+                    payload: record.payload.to_vec(),
                     topic: self.topic.clone(), // All messages use the configured topic
                     partition: 0,              // Memory transport doesn't have partitions
-                    offset: msg.token.seq as i64,
-                    key: msg.key.map(|k| k.to_string().into_bytes()),
-                    timestamp_ms: msg.timestamp_ms,
+                    offset: token.seq as i64,
+                    key: record.key.map(|k| k.to_string().into_bytes()),
+                    timestamp_ms: record.metadata.timestamp_ms,
                 })
                 .collect())
         }
@@ -445,18 +534,26 @@ impl TransportBackend {
     /// Selects transport type based on `config.transport`:
     /// - `"grpc"` → gRPC server mode (receives from dfe-receiver)
     /// - anything else → Kafka (default)
-    pub async fn from_config(config: &crate::config::Config) -> Result<Self> {
+    ///
+    /// `governor`, when `Some`, attaches the Kafka pause-partitions inbound gate
+    /// to the receiver (default-on self-regulation). gRPC has no broker-side
+    /// brake (a push source sheds via the upstream's retry, not a pull pause), so
+    /// the governor is a no-op on that path.
+    pub async fn from_config(
+        config: &crate::config::Config,
+        governor: Option<&SelfRegulationGovernor>,
+    ) -> Result<Self> {
         if config.transport == "grpc" {
             let adapter = GrpcTransportAdapter::new(&config.grpc).await?;
             Ok(Self::Grpc(adapter))
         } else {
-            let adapter = TransportAdapter::new(&config.kafka).await?;
+            let adapter = TransportAdapter::new(&config.kafka, governor).await?;
             Ok(Self::Kafka(adapter))
         }
     }
 
-    /// Receive up to `max` messages.
-    pub async fn recv(&self, max: usize) -> Result<Vec<super::KafkaMessage>> {
+    /// Receive a batch (messages + inbound-filter DLQ entries).
+    pub async fn recv(&self, max: usize) -> Result<ReceivedBatch> {
         match self {
             Self::Kafka(a) => a.recv(max).await,
             Self::Grpc(a) => a.recv(max).await,
@@ -492,6 +589,18 @@ impl TransportBackend {
         match self {
             Self::Kafka(a) => a.name(),
             Self::Grpc(a) => a.name(),
+        }
+    }
+
+    /// Per-pod assigned-partition consumer lag (Kafka only).
+    ///
+    /// Returns `None` for the gRPC backend (a push source has no broker-side
+    /// backlog the pod can read locally — the engine falls back to CPU-only for
+    /// that path). Feeds `scaling_signals.set_kafka_assigned_lag` (2.8.10).
+    pub fn assigned_lag(&self) -> Option<i64> {
+        match self {
+            Self::Kafka(a) => Some(a.assigned_lag()),
+            Self::Grpc(_) => None,
         }
     }
 }
@@ -808,7 +917,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = TransportBackend::from_config(&config).await;
+        let result = TransportBackend::from_config(&config, None).await;
         // Either the adapter constructs (listen is lazy) or fails — both are
         // fine. What matters is if it did construct, it is a Grpc variant.
         if let Ok(backend) = result {
@@ -834,7 +943,7 @@ mod tests {
 
         // Either succeeds (lazy) or fails — both are acceptable; what matters is
         // that dispatch did not panic and did not go to the gRPC path.
-        let _ = TransportBackend::from_config(&config).await;
+        let _ = TransportBackend::from_config(&config, None).await;
     }
 
     #[tokio::test]
@@ -851,7 +960,7 @@ mod tests {
         };
 
         // Just verify dispatch doesn't panic — construction may fail
-        let _ = TransportBackend::from_config(&config).await;
+        let _ = TransportBackend::from_config(&config, None).await;
     }
 
     // ========================================================================

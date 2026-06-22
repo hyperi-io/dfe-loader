@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: FSL-1.1-ALv2
+// SPDX-License-Identifier: BUSL-1.1
 // Copyright (c) 2026 HYPERI PTY LIMITED
 
 //! Pipeline configuration: routing, enrichment, coercion, metadata, field mapping.
@@ -964,8 +964,21 @@ impl CoercionConfig {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SchemaConfig {
+    /// TTL for cached schemas before background refresh marks them stale.
     pub cache_ttl_secs: u64,
+    /// Whether to refresh the schema cache on insert errors.
     pub refresh_on_error: bool,
+    /// Total wall-clock budget for pre-warm retry on startup.
+    /// `0` disables retry — pre-warm runs once and moves on.
+    pub pre_warm_retry_secs: u64,
+    /// Max messages buffered per table while waiting for schema resolution.
+    /// Excess messages route to DLQ with a security event.
+    pub pending_max_per_table: usize,
+    /// Max messages buffered across all tables.
+    /// Hitting this cap evicts the oldest entry FIFO across tables.
+    pub pending_max_total: usize,
+    /// Max age of a pending message before it is routed to DLQ.
+    pub pending_max_age_secs: u64,
 }
 
 impl Default for SchemaConfig {
@@ -973,6 +986,10 @@ impl Default for SchemaConfig {
         Self {
             cache_ttl_secs: 300, // 5 minutes
             refresh_on_error: true,
+            pre_warm_retry_secs: 60,
+            pending_max_per_table: 1000,
+            pending_max_total: 10_000,
+            pending_max_age_secs: 30,
         }
     }
 }
@@ -1261,5 +1278,25 @@ mod tests {
         assert_eq!(cfg.builtin, "none");
         assert!(cfg.files.is_empty());
         assert!(cfg.overrides.is_empty());
+    }
+
+    #[test]
+    fn schema_config_default_has_new_fields() {
+        let c = SchemaConfig::default();
+        assert_eq!(c.cache_ttl_secs, 300);
+        assert_eq!(c.pre_warm_retry_secs, 60);
+        assert_eq!(c.pending_max_per_table, 1000);
+        assert_eq!(c.pending_max_total, 10_000);
+        assert_eq!(c.pending_max_age_secs, 30);
+    }
+
+    #[test]
+    fn schema_config_deserialises_partial_yaml() {
+        // Only overriding cache_ttl_secs — new fields stay at defaults.
+        let yaml = "cache_ttl_secs: 600\n";
+        let c: SchemaConfig = serde_yaml_ng::from_str(yaml).unwrap();
+        assert_eq!(c.cache_ttl_secs, 600);
+        assert_eq!(c.pre_warm_retry_secs, 60);
+        assert_eq!(c.pending_max_per_table, 1000);
     }
 }

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: FSL-1.1-ALv2
+// SPDX-License-Identifier: BUSL-1.1
 // Copyright (c) 2026 HYPERI PTY LIMITED
 
 //! Shared types for the pipeline processing stages.
@@ -12,8 +12,8 @@ use crate::buffer::KafkaOffset;
 /// Result of processing a single message through the parallel phase.
 ///
 /// Carries all data needed by the sequential phase (buffer push, mark_pending).
-/// Produced by [`super::processor::MessageProcessor::process`], consumed by
-/// [`super::coordinator::BatchCoordinator::apply_results`].
+/// Produced by `super::processor::MessageProcessor::process`, consumed by
+/// `super::coordinator::BatchCoordinator::apply_results`.
 pub struct ProcessedMessage {
     /// Destination table (db.table) from routing.
     pub table: String,

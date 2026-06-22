@@ -2,7 +2,7 @@
 # File:      Dockerfile
 # Purpose:   Production container image with dynamic librdkafka
 #
-# License:   FSL-1.1-ALv2
+# License:   BUSL-1.1
 # Copyright: (c) 2026 HYPERI PTY LIMITED
 
 FROM ubuntu:24.04

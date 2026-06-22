@@ -1,11 +1,11 @@
-// SPDX-License-Identifier: FSL-1.1-ALv2
+// SPDX-License-Identifier: BUSL-1.1
 // Copyright (c) 2026 HYPERI PTY LIMITED
 
 //! Sequential batch coordinator.
 //!
 //! Applies results from the parallel processing phase to mutable state:
 //! buffer push, mark_pending, stats, DLQ routing. Called after
-//! [`super::processor::MessageProcessor`] completes and its borrows are released.
+//! `super::processor::MessageProcessor` completes and its borrows are released.
 
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
@@ -19,6 +19,7 @@ use crate::metrics::Metrics;
 use crate::transform::{ComputedColumnCache, FieldMappingCache};
 
 use super::capture::CaptureOverrides;
+use super::pending_schema::{EnqueueOutcome, PendingOverflow, PendingSchemaBuffer};
 use super::types::ProcessedMessage;
 
 /// Counters returned from `apply_results` for the orchestrator to update stats.
@@ -27,6 +28,11 @@ pub struct BatchOutcome {
     pub processed: u64,
     pub errors: u64,
     pub dlq: u64,
+    /// Messages routed into the pending-schema buffer (awaiting resolution).
+    pub pending: u64,
+    /// Tables seen for the first time that need a resolution request kicked
+    /// off by the orchestrator.
+    pub needs_resolution: Vec<String>,
 }
 
 /// Applies parallel processing results to mutable state.
@@ -43,6 +49,7 @@ pub(crate) struct BatchCoordinator<'a> {
     pub dlq_tx: &'a mpsc::Sender<DlqEntry>,
     pub dlq_enabled: bool,
     pub memory_guard: &'a MemoryGuard,
+    pub pending_schema: &'a mut PendingSchemaBuffer,
 }
 
 impl BatchCoordinator<'_> {
@@ -100,6 +107,48 @@ impl BatchCoordinator<'_> {
                     outcome.processed += 1;
                     if let Some(m) = self.metrics {
                         m.record_processed(&processed.table);
+                    }
+                }
+                Err(crate::Error::SchemaPending { table }) => {
+                    match self
+                        .pending_schema
+                        .enqueue(table.clone(), msg.clone_for_pending())
+                    {
+                        Ok(EnqueueOutcome::Enqueued) => {
+                            outcome.pending += 1;
+                        }
+                        Ok(EnqueueOutcome::NeedsResolution) => {
+                            outcome.pending += 1;
+                            outcome.needs_resolution.push(table);
+                        }
+                        Err(PendingOverflow::PerTable(t)) => {
+                            // Per-table cap hit — this message overflows to DLQ.
+                            // Memory is released (it won't be flushed). Other
+                            // buffered messages for the table stay put.
+                            outcome.dlq += 1;
+                            if let Some(m) = self.metrics {
+                                m.record_dlq();
+                                m.record_pending_schema_overflow();
+                            }
+                            if self.dlq_enabled {
+                                let entry =
+                                    DlqEntry::new(
+                                        "loader",
+                                        format!("pending_schema_per_table_overflow table={t}"),
+                                        msg.payload.clone(),
+                                    )
+                                    .with_source(
+                                        DlqSource::kafka(&*msg.topic, msg.partition, msg.offset),
+                                    );
+                                let _ = self.dlq_tx.try_send(entry);
+                            }
+                            hyperi_rustlib::logger::security::record_dlq(
+                                "pending_schema_overflow",
+                                &format!("per-table cap exceeded for {t}"),
+                                None,
+                            );
+                            self.memory_guard.release(msg.payload.len() as u64);
+                        }
                     }
                 }
                 Err(e) => {
@@ -188,6 +237,16 @@ mod tests {
         }
     }
 
+    fn make_pending() -> crate::pipeline::pending_schema::PendingSchemaBuffer {
+        crate::pipeline::pending_schema::PendingSchemaBuffer::new(
+            crate::pipeline::pending_schema::PendingSchemaConfig {
+                max_per_table: 100,
+                max_total: 1000,
+                max_age: std::time::Duration::from_secs(30),
+            },
+        )
+    }
+
     fn make_processed(table: &str) -> ProcessedMessage {
         ProcessedMessage {
             table: table.to_string(),
@@ -210,6 +269,7 @@ mod tests {
         dlq_tx: &'a mpsc::Sender<DlqEntry>,
         dlq_enabled: bool,
         memory_guard: &'a MemoryGuard,
+        pending_schema: &'a mut crate::pipeline::pending_schema::PendingSchemaBuffer,
     ) -> BatchCoordinator<'a> {
         BatchCoordinator {
             buffer_manager,
@@ -220,6 +280,7 @@ mod tests {
             dlq_tx,
             dlq_enabled,
             memory_guard,
+            pending_schema,
         }
     }
 
@@ -231,6 +292,8 @@ mod tests {
         assert_eq!(outcome.processed, 0);
         assert_eq!(outcome.errors, 0);
         assert_eq!(outcome.dlq, 0);
+        assert_eq!(outcome.pending, 0);
+        assert!(outcome.needs_resolution.is_empty());
     }
 
     // ---- BatchCoordinator tests ----
@@ -246,6 +309,7 @@ mod tests {
         let mut capture_overrides = CaptureOverrides::new(&MetadataConfig::default());
         let mut field_mapping_cache = None;
         let mut computed_column_cache = ComputedColumnCache::new(ComputedColumnsConfig::default());
+        let mut pending = make_pending();
 
         let mut coord = make_coordinator(
             &mut buffer_manager,
@@ -256,6 +320,7 @@ mod tests {
             &dlq_tx,
             true,
             &guard,
+            &mut pending,
         );
 
         let messages: Vec<KafkaMessage> = vec![];
@@ -278,6 +343,7 @@ mod tests {
         let mut capture_overrides = CaptureOverrides::new(&MetadataConfig::default());
         let mut field_mapping_cache = None;
         let mut computed_column_cache = ComputedColumnCache::new(ComputedColumnsConfig::default());
+        let mut pending = make_pending();
 
         let mut coord = make_coordinator(
             &mut buffer_manager,
@@ -288,6 +354,7 @@ mod tests {
             &dlq_tx,
             true,
             &guard,
+            &mut pending,
         );
 
         let messages = vec![
@@ -318,6 +385,7 @@ mod tests {
         let mut capture_overrides = CaptureOverrides::new(&MetadataConfig::default());
         let mut field_mapping_cache = None;
         let mut computed_column_cache = ComputedColumnCache::new(ComputedColumnsConfig::default());
+        let mut pending = make_pending();
 
         let mut coord = make_coordinator(
             &mut buffer_manager,
@@ -328,6 +396,7 @@ mod tests {
             &dlq_tx,
             true,
             &guard,
+            &mut pending,
         );
 
         let messages = vec![
@@ -364,6 +433,7 @@ mod tests {
         let mut capture_overrides = CaptureOverrides::new(&MetadataConfig::default());
         let mut field_mapping_cache = None;
         let mut computed_column_cache = ComputedColumnCache::new(ComputedColumnsConfig::default());
+        let mut pending = make_pending();
 
         let mut coord = make_coordinator(
             &mut buffer_manager,
@@ -374,6 +444,7 @@ mod tests {
             &dlq_tx,
             false, // DLQ disabled
             &guard,
+            &mut pending,
         );
 
         let messages = vec![make_kafka_message(b"bad", "topic", 0, 1)];
@@ -399,6 +470,7 @@ mod tests {
         let mut capture_overrides = CaptureOverrides::new(&MetadataConfig::default());
         let mut field_mapping_cache = None;
         let mut computed_column_cache = ComputedColumnCache::new(ComputedColumnsConfig::default());
+        let mut pending = make_pending();
 
         let mut coord = make_coordinator(
             &mut buffer_manager,
@@ -409,6 +481,7 @@ mod tests {
             &dlq_tx,
             true,
             &guard,
+            &mut pending,
         );
 
         let messages = vec![
@@ -449,6 +522,7 @@ mod tests {
         let mut capture_overrides = CaptureOverrides::new(&MetadataConfig::default());
         let mut field_mapping_cache = None;
         let mut computed_column_cache = ComputedColumnCache::new(ComputedColumnsConfig::default());
+        let mut pending = make_pending();
 
         let mut coord = make_coordinator(
             &mut buffer_manager,
@@ -459,6 +533,7 @@ mod tests {
             &dlq_tx,
             true,
             &guard,
+            &mut pending,
         );
 
         let messages = vec![
@@ -493,6 +568,7 @@ mod tests {
         let mut capture_overrides = CaptureOverrides::new(&MetadataConfig::default());
         let mut field_mapping_cache = None;
         let mut computed_column_cache = ComputedColumnCache::new(ComputedColumnsConfig::default());
+        let mut pending = make_pending();
 
         let mut coord = make_coordinator(
             &mut buffer_manager,
@@ -503,6 +579,7 @@ mod tests {
             &dlq_tx,
             false,
             &guard,
+            &mut pending,
         );
 
         // 50-byte payload — memory should be released on error
@@ -529,6 +606,7 @@ mod tests {
         let mut capture_overrides = CaptureOverrides::new(&MetadataConfig::default());
         let mut field_mapping_cache = None;
         let mut computed_column_cache = ComputedColumnCache::new(ComputedColumnsConfig::default());
+        let mut pending = make_pending();
 
         let mut coord = make_coordinator(
             &mut buffer_manager,
@@ -539,6 +617,7 @@ mod tests {
             &dlq_tx,
             true,
             &guard,
+            &mut pending,
         );
 
         let msg1 = make_kafka_message(b"ref1", "topic", 0, 1);
@@ -567,6 +646,7 @@ mod tests {
         let mut capture_overrides = CaptureOverrides::new(&MetadataConfig::default());
         let mut field_mapping_cache = None;
         let mut computed_column_cache = ComputedColumnCache::new(ComputedColumnsConfig::default());
+        let mut pending = make_pending();
 
         let mut coord = make_coordinator(
             &mut buffer_manager,
@@ -577,6 +657,7 @@ mod tests {
             &dlq_tx,
             true,
             &guard,
+            &mut pending,
         );
 
         let messages = vec![make_kafka_message(b"only_one", "topic", 0, 1)];
@@ -601,6 +682,7 @@ mod tests {
         let mut capture_overrides = CaptureOverrides::new(&MetadataConfig::default());
         let mut field_mapping_cache = None;
         let mut computed_column_cache = ComputedColumnCache::new(ComputedColumnsConfig::default());
+        let mut pending = make_pending();
 
         let mut coord = make_coordinator(
             &mut buffer_manager,
@@ -611,6 +693,7 @@ mod tests {
             &dlq_tx,
             true,
             &guard,
+            &mut pending,
         );
 
         let messages = vec![
@@ -622,5 +705,106 @@ mod tests {
 
         let outcome = coord.apply_results(results, &messages);
         assert_eq!(outcome.processed, 1);
+    }
+
+    #[test]
+    fn schema_pending_routes_to_buffer_not_dlq() {
+        let mut buffer_manager = BufferManager::new(&BufferConfig::default());
+        let mut capture_overrides = CaptureOverrides::new(&MetadataConfig::default());
+        let mut fmc: Option<crate::transform::FieldMappingCache> = None;
+        let mut ccc = ComputedColumnCache::new(ComputedColumnsConfig::default());
+        let metrics: Option<crate::metrics::Metrics> = None;
+        let (dlq_tx, mut dlq_rx) = mpsc::channel::<DlqEntry>(8);
+        let guard = MemoryGuard::new(MemoryGuardConfig {
+            limit_bytes: 64 * 1024 * 1024,
+            ..Default::default()
+        });
+        let mut pending = crate::pipeline::pending_schema::PendingSchemaBuffer::new(
+            crate::pipeline::pending_schema::PendingSchemaConfig {
+                max_per_table: 100,
+                max_total: 1000,
+                max_age: std::time::Duration::from_secs(30),
+            },
+        );
+
+        let outcome = {
+            let mut coord = make_coordinator(
+                &mut buffer_manager,
+                &mut capture_overrides,
+                &mut fmc,
+                &mut ccc,
+                &metrics,
+                &dlq_tx,
+                true,
+                &guard,
+                &mut pending,
+            );
+            let messages = [make_kafka_message(b"a", "t", 0, 0)];
+            let results: Vec<crate::Result<ProcessedMessage>> =
+                vec![Err(crate::Error::SchemaPending {
+                    table: "dfe.t1".into(),
+                })];
+            coord.apply_results(results, &messages)
+        };
+
+        assert_eq!(outcome.pending, 1);
+        assert_eq!(outcome.dlq, 0);
+        assert_eq!(outcome.errors, 0);
+        assert_eq!(outcome.needs_resolution, vec!["dfe.t1".to_string()]);
+        assert_eq!(pending.len(), 1);
+        assert!(dlq_rx.try_recv().is_err(), "nothing should go to DLQ");
+    }
+
+    #[test]
+    fn schema_pending_per_table_overflow_goes_to_dlq() {
+        let mut buffer_manager = BufferManager::new(&BufferConfig::default());
+        let mut capture_overrides = CaptureOverrides::new(&MetadataConfig::default());
+        let mut fmc: Option<crate::transform::FieldMappingCache> = None;
+        let mut ccc = ComputedColumnCache::new(ComputedColumnsConfig::default());
+        let metrics: Option<crate::metrics::Metrics> = None;
+        let (dlq_tx, mut dlq_rx) = mpsc::channel::<DlqEntry>(8);
+        let guard = MemoryGuard::new(MemoryGuardConfig {
+            limit_bytes: 64 * 1024 * 1024,
+            ..Default::default()
+        });
+        let mut pending = crate::pipeline::pending_schema::PendingSchemaBuffer::new(
+            crate::pipeline::pending_schema::PendingSchemaConfig {
+                max_per_table: 1, // second message for the table overflows
+                max_total: 1000,
+                max_age: std::time::Duration::from_secs(30),
+            },
+        );
+
+        let outcome = {
+            let mut coord = make_coordinator(
+                &mut buffer_manager,
+                &mut capture_overrides,
+                &mut fmc,
+                &mut ccc,
+                &metrics,
+                &dlq_tx,
+                true,
+                &guard,
+                &mut pending,
+            );
+            let messages = [
+                make_kafka_message(b"a", "t", 0, 0),
+                make_kafka_message(b"b", "t", 0, 1),
+            ];
+            let results: Vec<crate::Result<ProcessedMessage>> = vec![
+                Err(crate::Error::SchemaPending {
+                    table: "dfe.t1".into(),
+                }),
+                Err(crate::Error::SchemaPending {
+                    table: "dfe.t1".into(),
+                }),
+            ];
+            coord.apply_results(results, &messages)
+        };
+
+        assert_eq!(outcome.pending, 1, "first fits");
+        assert_eq!(outcome.dlq, 1, "second overflows to DLQ");
+        let entry = dlq_rx.try_recv().expect("overflow DLQ entry");
+        assert!(entry.reason.contains("pending_schema"));
     }
 }

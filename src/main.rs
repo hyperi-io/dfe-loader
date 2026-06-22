@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: FSL-1.1-ALv2
+// SPDX-License-Identifier: BUSL-1.1
 // Copyright (c) 2026 HYPERI PTY LIMITED
 
 //! CLI entry point for dfe-loader
@@ -136,10 +136,26 @@ impl DfeApp for App {
             // Create shared config for hot-reload
             let shared_config = SharedConfig::new(config.clone());
 
-            // Create orchestrator with hot-reload support and scaling pressure
+            // Take the runtime's self-regulation governor (default-on; None when
+            // self_regulation.enabled = false). Moving it out of the runtime is
+            // safe: the runtime already wired the byte-budget into the batch
+            // engine at build time, and the loader attaches the Kafka
+            // pause-partitions inbound gate itself via the orchestrator.
+            let governor = runtime.governor.take();
+
+            // Create orchestrator with hot-reload support and scaling pressure.
+            // Inject the runtime's SHARED memory guard (the same one feeding the
+            // governor and worker pool) so in-flight byte accounting drives the
+            // inbound brake — never a stand-alone guard the pipeline ignores.
+            // Also hand it the runtime's per-pod scaling-signal cell (2.8.10):
+            // the orchestrator pushes Kafka assigned-lag + ClickHouse sink
+            // circuit-open into it; the runtime's ScalingEngine reads it each tick.
             let mut orchestrator = Orchestrator::with_metrics(config.clone(), metrics)
                 .with_shared_config(shared_config.clone())
-                .with_scaling(Arc::clone(&scaling));
+                .with_scaling(Arc::clone(&scaling))
+                .with_scaling_signals(Arc::clone(&runtime.scaling_signals))
+                .with_memory_guard(Arc::clone(&runtime.memory_guard))
+                .with_governor(governor);
 
             // Use runtime worker pool if available
             if let Some(ref pool) = runtime.worker_pool {
@@ -221,7 +237,7 @@ async fn main() {
 
     if let Some(output) = &app.emit_helm {
         let contract = Config::deployment_contract();
-        if let Err(e) = hyperi_rustlib::deployment::generate_chart(&contract, output) {
+        if let Err(e) = hyperi_rustlib::deployment::generate_chart(&contract, output, None) {
             eprintln!("fatal: {e}");
             std::process::exit(1);
         }
@@ -231,7 +247,7 @@ async fn main() {
 
     if let Some(output) = &app.emit_dockerfile {
         let contract = Config::deployment_contract();
-        let content = hyperi_rustlib::deployment::generate_dockerfile(&contract);
+        let content = hyperi_rustlib::deployment::generate_dockerfile(&contract, None);
         if let Err(e) = std::fs::write(output, &content) {
             eprintln!("fatal: could not write Dockerfile: {e}");
             std::process::exit(1);

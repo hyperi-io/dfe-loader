@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: FSL-1.1-ALv2
+// SPDX-License-Identifier: BUSL-1.1
 // Copyright (c) 2026 HYPERI PTY LIMITED
 
 // Project:   dfe-loader
@@ -6,7 +6,7 @@
 // Purpose:   ClickHouse client abstraction
 // Language:  Rust
 //
-// License:   FSL-1.1-ALv2
+// License:   BUSL-1.1
 // Copyright: (c) 2026 HYPERI PTY LIMITED
 
 //! `ClickHouse` client abstraction.
@@ -40,7 +40,7 @@ pub mod inserter;
 pub mod schema;
 
 // Re-export core types
-pub use client_http::{ClickHouseQueryClient, SharedQueryClient};
+pub use client_http::{ClickHouseQueryClient, PoolStats, SharedQueryClient};
 pub use config::{ClickHouseConfig, InsertFormat, Transport};
 pub use error::{ClickHouseError, ErrorCategory};
 pub use types::{

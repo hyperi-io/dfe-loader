@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: FSL-1.1-ALv2
+// SPDX-License-Identifier: BUSL-1.1
 // Copyright (c) 2026 HYPERI PTY LIMITED
 
 // Project:   dfe-loader
@@ -6,37 +6,22 @@
 // Purpose:   ClickHouse type parsing (runtime, not compiled)
 // Language:  Rust
 //
-// License:   FSL-1.1-ALv2
+// License:   BUSL-1.1
 // Copyright: (c) 2026 HYPERI PTY LIMITED
 
 //! `ClickHouse` type system - runtime parsed, not compiled.
 //!
-//! `ParsedType` is re-exported from the clickhouse-rs fork's `dynamic` module.
-//! The fork owns the type parser — it's generic and useful to any clickhouse-rs user.
-//!
-//! This module adds `coercer_category()` as a DFE-specific alias for the fork's
-//! `category()` method, plus DFE-specific types (`ColumnInfo`, `TableSchema`).
+//! `ParsedType` and `ParsedTypeExt` are re-exported from the loader's
+//! `clickhouse_ext` module (the HyperI dynamic-insert layer over the
+//! clickhouse-rs hyperi-port fork). `clickhouse_ext` owns the runtime type
+//! parser; this module re-exports it plus the DFE-specific `ColumnInfo` /
+//! `TableSchema` types.
 
-/// Re-export `ParsedType` from clickhouse-rs fork.
+/// Re-export `ParsedType` + `ParsedTypeExt` from `clickhouse_ext`.
 ///
-/// The fork's `dynamic::ParsedType` is the canonical type parser.
-/// Use `ParsedTypeExt::coercer_category()` for the DFE coercion category.
-pub use clickhouse::dynamic::ParsedType;
-
-/// DFE extension trait for `ParsedType` — adds `coercer_category()` alias.
-///
-/// The fork's `category()` and this `coercer_category()` return the same values.
-/// This alias exists for backward compatibility with existing DFE coercer code.
-pub trait ParsedTypeExt {
-    /// Get the coercer category for this type (alias for `category()`).
-    fn coercer_category(&self) -> &str;
-}
-
-impl ParsedTypeExt for ParsedType {
-    fn coercer_category(&self) -> &str {
-        self.category()
-    }
-}
+/// `clickhouse_ext::ParsedType` is the canonical runtime type parser.
+/// `ParsedTypeExt::coercer_category()` returns the DFE coercion category.
+pub use crate::clickhouse_ext::{ParsedType, ParsedTypeExt};
 
 /// Column information from `ClickHouse` system.columns.
 #[derive(Debug, Clone)]

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: FSL-1.1-ALv2
+// SPDX-License-Identifier: BUSL-1.1
 // Copyright (c) 2026 HYPERI PTY LIMITED
 
 //! Kafka integration tests
@@ -132,7 +132,7 @@ async fn test_kafka_transport_creation() {
 
     let config = get_test_config();
     let start = std::time::Instant::now();
-    let result = TransportAdapter::new(&config).await;
+    let result = TransportAdapter::new(&config, None).await;
 
     match result {
         Ok(transport) => {

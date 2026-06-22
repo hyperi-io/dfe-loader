@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: FSL-1.1-ALv2
+// SPDX-License-Identifier: BUSL-1.1
 // Copyright (c) 2026 HYPERI PTY LIMITED
 
 //! End-to-end integration tests for `Inserter` and `ClickHouseQueryClient`
@@ -41,7 +41,7 @@ use crate::common::unique_table_name;
 async fn spin_up() -> (
     TestInfrastructure,
     Arc<ClickHouseQueryClient>,
-    clickhouse::UnifiedClient,
+    clickhouse::Client,
 ) {
     let infra = TestInfrastructure::new(true, false).await;
     let container = infra
@@ -73,14 +73,13 @@ async fn spin_up() -> (
         ClickHouseQueryClient::new(&cfg).expect("ClickHouseQueryClient must build for HTTP"),
     );
 
-    // Fork UnifiedClient (HTTP transport — needed for JSONEachRow inserter path
-    // and sufficient for RowBinary).
+    // Fork Client (HTTP transport — needed for the JSONEachRow inserter path
+    // and sufficient for RowBinary over HTTP).
     let url = format!("http://{host}:{http_port}");
-    let unified = clickhouse::UnifiedClient::http()
+    let unified = clickhouse::Client::default()
         .with_url(&url)
         .with_user("default")
-        .with_database("default")
-        .build();
+        .with_database("default");
 
     // Wait briefly for the server to be fully responsive (the image reports
     // ready before the default user is fully usable on some builds).

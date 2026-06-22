@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: FSL-1.1-ALv2
+// SPDX-License-Identifier: BUSL-1.1
 // Copyright (c) 2026 HYPERI PTY LIMITED
 
 //! dfe-loader: High-performance Kafka to `ClickHouse` data loader
@@ -8,6 +8,7 @@
 
 pub mod buffer;
 pub mod clickhouse;
+pub mod clickhouse_ext;
 pub mod column_meta;
 pub mod config;
 pub mod enrich;

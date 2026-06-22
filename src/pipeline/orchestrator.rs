@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: FSL-1.1-ALv2
+// SPDX-License-Identifier: BUSL-1.1
 // Copyright (c) 2026 HYPERI PTY LIMITED
 
 //! Main pipeline coordinator.
@@ -12,7 +12,6 @@
 //! `JSONEachRow` HTTP inserts to `ClickHouse`.
 
 use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
 use std::time::Duration;
 
 use tokio::sync::mpsc;
@@ -23,8 +22,10 @@ use tracing::{debug, error, info, trace, warn};
 use rustc_hash::FxHashSet;
 
 use hyperi_rustlib::ScalingPressure;
+use hyperi_rustlib::SelfRegulationGovernor;
 use hyperi_rustlib::dlq::{Dlq, DlqEntry};
 use hyperi_rustlib::memory::{MemoryGuard, MemoryGuardConfig};
+use hyperi_rustlib::scaling::ScalingSignalsCell;
 
 use crate::Result;
 use crate::buffer::{BufferManager, FlushBatch, KafkaOffset};
@@ -67,13 +68,40 @@ pub struct Orchestrator {
     stats: PipelineStats,
     metrics: Option<Metrics>,
     scaling: Option<Arc<ScalingPressure>>,
+    /// Cgroup-aware memory guard. In production this is the runtime's shared
+    /// guard (the SAME one feeding the self-regulation governor and the worker
+    /// pool), set via [`with_memory_guard`](Self::with_memory_guard); a
+    /// stand-alone guard is built only as a test/default fallback. Accounting
+    /// here (`add_bytes` on recv, `release` after flush) drives the inbound
+    /// pause-partitions brake.
     memory_guard: Arc<MemoryGuard>,
+    /// Self-regulation governor (default-on). When `Some`, its Kafka
+    /// pause-partitions gate is attached to the receive transport so inbound
+    /// intake brakes under memory pressure. `None` when self-regulation is
+    /// disabled (`self_regulation.enabled = false`).
+    governor: Option<SelfRegulationGovernor>,
     worker_pool: Option<Arc<hyperi_rustlib::worker::AdaptiveWorkerPool>>,
     batch_engine: Option<Arc<hyperi_rustlib::worker::BatchEngine>>,
+    /// Per-pod scaling-signal cell from the runtime (2.8.10). The horizontal
+    /// scaling-pressure engine reads it each tick. The orchestrator pushes the
+    /// Kafka assigned-partition lag (inbound term) and the ClickHouse sink's
+    /// circuit-open state (the composite gate) from the recv/flush loop. `None`
+    /// in test/default construction.
+    scaling_signals: Option<Arc<ScalingSignalsCell>>,
+    /// Lightweight ClickHouse sink-health latch driving `set_circuit_open`.
+    /// Set when a whole flush cycle fails with zero successful inserts (sink
+    /// unreachable); cleared the moment any insert succeeds. This is the real,
+    /// observable "sink dead" signal — the loader's per-table CircuitBreaker is
+    /// not wired into the inserter, so we derive the gate from insert outcomes.
+    sink_circuit_open: bool,
 }
 
 impl Orchestrator {
-    /// Create a new orchestrator with config
+    /// Create a new orchestrator with config.
+    ///
+    /// Builds a stand-alone memory guard as a test/default fallback. In
+    /// production the runtime's shared guard is injected via
+    /// [`with_memory_guard`](Self::with_memory_guard).
     pub fn new(config: Config) -> Self {
         let memory_guard = Arc::new(MemoryGuard::new(memory_guard_config(&config)));
         Self {
@@ -84,12 +112,19 @@ impl Orchestrator {
             metrics: None,
             scaling: None,
             memory_guard,
+            governor: None,
             worker_pool: None,
             batch_engine: None,
+            scaling_signals: None,
+            sink_circuit_open: false,
         }
     }
 
-    /// Create a new orchestrator with config and metrics
+    /// Create a new orchestrator with config and metrics.
+    ///
+    /// Builds a stand-alone memory guard as a test/default fallback. In
+    /// production the runtime's shared guard is injected via
+    /// [`with_memory_guard`](Self::with_memory_guard).
     pub fn with_metrics(config: Config, metrics: Metrics) -> Self {
         let memory_guard = Arc::new(MemoryGuard::new(memory_guard_config(&config)));
         Self {
@@ -100,9 +135,22 @@ impl Orchestrator {
             metrics: Some(metrics),
             scaling: None,
             memory_guard,
+            governor: None,
             worker_pool: None,
             batch_engine: None,
+            scaling_signals: None,
+            sink_circuit_open: false,
         }
+    }
+
+    /// Set the per-pod scaling-signal cell (2.8.10 horizontal scaling engine).
+    ///
+    /// The orchestrator pushes the Kafka assigned-partition lag and the
+    /// ClickHouse sink circuit-open state into this cell from its loops; the
+    /// runtime's `ScalingEngine` reads it each tick.
+    pub fn with_scaling_signals(mut self, signals: Arc<ScalingSignalsCell>) -> Self {
+        self.scaling_signals = Some(signals);
+        self
     }
 
     /// Set shared config for hot-reload support
@@ -132,6 +180,27 @@ impl Orchestrator {
         self
     }
 
+    /// Inject the runtime's shared cgroup-aware memory guard.
+    ///
+    /// This replaces the stand-alone fallback guard so the orchestrator accounts
+    /// in-flight bytes on the SAME guard that feeds the self-regulation governor
+    /// and the worker pool — without it the inbound brake would read a guard the
+    /// pipeline never touches.
+    pub fn with_memory_guard(mut self, guard: Arc<MemoryGuard>) -> Self {
+        self.memory_guard = guard;
+        self
+    }
+
+    /// Set the self-regulation governor (default-on).
+    ///
+    /// When `Some`, its Kafka pause-partitions inbound gate is attached to the
+    /// receive transport in [`run`](Self::run). `None` disables self-regulation
+    /// (byte-identical to the pre-governor data path).
+    pub fn with_governor(mut self, governor: Option<SelfRegulationGovernor>) -> Self {
+        self.governor = governor;
+        self
+    }
+
     /// Access the memory guard (for worker pool integration in main.rs).
     pub fn memory_guard(&self) -> &Arc<MemoryGuard> {
         &self.memory_guard
@@ -146,11 +215,19 @@ impl Orchestrator {
     pub async fn run(&mut self) -> Result<()> {
         info!("Starting pipeline orchestrator");
 
-        // Initialize transport backend (Kafka based on config)
-        let transport = TransportBackend::from_config(&self.config).await?;
-        info!(transport = transport.name(), "Transport initialized");
+        // Initialize transport backend (Kafka based on config). When a
+        // self-regulation governor is present, its Kafka pause-partitions inbound
+        // gate is attached to the receiver so intake brakes under memory pressure
+        // (the gate is evaluated automatically inside recv). The outbound
+        // ClickHouse insert drain is NEVER gated — gating the sink would deadlock.
+        let transport = TransportBackend::from_config(&self.config, self.governor.as_ref()).await?;
+        info!(
+            transport = transport.name(),
+            governed = self.governor.is_some(),
+            "Transport initialized"
+        );
 
-        // Validate ClickHouse config (transport/port mismatch, native not yet supported)
+        // Validate ClickHouse config (transport/port mismatch, JSONEachRow+native)
         let ch_config: crate::clickhouse::ClickHouseConfig = (&self.config.clickhouse).into();
         match ch_config.validate() {
             Err(e) => return Err(crate::Error::Config(e)),
@@ -167,39 +244,11 @@ impl Orchestrator {
                 .map_err(|e| crate::Error::ClickHouse(e.to_string()))?,
         );
 
-        // Build unified client for inserts -- same transport as the query client.
-        // RowBinary (DynamicInsert) works on both HTTP and native.
-        // JSONEachRow (InsertFormatted) is HTTP-only and will error on native.
-        let ch_client = {
-            use crate::clickhouse::Transport;
-            let host = ch_config
-                .primary_endpoint()
-                .unwrap_or_else(|| "localhost:8123".to_string());
-            match ch_config.transport {
-                Transport::Http => {
-                    let scheme = if ch_config.tls { "https" } else { "http" };
-                    clickhouse::UnifiedClient::http()
-                        .with_url(format!("{scheme}://{host}"))
-                        .with_user(&ch_config.username)
-                        .with_password(&ch_config.password)
-                        .with_database(&ch_config.database)
-                        .build()
-                }
-                Transport::Native => {
-                    let mut builder = clickhouse::UnifiedClient::native()
-                        .with_addr(&*host)
-                        .with_user(&ch_config.username)
-                        .with_password(&ch_config.password)
-                        .with_database(&ch_config.database)
-                        .with_lz4();
-                    if ch_config.tls {
-                        let hostname = host.split(':').next().unwrap_or(&host);
-                        builder = builder.with_tls(hostname);
-                    }
-                    builder.build()
-                }
-            }
-        };
+        // Build the insert client -- same transport as the query client.
+        // RowBinary (DynamicInsert) dispatches HTTP/TCP via insert_native_with_columns;
+        // JSONEachRow (InsertFormatted) is HTTP-only.
+        let ch_client = crate::clickhouse::client_http::build_client(&ch_config)
+            .map_err(|e| crate::Error::ClickHouse(e.to_string()))?;
 
         let insert_format = ch_config.insert_format;
         info!(format = %insert_format, "Insert format configured");
@@ -358,6 +407,12 @@ impl Orchestrator {
 
         let mut buffer_manager = BufferManager::new(&self.config.buffer);
 
+        // Pending-schema buffer — holds messages whose table schema is not yet cached.
+        // Drained when the background resolver populates the schema (later task).
+        let mut pending_schema_buffer = super::pending_schema::PendingSchemaBuffer::new(
+            super::pending_schema::PendingSchemaConfig::from_schema_config(&self.config.schema),
+        );
+
         // Per-table capture overrides (_json/_raw disable via config + DDL tags)
         let mut capture_overrides = CaptureOverrides::new(&self.config.metadata);
 
@@ -424,24 +479,85 @@ impl Orchestrator {
             "Pipeline running"
         );
 
-        // Pre-warm schema cache for all config-known tables so the first batch
-        // uses the extractor (json_primary) path. Dynamically-routed tables
-        // (via table_fields/db_fields) can't be pre-warmed — they hit the
-        // transformer path on first batch until background resolution completes.
-        pre_warm_schema_cache(
-            &self.config.routing,
-            &http_client,
-            &schema_cache,
-            &col_meta_cache,
-            &mut capture_overrides,
-        )
-        .await;
+        // Pre-warm the schema cache with bounded-backoff retry so a brief
+        // ClickHouse outage at startup recovers before the first message —
+        // failed tables otherwise fall to the silent-loss transformer path (#36).
+        // Tables still failing after the budget fall back to per-message
+        // queue-and-retry. Comments are collected and applied to capture
+        // overrides after the loop (capture_overrides is &mut and cannot be
+        // borrowed inside the warm closure's future).
+        {
+            let pre_warm_budget = Duration::from_secs(self.config.schema.pre_warm_retry_secs);
+            let tables = collect_pre_warm_tables(&self.config.routing);
+            let comments_cell: Arc<std::sync::Mutex<Vec<(String, String)>>> =
+                Arc::new(std::sync::Mutex::new(Vec::new()));
+            let report = {
+                let http = &http_client;
+                let sc = &schema_cache;
+                let cm = &col_meta_cache;
+                let comments = Arc::clone(&comments_cell);
+                pre_warm_with_retry(
+                    move |t| {
+                        let comments = Arc::clone(&comments);
+                        warm_tables_once(t, http, sc, cm, comments)
+                    },
+                    tables,
+                    pre_warm_budget,
+                    &self.shutdown,
+                )
+                .await
+            };
+            let collected = Arc::try_unwrap(comments_cell)
+                .unwrap_or_else(|a| std::sync::Mutex::new(a.lock().unwrap().clone()))
+                .into_inner()
+                .unwrap_or_default();
+            for (table, comment) in collected {
+                capture_overrides.update_from_comment(&table, &comment);
+            }
+            info!(
+                succeeded = report.succeeded.len(),
+                failed = report.failed.len(),
+                rounds = report.rounds,
+                "Schema cache pre-warm complete"
+            );
+            if !report.failed.is_empty() {
+                warn!(
+                    tables = ?report.failed,
+                    "Pre-warm gave up on some tables — will retry per-message"
+                );
+            }
+            if let Some(ref m) = self.metrics {
+                m.update_schema_prewarm_failed_tables(report.failed.len());
+                // Rounds beyond the first are retries.
+                for _ in 1..report.rounds {
+                    m.record_schema_prewarm_retry();
+                }
+            }
+        }
 
         loop {
             tokio::select! {
                 biased; // Prioritize shutdown check
 
                 () = self.shutdown.cancelled() => {
+                    // Drain the pending-schema buffer to DLQ — these messages
+                    // never received a schema and cannot be processed (#36).
+                    let drained = pending_schema_buffer.drain_all();
+                    let drained_n = drained.len() as u64;
+                    for (msg, reason) in drained {
+                        route_pending_to_dlq(
+                            &dlq_tx,
+                            dlq.is_some(),
+                            &self.memory_guard,
+                            &self.metrics,
+                            msg,
+                            &reason,
+                        );
+                    }
+                    if drained_n > 0 {
+                        self.stats.messages_dlq += drained_n;
+                        warn!(count = drained_n, "Drained pending-schema buffer to DLQ on shutdown");
+                    }
                     info!("Shutdown requested, flushing remaining buffers");
                     break;
                 }
@@ -510,6 +626,19 @@ impl Orchestrator {
                         }
                     }
 
+                    // Push the per-pod Kafka inbound scaling signal (2.8.10).
+                    // assigned_lag() sums lag over THIS pod's ASSIGNED partitions
+                    // (scale-invariant). gRPC has no broker lag -> None -> the
+                    // engine's inbound term stays 0 (CPU-only). The flush tick
+                    // (every flush_age_secs, default 5s) is fresher than the
+                    // engine's 15s tick. The circuit-open gate is pushed from the
+                    // flush path on every insert outcome.
+                    if let Some(ref signals) = self.scaling_signals
+                        && let Some(lag) = transport.assigned_lag()
+                    {
+                        signals.set_kafka_assigned_lag(lag as f64);
+                    }
+
                     // Check for buffers ready to flush
                     let batches = buffer_manager.get_ready_for_flush();
                     if !batches.is_empty() {
@@ -553,44 +682,118 @@ impl Orchestrator {
                     }
                 }
 
-                // Receive batch of messages from transport
-                // Zero-copy: payload is moved (not copied), topic is Arc<str> clone (refcount only)
-                messages = transport.recv(RECV_BATCH_SIZE) => {
-                    // Memory pressure gate (Pattern B): skip processing when under pressure.
-                    // Messages stay in Kafka (not committed) — consumer lag rises, KEDA scales.
-                    if self.memory_guard.under_pressure() {
-                        static PRESSURE_TS: AtomicU64 = AtomicU64::new(0);
-                        if hyperi_rustlib::logger::log_debounced(&PRESSURE_TS, 5000) {
-                            let current = self.memory_guard.current_bytes();
-                            let limit = self.memory_guard.limit_bytes();
-                            warn!(
-                                current_bytes = current,
-                                limit_bytes = limit,
-                                ratio = format_args!("{:.1}%", if limit > 0 { current as f64 / limit as f64 * 100.0 } else { 0.0 }),
-                                "Memory pressure HIGH — pausing consumption (max 1 per 5s)"
+                // Receive batch of messages from transport.
+                // Zero-copy: payload Bytes is moved, topic is an Arc<str> clone
+                // (refcount only).
+                //
+                // Inbound memory backpressure is handled by the self-regulation
+                // governor, NOT a hand-rolled pause loop here: the Kafka
+                // pause-partitions gate (attached to the receive transport) pauses
+                // the consumer's ASSIGNED partitions under pressure — the member
+                // stays in the group (no rebalance), consumer lag rises, KEDA
+                // scales up. The gate is evaluated automatically inside recv, so
+                // recv simply returns an empty batch while paused. We never gate
+                // the outbound ClickHouse drain — gating the sink would deadlock.
+                received = transport.recv(RECV_BATCH_SIZE) => {
+                    // Surface any inbound-filter DLQ entries (no silent drop). The
+                    // loader configures no inbound rustlib filters, so this is
+                    // normally empty, but the contract is honoured regardless.
+                    let messages = match received {
+                        Ok(batch) => {
+                            for entry in batch.dlq_entries {
+                                if dlq.is_some() {
+                                    let dlq_entry = DlqEntry::new(
+                                        "loader",
+                                        entry.reason,
+                                        entry.payload,
+                                    );
+                                    if dlq_tx.try_send(dlq_entry).is_ok() {
+                                        self.stats.messages_dlq += 1;
+                                    }
+                                    if let Some(ref m) = self.metrics {
+                                        m.record_dlq();
+                                    }
+                                }
+                            }
+                            Ok(batch.messages)
+                        }
+                        Err(e) => Err(e),
+                    };
+
+                    // --- Pending-schema buffer maintenance (#36) ---
+                    // Expire stale / globally-evicted entries to DLQ, then
+                    // re-request resolution for tables still stuck (e.g. a failed
+                    // fetch during a transient ClickHouse outage). Runs every recv
+                    // tick regardless of whether a batch arrived.
+                    //
+                    // Note: with inbound backpressure now handled at the transport
+                    // (the governor's pause-partitions gate), there is no
+                    // memory-pressure `continue` short-circuiting this block — recv
+                    // simply returns an empty batch every poll while partitions are
+                    // paused. Maintenance therefore keeps running under sustained
+                    // pressure: stuck tables still re-request and aged entries still
+                    // expire, while no new payload bytes are admitted. The global
+                    // cap still bounds the buffer via eviction on enqueue.
+                    let now_pending = std::time::Instant::now();
+                    {
+                        let expired = pending_schema_buffer.expire(now_pending);
+                        let expired_n = expired.len() as u64;
+                        for (msg, reason) in expired {
+                            route_pending_to_dlq(
+                                &dlq_tx,
+                                dlq.is_some(),
+                                &self.memory_guard,
+                                &self.metrics,
+                                msg,
+                                &reason,
                             );
                         }
-                        tokio::time::sleep(Duration::from_millis(100)).await;
-                        continue;
+                        if expired_n > 0 {
+                            self.stats.messages_dlq += expired_n;
+                            warn!(count = expired_n, "Expired pending-schema messages to DLQ");
+                        }
+                        for table in pending_schema_buffer
+                            .tables_needing_rerequest(now_pending, PENDING_REREQUEST_INTERVAL)
+                        {
+                            let _ = resolve_tx.try_send(table);
+                        }
                     }
 
-                    match messages {
+                    // Merge messages whose schema just resolved (re-processed via
+                    // the extractor path) ahead of the freshly received batch.
+                    // Their memory was counted on first receipt and is NOT
+                    // re-counted. take_ready only runs on a transport Ok, so
+                    // resolved messages are never dropped on a transport error.
+                    let combined: crate::Result<Vec<crate::kafka::KafkaMessage>> = match messages {
+                        Ok(mut fresh) => {
+                            for msg in &fresh {
+                                self.memory_guard.add_bytes(msg.payload.len() as u64);
+                            }
+                            self.stats.messages_received += fresh.len() as u64;
+                            if let Some(ref m) = self.metrics {
+                                for _ in 0..fresh.len() {
+                                    m.record_received();
+                                }
+                            }
+                            let ready = pending_schema_buffer.take_ready(&schema_cache);
+                            if ready.is_empty() {
+                                Ok(fresh)
+                            } else {
+                                let mut merged = Vec::with_capacity(ready.len() + fresh.len());
+                                merged.extend(ready);
+                                merged.append(&mut fresh);
+                                Ok(merged)
+                            }
+                        }
+                        Err(e) => Err(e),
+                    };
+
+                    match combined {
                         Ok(batch) if !batch.is_empty() => {
                             debug!(
                                 batch_size = batch.len(),
                                 "Batch received from transport"
                             );
-
-                            // Track memory for backpressure (pre-loop)
-                            for msg in &batch {
-                                self.memory_guard.add_bytes(msg.payload.len() as u64);
-                            }
-                            self.stats.messages_received += batch.len() as u64;
-                            if let Some(ref m) = self.metrics {
-                                for _ in 0..batch.len() {
-                                    m.record_received();
-                                }
-                            }
 
                             let batch_start = std::time::Instant::now();
 
@@ -720,6 +923,7 @@ impl Orchestrator {
                                 dlq_tx: &dlq_tx,
                                 dlq_enabled: dlq.is_some(),
                                 memory_guard: &self.memory_guard,
+                                pending_schema: &mut pending_schema_buffer,
                             };
                             // When pre-route is active, results only contain passing
                             // messages — build the matching message slice.
@@ -737,6 +941,7 @@ impl Orchestrator {
                                 duration_ms = batch_elapsed.as_millis(),
                                 processed = outcome.processed,
                                 errors = outcome.errors,
+                                pending_schema = pending_schema_buffer.len(),
                                 "Batch processed"
                             );
 
@@ -767,6 +972,9 @@ impl Orchestrator {
                                     buf_stats.pending_bytes,
                                     buf_stats.pending_chunks,
                                 );
+
+                                // Messages held awaiting schema resolution (#36)
+                                m.update_pending_schema_messages(pending_schema_buffer.len());
 
                                 // Per-table buffer depth for monitoring individual table backlog
                                 for (table, rows, bytes) in buffer_manager.per_table_stats() {
@@ -801,6 +1009,14 @@ impl Orchestrator {
                             // Results arrive in schema_result_rx (handled in select! arm below).
                             {
                                 let mut seen = FxHashSet::default();
+                                // Tables newly buffered for schema resolution (#36) —
+                                // kick off their first resolution request.
+                                for table in outcome.needs_resolution {
+                                    if seen.insert(table.clone())
+                                        && resolve_tx.try_send(table).is_err() {
+                                            debug!("Schema resolve channel full, will retry next tick");
+                                        }
+                                }
                                 for table in capture_overrides.take_pending() {
                                     if seen.insert(table.clone())
                                         && resolve_tx.try_send(table).is_err() {
@@ -907,14 +1123,31 @@ impl Orchestrator {
             })
             .collect();
 
+        // Inserter in-flight / queue depth (2.8.10 audit): the number of insert
+        // tasks the inserter runs concurrently this cycle (bounded by its
+        // semaphore). A high steady value means inserts are the bottleneck.
+        if let Some(ref m) = self.metrics {
+            m.set_inserter_inflight(batch_count as u64);
+        }
+
         let start = Instant::now();
         let results = inserter.insert_batches(batches_for_insert).await;
         let latency = start.elapsed().as_secs_f64();
+
+        // Drain the in-flight gauge once the concurrent inserts complete.
+        if let Some(ref m) = self.metrics {
+            m.set_inserter_inflight(0);
+        }
 
         // Update scaling pressure with insert latency
         if let Some(ref scaling) = self.scaling {
             scaling.set_component("insert_latency", latency);
         }
+
+        // Track per-cycle insert outcomes to derive the ClickHouse sink
+        // circuit-open scaling gate (sink dead == whole cycle failed).
+        let mut cycle_ok = 0usize;
+        let mut cycle_err = 0usize;
 
         // Commit offsets independently per batch — Table A success/failure is isolated
         for ((result, offsets), batch_bytes) in results
@@ -929,10 +1162,13 @@ impl Orchestrator {
 
             match result {
                 Ok(count) => {
+                    cycle_ok += 1;
                     self.stats.rows_inserted += count as u64;
                     if let Some(ref m) = self.metrics {
                         m.record_flush(count, latency);
                         m.record_insert_quantities(batch_bytes, 1);
+                        // ClickHouse flush-size (bytes) distribution (2.8.10 audit).
+                        m.record_flush_bytes(batch_bytes);
                     }
                     if !offsets.is_empty() {
                         match transport.commit(&offsets).await {
@@ -953,13 +1189,35 @@ impl Orchestrator {
                     }
                 }
                 Err(e) => {
+                    cycle_err += 1;
                     error!(error = %e, "Batch insert failed — offsets withheld, messages will re-deliver");
                     self.stats.errors += 1;
                     if let Some(ref m) = self.metrics {
                         m.record_error();
+                        // ClickHouse-specific terminal insert error (2.8.10 audit).
+                        m.record_clickhouse_insert_error();
                     }
                 }
             }
+        }
+
+        // Refresh the ClickHouse rows-per-second gauge once per flush cycle.
+        if let Some(ref m) = self.metrics {
+            m.update_clickhouse_rows_per_sec();
+        }
+
+        // Drive the ClickHouse sink circuit-open scaling gate (2.8.10). The
+        // sink is "dead" when a whole flush cycle failed with zero successes;
+        // it recovers the moment any insert succeeds. The engine zeroes the
+        // composite while circuit_open is true (more pods can't relieve a dead
+        // sink) — exactly the right behaviour for a non-rustlib outbound.
+        if cycle_ok > 0 {
+            self.sink_circuit_open = false;
+        } else if cycle_err > 0 {
+            self.sink_circuit_open = true;
+        }
+        if let Some(ref signals) = self.scaling_signals {
+            signals.set_circuit_open(self.sink_circuit_open);
         }
 
         self.stats.batches_flushed += batch_count as u64;
@@ -1077,45 +1335,119 @@ fn warn_restart_required(old: &Config, new: &Config) {
     }
 }
 
-/// Pre-warm schema cache for all config-known tables in parallel.
-///
-/// Fetches schema, column comments, and table comments for each table
-/// concurrently so the first batch always uses the extractor (json_primary)
-/// path. Without this, messages arriving before background resolution
-/// completes fall through to the transformer path.
-async fn pre_warm_schema_cache(
-    routing: &crate::config::RoutingConfig,
-    http_client: &Arc<ClickHouseQueryClient>,
-    schema_cache: &SharedSchemaCache,
-    col_meta_cache: &Arc<ColumnMetaCache>,
-    capture_overrides: &mut CaptureOverrides,
-) {
-    use futures::future::join_all;
+/// Report from `pre_warm_with_retry`.
+#[derive(Debug, Default)]
+pub(crate) struct PreWarmReport {
+    pub succeeded: Vec<String>,
+    pub failed: Vec<String>,
+    pub rounds: usize,
+}
 
+/// Collect the config-known tables to pre-warm (default table + CEL rule
+/// targets + source_to_table targets), deduplicated.
+fn collect_pre_warm_tables(routing: &crate::config::RoutingConfig) -> Vec<String> {
     let default_db = &routing.default_db;
-    let mut tables: Vec<String> = Vec::new();
-
-    // Default table (always known)
-    tables.push(format!("{default_db}.{}", routing.default_table));
-
-    // CEL routing rule targets
+    let mut tables: Vec<String> = vec![format!("{default_db}.{}", routing.default_table)];
     for rule in &routing.rules {
         let db = rule.db.as_deref().unwrap_or(default_db);
         tables.push(format!("{db}.{}", rule.target));
     }
-
-    // source_to_table mapping targets
     for table in routing.source_to_table.values() {
         tables.push(format!("{default_db}.{table}"));
     }
-
     tables.sort();
     tables.dedup();
+    tables
+}
 
-    // Fetch all tables in parallel — each table's three queries are also concurrent.
-    let results: Vec<_> = join_all(tables.iter().map(|table| {
+/// Bounded-backoff retry over still-failing tables.
+///
+/// `warm` is invoked per round with the tables still needing a schema and
+/// returns per-table success. Backoff between rounds: 500ms, 1s, 2s, 4s, 8s,
+/// then 8s capped. Selects on `shutdown` so it never delays process exit.
+/// A `budget` of 0 means a single attempt with no retry.
+pub(crate) async fn pre_warm_with_retry<F, Fut>(
+    mut warm: F,
+    initial_tables: Vec<String>,
+    budget: Duration,
+    shutdown: &tokio_util::sync::CancellationToken,
+) -> PreWarmReport
+where
+    F: FnMut(Vec<String>) -> Fut,
+    Fut: std::future::Future<Output = Vec<(String, bool)>>,
+{
+    use std::time::Instant;
+
+    let deadline = Instant::now() + budget;
+    let mut report = PreWarmReport::default();
+    let mut to_warm = initial_tables;
+    let backoff_steps = [500u64, 1000, 2000, 4000, 8000];
+    let mut backoff_idx: usize = 0;
+
+    loop {
+        if shutdown.is_cancelled() {
+            report.failed.extend(to_warm);
+            return report;
+        }
+        report.rounds += 1;
+        let results = warm(to_warm.clone()).await;
+
+        let mut still_failing = Vec::new();
+        for (table, ok) in results {
+            if ok {
+                if !report.succeeded.contains(&table) {
+                    report.succeeded.push(table);
+                }
+            } else {
+                still_failing.push(table);
+            }
+        }
+
+        if still_failing.is_empty() {
+            return report;
+        }
+        if Instant::now() >= deadline {
+            report.failed = still_failing;
+            return report;
+        }
+
+        let sleep_ms = backoff_steps[backoff_idx.min(backoff_steps.len() - 1)];
+        backoff_idx = backoff_idx.saturating_add(1);
+        tokio::select! {
+            biased;
+            () = shutdown.cancelled() => {
+                report.failed = still_failing;
+                return report;
+            }
+            () = tokio::time::sleep(Duration::from_millis(sleep_ms)) => {}
+        }
+        to_warm = still_failing;
+    }
+}
+
+/// Production single-pass warm: fetch schema + column comments + table comment
+/// for each table, populate the schema cache and column-meta cache, and collect
+/// non-empty table comments into `comments_out` for the caller to apply to
+/// `CaptureOverrides` afterwards. Returns per-table success.
+///
+/// All borrowed parameters are SHARED references (the caches use interior
+/// mutability via `Arc`), so the returned future borrows the caller's scope —
+/// NOT a closure environment — which keeps `pre_warm_with_retry`'s closure
+/// bound satisfiable.
+///
+/// `comments_out` uses `Arc<Mutex<_>>` rather than `RefCell` so that the
+/// future is `Send` when the calling async task requires it.
+async fn warm_tables_once(
+    tables: Vec<String>,
+    http_client: &Arc<ClickHouseQueryClient>,
+    schema_cache: &SharedSchemaCache,
+    col_meta_cache: &Arc<ColumnMetaCache>,
+    comments_out: Arc<std::sync::Mutex<Vec<(String, String)>>>,
+) -> Vec<(String, bool)> {
+    use futures::future::join_all;
+
+    let results: Vec<_> = join_all(tables.into_iter().map(|table| {
         let client = Arc::clone(http_client);
-        let table = table.clone();
         async move {
             let (schema_res, comments_res, comment_res) = tokio::join!(
                 client.fetch_table_schema(&table),
@@ -1127,11 +1459,10 @@ async fn pre_warm_schema_cache(
     }))
     .await;
 
-    let mut warmed = 0usize;
+    let mut out = Vec::with_capacity(results.len());
     for (table, schema_res, comments_res, comment_res) in results {
         if let Ok(schema) = schema_res {
             schema_cache.insert(table.clone(), schema);
-
             if let Ok(comments) = comments_res {
                 let directives = comments
                     .into_iter()
@@ -1139,25 +1470,77 @@ async fn pre_warm_schema_cache(
                     .collect();
                 col_meta_cache.apply_ddl(&table, directives);
             }
-
             if let Ok(comment) = comment_res
                 && !comment.is_empty()
+                && let Ok(mut guard) = comments_out.lock()
             {
-                capture_overrides.update_from_comment(&table, &comment);
+                guard.push((table.clone(), comment));
             }
-
             debug!(table = %table, "Pre-warmed schema cache");
-            warmed += 1;
+            out.push((table, true));
         } else {
-            warn!(table = %table, "Failed to pre-warm schema, first batch will use transformer path");
+            out.push((table, false));
         }
     }
+    out
+}
 
-    info!(
-        count = warmed,
-        total = tables.len(),
-        "Schema cache pre-warm complete"
-    );
+/// Interval between resolution re-requests for tables still stuck in the
+/// pending-schema buffer (e.g. resolution failed due to a transient CH outage).
+const PENDING_REREQUEST_INTERVAL: Duration = Duration::from_secs(2);
+
+/// Human-readable DLQ reason string for an expired / evicted / shutdown-drained
+/// pending-schema message.
+fn format_pending_reason(reason: &super::pending_schema::ExpireReason) -> String {
+    use super::pending_schema::ExpireReason;
+    match reason {
+        ExpireReason::AgeExceeded { age_ms, table } => {
+            format!("schema_pending_timeout table={table} age_ms={age_ms}")
+        }
+        ExpireReason::GlobalCapEviction { table } => {
+            format!("pending_schema_global_overflow table={table}")
+        }
+        ExpireReason::Shutdown { table } => format!("schema_pending_shutdown table={table}"),
+    }
+}
+
+/// Security-event category label for a pending-schema DLQ reason.
+fn pending_reason_label(reason: &super::pending_schema::ExpireReason) -> &'static str {
+    use super::pending_schema::ExpireReason;
+    match reason {
+        ExpireReason::AgeExceeded { .. } => "schema_pending_timeout",
+        ExpireReason::GlobalCapEviction { .. } => "pending_schema_global_overflow",
+        ExpireReason::Shutdown { .. } => "schema_pending_shutdown",
+    }
+}
+
+/// Route a pending-schema message to the DLQ (with a security event) and
+/// release its tracked memory. Used by the per-tick expire sweep and the
+/// shutdown drain — these messages never received a schema, so the loss is
+/// surfaced (DLQ + security event), never silent (#36).
+fn route_pending_to_dlq(
+    dlq_tx: &mpsc::Sender<DlqEntry>,
+    dlq_enabled: bool,
+    memory_guard: &MemoryGuard,
+    metrics: &Option<Metrics>,
+    msg: crate::kafka::KafkaMessage,
+    reason: &super::pending_schema::ExpireReason,
+) {
+    let reason_str = format_pending_reason(reason);
+    if dlq_enabled {
+        let entry = DlqEntry::new("loader", reason_str.clone(), msg.payload.clone()).with_source(
+            hyperi_rustlib::dlq::DlqSource::kafka(&*msg.topic, msg.partition, msg.offset),
+        );
+        let _ = dlq_tx.try_send(entry);
+    }
+    hyperi_rustlib::logger::security::record_dlq(pending_reason_label(reason), &reason_str, None);
+    // Surface in Prometheus too — both the generic DLQ counter and the
+    // pending-schema-specific counter — so dashboards see this loss class (#36).
+    if let Some(m) = metrics {
+        m.record_dlq();
+        m.record_pending_schema_expired();
+    }
+    memory_guard.release(msg.payload.len() as u64);
 }
 
 #[cfg(test)]
@@ -1205,5 +1588,68 @@ mod tests {
         let updated = shared.read();
         assert_eq!(updated.buffer.flush_rows, 99999);
         assert_eq!(shared.version(), 1);
+    }
+
+    #[tokio::test]
+    async fn pre_warm_retry_succeeds_after_failures() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let calls = Arc::new(AtomicUsize::new(0));
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let calls_inner = Arc::clone(&calls);
+        let report = pre_warm_with_retry(
+            move |tables: Vec<String>| {
+                let calls = Arc::clone(&calls_inner);
+                async move {
+                    let n = calls.fetch_add(1, Ordering::SeqCst);
+                    // fail rounds 0 and 1, succeed from round 2 (3rd call)
+                    tables.into_iter().map(|t| (t, n >= 2)).collect()
+                }
+            },
+            vec!["dfe.late".to_string()],
+            Duration::from_secs(10),
+            &shutdown,
+        )
+        .await;
+        assert_eq!(report.succeeded, vec!["dfe.late".to_string()]);
+        assert!(report.failed.is_empty());
+        assert!(report.rounds >= 3);
+    }
+
+    #[tokio::test]
+    async fn pre_warm_retry_gives_up_at_budget() {
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let report = pre_warm_with_retry(
+            |tables: Vec<String>| async move { tables.into_iter().map(|t| (t, false)).collect() },
+            vec!["dfe.never".to_string()],
+            Duration::from_millis(800),
+            &shutdown,
+        )
+        .await;
+        assert!(report.succeeded.is_empty());
+        assert_eq!(report.failed, vec!["dfe.never".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn pre_warm_retry_cancels_on_shutdown() {
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let shutdown_clone = shutdown.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            shutdown_clone.cancel();
+        });
+        let t0 = std::time::Instant::now();
+        let report = pre_warm_with_retry(
+            |tables: Vec<String>| async move { tables.into_iter().map(|t| (t, false)).collect() },
+            vec!["dfe.x".to_string()],
+            Duration::from_secs(60),
+            &shutdown,
+        )
+        .await;
+        assert!(
+            t0.elapsed() < Duration::from_secs(3),
+            "should cancel quickly"
+        );
+        assert!(!report.failed.is_empty());
     }
 }

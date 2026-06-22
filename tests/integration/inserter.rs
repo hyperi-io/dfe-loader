@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: FSL-1.1-ALv2
+// SPDX-License-Identifier: BUSL-1.1
 // Copyright (c) 2026 HYPERI PTY LIMITED
 
 //! Inserter integration tests
@@ -15,7 +15,8 @@ use dfe_loader::clickhouse::config::InsertFormat;
 use dfe_loader::clickhouse::{Inserter, InserterConfig};
 
 use crate::common::{
-    create_ch_test_client, create_http_test_client, drop_http_test_table, unique_table_name,
+    create_ch_test_client, create_http_test_client, drop_http_test_table,
+    unique_qualified_table_name, unique_table_name,
 };
 use crate::{skip_if_docker, skip_if_no_clickhouse};
 
@@ -49,7 +50,7 @@ async fn test_inserter_basic_insert() {
         eprintln!("Could not create HTTP client");
         return;
     };
-    let table_name = unique_table_name("test_inserter_basic");
+    let table_name = unique_qualified_table_name("test_inserter_basic");
     let oc = crate::common::on_cluster_clause();
 
     // Create test table
@@ -84,6 +85,51 @@ async fn test_inserter_basic_insert() {
     drop_http_test_table(&client, &table_name).await;
 }
 
+/// config -> ACTION: a MULTI-ROW RowBinary batch must be accepted by a real
+/// ClickHouse. A successful end() (the server returns 200 after parsing the
+/// RowBinary body) proves the dynamic encoder + the FORMAT RowBinary insert
+/// path actually land data -- the offline byte tests cannot.
+///
+/// RowBinary goes over HTTP. The TCP/native dynamic insert would use the
+/// fork's FORMAT Native path, which this server rejects (Native block
+/// mis-frame, even single-row) -- tracked as a fork issue -- so it is not
+/// exercised here.
+#[tokio::test]
+async fn rowbinary_multirow_lands_over_http() {
+    skip_if_no_clickhouse!();
+
+    let client = match create_http_test_client() {
+        Some(c) => Arc::new(c),
+        None => return,
+    };
+    let oc = crate::common::on_cluster_clause();
+    // Qualify with the configured database: in remote mode it is `benchmark`,
+    // and a bare table name defaults the insert path to the `default` db.
+    let db = crate::common::ClickHouseTestConfig::from_env().database;
+
+    let table = format!("{db}.{}", unique_table_name("rb_multirow"));
+    let ddl = format!(
+        "CREATE TABLE {table}{oc} (id UInt64, name String, value Float64) \
+         ENGINE = MergeTree() ORDER BY tuple()"
+    );
+    client.execute(&ddl).await.expect("create table");
+
+    let inserter = Inserter::new(
+        client.clone(),
+        create_ch_test_client().unwrap(),
+        InserterConfig::default(),
+    )
+    .with_insert_format(InsertFormat::RowBinary);
+
+    let n = inserter
+        .insert_rows(&table, &make_test_rows(5), &[])
+        .await
+        .expect("multi-row RowBinary insert must be accepted by the server");
+    assert_eq!(n, 5, "RowBinary insert must report 5 rows written");
+
+    drop_http_test_table(&client, &table).await;
+}
+
 #[tokio::test]
 async fn test_inserter_large_batch() {
     skip_if_no_clickhouse!();
@@ -92,7 +138,7 @@ async fn test_inserter_large_batch() {
         Some(c) => Arc::new(c),
         None => return,
     };
-    let table_name = unique_table_name("test_large_batch");
+    let table_name = unique_qualified_table_name("test_large_batch");
     let oc = crate::common::on_cluster_clause();
 
     // Create test table
@@ -226,7 +272,7 @@ async fn test_circuit_breaker_with_inserter() {
         Some(c) => Arc::new(c),
         None => return,
     };
-    let table_name = unique_table_name("test_cb_inserter");
+    let table_name = unique_qualified_table_name("test_cb_inserter");
     let oc = crate::common::on_cluster_clause();
 
     // Create test table
@@ -291,7 +337,7 @@ async fn test_concurrent_inserts() {
         Some(c) => Arc::new(c),
         None => return,
     };
-    let table_name = unique_table_name("test_concurrent");
+    let table_name = unique_qualified_table_name("test_concurrent");
     let oc = crate::common::on_cluster_clause();
 
     // Create test table
@@ -373,7 +419,7 @@ async fn test_inserter_batch_salvage() {
         Some(c) => Arc::new(c),
         None => return,
     };
-    let table_name = unique_table_name("test_salvage");
+    let table_name = unique_qualified_table_name("test_salvage");
     let oc = crate::common::on_cluster_clause();
 
     // Create test table

@@ -99,6 +99,19 @@ keda:
     enabled: true
     # -- CPU utilisation percentage threshold
     threshold: "80"
+  scalingPressure:
+    # -- Prometheus trigger on the correlated-composite
+    # loader_scaling_pressure gauge (rustlib ScalingEngine).
+    # Opt-in: set serverAddress to your Prometheus before enabling.
+    enabled: false
+    # -- Prometheus endpoint KEDA queries (cluster-specific)
+    serverAddress: ""
+    # -- PromQL returning ONE scalar. The composite is a capped
+    # per-pod 0-100 score, so avg across pods + metricType Value
+    # (proportional). Never sum() a ratio. See docs/deployment/KEDA.md.
+    query: "avg(loader_scaling_pressure)"
+    # -- Per-pod scaling_pressure target (gauge is 0-100)
+    threshold: "70"
 
 # -- Standard HPA fallback (when KEDA is not installed)
 # Mutually exclusive with keda.enabled

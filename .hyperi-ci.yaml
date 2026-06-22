@@ -2,7 +2,7 @@
 # File:      .hyperi-ci.yaml
 # Purpose:   CI configuration for hyperi-ci
 #
-# License:   FSL-1.1-ALv2
+# License:   BUSL-1.1
 # Copyright: (c) 2026 HYPERI PTY LIMITED
 
 # Project language (auto-detected if not specified)
@@ -45,7 +45,7 @@ build:
     #   spike/alpha → jemalloc + thin LTO
     #   beta        → jemalloc + fat LTO
     #   release     → jemalloc + fat LTO + PGO/BOLT (opt-in below)
-    # See docs/PERFORMANCE.md and hyperi-ci's
+    # See docs/performance/OVERVIEW.md and hyperi-ci's
     # docs/RUST-RELEASE-TRACK-OPTIMISATION.md for the full contract.
     optimize:
       pgo:
