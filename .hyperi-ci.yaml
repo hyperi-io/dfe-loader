@@ -16,6 +16,13 @@ runners:
 # Quality checks
 quality:
   enabled: true
+  # Advisory ignores fed to cargo-audit and osv-scanner. cargo-deny reads
+  # deny.toml separately; osv-scanner does NOT, so the paste unmaintained
+  # advisory must be ignored here too or the release Quality stage fails.
+  ignore:
+    - tool: osv-scanner
+      id: RUSTSEC-2024-0436
+      reason: "paste (dtolnay) unmaintained, no replacement; transitive dep. Mirrors the deny.toml ignore. Drop when a maintained fork lands."
   # Rust: test specific feature sets (avoids --all-features conflicts).
   # DFE policy 2026-04-17 — jemalloc only; mimalloc removed.
   rust:
