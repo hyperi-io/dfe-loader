@@ -12,16 +12,17 @@
 //! `From<&loader::ClickHouseConfig>` is invoked to build the internal
 //! `clickhouse::ClickHouseConfig`.
 
-use hyperi_rustlib::config::sensitive::SensitiveString;
-use hyperi_rustlib::credential::{CredentialError, resolve};
+use scalo::config::sensitive::SensitiveString;
+use scalo::secrets::{CredentialError, resolve};
 
 use crate::config::loader::ClickHouseConfig;
 
 /// Resolve `username` and `password` spec strings into their plaintext values.
 ///
 /// `env:VAR_NAME` reads `$VAR_NAME` (hard error if unset). `vault:path:key`
-/// fetches from OpenBao (returns `VaultUnsupported` because the loader does
-/// not enable rustlib's `secrets` feature). Any other string is used literally.
+/// fetches from OpenBao (returns `VaultUnsupported` because the loader enables
+/// scalo's `secrets` feature but NOT `secrets-vault`). Any other string is used
+/// literally.
 pub async fn resolve_clickhouse_credentials(
     cfg: &mut ClickHouseConfig,
 ) -> Result<(), CredentialError> {

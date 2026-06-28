@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: BUSL-1.1
 // Copyright (c) 2026 HYPERI PTY LIMITED
 
-//! Metrics via hyperi-rustlib `MetricsManager` + DFE metric groups.
+//! Metrics via scalo `MetricsManager` + DFE metric groups.
 //!
 //! Three layers:
-//! 1. `DfeMetrics` — platform `dfe_*` metrics (records, transport, scaling)
+//! 1. `ServiceMetrics` — platform `dfe_*` metrics (records, transport, scaling)
 //! 2. Metric groups — standardised `dfe_loader_*` metrics (app, buffer, consumer, sink, CB)
 //! 3. Loader-specific — per-table gauges, salvage, routing metrics
 //!
@@ -17,22 +17,22 @@ use std::time::Instant;
 
 use metrics::{Counter, Gauge, Histogram};
 
-use hyperi_rustlib::ScalingPressure;
-use hyperi_rustlib::metrics::dfe_groups::{
+use scalo::ScalingPressure;
+use scalo::metrics::groups::{
     AppMetrics, BackpressureMetrics, BufferMetrics, CircuitBreakerMetrics, ConsumerMetrics,
     EnrichmentMetrics, SchemaCacheMetrics, SinkMetrics,
 };
-use hyperi_rustlib::metrics::{DfeMetrics, MetricsManager, TransportKind};
+use scalo::metrics::{MetricsManager, ServiceMetrics, TransportKind};
 
 /// Application metrics backed by rustlib `MetricsManager`.
 ///
 /// Registers metrics at three layers:
-/// - `dfe_*` platform metrics via `DfeMetrics`
+/// - `dfe_*` platform metrics via `ServiceMetrics`
 /// - `dfe_loader_*` standardised metrics via metric groups
 /// - `loader_*` legacy metrics (dual-emit, remove after dashboard migration)
 #[derive(Clone)]
 pub struct Metrics {
-    dfe: Arc<DfeMetrics>,
+    dfe: Arc<ServiceMetrics>,
 
     // Standardised metric groups (dfe_loader_* namespace)
     pub app: AppMetrics,
@@ -101,7 +101,7 @@ impl Metrics {
     /// The manager must already have installed the global recorder
     /// (via `MetricsManager::new` or `MetricsManager::with_config`).
     pub fn new(manager: &MetricsManager) -> Self {
-        let dfe = Arc::new(DfeMetrics::register(manager));
+        let dfe = Arc::new(ServiceMetrics::register(manager));
 
         Self {
             dfe,
@@ -172,14 +172,17 @@ impl Metrics {
                 "clickhouse_insert_duration_seconds",
                 "ClickHouse insert batch latency",
             ),
-            ch_flush_rows: manager.histogram_count(
+            // scalo 2.10 dropped histogram_count / histogram_with_unit: the
+            // remaining histogram constructors register the manifest unit as
+            // seconds. These two are a count (rows) and bytes distribution; the
+            // emitted metric is unchanged, only the manifest unit metadata.
+            ch_flush_rows: manager.histogram(
                 "clickhouse_flush_rows",
                 "Rows per flush to ClickHouse (flush size)",
             ),
-            ch_flush_bytes: manager.histogram_with_unit(
+            ch_flush_bytes: manager.histogram(
                 "clickhouse_flush_bytes",
                 "Uncompressed bytes per flush to ClickHouse (flush size)",
-                metrics::Unit::Bytes,
             ),
             ch_inserter_inflight: manager.gauge(
                 "clickhouse_inserter_inflight",
@@ -458,9 +461,9 @@ impl ServerState {
 mod tests {
     use std::sync::{Arc, OnceLock};
 
-    use hyperi_rustlib::ScalingPressure;
-    use hyperi_rustlib::metrics::MetricsManager;
-    use hyperi_rustlib::scaling::ScalingPressureConfig;
+    use scalo::ScalingPressure;
+    use scalo::metrics::MetricsManager;
+    use scalo::scaling::ScalingPressureConfig;
 
     use super::{Metrics, ServerState};
 

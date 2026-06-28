@@ -17,7 +17,7 @@ use std::time::Duration;
 use dfe_loader::config::{Config, SharedConfig};
 use dfe_loader::metrics::{Metrics, ServerState};
 use dfe_loader::pipeline::Orchestrator;
-use hyperi_rustlib::metrics::MetricsManager;
+use scalo::metrics::MetricsManager;
 
 /// Shared `MetricsManager` for all smoke tests (recorder installed once).
 fn shared_manager() -> &'static MetricsManager {
@@ -130,7 +130,7 @@ fn smoke_deployment_contract() {
 fn smoke_helm_generation() {
     let contract = Config::deployment_contract();
     let tmp = tempfile::tempdir().expect("tempdir");
-    let result = hyperi_rustlib::deployment::generate_chart(&contract, tmp.path(), None);
+    let result = scalo::deployment::generate_chart(&contract, tmp.path(), None);
     assert!(
         result.is_ok(),
         "chart generation should succeed: {result:?}"
@@ -141,7 +141,7 @@ fn smoke_helm_generation() {
 #[test]
 fn smoke_dockerfile_generation() {
     let contract = Config::deployment_contract();
-    let content = hyperi_rustlib::deployment::generate_dockerfile(&contract, None);
+    let content = scalo::deployment::generate_dockerfile(&contract, None);
     assert!(
         content.contains("FROM"),
         "Dockerfile should contain FROM directive"

@@ -193,11 +193,11 @@ async fn test_metrics_server_integration() {
     use dfe_loader::metrics::ServerState;
     use std::sync::Arc;
 
-    let scaling = Arc::new(hyperi_rustlib::ScalingPressure::new(
-        hyperi_rustlib::scaling::ScalingPressureConfig::default(),
+    let scaling = Arc::new(scalo::ScalingPressure::new(
+        scalo::scaling::ScalingPressureConfig::default(),
         vec![],
     ));
-    let manager = hyperi_rustlib::metrics::MetricsManager::new("loader_test_e2e");
+    let manager = scalo::metrics::MetricsManager::new("loader_test_e2e");
     let metrics = dfe_loader::metrics::Metrics::new(&manager);
     let state = Arc::new(ServerState::new(metrics, scaling));
 

@@ -4,7 +4,7 @@
 //! Resilience tests — `MemoryGuard` backpressure and `CircuitBreaker` state transitions.
 
 use dfe_loader::clickhouse::{CircuitBreaker, CircuitBreakerConfig, CircuitState};
-use hyperi_rustlib::memory::{MemoryGuard, MemoryGuardConfig};
+use scalo::memory::{MemoryGuard, MemoryGuardConfig};
 
 // === MemoryGuard tests ===
 

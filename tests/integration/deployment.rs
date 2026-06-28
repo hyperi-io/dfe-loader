@@ -8,12 +8,12 @@
 use std::path::Path;
 
 use dfe_loader::config::Config;
-use hyperi_rustlib::deployment::{
+use scalo::deployment::{
     generate_chart, generate_compose_fragment, generate_dockerfile, validate_dockerfile,
     validate_helm_values,
 };
 
-fn contract() -> hyperi_rustlib::deployment::DeploymentContract {
+fn contract() -> scalo::deployment::DeploymentContract {
     Config::deployment_contract()
 }
 
@@ -22,10 +22,14 @@ fn test_generated_dockerfile_matches_existing() {
     let contract = contract();
     let generated = generate_dockerfile(&contract, None);
 
-    // Verify key contract points are present
+    // Verify key contract points are present. base_image is cascade-resolved
+    // (deployment.base_image config/env wins, else scalo's DEFAULT_BASE_IMAGE),
+    // so assert the FROM uses the contract's resolved value rather than a pinned
+    // distro.
     assert!(
-        generated.contains("FROM ubuntu:24.04"),
-        "Should use ubuntu:24.04 base"
+        generated.contains(&format!("FROM {}", contract.base_image)),
+        "Should use the contract base_image: {}",
+        contract.base_image
     );
     assert!(
         generated.contains("COPY dfe-loader /usr/local/bin/dfe-loader"),

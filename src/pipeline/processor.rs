@@ -6,7 +6,7 @@
 //! `MessageProcessor` holds only `&` references to immutable dependencies.
 //! Its `process` method is pure computation — no
 //! mutable state, no I/O, no `.await`. Safe for rayon `par_iter` via
-//! [`AdaptiveWorkerPool::process_batch`](hyperi_rustlib::worker::AdaptiveWorkerPool::process_batch).
+//! [`AdaptiveWorkerPool::process_batch`](scalo::worker::AdaptiveWorkerPool::process_batch).
 //!
 //! Created per-batch in the orchestrator's event loop. Borrows are released
 //! before the sequential phase begins — the borrow checker enforces this.
@@ -78,7 +78,7 @@ impl MessageProcessor<'_> {
         let format = match self.format_detector.check_and_detect(&msg.payload) {
             Ok(fmt) => fmt,
             Err(_expected) => {
-                hyperi_rustlib::logger::security::input_validation_failure(
+                scalo::logger::security::input_validation_failure(
                     "format_check",
                     "payload format mismatch",
                     None,
@@ -90,7 +90,7 @@ impl MessageProcessor<'_> {
         // Step 2: Parse payload to JSON Value
         let value: Value = match format {
             PayloadFormat::Json => sonic_rs::from_slice(&msg.payload).map_err(|e| {
-                hyperi_rustlib::logger::security::input_validation_failure(
+                scalo::logger::security::input_validation_failure(
                     "json_parse",
                     "invalid JSON payload",
                     None,
@@ -98,7 +98,7 @@ impl MessageProcessor<'_> {
                 crate::Error::Json(format!("JSON parse error: {e}"))
             })?,
             PayloadFormat::MessagePack => rmp_serde::from_slice(&msg.payload).map_err(|e| {
-                hyperi_rustlib::logger::security::input_validation_failure(
+                scalo::logger::security::input_validation_failure(
                     "msgpack_parse",
                     "invalid MessagePack payload",
                     None,
@@ -106,7 +106,7 @@ impl MessageProcessor<'_> {
                 crate::Error::Json(format!("MessagePack parse error: {e}"))
             })?,
             PayloadFormat::Unknown => {
-                hyperi_rustlib::logger::security::input_validation_failure(
+                scalo::logger::security::input_validation_failure(
                     "format_check",
                     "unknown payload format",
                     None,
@@ -125,9 +125,7 @@ impl MessageProcessor<'_> {
             }
             RouteResult::Dlq(reason) => {
                 debug!(reason = %reason, "Routing to DLQ");
-                hyperi_rustlib::logger::security::input_validation_failure(
-                    "routing", &reason, None,
-                );
+                scalo::logger::security::input_validation_failure("routing", &reason, None);
                 return Err(crate::Error::Json(format!("DLQ: {reason}")));
             }
         };

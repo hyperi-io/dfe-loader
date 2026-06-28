@@ -3,7 +3,7 @@
 
 //! Kafka transport adapters and topic resolution
 //!
-//! Uses hyperi-rustlib `KafkaTransport` for all Kafka operations.
+//! Uses scalo `KafkaTransport` for all Kafka operations.
 //! The legacy direct-rdkafka consumer has been removed — all Kafka
 //! interaction goes through the transport abstraction.
 

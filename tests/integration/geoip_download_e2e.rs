@@ -10,7 +10,7 @@
 //!
 //! ## Why a hand-rolled HTTP/1.1 server
 //!
-//! `axum` and `hyper` are pulled in transitively via `hyperi-rustlib` but are
+//! `axum` and `hyper` are pulled in transitively via `scalo` but are
 //! not direct dev-dependencies and the task forbids modifying production
 //! `Cargo.toml`. A minimal `tokio::net::TcpListener` fixture covers everything
 //! these tests need (fixed-size response bodies, custom status codes, early

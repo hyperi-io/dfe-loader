@@ -92,7 +92,7 @@ fn get_test_config() -> KafkaConfig {
             enabled: true,
             mechanism: mechanism_to_string(mechanism),
             username: env::var("KAFKA_SASL_USER").unwrap_or_default(),
-            password: hyperi_rustlib::config::sensitive::SensitiveString::from(
+            password: scalo::config::sensitive::SensitiveString::from(
                 env::var("KAFKA_SASL_PASSWORD").unwrap_or_default(),
             ),
             ..Default::default()
@@ -184,7 +184,7 @@ async fn test_kafka_sasl_config() {
             enabled: true,
             mechanism: "scram_sha_256".to_string(),
             username: "testuser".to_string(),
-            password: hyperi_rustlib::config::sensitive::SensitiveString::from("testpass"),
+            password: scalo::config::sensitive::SensitiveString::from("testpass"),
             ..Default::default()
         }),
         tls: None,

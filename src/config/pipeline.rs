@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 
-use hyperi_rustlib::config::sensitive::SensitiveString;
+use scalo::config::sensitive::SensitiveString;
 use serde::{Deserialize, Serialize};
 
 fn default_true() -> bool {
@@ -409,8 +409,8 @@ impl Default for DlqConfig {
 
 impl DlqConfig {
     /// Convert to rustlib `DlqConfig` for the unified DLQ module.
-    pub fn to_rustlib_config(&self) -> hyperi_rustlib::dlq::DlqConfig {
-        use hyperi_rustlib::dlq::{DlqMode, FileDlqConfig};
+    pub fn to_rustlib_config(&self) -> scalo::dlq::DlqConfig {
+        use scalo::dlq::{DlqMode, FileDlqConfig};
 
         let (mode, enabled) = match self.mode.as_str() {
             "disabled" => (DlqMode::Cascade, false),
@@ -420,7 +420,7 @@ impl DlqConfig {
             _ => (DlqMode::Cascade, self.enabled),
         };
 
-        hyperi_rustlib::dlq::DlqConfig {
+        scalo::dlq::DlqConfig {
             enabled,
             mode,
             file: FileDlqConfig {
@@ -428,12 +428,12 @@ impl DlqConfig {
                 path: self.file_path.clone().into(),
                 ..FileDlqConfig::default()
             },
-            kafka: hyperi_rustlib::dlq::KafkaDlqConfig {
+            kafka: scalo::dlq::KafkaDlqConfig {
                 enabled: self.kafka_enabled,
                 topic_suffix: self.topic_suffix.clone(),
-                ..hyperi_rustlib::dlq::KafkaDlqConfig::default()
+                ..scalo::dlq::KafkaDlqConfig::default()
             },
-            ..hyperi_rustlib::dlq::DlqConfig::default()
+            ..scalo::dlq::DlqConfig::default()
         }
     }
 }
@@ -796,15 +796,23 @@ impl Default for ScalingConfig {
 }
 
 impl ScalingConfig {
-    /// Build a `ScalingPressure` engine from this config.
-    pub fn build_pressure(&self) -> hyperi_rustlib::ScalingPressure {
-        use hyperi_rustlib::{ScalingComponent, ScalingPressureConfig};
-
-        let base = ScalingPressureConfig {
+    /// The scalo `ScalingPressureConfig` (gate thresholds) from this config.
+    pub fn pressure_config(&self) -> scalo::ScalingPressureConfig {
+        scalo::ScalingPressureConfig {
             enabled: self.enabled,
             memory_gate_threshold: self.memory_gate_threshold,
-        };
-        let components = vec![
+        }
+    }
+
+    /// The weighted KEDA components for this loader's scaling pressure.
+    ///
+    /// Shared between [`build_pressure`](Self::build_pressure) and the
+    /// `ServiceApp::scaling_components` hook so the runtime's single
+    /// `ScalingPressure` engine (the one `/scaling/pressure` serves to KEDA)
+    /// and any standalone fallback engine register the SAME components.
+    pub fn components(&self) -> Vec<scalo::ScalingComponent> {
+        use scalo::ScalingComponent;
+        vec![
             ScalingComponent::new(
                 "kafka_lag",
                 self.weight_kafka_lag,
@@ -822,8 +830,16 @@ impl ScalingConfig {
             ),
             ScalingComponent::new("memory", self.weight_memory, 1.0),
             ScalingComponent::new("errors", self.weight_errors, self.saturation_errors),
-        ];
-        hyperi_rustlib::ScalingPressure::new(base, components)
+        ]
+    }
+
+    /// Build a standalone `ScalingPressure` engine from this config.
+    ///
+    /// Used as a fallback when the scaling feature/section is off and the
+    /// runtime hands back no shared engine (registered via
+    /// `ServiceApp::scaling_components`).
+    pub fn build_pressure(&self) -> scalo::ScalingPressure {
+        scalo::ScalingPressure::new(self.pressure_config(), self.components())
     }
 }
 

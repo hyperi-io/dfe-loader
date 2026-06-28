@@ -431,7 +431,7 @@ pub fn get_clickhouse_config() -> ClickHouseConfig {
         hosts: vec![ch.native_addr()],
         database: ch.database,
         username: ch.user,
-        password: hyperi_rustlib::config::sensitive::SensitiveString::from(ch.password),
+        password: scalo::config::sensitive::SensitiveString::from(ch.password),
         protocol: "native".to_string(),
         tables: Vec::new(),
         tls: None,
@@ -453,7 +453,7 @@ pub fn get_kafka_config() -> KafkaConfig {
             enabled: true,
             mechanism: mechanism.to_string(),
             username: kf.sasl_user.unwrap_or_default(),
-            password: hyperi_rustlib::config::sensitive::SensitiveString::from(
+            password: scalo::config::sensitive::SensitiveString::from(
                 kf.sasl_password.unwrap_or_default(),
             ),
             ..Default::default()

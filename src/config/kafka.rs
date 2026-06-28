@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 
-use hyperi_rustlib::config::sensitive::SensitiveString;
+use scalo::config::sensitive::SensitiveString;
 use serde::{Deserialize, Serialize};
 
 // ============================================================================
@@ -40,15 +40,16 @@ pub struct KafkaConfig {
 impl Default for KafkaConfig {
     fn default() -> Self {
         let mut overrides = HashMap::new();
-        // Enable rdkafka statistics every 5s. rustlib's KafkaTransport consumes
+        // Enable rdkafka statistics every 5s. scalo's KafkaTransport consumes
         // these to compute `kafka_consumer_group_lag` (summed over this pod's
-        // ASSIGNED partitions) and the loader pushes that into the scaling
-        // engine's Kafka inbound term via `set_kafka_assigned_lag` (2.8.10+).
-        // With stats disabled ("0") the lag snapshot is always empty so the
-        // inbound scaling term silently reads 0 — the engine would never scale
-        // out on Kafka backlog. 5s is well off the data hot-path and matches the
-        // engine's 15s evaluation tick. rustlib routes the StatsContext output to
-        // its own metrics, not the INFO log, so this no longer spams.
+        // ASSIGNED partitions) and the loader pushes that into the unified
+        // ScalingPressure engine's kafka_lag component via
+        // `set_component("kafka_lag", lag)`. With stats disabled ("0") the lag
+        // snapshot is always empty so the kafka_lag term silently reads 0 — the
+        // engine would never scale out on Kafka backlog. 5s is well off the data
+        // hot-path and matches the engine's evaluation tick. scalo routes the
+        // StatsContext output to its own metrics, not the INFO log, so this no
+        // longer spams.
         overrides.insert("statistics.interval.ms".to_string(), "5000".to_string());
 
         Self {

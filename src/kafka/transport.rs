@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: BUSL-1.1
 // Copyright (c) 2026 HYPERI PTY LIMITED
 
-//! Transport adapters for hyperi-rustlib transport abstraction.
+//! Transport adapters for scalo transport abstraction.
 //!
-//! This module provides thin adapter layers between the hyperi-rustlib Transport trait
+//! This module provides thin adapter layers between the scalo Transport trait
 //! and the local KafkaMessage/KafkaOffset types. Each adapter converts transport-specific
 //! messages into the common pipeline types.
 //!
@@ -21,11 +21,11 @@
 use crate::Result;
 use crate::buffer::KafkaOffset;
 use crate::config::KafkaConfig;
-use hyperi_rustlib::SelfRegulationGovernor;
-use hyperi_rustlib::transport::filter::FilteredDlqEntry;
-use hyperi_rustlib::transport::{
+use scalo::SelfRegulationGovernor;
+use scalo::transport::filter::FilteredDlqEntry;
+use scalo::transport::{
     GrpcConfig as TransportGrpcConfig, GrpcTransport, KafkaConfig as TransportKafkaConfig,
-    KafkaRole, KafkaToken, KafkaTransport, TransportBase, TransportError, TransportReceiver,
+    KafkaToken, KafkaTransport, TransportBase, TransportError, TransportReceiver,
 };
 use tracing::{debug, trace};
 
@@ -44,7 +44,7 @@ pub struct ReceivedBatch {
     pub dlq_entries: Vec<FilteredDlqEntry>,
 }
 
-/// Adapter that wraps hyperi-rustlib `KafkaTransport` for local use.
+/// Adapter that wraps scalo `KafkaTransport` for local use.
 ///
 /// Provides the same interface as the old Consumer but uses the transport abstraction
 /// underneath. This allows swapping to Memory transports for dev/test.
@@ -85,13 +85,15 @@ impl TransportAdapter {
         Ok(Self { transport })
     }
 
-    /// Convert local `KafkaConfig` to hyperi-rustlib `TransportKafkaConfig`.
+    /// Convert local `KafkaConfig` to scalo `TransportKafkaConfig`.
     pub fn convert_config(config: &KafkaConfig) -> TransportKafkaConfig {
         let mut transport_config = TransportKafkaConfig {
-            // loader is consume-only (Kafka -> ClickHouse); the Consumer role
-            // means rustlib builds no idle producer (#44). The DLQ uses rustlib's
-            // standalone KafkaProducer, not this transport.
-            role: KafkaRole::Consumer,
+            // loader is consume-only (Kafka -> ClickHouse). scalo 2.10 dropped the
+            // explicit role enum for a profile-based config: a NON-EMPTY consumer
+            // group is what makes scalo build a consumer (and no idle producer).
+            // The loader is a consumer, so the group MUST stay set (do not clear
+            // it). The DLQ uses scalo's standalone KafkaProducer, not this
+            // transport. profile defaults to Production (lean librdkafka baseline).
             brokers: config.brokers.clone(),
             group: config.group.clone(),
             client_id: config.client_id.clone(),
@@ -257,13 +259,13 @@ impl TransportAdapter {
     /// Total consumer lag summed over THIS pod's ASSIGNED partitions.
     ///
     /// rdkafka reports `consumer_lag` only for assigned partitions, so the sum
-    /// is inherently PER-POD and scale-invariant (the 2.8.10 scaling engine
-    /// consumes it as the Kafka inbound pressure term via
-    /// `scaling_signals.set_kafka_assigned_lag`). Requires librdkafka statistics
+    /// is inherently PER-POD and scale-invariant. The orchestrator pushes it as
+    /// the Kafka inbound pressure term into the unified `ScalingPressure` engine
+    /// via `set_component("kafka_lag", lag)`. Requires librdkafka statistics
     /// to be enabled (`statistics.interval.ms` > 0); with stats disabled the
     /// snapshot is empty and this returns 0.
     pub fn assigned_lag(&self) -> i64 {
-        use hyperi_rustlib::transport::kafka::total_consumer_lag;
+        use scalo::transport::kafka::total_consumer_lag;
         total_consumer_lag(&self.transport.stats()).max(0)
     }
 }
@@ -279,7 +281,7 @@ impl From<TransportError> for crate::Error {
 // GrpcTransportAdapter - Receives Push RPCs from dfe-receiver
 // ============================================================================
 
-/// Adapter that wraps hyperi-rustlib `GrpcTransport` for receiving mode.
+/// Adapter that wraps scalo `GrpcTransport` for receiving mode.
 ///
 /// dfe-loader acts as a gRPC server: remote senders (e.g. dfe-receiver) call
 /// the `Push` RPC to deliver messages. The adapter converts those into the
@@ -388,9 +390,7 @@ pub use memory_adapter::MemoryTransportAdapter;
 
 #[cfg(feature = "transport-memory")]
 mod memory_adapter {
-    use hyperi_rustlib::transport::{
-        MemoryConfig, MemoryTransport, TransportBase, TransportReceiver,
-    };
+    use scalo::transport::{MemoryConfig, MemoryTransport, TransportBase, TransportReceiver};
     use std::sync::Arc;
 
     use crate::Result;
@@ -398,7 +398,7 @@ mod memory_adapter {
 
     use super::super::KafkaMessage;
 
-    /// Adapter that wraps hyperi-rustlib `MemoryTransport` for local testing.
+    /// Adapter that wraps scalo `MemoryTransport` for local testing.
     ///
     /// Same interface as `TransportAdapter` but uses in-memory channels.
     /// Perfect for unit tests - no Kafka required.
@@ -596,7 +596,8 @@ impl TransportBackend {
     ///
     /// Returns `None` for the gRPC backend (a push source has no broker-side
     /// backlog the pod can read locally — the engine falls back to CPU-only for
-    /// that path). Feeds `scaling_signals.set_kafka_assigned_lag` (2.8.10).
+    /// that path). Feeds the unified `ScalingPressure` engine's `kafka_lag`
+    /// component via `set_component("kafka_lag", lag)`.
     pub fn assigned_lag(&self) -> Option<i64> {
         match self {
             Self::Kafka(a) => Some(a.assigned_lag()),
@@ -608,7 +609,7 @@ impl TransportBackend {
 #[cfg(all(test, feature = "transport-memory"))]
 mod tests {
     use super::*;
-    use hyperi_rustlib::transport::MemoryConfig;
+    use scalo::transport::MemoryConfig;
 
     // ========================================================================
     // MemoryTransportAdapter: construction
@@ -999,7 +1000,7 @@ mod tests {
 
     #[test]
     fn test_transport_error_conversion() {
-        let te = hyperi_rustlib::transport::TransportError::Closed;
+        let te = scalo::transport::TransportError::Closed;
         let ce: crate::Error = te.into();
         match ce {
             crate::Error::Kafka(msg) => {

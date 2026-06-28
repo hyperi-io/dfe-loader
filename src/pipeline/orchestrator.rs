@@ -5,7 +5,7 @@
 //!
 //! Orchestrates the Transport → Transform → Buffer → `ClickHouse` pipeline.
 //!
-//! Uses the hyperi-rustlib Transport abstraction for message sources (Kafka/Memory).
+//! Uses the scalo Transport abstraction for message sources (Kafka/Memory).
 //! Processes messages in batches for efficiency.
 //!
 //! Accumulates rows as `Map<String, Value>` per table, then flushes via
@@ -21,11 +21,10 @@ use tracing::{debug, error, info, trace, warn};
 
 use rustc_hash::FxHashSet;
 
-use hyperi_rustlib::ScalingPressure;
-use hyperi_rustlib::SelfRegulationGovernor;
-use hyperi_rustlib::dlq::{Dlq, DlqEntry};
-use hyperi_rustlib::memory::{MemoryGuard, MemoryGuardConfig};
-use hyperi_rustlib::scaling::ScalingSignalsCell;
+use scalo::ScalingPressure;
+use scalo::SelfRegulationGovernor;
+use scalo::dlq::{Dlq, DlqEntry};
+use scalo::memory::{MemoryGuard, MemoryGuardConfig};
 
 use crate::Result;
 use crate::buffer::{BufferManager, FlushBatch, KafkaOffset};
@@ -80,14 +79,8 @@ pub struct Orchestrator {
     /// intake brakes under memory pressure. `None` when self-regulation is
     /// disabled (`self_regulation.enabled = false`).
     governor: Option<SelfRegulationGovernor>,
-    worker_pool: Option<Arc<hyperi_rustlib::worker::AdaptiveWorkerPool>>,
-    batch_engine: Option<Arc<hyperi_rustlib::worker::BatchEngine>>,
-    /// Per-pod scaling-signal cell from the runtime (2.8.10). The horizontal
-    /// scaling-pressure engine reads it each tick. The orchestrator pushes the
-    /// Kafka assigned-partition lag (inbound term) and the ClickHouse sink's
-    /// circuit-open state (the composite gate) from the recv/flush loop. `None`
-    /// in test/default construction.
-    scaling_signals: Option<Arc<ScalingSignalsCell>>,
+    worker_pool: Option<Arc<scalo::worker::AdaptiveWorkerPool>>,
+    batch_engine: Option<Arc<scalo::worker::BatchEngine>>,
     /// Lightweight ClickHouse sink-health latch driving `set_circuit_open`.
     /// Set when a whole flush cycle fails with zero successful inserts (sink
     /// unreachable); cleared the moment any insert succeeds. This is the real,
@@ -115,7 +108,6 @@ impl Orchestrator {
             governor: None,
             worker_pool: None,
             batch_engine: None,
-            scaling_signals: None,
             sink_circuit_open: false,
         }
     }
@@ -138,19 +130,8 @@ impl Orchestrator {
             governor: None,
             worker_pool: None,
             batch_engine: None,
-            scaling_signals: None,
             sink_circuit_open: false,
         }
-    }
-
-    /// Set the per-pod scaling-signal cell (2.8.10 horizontal scaling engine).
-    ///
-    /// The orchestrator pushes the Kafka assigned-partition lag and the
-    /// ClickHouse sink circuit-open state into this cell from its loops; the
-    /// runtime's `ScalingEngine` reads it each tick.
-    pub fn with_scaling_signals(mut self, signals: Arc<ScalingSignalsCell>) -> Self {
-        self.scaling_signals = Some(signals);
-        self
     }
 
     /// Set shared config for hot-reload support
@@ -166,16 +147,13 @@ impl Orchestrator {
     }
 
     /// Set the adaptive worker pool for parallel message processing.
-    pub fn with_worker_pool(
-        mut self,
-        pool: Arc<hyperi_rustlib::worker::AdaptiveWorkerPool>,
-    ) -> Self {
+    pub fn with_worker_pool(mut self, pool: Arc<scalo::worker::AdaptiveWorkerPool>) -> Self {
         self.worker_pool = Some(pool);
         self
     }
 
     /// Set the batch processing engine (SIMD parse, pre-route, parallel transform).
-    pub fn with_batch_engine(mut self, engine: Arc<hyperi_rustlib::worker::BatchEngine>) -> Self {
+    pub fn with_batch_engine(mut self, engine: Arc<scalo::worker::BatchEngine>) -> Self {
         self.batch_engine = Some(engine);
         self
     }
@@ -462,7 +440,7 @@ impl Orchestrator {
         let mut config_rx = self
             .shared_config
             .as_ref()
-            .map(hyperi_rustlib::SharedConfig::subscribe);
+            .map(scalo::SharedConfig::subscribe);
 
         // Batch size for transport.recv() - process multiple messages per iteration
         const RECV_BATCH_SIZE: usize = 100;
@@ -601,7 +579,7 @@ impl Orchestrator {
                         // Update config registry (enables /config endpoint to reflect changes)
                         self.config.register_sections();
 
-                        hyperi_rustlib::logger::security::config_changed(
+                        scalo::logger::security::config_changed(
                             "config_reload",
                             "system",
                             &format!("pipeline config reloaded (version {version})"),
@@ -626,17 +604,19 @@ impl Orchestrator {
                         }
                     }
 
-                    // Push the per-pod Kafka inbound scaling signal (2.8.10).
-                    // assigned_lag() sums lag over THIS pod's ASSIGNED partitions
-                    // (scale-invariant). gRPC has no broker lag -> None -> the
-                    // engine's inbound term stays 0 (CPU-only). The flush tick
-                    // (every flush_age_secs, default 5s) is fresher than the
-                    // engine's 15s tick. The circuit-open gate is pushed from the
-                    // flush path on every insert outcome.
-                    if let Some(ref signals) = self.scaling_signals
+                    // Push the per-pod Kafka inbound scaling signal into the
+                    // unified ScalingPressure engine (scalo 2.10 collapsed the old
+                    // separate scaling-signal cell into ONE ScalingPressure served
+                    // to KEDA at /scaling/pressure). assigned_lag() sums lag over
+                    // THIS pod's ASSIGNED partitions (scale-invariant). gRPC has no
+                    // broker lag -> None -> the kafka_lag term stays 0 (CPU-only).
+                    // The flush tick (every flush_age_secs, default 5s) is fresher
+                    // than the engine's evaluation tick. The circuit-open gate is
+                    // pushed from the flush path on every insert outcome.
+                    if let Some(ref scaling) = self.scaling
                         && let Some(lag) = transport.assigned_lag()
                     {
-                        signals.set_kafka_assigned_lag(lag as f64);
+                        scaling.set_component("kafka_lag", lag as f64);
                     }
 
                     // Check for buffers ready to flush
@@ -804,7 +784,7 @@ impl Orchestrator {
                             let pre_route_filtered = if let Some(ref engine) = self.batch_engine
                                 && let Some(ref field) = engine.config().routing_field
                             {
-                                use hyperi_rustlib::worker::engine::pre_route::{
+                                use scalo::worker::engine::pre_route::{
                                     PreRouteOutcome, apply_filters, extract_routing_field,
                                     filters_from_config,
                                 };
@@ -839,14 +819,14 @@ impl Orchestrator {
                                     let msg = &batch[*idx];
                                     if dlq.is_some() {
                                         let entry = DlqEntry::new("loader", reason.clone(), msg.payload.clone())
-                                            .with_source(hyperi_rustlib::dlq::DlqSource::kafka(
+                                            .with_source(scalo::dlq::DlqSource::kafka(
                                                 &*msg.topic,
                                                 msg.partition,
                                                 msg.offset,
                                             ));
                                         if dlq_tx.try_send(entry).is_ok() {
                                             self.stats.messages_dlq += 1;
-                                            hyperi_rustlib::logger::security::record_dlq(
+                                            scalo::logger::security::record_dlq(
                                                 "pre_route",
                                                 reason,
                                                 Some(&format!(
@@ -1206,18 +1186,19 @@ impl Orchestrator {
             m.update_clickhouse_rows_per_sec();
         }
 
-        // Drive the ClickHouse sink circuit-open scaling gate (2.8.10). The
-        // sink is "dead" when a whole flush cycle failed with zero successes;
-        // it recovers the moment any insert succeeds. The engine zeroes the
-        // composite while circuit_open is true (more pods can't relieve a dead
-        // sink) — exactly the right behaviour for a non-rustlib outbound.
+        // Drive the ClickHouse sink circuit-open gate on the unified
+        // ScalingPressure engine. The sink is "dead" when a whole flush cycle
+        // failed with zero successes; it recovers the moment any insert succeeds.
+        // The engine zeroes the composite while circuit_open is true (more pods
+        // can't relieve a dead sink) — exactly the right behaviour for a
+        // non-scalo outbound.
         if cycle_ok > 0 {
             self.sink_circuit_open = false;
         } else if cycle_err > 0 {
             self.sink_circuit_open = true;
         }
-        if let Some(ref signals) = self.scaling_signals {
-            signals.set_circuit_open(self.sink_circuit_open);
+        if let Some(ref scaling) = self.scaling {
+            scaling.set_circuit_open(self.sink_circuit_open);
         }
 
         self.stats.batches_flushed += batch_count as u64;
@@ -1529,11 +1510,11 @@ fn route_pending_to_dlq(
     let reason_str = format_pending_reason(reason);
     if dlq_enabled {
         let entry = DlqEntry::new("loader", reason_str.clone(), msg.payload.clone()).with_source(
-            hyperi_rustlib::dlq::DlqSource::kafka(&*msg.topic, msg.partition, msg.offset),
+            scalo::dlq::DlqSource::kafka(&*msg.topic, msg.partition, msg.offset),
         );
         let _ = dlq_tx.try_send(entry);
     }
-    hyperi_rustlib::logger::security::record_dlq(pending_reason_label(reason), &reason_str, None);
+    scalo::logger::security::record_dlq(pending_reason_label(reason), &reason_str, None);
     // Surface in Prometheus too — both the generic DLQ counter and the
     // pending-schema-specific counter — so dashboards see this loss class (#36).
     if let Some(m) = metrics {

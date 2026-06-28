@@ -85,7 +85,7 @@ mod testcontainers_impl {
                 hosts: vec![format!("{}:{}", host, native_port)],
                 database: "default".to_string(),
                 username: "default".to_string(),
-                password: hyperi_rustlib::config::sensitive::SensitiveString::default(),
+                password: scalo::config::sensitive::SensitiveString::default(),
                 protocol: "native".to_string(),
                 tables: Vec::new(),
                 tls: None,

@@ -690,7 +690,7 @@ impl Inserter {
                         )
                         .increment(1);
                         // Log: debounced at 5 min (operator guidance, not spam)
-                        if hyperi_rustlib::logger::log_debounced(&MAX_PATHS_TS, 300_000) {
+                        if scalo::logger::log_debounced(&MAX_PATHS_TS, 300_000) {
                             warn!(
                                 table = %table,
                                 "Table _json column hit max_dynamic_paths limit. \

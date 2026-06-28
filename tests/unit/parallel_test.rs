@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use dfe_loader::pipeline::capture::CaptureOverrides;
 
-use hyperi_rustlib::worker::{AdaptiveWorkerPool, WorkerPoolConfig};
+use scalo::worker::{AdaptiveWorkerPool, WorkerPoolConfig};
 
 /// Detected parallelism available to this process.
 ///

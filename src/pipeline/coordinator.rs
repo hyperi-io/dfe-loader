@@ -10,8 +10,8 @@
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
-use hyperi_rustlib::dlq::{DlqEntry, DlqSource};
-use hyperi_rustlib::memory::MemoryGuard;
+use scalo::dlq::{DlqEntry, DlqSource};
+use scalo::memory::MemoryGuard;
 
 use crate::buffer::BufferManager;
 use crate::kafka::KafkaMessage;
@@ -142,7 +142,7 @@ impl BatchCoordinator<'_> {
                                     );
                                 let _ = self.dlq_tx.try_send(entry);
                             }
-                            hyperi_rustlib::logger::security::record_dlq(
+                            scalo::logger::security::record_dlq(
                                 "pending_schema_overflow",
                                 &format!("per-table cap exceeded for {t}"),
                                 None,
@@ -164,7 +164,7 @@ impl BatchCoordinator<'_> {
                         match self.dlq_tx.try_send(entry) {
                             Ok(()) => {
                                 outcome.dlq += 1;
-                                hyperi_rustlib::logger::security::record_dlq(
+                                scalo::logger::security::record_dlq(
                                     "processing",
                                     &e.to_string(),
                                     Some(&format!(
@@ -177,14 +177,14 @@ impl BatchCoordinator<'_> {
                             Err(mpsc::error::TrySendError::Full(_)) => {
                                 static DLQ_FULL_TS: std::sync::atomic::AtomicU64 =
                                     std::sync::atomic::AtomicU64::new(0);
-                                if hyperi_rustlib::logger::log_debounced(&DLQ_FULL_TS, 5000) {
+                                if scalo::logger::log_debounced(&DLQ_FULL_TS, 5000) {
                                     warn!(error = %e, "DLQ channel full, messages dropped (max 1 per 5s)");
                                 }
                             }
                             Err(mpsc::error::TrySendError::Closed(_)) => {
                                 static DLQ_CLOSED_TS: std::sync::atomic::AtomicU64 =
                                     std::sync::atomic::AtomicU64::new(0);
-                                if hyperi_rustlib::logger::log_debounced(&DLQ_CLOSED_TS, 5000) {
+                                if scalo::logger::log_debounced(&DLQ_CLOSED_TS, 5000) {
                                     warn!(error = %e, "DLQ channel closed (max 1 per 5s)");
                                 }
                             }
@@ -209,8 +209,8 @@ mod tests {
 
     use tokio::sync::mpsc;
 
-    use hyperi_rustlib::dlq::DlqEntry;
-    use hyperi_rustlib::memory::{MemoryGuard, MemoryGuardConfig};
+    use scalo::dlq::DlqEntry;
+    use scalo::memory::{MemoryGuard, MemoryGuardConfig};
 
     use crate::buffer::{BufferManager, KafkaOffset};
     use crate::config::{BufferConfig, ComputedColumnsConfig, MetadataConfig};

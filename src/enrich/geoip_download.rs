@@ -219,7 +219,7 @@ async fn download_city_db(
             let token = auto
                 .ipinfo_token
                 .as_ref()
-                .map(hyperi_rustlib::config::sensitive::SensitiveString::expose)
+                .map(scalo::config::sensitive::SensitiveString::expose)
                 .ok_or(GeoIpDownloadError::MissingCredential {
                     provider: "IpInfoLite",
                     field: "ipinfo_token",

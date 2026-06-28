@@ -8,8 +8,8 @@
 
 pub mod parse;
 
-// Re-export from hyperi-rustlib with local type alias for backward compatibility
-pub use hyperi_rustlib::transport::{
+// Re-export from scalo with local type alias for backward compatibility
+pub use parse::parse_payload;
+pub use scalo::transport::{
     DetectedFormat as PayloadFormat, FormatDetector, FormatMode, detect_format,
 };
-pub use parse::parse_payload;

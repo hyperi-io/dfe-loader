@@ -163,7 +163,7 @@ fn sasl_config_from_env() -> Option<SaslConfig> {
         enabled: true,
         mechanism: mechanism.to_string(),
         username: kf.sasl_user.unwrap_or_default(),
-        password: hyperi_rustlib::config::sensitive::SensitiveString::from(
+        password: scalo::config::sensitive::SensitiveString::from(
             kf.sasl_password.unwrap_or_default(),
         ),
         ..Default::default()
@@ -176,7 +176,7 @@ fn ch_config_from_env() -> ClickHouseConfig {
         hosts: vec![format!("{}:{}", ch.host, ch.http_port)],
         database: ch.database,
         username: ch.user,
-        password: hyperi_rustlib::config::sensitive::SensitiveString::from(ch.password),
+        password: scalo::config::sensitive::SensitiveString::from(ch.password),
         protocol: "http".to_string(),
         tables: Vec::new(),
         tls: if ch.tls {

@@ -135,24 +135,22 @@ impl Router {
         let compiled_rules: Vec<CompiledRoutingRule> = config
             .rules
             .iter()
-            .filter_map(
-                |rule| match hyperi_rustlib::expression::compile(&rule.when) {
-                    Ok(program) => Some(CompiledRoutingRule {
-                        program,
-                        target: rule.target.clone(),
-                        db: rule.db.clone(),
-                    }),
-                    Err(e) => {
-                        warn!(
-                            expr = %rule.when,
-                            target = %rule.target,
-                            error = %e,
-                            "Skipping invalid routing rule"
-                        );
-                        None
-                    }
-                },
-            )
+            .filter_map(|rule| match scalo::expression::compile(&rule.when) {
+                Ok(program) => Some(CompiledRoutingRule {
+                    program,
+                    target: rule.target.clone(),
+                    db: rule.db.clone(),
+                }),
+                Err(e) => {
+                    warn!(
+                        expr = %rule.when,
+                        target = %rule.target,
+                        error = %e,
+                        "Skipping invalid routing rule"
+                    );
+                    None
+                }
+            })
             .collect();
 
         Self {
@@ -333,7 +331,7 @@ impl Router {
         // Pass serde_json::Map directly — build_context accepts any iterator
         // of (&String, &Value), no clone needed.
         let obj = value.as_object()?;
-        let context = match hyperi_rustlib::expression::build_context(obj) {
+        let context = match scalo::expression::build_context(obj) {
             Ok(ctx) => ctx,
             Err(_) => return None,
         };

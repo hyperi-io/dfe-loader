@@ -3,7 +3,7 @@
 
 //! Configuration hot-reload using rustlib's `ConfigReloader<T>`
 //!
-//! Wraps the generic `ConfigReloader` from `hyperi-rustlib` with
+//! Wraps the generic `ConfigReloader` from `scalo` with
 //! dfe-loader-specific config loading and validation logic.
 //!
 //! ## Features
@@ -35,7 +35,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use hyperi_rustlib::config::reloader::{ConfigReloader, ReloaderConfig};
+use scalo::config::reloader::{ConfigReloader, ReloaderConfig};
 use tokio::task::JoinHandle;
 
 use super::Config;

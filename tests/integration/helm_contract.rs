@@ -3,7 +3,7 @@
 
 //! Helm chart + Dockerfile contract sync tests
 //!
-//! Uses hyperi-rustlib's `DeploymentContract` to validate that
+//! Uses scalo's `DeploymentContract` to validate that
 //! `chart/values.yaml` and `Dockerfile` stay in sync with app defaults.
 //!
 //! If you change a default port, health path, or KEDA threshold in
@@ -13,7 +13,7 @@
 use std::path::Path;
 
 use dfe_loader::config::Config;
-use hyperi_rustlib::deployment::DeploymentContract;
+use scalo::deployment::DeploymentContract;
 
 fn app_contract() -> DeploymentContract {
     Config::deployment_contract()
@@ -28,8 +28,7 @@ fn test_helm_chart_matches_contract() {
     let contract = app_contract();
     let chart_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("chart");
 
-    let mismatches =
-        hyperi_rustlib::deployment::validate_helm_values(&contract, &chart_dir).unwrap();
+    let mismatches = scalo::deployment::validate_helm_values(&contract, &chart_dir).unwrap();
 
     assert!(
         mismatches.is_empty(),
@@ -51,8 +50,7 @@ fn test_dockerfile_matches_contract() {
     let contract = app_contract();
     let dockerfile = Path::new(env!("CARGO_MANIFEST_DIR")).join("Dockerfile");
 
-    let mismatches =
-        hyperi_rustlib::deployment::validate_dockerfile(&contract, &dockerfile).unwrap();
+    let mismatches = scalo::deployment::validate_dockerfile(&contract, &dockerfile).unwrap();
 
     assert!(
         mismatches.is_empty(),

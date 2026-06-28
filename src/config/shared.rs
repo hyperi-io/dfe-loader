@@ -3,7 +3,7 @@
 
 //! Shared configuration with hot-reload support
 //!
-//! Re-exports `hyperi_rustlib::config::shared::SharedConfig<Config>` as
+//! Re-exports `scalo::config::shared::SharedConfig<Config>` as
 //! `SharedConfig` for backward compatibility. All DFE components share
 //! the same generic abstraction from rustlib.
 
@@ -36,7 +36,7 @@ use super::Config;
 /// // Update config (from reloader)
 /// shared.update(new_config);
 /// ```
-pub type SharedConfig = hyperi_rustlib::config::shared::SharedConfig<Config>;
+pub type SharedConfig = scalo::config::shared::SharedConfig<Config>;
 
 #[cfg(test)]
 mod tests {

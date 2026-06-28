@@ -102,7 +102,7 @@ impl Coercer {
                         }
                         // Non-strict: log sampled warning and use default
                         static COERCE_FAILS: AtomicU64 = AtomicU64::new(0);
-                        if hyperi_rustlib::logger::log_sampled(&COERCE_FAILS, 1000) {
+                        if scalo::logger::log_sampled(&COERCE_FAILS, 1000) {
                             warn!(
                                 field = field_name,
                                 error = %e,

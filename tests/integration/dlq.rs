@@ -36,7 +36,7 @@ fn test_dlq_config_to_rustlib() {
     let config = DlqConfig::default();
     let rustlib_config = config.to_rustlib_config();
     assert!(rustlib_config.enabled);
-    assert_eq!(rustlib_config.mode, hyperi_rustlib::dlq::DlqMode::Cascade);
+    assert_eq!(rustlib_config.mode, scalo::dlq::DlqMode::Cascade);
     assert!(rustlib_config.file.enabled);
 }
 
@@ -48,7 +48,7 @@ fn test_dlq_config_file_only_mode() {
         ..DlqConfig::default()
     };
     let rustlib_config = config.to_rustlib_config();
-    assert_eq!(rustlib_config.mode, hyperi_rustlib::dlq::DlqMode::FileOnly);
+    assert_eq!(rustlib_config.mode, scalo::dlq::DlqMode::FileOnly);
 }
 
 #[test]
@@ -69,14 +69,12 @@ fn test_dlq_file_backend_write() {
 
     rt.block_on(async {
         let shutdown = tokio_util::sync::CancellationToken::new();
-        let dlq =
-            hyperi_rustlib::dlq::Dlq::spawn(&rustlib_config, "loader", None, shutdown.clone())
-                .expect("create file-only DLQ");
+        let dlq = scalo::dlq::Dlq::spawn(&rustlib_config, "loader", None, shutdown.clone())
+            .expect("create file-only DLQ");
 
-        let entry =
-            hyperi_rustlib::dlq::DlqEntry::new("loader", "parse_error", b"bad data".to_vec())
-                .with_destination("acme.auth")
-                .with_source(hyperi_rustlib::dlq::DlqSource::kafka("events", 1, 42));
+        let entry = scalo::dlq::DlqEntry::new("loader", "parse_error", b"bad data".to_vec())
+            .with_destination("acme.auth")
+            .with_source(scalo::dlq::DlqSource::kafka("events", 1, 42));
 
         dlq.send(entry).await.expect("DLQ send");
         dlq.flush().await.expect("DLQ flush");

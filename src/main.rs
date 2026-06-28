@@ -24,8 +24,8 @@ use tracing::{debug, info, warn};
 use dfe_loader::config::{Config, ConfigWatcher, SharedConfig, WatcherConfig};
 use dfe_loader::metrics::{Metrics, ServerState};
 use dfe_loader::pipeline::Orchestrator;
-use hyperi_rustlib::cli::{
-    CliError, CommonArgs, DfeApp, ServiceRuntime, StandardCommand, VersionInfo, run_app,
+use scalo::cli::{
+    CliError, CommonArgs, ServiceApp, ServiceRuntime, StandardCommand, VersionInfo, run_app,
 };
 
 #[derive(Parser, Debug)]
@@ -48,7 +48,7 @@ struct App {
     emit_dockerfile: Option<PathBuf>,
 }
 
-impl DfeApp for App {
+impl ServiceApp for App {
     type Config = Config;
 
     fn name(&self) -> &'static str {
@@ -96,7 +96,7 @@ impl DfeApp for App {
                 .map_err(|e| CliError::Config(e.to_string()))?;
 
             // Fire-and-forget version check
-            hyperi_rustlib::VersionCheck::new(hyperi_rustlib::VersionCheckConfig {
+            scalo::VersionCheck::new(scalo::VersionCheckConfig {
                 product: "dfe-loader".into(),
                 current_version: env!("CARGO_PKG_VERSION").into(),
                 ..Default::default()
@@ -123,8 +123,15 @@ impl DfeApp for App {
                 "Resolved configuration"
             );
 
-            // Build loader-specific scaling pressure (custom components)
-            let scaling = Arc::new(config.scaling.build_pressure());
+            // Share the runtime's single ScalingPressure engine (registered via
+            // the `scaling_components` override below and served at
+            // /scaling/pressure to KEDA). scalo 2.10 unified scaling onto this one
+            // engine. If the scaling feature/section is off the runtime hands back
+            // None; fall back to a standalone engine with the same components.
+            let scaling = runtime
+                .scaling
+                .clone()
+                .unwrap_or_else(|| Arc::new(config.scaling.build_pressure()));
 
             // Register loader-specific metrics using runtime's MetricsManager
             let metrics = Metrics::new(&runtime.metrics);
@@ -147,13 +154,14 @@ impl DfeApp for App {
             // Inject the runtime's SHARED memory guard (the same one feeding the
             // governor and worker pool) so in-flight byte accounting drives the
             // inbound brake — never a stand-alone guard the pipeline ignores.
-            // Also hand it the runtime's per-pod scaling-signal cell (2.8.10):
-            // the orchestrator pushes Kafka assigned-lag + ClickHouse sink
-            // circuit-open into it; the runtime's ScalingEngine reads it each tick.
+            // scalo 2.10 unified scaling onto ONE ScalingPressure engine (the
+            // separate per-pod scaling-signal cell was removed): the orchestrator
+            // pushes Kafka assigned-lag + ClickHouse sink circuit-open directly
+            // into this `scaling` engine, which is served to KEDA at
+            // /scaling/pressure.
             let mut orchestrator = Orchestrator::with_metrics(config.clone(), metrics)
                 .with_shared_config(shared_config.clone())
                 .with_scaling(Arc::clone(&scaling))
-                .with_scaling_signals(Arc::clone(&runtime.scaling_signals))
                 .with_memory_guard(Arc::clone(&runtime.memory_guard))
                 .with_governor(governor);
 
@@ -226,7 +234,14 @@ impl DfeApp for App {
         }
     }
 
-    fn deployment_contract(&self) -> Option<hyperi_rustlib::deployment::DeploymentContract> {
+    fn scaling_components(&self, config: &Self::Config) -> Vec<scalo::ScalingComponent> {
+        // Register the loader's weighted KEDA components on the runtime's single
+        // ScalingPressure -- the engine `/scaling/pressure` serves. The
+        // orchestrator feeds it kafka_lag + circuit-open from its recv/flush loop.
+        config.scaling.components()
+    }
+
+    fn deployment_contract(&self) -> Option<scalo::deployment::DeploymentContract> {
         Some(Config::deployment_contract())
     }
 }
@@ -237,7 +252,7 @@ async fn main() {
 
     if let Some(output) = &app.emit_helm {
         let contract = Config::deployment_contract();
-        if let Err(e) = hyperi_rustlib::deployment::generate_chart(&contract, output, None) {
+        if let Err(e) = scalo::deployment::generate_chart(&contract, output, None) {
             eprintln!("fatal: {e}");
             std::process::exit(1);
         }
@@ -247,7 +262,7 @@ async fn main() {
 
     if let Some(output) = &app.emit_dockerfile {
         let contract = Config::deployment_contract();
-        let content = hyperi_rustlib::deployment::generate_dockerfile(&contract, None);
+        let content = scalo::deployment::generate_dockerfile(&contract, None);
         if let Err(e) = std::fs::write(output, &content) {
             eprintln!("fatal: could not write Dockerfile: {e}");
             std::process::exit(1);

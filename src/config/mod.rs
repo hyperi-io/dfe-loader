@@ -7,7 +7,7 @@
 //!
 //! The config module supports hot-reloading via file polling and SIGHUP,
 //! using the generic `SharedConfig<T>` and `ConfigReloader<T>` from
-//! `hyperi-rustlib`. File polling works reliably on all filesystem types
+//! `scalo`. File polling works reliably on all filesystem types
 //! including S3, NFS, and FUSE mounts.
 //!
 //! ```ignore

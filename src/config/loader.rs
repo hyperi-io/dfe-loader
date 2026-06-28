@@ -13,7 +13,7 @@
 
 use std::path::Path;
 
-use hyperi_rustlib::config::sensitive::SensitiveString;
+use scalo::config::sensitive::SensitiveString;
 use serde::{Deserialize, Serialize};
 
 use crate::Result;
@@ -86,7 +86,7 @@ pub struct Config {
     pub scaling: ScalingConfig,
     /// Batch processing engine config (SIMD parse, pre-route, parallelism). **Restart required.**
     #[serde(default)]
-    pub batch_processing: hyperi_rustlib::worker::BatchProcessingConfig,
+    pub batch_processing: scalo::worker::BatchProcessingConfig,
 
     // --- Hot-reloaded (takes effect on next batch) ---
     /// Routing rules and table mapping. **Hot-reloaded.**
@@ -173,7 +173,7 @@ impl From<&ClickHouseConfig> for crate::clickhouse::ClickHouseConfig {
 /// Environment variable prefix for all dfe-loader settings
 const ENV_PREFIX: &str = "DFE_LOADER";
 
-use hyperi_rustlib::config::flat_env::{self, ApplyFlatEnv, Normalize};
+use scalo::config::flat_env::{self, ApplyFlatEnv, Normalize};
 
 impl ApplyFlatEnv for Config {
     /// Apply flat `DFE_LOADER`_* env var overrides.
@@ -306,7 +306,7 @@ impl Normalize for Config {
 fn apply_figment_env(config: &mut Config) -> Result<()> {
     use figment::Figment;
     use figment::providers::{Env, Serialized};
-    use hyperi_rustlib::expose_during;
+    use scalo::expose_during;
 
     let extracted = expose_during(|| {
         Figment::from(Serialized::defaults(&*config))
@@ -378,7 +378,7 @@ impl Config {
     /// Enables `/config` endpoint dump (with redaction) and change notifications.
     /// Called after load and after hot-reload.
     pub fn register_sections(&self) {
-        use hyperi_rustlib::config::registry;
+        use scalo::config::registry;
         registry::register("kafka", &self.kafka);
         registry::register("clickhouse", &self.clickhouse);
         registry::register("routing", &self.routing);
@@ -434,16 +434,25 @@ impl Config {
     ///
     /// Apps provide ~20% customisation; rustlib generates ~80% boilerplate
     /// (Dockerfile, Helm chart, Compose fragment).
-    pub fn deployment_contract() -> hyperi_rustlib::deployment::DeploymentContract {
-        use hyperi_rustlib::deployment::{
+    pub fn deployment_contract() -> scalo::deployment::DeploymentContract {
+        use scalo::deployment::{
             DeploymentContract, HealthContract, ImageProfile, KedaContract, NativeDepsContract,
-            OciLabels, SecretEnvContract, SecretGroupContract,
+            OciLabels, SecretEnvContract, SecretGroupContract, base_image_from_cascade,
+            image_registry_from_cascade,
         };
+
+        // Resolve base image + registry via the scalo cascade helpers so org-wide
+        // overrides in deployment.* config keys (or env) win before falling back
+        // to scalo's DEFAULT_BASE_IMAGE / DEFAULT_IMAGE_REGISTRY. scalo 2.10's
+        // Dockerfile generator is contract-driven, so these values flow into the
+        // generated Dockerfile.
+        let base_image = base_image_from_cascade();
+        let image_registry = image_registry_from_cascade();
 
         DeploymentContract {
             schema_version: 2,
             app_name: "dfe-loader".into(),
-            base_image: "ubuntu:24.04".into(),
+            base_image: base_image.clone(),
             binary_name: "dfe-loader".into(),
             description: "High-performance Kafka to ClickHouse data loader".into(),
             metrics_port: 9090,
@@ -455,7 +464,7 @@ impl Config {
             env_prefix: "DFE_LOADER".into(),
             metric_prefix: "loader".into(),
             config_mount_path: "/etc/dfe/loader.yaml".into(),
-            image_registry: "ghcr.io/hyperi-io".into(),
+            image_registry,
             extra_ports: vec![],
             entrypoint_args: vec!["--config".into(), "/etc/dfe/loader.yaml".into()],
             secrets: vec![
@@ -522,12 +531,16 @@ impl Config {
                     "logger",
                     "expression",
                 ],
-                "ubuntu:24.04",
+                &base_image,
             ),
             image_profile: ImageProfile::Production,
+            // dfe-loader is BUSL-1.1 (scalo itself is Apache-2.0). Drive the OCI
+            // licenses label + the generated Dockerfile's `# License` header from
+            // the contract so a regen never stamps Apache into this BUSL repo.
             oci_labels: OciLabels {
                 title: "dfe-loader".into(),
                 description: "High-performance Kafka to ClickHouse data loader".into(),
+                licenses: "BUSL-1.1".into(),
                 ..OciLabels::default()
             },
         }
@@ -1656,7 +1669,15 @@ logging:
         assert_eq!(contract.schema_version, 2);
         assert_eq!(contract.app_name, "dfe-loader");
         assert_eq!(contract.binary_name, "dfe-loader");
-        assert_eq!(contract.base_image, "ubuntu:24.04");
+        // base_image is cascade-resolved (deployment.base_image config/env wins,
+        // else scalo's DEFAULT_BASE_IMAGE). Don't pin to a distro: just assert it
+        // is non-empty and carries an explicit tag.
+        assert!(!contract.base_image.is_empty());
+        assert!(
+            contract.base_image.contains(':'),
+            "base_image must include an explicit tag: {}",
+            contract.base_image
+        );
         assert_eq!(contract.env_prefix, "DFE_LOADER");
         assert_eq!(contract.metrics_port, 9090);
         assert_eq!(contract.health.liveness_path, "/healthz");

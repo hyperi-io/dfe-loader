@@ -18,7 +18,7 @@ use dfe_loader::metrics::Metrics;
 use dfe_loader::payload::{FormatDetector, FormatMode};
 use dfe_loader::routing::{RouteResult, Router};
 use dfe_loader::transform::Transformer;
-use hyperi_rustlib::metrics::MetricsManager;
+use scalo::metrics::MetricsManager;
 
 use crate::common::{
     check_clickhouse_reachable, create_http_test_client, drop_http_test_table, load_dotenv,
