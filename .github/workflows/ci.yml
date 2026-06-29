@@ -41,7 +41,7 @@ permissions:
 
 jobs:
   ci:
-    uses: hyperi-io/hyperi-ci/.github/workflows/rust-ci.yml@e54b23bedda6a43e0ef68f2c7f57e3b3dc65fc5a # main
+    uses: hyperi-io/hyperi-ci/.github/workflows/rust-ci.yml@354dabfc42be3d1eb9e80e3623d4ad95f776e3dc # main
     with:
       # `both` → release-channel publish on tagged dispatch (unlocks Tier 2 PGO+BOLT).
       # On non-tag pushes the build channel is `spike` regardless (HYPERCI_CHANNEL='').
