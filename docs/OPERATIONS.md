@@ -16,7 +16,7 @@ about what it does when something goes wrong.
 ## Subcommands
 
 The loader is a standard HyperI CLI app (the `cli` scaffolding in
-hyperi-rustlib). The default subcommand is `run`.
+scalo). The default subcommand is `run`.
 
 | Subcommand | Purpose |
 |------------|---------|
@@ -51,7 +51,7 @@ See [clickhouse/INSERT-FORMATS.md](clickhouse/INSERT-FORMATS.md).
   `--json`, and `--filter` make it scriptable; the JSON/TSV output pipes into
   shell tooling.
 - **Health** -- the probe trinity (`/healthz`, `/readyz`, `/startupz`) from the
-  rustlib health pillar, for Kubernetes liveness/readiness/startup.
+  scalo health pillar, for Kubernetes liveness/readiness/startup.
 
 ## Hot-reload
 

@@ -10,19 +10,25 @@
 
 # gRPC transport
 
-The transports themselves -- Kafka, gRPC, Memory -- live in hyperi-rustlib.
-The loader does not implement them; it wires the rustlib `Transport` trait into
+> **NOTE - partly HISTORICAL.** The later sections capture the original
+> gRPC-replaces-Zenoh migration (phased plan, breaking-change-to-2.0.0 notes)
+> from the pre-scalo era. That migration is long done; treat the phase plans and
+> version-bump notes as history, not current guidance. The transport behaviour
+> described at the top remains accurate against the scalo `Transport` trait.
+
+The transports themselves -- Kafka, gRPC, Memory -- live in scalo.
+The loader does not implement them; it wires the scalo `Transport` trait into
 its pipeline via a thin adapter. This page documents the gRPC transport: the
 wire protocol, the proto schema, the config surface, and how the loader consumes
 it.
 
-gRPC replaced the old Zenoh transport in rustlib. It gives the loader (and
+gRPC replaced the old Zenoh transport in scalo. It gives the loader (and
 dfe-archiver) a server that receives event batches, and gives dfe-receiver (and
 transformers) a client that pushes batches directly -- a Kafka-less path when you
 want one.
 
 - **Wire protocol:** gRPC (Protobuf over HTTP/2) via `tonic` 0.14.x.
-- **Scope:** rustlib transport module + dfe-loader, dfe-archiver, dfe-receiver.
+- **Scope:** scalo transport module + dfe-loader, dfe-archiver, dfe-receiver.
 - **Feature flag:** `transport-grpc` (optional `tonic` + `prost` deps).
 
 ```mermaid
@@ -41,7 +47,7 @@ flowchart LR
 
 ## Design principles
 
-1. **Same `Transport` trait** -- `GrpcTransport` implements the existing rustlib
+1. **Same `Transport` trait** -- `GrpcTransport` implements the existing scalo
    trait. No trait changes.
 2. **ACK = response** -- the gRPC response is the acknowledgement. No custom
    protocol on top.
@@ -94,7 +100,7 @@ Reference:
 
 ## Proto definition
 
-File: `proto/dfe/transport/v1/transport.proto` (in rustlib)
+File: `proto/dfe/transport/v1/transport.proto` (in scalo)
 
 ```protobuf
 syntax = "proto3";
@@ -268,7 +274,7 @@ Unary `PushEvents` is simpler and sufficient for point-to-point. The streaming
 variant adds value in mesh deployments where connection lifecycle matters.
 Starting with unary means fewer moving parts for v1.
 
-## rustlib implementation
+## scalo implementation
 
 ### New files
 
@@ -759,7 +765,7 @@ impl GrpcTransport {
 }
 ```
 
-## Feature flags (rustlib Cargo.toml)
+## Feature flags (scalo Cargo.toml)
 
 ### Before
 
@@ -848,13 +854,13 @@ pub struct TransportConfig {
 ```toml
 # Before
 [features]
-transport-zenoh = ["hyperi-rustlib/transport-zenoh"]
-transport-memory = ["hyperi-rustlib/transport-memory"]
+transport-zenoh = ["scalo/transport-zenoh"]
+transport-memory = ["scalo/transport-memory"]
 
 # After
 [features]
-transport-grpc = ["hyperi-rustlib/transport-grpc"]
-transport-memory = ["hyperi-rustlib/transport-memory"]
+transport-grpc = ["scalo/transport-grpc"]
+transport-memory = ["scalo/transport-memory"]
 ```
 
 ### Config changes (loader.rs)
@@ -900,7 +906,7 @@ mod zenoh_adapter { ... }
 // Add
 #[cfg(feature = "transport-grpc")]
 mod grpc_adapter {
-    use hyperi_rustlib::transport::{
+    use scalo::transport::{
         Transport, GrpcConfig as TransportGrpcConfig, GrpcTransport,
     };
 
@@ -947,19 +953,19 @@ Minimal -- swap the feature flag:
 
 ```toml
 # Before (Cargo.toml)
-hyperi-rustlib = { version = ">=1.3", features = [
+scalo = { version = ">=1.3", features = [
     "config", "logger", "metrics", "transport-kafka", "transport-zenoh",
     "http-server", "tiered-sink", "spool",
 ] }
 
 # After
-hyperi-rustlib = { version = ">=2.0", features = [
+scalo = { version = ">=2.0", features = [
     "config", "logger", "metrics", "transport-kafka", "transport-grpc",
     "http-server", "tiered-sink", "spool",
 ] }
 ```
 
-No adapter code exists in dfe-archiver -- it uses rustlib's transport directly.
+No adapter code exists in dfe-archiver -- it uses scalo's transport directly.
 
 ## dfe-receiver migration
 
@@ -968,7 +974,7 @@ to send directly to dfe-loader without Kafka:
 
 ```toml
 # Cargo.toml -- add transport-grpc
-hyperi-rustlib = { version = ">=2.0", features = [
+scalo = { version = ">=2.0", features = [
     "config", "config-reload", "logger", "metrics", "http-server",
     "transport-kafka", "transport-grpc",
     "spool", "tiered-sink", "runtime", "secrets",
@@ -989,7 +995,7 @@ loader:
 
 ## Migration sequence
 
-### Phase 1: rustlib (hyperi-rustlib)
+### Phase 1: scalo (scalo)
 
 1. Create `proto/dfe/transport/v1/transport.proto`.
 2. Add `tonic-build` to build deps, write `build.rs` for proto codegen.
@@ -1019,7 +1025,7 @@ loader:
 ### Phase 3: dfe-archiver
 
 1. Update Cargo.toml -- swap `transport-zenoh` for `transport-grpc`.
-2. No code changes needed (uses rustlib transport directly).
+2. No code changes needed (uses scalo transport directly).
 
 ### Phase 4: dfe-receiver
 
@@ -1093,7 +1099,7 @@ triggers:
 
 ## Testing strategy
 
-### Unit tests (rustlib)
+### Unit tests (scalo)
 
 1. Config construction (client, server, bidirectional, devtest presets).
 2. Token creation and Display formatting.
@@ -1125,10 +1131,10 @@ triggers:
 
 ## Version strategy
 
-This is a **breaking change** to rustlib's transport module (removing Zenoh,
+This is a **breaking change** to scalo's transport module (removing Zenoh,
 adding gRPC).
 
-- rustlib: bump to **2.0.0** (breaking: removed `transport-zenoh` feature).
+- scalo: bump to **2.0.0** (breaking: removed `transport-zenoh` feature).
 - dfe-loader: update dep to `>=2.0.0`.
 - dfe-archiver: update dep to `>=2.0.0`.
 - dfe-receiver: update dep to `>=2.0.0`.
@@ -1166,9 +1172,9 @@ routing) is entirely v2 scope.
    in proto but not implemented. Add in v2 when benchmarks show connection
    lifecycle overhead.
 
-3. **Proto location:** Proto lives in rustlib (`proto/dfe/transport/v1/`).
+3. **Proto location:** Proto lives in scalo (`proto/dfe/transport/v1/`).
    Generated code checked into `src/transport/grpc/generated/`. All projects
-   import via the rustlib dep.
+   import via the scalo dep.
 
 4. **Receiver WAL:** Separate from transport. The gRPC transport works without WAL
    (at-most-once). WAL adds at-least-once on top. WAL + origin tracking =

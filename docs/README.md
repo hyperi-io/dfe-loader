@@ -41,7 +41,7 @@ Everything else in these docs is "and here is how the pieces work".
 
 ```mermaid
 flowchart TB
-    subgraph Ingress["Transport (hyperi-rustlib)"]
+    subgraph Ingress["Transport (scalo)"]
         K["Kafka"]
         G["gRPC"]
         M["Memory"]

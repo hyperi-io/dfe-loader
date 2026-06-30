@@ -11,7 +11,7 @@
 # Feature flags
 
 dfe-loader is a binary, not a library, so it carries far fewer features than
-hyperi-rustlib. The defaults are empty -- everything the running loader needs is
+scalo. The defaults are empty -- everything the running loader needs is
 always compiled; the flags exist for the allocator, test scaffolding, and the
 PGO build.
 
@@ -20,7 +20,7 @@ PGO build.
 | Feature | Default | Pulls in | Purpose |
 |---------|---------|----------|---------|
 | `jemalloc` | off | `tikv-jemallocator`, `tikv-jemalloc-ctl` | jemalloc allocator (DFE policy: jemalloc at every channel, no mimalloc) |
-| `transport-memory` | off | `hyperi-rustlib/transport-memory` | in-process Memory transport for unit tests |
+| `transport-memory` | off | `scalo/transport-memory` | in-process Memory transport for unit tests |
 | `testcontainers` | off | -- | enable Docker-backed integration tests (`TEST_MODE=docker`) |
 | `pgo-driver` | off | `rdkafka` | build the PGO workload producer binary; the main loader binary is unaffected |
 
@@ -46,11 +46,11 @@ re-points it. The fork's own features (`tcp`, `inserter`, the rustls TLS
 features) are selected through that dependency. See
 [clickhouse/CLICKHOUSE-EXT.md](clickhouse/CLICKHOUSE-EXT.md).
 
-## hyperi-rustlib features
+## scalo features
 
-The bulk of the loader's capability surface comes from hyperi-rustlib (config
+The bulk of the loader's capability surface comes from scalo (config
 cascade, logging, metrics, health, shutdown, transports, memory guard, CLI,
-top). Those are selected in the `hyperi-rustlib` dependency entry, pinned to a
-crates.io release (never a path or patch override). For the rustlib feature tree
-see the hyperi-rustlib docs; for how the loader wires them at startup see
+top). Those are selected in the `scalo` dependency entry, pinned to a
+crates.io release (never a path or patch override). For the scalo feature tree
+see the scalo docs; for how the loader wires them at startup see
 [ARCHITECTURE.md](ARCHITECTURE.md).

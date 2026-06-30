@@ -17,7 +17,7 @@ mutates state -- buffer push, schema-cache marking, stats, DLQ routing -- stays
 sequential. This doc is the playbook for that split.
 
 dfe-loader is the reference implementation; the same pattern applies to all six
-DFE projects. The pattern is owned by the hyperi-rustlib `worker` feature
+DFE projects. The pattern is owned by the scalo `worker` feature
 (`AdaptiveWorkerPool`).
 
 ## The pattern: parallel-then-sequential
@@ -55,7 +55,7 @@ flowchart TB
 ### 1. Update Cargo.toml
 
 ```toml
-hyperi-rustlib = { version = ">=2.0.0", features = [..., "worker"] }
+scalo = { version = ">=2.0.0", features = [..., "worker"] }
 ```
 
 ### 2. Create the Processor struct

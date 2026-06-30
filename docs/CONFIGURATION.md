@@ -10,7 +10,7 @@
 
 # Configuration
 
-dfe-loader is configured through an 8-layer cascade (hyperi-rustlib). Higher
+dfe-loader is configured through an 8-layer cascade (scalo). Higher
 layers win. Every setting has a safe default, so an empty config boots.
 
 ```mermaid
@@ -21,7 +21,7 @@ flowchart TB
     ENVYAML["4. settings.{env}.yaml"]
     YAML["5. settings.yaml"]
     DEF["6. defaults.yaml"]
-    LIB["7. rustlib built-ins"]
+    LIB["7. scalo built-ins"]
     HARD["8. hard-coded"]
     CLI --> ENV --> DOTENV --> ENVYAML --> YAML --> DEF --> LIB --> HARD
 ```

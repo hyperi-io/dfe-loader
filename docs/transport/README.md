@@ -11,7 +11,7 @@
 # Transport
 
 The transports themselves -- Kafka, gRPC and Memory -- are provided by
-hyperi-rustlib. The loader does not implement them; it consumes the rustlib
+scalo. The loader does not implement them; it consumes the scalo
 `Transport` trait and feeds whatever arrives into its parse stage, then on
 through routing, extraction and the per-table insert path. Whichever transport
 delivers a message, the bytes converge on the same hot path: detect format,
@@ -19,7 +19,7 @@ parse, route to `db.table`, promote schema columns, and buffer for insert.
 
 ```mermaid
 flowchart LR
-    subgraph rustlib["Transport (hyperi-rustlib)"]
+    subgraph scalo["Transport (scalo)"]
         K["Kafka"]
         G["gRPC"]
         M["Memory"]
