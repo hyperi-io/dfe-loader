@@ -95,14 +95,6 @@ impl ServiceApp for App {
                 .await
                 .map_err(|e| CliError::Config(e.to_string()))?;
 
-            // Fire-and-forget version check
-            scalo::VersionCheck::new(scalo::VersionCheckConfig {
-                product: "dfe-loader".into(),
-                current_version: env!("CARGO_PKG_VERSION").into(),
-                ..Default::default()
-            })
-            .check_on_startup();
-
             info!(
                 version = env!("CARGO_PKG_VERSION"),
                 kafka_brokers = ?config.kafka.brokers,

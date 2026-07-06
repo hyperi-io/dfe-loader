@@ -149,7 +149,16 @@ impl From<&ClickHouseConfig> for crate::clickhouse::ClickHouseConfig {
             "http" => crate::clickhouse::Transport::Http,
             _ => crate::clickhouse::Transport::Native,
         };
-        let tls = cfg.tls.as_ref().is_some_and(|t| t.enabled);
+        // Explicit tls config wins; when unset (None), auto-detect a secure
+        // endpoint from the host so bare cloud configs still connect over TLS.
+        // Mirrors dfe-hunt-runner's `secure` sentinel (None -> auto-detect).
+        let tls = match cfg.tls.as_ref() {
+            Some(t) => t.enabled,
+            None => cfg
+                .hosts
+                .iter()
+                .any(|h| crate::clickhouse::host_implies_tls(h)),
+        };
 
         crate::clickhouse::ClickHouseConfig {
             hosts: cfg.hosts.clone(),
@@ -492,28 +501,15 @@ impl Config {
                     }],
                 },
             ],
-            default_config: Some(serde_json::json!({
-                "kafka": {
-                    "brokers": "kafka:9092",
-                    "group_id": "dfe-loader",
-                    "topics": ["default_land"],
-                    "security_protocol": "SASL_PLAINTEXT",
-                    "sasl_mechanism": "SCRAM-SHA-512"
-                },
-                "clickhouse": {
-                    "url": "http://clickhouse:8123",
-                    "database": "dfe",
-                    "username": "default"
-                },
-                "routing": {
-                    "default_db": "dfe",
-                    "default_table": "default"
-                },
-                "metrics": {
-                    "enabled": true,
-                    "address": "0.0.0.0:9090"
-                }
-            })),
+            // Derived from Config::default(), NOT hand-authored: a json! literal
+            // is not type-checked against the config structs, so it drifts from
+            // (and can contradict) the real defaults and fails config-check on
+            // the emitted contract (#68). expose_during so the round-trip keeps
+            // real (empty) secret values instead of "***REDACTED***" markers.
+            default_config: Some(
+                scalo::config::sensitive::expose_during(|| serde_json::to_value(Config::default()))
+                    .expect("Config::default() must serialize to JSON"),
+            ),
             depends_on: vec!["kafka".into(), "clickhouse".into()],
             keda: Some(KedaContract::default()),
             native_deps: NativeDepsContract::for_rustlib_features(
@@ -1297,6 +1293,45 @@ kafka:
     }
 
     #[test]
+    fn test_clickhouse_config_tls_auto_detect_cloud_host() {
+        // tls unset (None) + a cloud-looking host -> TLS auto-enabled.
+        let cfg = ClickHouseConfig {
+            hosts: vec!["abc.clickhouse.cloud:9440".to_string()],
+            tls: None,
+            ..ClickHouseConfig::default()
+        };
+        let client_cfg: crate::clickhouse::ClickHouseConfig = (&cfg).into();
+        assert!(client_cfg.tls, "cloud host should auto-enable TLS");
+    }
+
+    #[test]
+    fn test_clickhouse_config_tls_auto_detect_secure_port() {
+        let cfg = ClickHouseConfig {
+            hosts: vec!["ch.internal:8443".to_string()],
+            tls: None,
+            ..ClickHouseConfig::default()
+        };
+        let client_cfg: crate::clickhouse::ClickHouseConfig = (&cfg).into();
+        assert!(client_cfg.tls, "secure port should auto-enable TLS");
+    }
+
+    #[test]
+    fn test_clickhouse_config_explicit_tls_off_wins_over_auto_detect() {
+        // Explicit tls: enabled=false must NOT be overridden by auto-detect,
+        // even on a cloud-looking host (operator's explicit choice wins).
+        let cfg = ClickHouseConfig {
+            hosts: vec!["abc.clickhouse.cloud:9440".to_string()],
+            tls: Some(TlsConfig {
+                enabled: false,
+                ..TlsConfig::default()
+            }),
+            ..ClickHouseConfig::default()
+        };
+        let client_cfg: crate::clickhouse::ClickHouseConfig = (&cfg).into();
+        assert!(!client_cfg.tls, "explicit tls off must win");
+    }
+
+    #[test]
     fn test_clickhouse_config_protocol_case_insensitive() {
         let cfg = ClickHouseConfig {
             hosts: vec!["ch:8123".to_string()],
@@ -1703,6 +1738,26 @@ logging:
         let contract = Config::deployment_contract();
         assert!(contract.depends_on.contains(&"kafka".to_string()));
         assert!(contract.depends_on.contains(&"clickhouse".to_string()));
+    }
+
+    #[test]
+    fn test_deployment_contract_default_config_round_trips() {
+        // #68: the contract's default_config must equal the code default and
+        // survive the generate-artefacts -> config-check path. Feed it back
+        // through the real config deserialise + validate and assert it holds.
+        let contract = Config::deployment_contract();
+        let default_config = contract
+            .default_config
+            .expect("deployment contract must ship a default_config");
+
+        let cfg: Config = serde_json::from_value(default_config)
+            .expect("default_config must deserialise back into Config (config-check)");
+        cfg.validate()
+            .expect("default_config must pass Config::validate()");
+
+        // It is the CODE default, not a hand-authored parallel artifact.
+        assert_eq!(cfg.kafka.brokers, Config::default().kafka.brokers);
+        assert_eq!(cfg.clickhouse.hosts, Config::default().clickhouse.hosts);
     }
 
     // ========================================================================

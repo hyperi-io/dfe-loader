@@ -169,6 +169,26 @@ pub struct ClickHouseConfig {
     pub compression: bool,
 }
 
+/// Does this `host:port` look like a TLS-only ClickHouse endpoint?
+///
+/// ClickHouse Cloud (and most managed offerings) are TLS-only: native-secure
+/// on 9440, HTTPS on 8443, hostnames under `*.clickhouse.cloud`. A bare config
+/// that omits the `tls` flag should still connect to those, so we auto-detect.
+/// Mirrors the `secure` auto-detect in dfe-hunt-runner
+/// (`utils/clickhouse.py`: `port in {8443, 9440} or "clickhouse.cloud" in host`).
+///
+/// This is only a *default* - an explicit `tls` setting always wins upstream.
+#[must_use]
+pub fn host_implies_tls(host: &str) -> bool {
+    if host.contains("clickhouse.cloud") {
+        return true;
+    }
+    host.rsplit(':')
+        .next()
+        .and_then(|p| p.parse::<u16>().ok())
+        .is_some_and(|port| matches!(port, 8443 | 9440))
+}
+
 const fn default_connect_timeout() -> u64 {
     5000
 }
@@ -286,6 +306,20 @@ impl ClickHouseConfig {
                  which works on both transports."
                     .to_string(),
             );
+        }
+
+        // Cloud endpoints are TLS-only. If a host looks like ClickHouse Cloud
+        // (8443/9440 or *.clickhouse.cloud) but TLS is off, the connection will
+        // fail - surface it as an actionable warning rather than a cryptic
+        // connection error at runtime.
+        if !self.tls
+            && let Some(host) = self.hosts.first()
+            && host_implies_tls(host)
+        {
+            warnings.push(format!(
+                "Host {host} looks like a secure/cloud ClickHouse endpoint but TLS is \
+                 disabled. Set tls = true (ClickHouse Cloud requires TLS on 8443/9440)."
+            ));
         }
 
         // Detect port/transport mismatch
@@ -534,6 +568,52 @@ mod tests {
                 "transport={transport} insert_format={insert_format}: got {result:?}"
             );
         }
+    }
+
+    #[test]
+    fn host_implies_tls_detects_cloud_and_secure_ports() {
+        // Cloud hostname (any port)
+        assert!(host_implies_tls("abc123.clickhouse.cloud:9440"));
+        assert!(host_implies_tls("abc123.us-east.clickhouse.cloud:8443"));
+        assert!(host_implies_tls("abc123.clickhouse.cloud"));
+        // Secure ports on any host
+        assert!(host_implies_tls("ch.internal:9440"));
+        assert!(host_implies_tls("ch.internal:8443"));
+        // Plaintext defaults are NOT secure
+        assert!(!host_implies_tls("localhost:9000"));
+        assert!(!host_implies_tls("localhost:8123"));
+        assert!(!host_implies_tls("ch.internal"));
+        assert!(!host_implies_tls("clickhouse:9000"));
+    }
+
+    #[test]
+    fn validate_cloud_host_without_tls_warns() {
+        let config = ClickHouseConfig {
+            hosts: vec!["abc.clickhouse.cloud:9440".to_string()],
+            tls: false,
+            ..Default::default()
+        };
+        let warnings = config
+            .validate()
+            .expect("cloud host is a warning, not error");
+        assert!(
+            warnings.iter().any(|w| w.contains("TLS is disabled")),
+            "expected a TLS-off warning, got {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn validate_cloud_host_with_tls_is_clean() {
+        let config = ClickHouseConfig {
+            hosts: vec!["abc.clickhouse.cloud:9440".to_string()],
+            tls: true,
+            ..Default::default()
+        };
+        let warnings = config.validate().expect("valid");
+        assert!(
+            !warnings.iter().any(|w| w.contains("TLS is disabled")),
+            "TLS-on cloud host should not warn, got {warnings:?}"
+        );
     }
 
     #[test]
