@@ -41,7 +41,7 @@ permissions:
 
 jobs:
   ci:
-    uses: hyperi-io/hyperi-ci/.github/workflows/rust-ci.yml@82fd47578505b61daf86495f3e1268e2d896ce76 # main
+    uses: hyperi-io/hyperi-ci/.github/workflows/rust-ci.yml@main
     with:
       # `both` → release-channel publish on tagged dispatch (unlocks Tier 2 PGO+BOLT).
       # On non-tag pushes the build channel is `spike` regardless (HYPERCI_CHANNEL='').
@@ -49,4 +49,16 @@ jobs:
       tag: ${{ inputs.tag || '' }}
       from-head: ${{ inputs.from-head || '' }}
       bump: ${{ inputs.bump || 'auto' }}
-    secrets: inherit
+    # Least privilege: pass only the secrets rust-ci.yml actually consumes, not
+    # the whole repo secret store (`inherit`). All optional - unset ones resolve
+    # empty. Names are the org-level secret names (org is the SSoT). JFrog is
+    # deliberately omitted: the publish path moved to Harbor/DockerHub/GHCR and
+    # nothing in rust-ci.yml consumes JFROG_TOKEN (legacy, pending org cleanup).
+    secrets:
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+      GITLEAKS_GH_ACTIONS_KEY: ${{ secrets.GITLEAKS_GH_ACTIONS_KEY }}
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+      CONTAINER_MGT_APP_PRIVATE_KEY: ${{ secrets.CONTAINER_MGT_APP_PRIVATE_KEY }}
