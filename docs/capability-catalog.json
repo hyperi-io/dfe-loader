@@ -1,0 +1,91 @@
+[
+  {
+    "kind": "sink",
+    "name": "clickhouse",
+    "description": "ClickHouse loader sink: batches parsed records and inserts into ClickHouse over the native or HTTP protocol.",
+    "maturity": "stable",
+    "fields": [
+      {
+        "name": "hosts",
+        "type": "list",
+        "required": true,
+        "description": "ClickHouse host:port list."
+      },
+      {
+        "name": "database",
+        "type": "string",
+        "required": false,
+        "default": "default",
+        "description": "Target database."
+      },
+      {
+        "name": "username",
+        "type": "string",
+        "required": false,
+        "default": "default",
+        "description": "ClickHouse user."
+      },
+      {
+        "name": "password",
+        "type": "secret",
+        "required": false,
+        "description": "ClickHouse password.",
+        "secret": true
+      },
+      {
+        "name": "protocol",
+        "type": "enum",
+        "required": false,
+        "default": "native",
+        "description": "Wire protocol.",
+        "enum_values": [
+          "native",
+          "http"
+        ]
+      }
+    ]
+  },
+  {
+    "kind": "transform",
+    "name": "pipeline",
+    "description": "Per-record enrichment + shaping pipeline applied before insert.",
+    "maturity": "stable",
+    "children": [
+      {
+        "kind": "service",
+        "name": "routing",
+        "description": "Topic -> table routing rules + table mapping."
+      },
+      {
+        "kind": "service",
+        "name": "geoip",
+        "description": "MaxMind GeoIP enrichment from mounted MMDB readers."
+      },
+      {
+        "kind": "service",
+        "name": "computed_columns",
+        "description": "Derived columns computed from record fields."
+      },
+      {
+        "kind": "service",
+        "name": "coercion",
+        "description": "Type coercion of fields to the destination column types."
+      },
+      {
+        "kind": "service",
+        "name": "field_mapping",
+        "description": "Field-name mapping / overrides."
+      },
+      {
+        "kind": "service",
+        "name": "field_sanitization",
+        "description": "Field-name sanitisation for ClickHouse."
+      },
+      {
+        "kind": "service",
+        "name": "timestamp_dq",
+        "description": "Timestamp data-quality validation."
+      }
+    ]
+  }
+]

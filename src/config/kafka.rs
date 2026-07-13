@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 // Kafka Configuration
 // ============================================================================
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct KafkaConfig {
     pub brokers: Vec<String>,
@@ -74,7 +74,7 @@ impl Default for KafkaConfig {
 ///
 /// When `transport = "grpc"`, the loader starts a gRPC server listening on
 /// `listen` and accepts Push RPCs from remote senders (e.g. dfe-receiver).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct GrpcConfig {
     /// Server listen address (e.g., "0.0.0.0:6000").
@@ -114,7 +114,9 @@ impl Default for GrpcConfig {
 /// SASL authentication mechanism
 ///
 /// Config file values (case-insensitive): none, plain, `scram_sha_256`, `scram_sha_512`, oauthbearer, `aws_msk_iam`
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, schemars::JsonSchema,
+)]
 #[allow(clippy::upper_case_acronyms)]
 pub enum SaslMechanism {
     /// No authentication (dev/test only - full admin access)
@@ -177,7 +179,7 @@ impl std::fmt::Display for SaslMechanism {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct SaslConfig {
     /// Enable SASL authentication
@@ -293,7 +295,7 @@ impl SaslConfig {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 #[derive(Default)]
 pub struct TlsConfig {

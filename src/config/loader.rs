@@ -50,7 +50,7 @@ pub use super::pipeline::*;
 /// - `geoip.*` — MMDB readers opened at startup
 /// - `computed_columns.*` — computed column cache built at startup
 /// - `column_directives.*` — column directive cache built at startup
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 #[derive(Default)]
 pub struct Config {
@@ -117,7 +117,7 @@ fn default_transport() -> String {
 // ClickHouse Configuration
 // ============================================================================
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct ClickHouseConfig {
     pub hosts: Vec<String>,
@@ -459,7 +459,7 @@ impl Config {
         let image_registry = image_registry_from_cascade();
 
         DeploymentContract {
-            schema_version: 2,
+            schema_version: 3,
             app_name: "dfe-loader".into(),
             base_image: base_image.clone(),
             binary_name: "dfe-loader".into(),
@@ -539,7 +539,42 @@ impl Config {
                 licenses: "BUSL-1.1".into(),
                 ..OciLabels::default()
             },
+            // Reflectable config (scalo-rs#6): derived JSON Schema of the full
+            // Config (ClickHouse sink + the routing/enrichment/coercion pipeline,
+            // secret fields marked x-dfe-secret) + a catalog of the sink + the
+            // pipeline transform stages.
+            config_schema: Some(scalo::deployment::config_schema_json::<crate::config::Config>()),
+            capabilities: Self::capabilities(),
         }
+    }
+
+    /// Capability catalog for dfe-loader: the ClickHouse sink + the enrichment /
+    /// transform pipeline stages. The typed per-stage knobs live in the derived
+    /// schema; this lists the sink + the stages the control plane surfaces.
+    fn capabilities() -> Vec<scalo::deployment::Capability> {
+        use scalo::deployment::{Capability, FieldSpec};
+        vec![
+            Capability::sink("clickhouse")
+                .description("ClickHouse loader sink: batches parsed records and inserts into ClickHouse over the native or HTTP protocol.")
+                .maturity("stable")
+                .field(FieldSpec::list("hosts").required().description("ClickHouse host:port list."))
+                .field(FieldSpec::string("database").default_value("default").description("Target database."))
+                .field(FieldSpec::string("username").default_value("default").description("ClickHouse user."))
+                .field(FieldSpec::secret("password").description("ClickHouse password."))
+                .field(FieldSpec::enumeration("protocol", ["native", "http"]).default_value("native").description("Wire protocol.")),
+            Capability::new("transform", "pipeline")
+                .description("Per-record enrichment + shaping pipeline applied before insert.")
+                .maturity("stable")
+                .children(vec![
+                    Capability::service("routing").description("Topic -> table routing rules + table mapping."),
+                    Capability::service("geoip").description("MaxMind GeoIP enrichment from mounted MMDB readers."),
+                    Capability::service("computed_columns").description("Derived columns computed from record fields."),
+                    Capability::service("coercion").description("Type coercion of fields to the destination column types."),
+                    Capability::service("field_mapping").description("Field-name mapping / overrides."),
+                    Capability::service("field_sanitization").description("Field-name sanitisation for ClickHouse."),
+                    Capability::service("timestamp_dq").description("Timestamp data-quality validation."),
+                ]),
+        ]
     }
 }
 
@@ -1699,9 +1734,24 @@ logging:
     // ========================================================================
 
     #[test]
+    fn test_deployment_contract_reflectable_config() {
+        let contract = Config::deployment_contract();
+        assert!(contract.config_schema.is_some());
+        assert!(contract.capabilities.iter().any(|c| c.name == "clickhouse"));
+    }
+
+    /// Committed reflectable artefacts under docs/ must not drift. Regenerate
+    /// with `dfe-loader config-schema --dir docs`.
+    #[test]
+    fn test_config_artifacts_do_not_drift() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs");
+        scalo::deployment::assert_no_config_artifact_drift(&Config::deployment_contract(), dir);
+    }
+
+    #[test]
     fn test_deployment_contract_basic_fields() {
         let contract = Config::deployment_contract();
-        assert_eq!(contract.schema_version, 2);
+        assert_eq!(contract.schema_version, 3);
         assert_eq!(contract.app_name, "dfe-loader");
         assert_eq!(contract.binary_name, "dfe-loader");
         // base_image is cascade-resolved (deployment.base_image config/env wins,

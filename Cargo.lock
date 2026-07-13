@@ -1178,6 +1178,7 @@ dependencies = [
  "rstest",
  "rustc-hash",
  "scalo",
+ "schemars 1.2.1",
  "serde",
  "serde_json",
  "serde_yaml_ng",
@@ -4215,9 +4216,9 @@ dependencies = [
 
 [[package]]
 name = "scalo"
-version = "2.10.1"
+version = "2.10.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e19cae1760b6b67c0bae7adceed4e159d61785601e066adb3026b256a78c59bc"
+checksum = "8ed19f5cfaa1318fce62ca5904073c2568e39073a2df303596ed031e244478ac"
 dependencies = [
  "aes-gcm",
  "backon",
@@ -4248,6 +4249,7 @@ dependencies = [
  "regex",
  "reqwest 0.13.4",
  "rmpv",
+ "schemars 1.2.1",
  "serde",
  "serde_json",
  "serde_yaml_ng",
@@ -4295,9 +4297,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2b42f36aa1cd011945615b92222f6bf73c599a102a300334cd7f8dbeec726cc"
 dependencies = [
  "dyn-clone",
+ "indexmap 2.14.0",
  "ref-cast",
+ "schemars_derive",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "schemars_derive"
+version = "1.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7d115b50f4aaeea07e79c1912f645c7513d81715d0420f8bc77a18c6260b307f"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "serde_derive_internals",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -4388,6 +4404,7 @@ version = "1.0.150"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e8014e44b4736ed0538adeecded0fce2a272f22dc9578a7eb6b2d9993c74cfb9"
 dependencies = [
+ "indexmap 2.14.0",
  "itoa",
  "memchr",
  "serde",

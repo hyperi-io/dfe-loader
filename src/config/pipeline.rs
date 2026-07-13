@@ -16,7 +16,7 @@ fn default_true() -> bool {
 // Payload Configuration
 // ============================================================================
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct PayloadConfig {
     /// Format mode: "auto" (default), "json", "messagepack"/"msgpack"
@@ -54,7 +54,7 @@ impl Default for PayloadConfig {
 ///
 /// Rules are evaluated top-to-bottom, first match wins. If no rule matches,
 /// falls through to field-extraction routing (`db_fields/table_fields`).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct RoutingRule {
     /// CEL expression that must evaluate to true for this rule to match
     pub when: String,
@@ -72,7 +72,7 @@ pub struct RoutingRule {
 /// When an org is listed here, messages from that org are routed to the
 /// specified database (or `org_id` if `database` is omitted). Orgs NOT
 /// listed always go to `default_db`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct OrgRoute {
     /// Organisation identifier (matched against `org_id_field` value)
     pub org_id: String,
@@ -89,7 +89,7 @@ impl OrgRoute {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct RoutingConfig {
     /// CEL-based routing rules (top-to-bottom, first match wins).
@@ -181,7 +181,7 @@ impl Default for RoutingConfig {
 /// 1. Config per-table override (`overrides."db.table".column`)
 /// 2. Config global (`columns.column`)
 /// 3. `ClickHouse` column COMMENT `@computed:` directive
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct ComputedColumnsConfig {
     /// Global computed columns (applied to all tables).
@@ -206,7 +206,7 @@ impl Default for ComputedColumnsConfig {
 // ============================================================================
 
 /// `GeoIP` enrichment provider
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum GeoIpProvider {
     /// DB-IP Lite — free, anonymous download, city-level, CC BY 4.0
@@ -225,7 +225,7 @@ pub enum GeoIpProvider {
 }
 
 /// Auto-download settings for `GeoIP` databases
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct AutoDownloadConfig {
     /// Enable auto-download on startup if MMDB files missing or stale
@@ -261,7 +261,7 @@ impl Default for AutoDownloadConfig {
 }
 
 /// `GeoIP` enrichment configuration
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct GeoIpConfig {
     /// Enable `GeoIP` enrichment
@@ -301,7 +301,7 @@ impl Default for GeoIpConfig {
 // ============================================================================
 
 /// IP enrichment pipeline configuration (`GeoIP` + reputation + risk scoring)
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct EnrichmentConfig {
     /// Fields to check for IP addresses (first match wins, order matters)
@@ -332,7 +332,7 @@ impl Default for EnrichmentConfig {
 }
 
 /// Reputation enrichment configuration
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct ReputationEnrichmentConfig {
     /// Enable reputation lookups
@@ -356,7 +356,7 @@ impl Default for ReputationEnrichmentConfig {
 }
 
 /// Risk scoring configuration
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct RiskScoringConfig {
     /// Enable risk scoring (requires at least `GeoIP` or reputation to be useful)
@@ -380,7 +380,7 @@ impl Default for RiskScoringConfig {
 
 // ============================================================================
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct DlqConfig {
     pub enabled: bool,
@@ -442,7 +442,7 @@ impl DlqConfig {
 // Buffer Configuration
 // ============================================================================
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct BufferConfig {
     pub flush_bytes: usize,
@@ -464,7 +464,7 @@ impl Default for BufferConfig {
 // Memory Configuration
 // ============================================================================
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct MemoryConfig {
     /// Maximum memory for buffers in bytes. 0 = auto-detect (67% of available)
@@ -486,7 +486,7 @@ impl Default for MemoryConfig {
 // Metrics Configuration
 // ============================================================================
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct MetricsConfig {
     pub enabled: bool,
@@ -506,7 +506,7 @@ impl Default for MetricsConfig {
 // Logging Configuration
 // ============================================================================
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct LoggingConfig {
     pub level: String,
@@ -526,7 +526,7 @@ impl Default for LoggingConfig {
 // Timestamp Data Quality Configuration
 // ============================================================================
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct TimestampDqConfig {
     pub enabled: bool,
@@ -552,7 +552,7 @@ impl Default for TimestampDqConfig {
 // Field Sanitization Configuration
 // ============================================================================
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct FieldSanitizationConfig {
     pub strip_at_prefix: bool,
@@ -580,7 +580,7 @@ impl Default for FieldSanitizationConfig {
 // Metadata Configuration
 // ============================================================================
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct MetadataConfig {
     /// Master switch for common header field injection (default: true)
@@ -709,7 +709,7 @@ impl Default for MetadataConfig {
 /// The contract sync test validates that chart/values.yaml matches these
 /// defaults. Override at runtime via env vars:
 ///   `DFE_LOADER__KEDA__KAFKA_LAG_THRESHOLD=5000`
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct KedaConfig {
     pub enabled: bool,
@@ -757,7 +757,7 @@ impl Default for KedaConfig {
 /// Override weights at runtime via env vars:
 ///   `DFE_LOADER__SCALING__WEIGHT_KAFKA_LAG=0.45`
 ///   `DFE_LOADER__SCALING__SATURATION_BUFFER_DEPTH=20000`
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct ScalingConfig {
     /// Enable scaling pressure calculation.
@@ -853,7 +853,9 @@ impl ScalingConfig {
 ///
 /// All modes extract promoted fields to schema columns. The only difference
 /// is where (or whether) the full payload is preserved.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum CaptureMode {
     /// `_json` = full payload (JSON type), `_raw` = extracted from raw_source_fields
@@ -884,7 +886,9 @@ pub struct TableCaptureConfig {
 // ============================================================================
 
 /// Null handling strategy
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, schemars::JsonSchema,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum NullHandling {
     /// Substitute type-appropriate default value (recommended)
@@ -902,7 +906,7 @@ pub enum NullHandling {
 /// - Type mappings for custom types
 /// - Configurable null handling
 /// - Timezone handling for naive timestamps
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct CoercionConfig {
     /// Map custom type names to base coercer categories
@@ -977,7 +981,7 @@ impl CoercionConfig {
 // Schema Configuration
 // ============================================================================
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct SchemaConfig {
     /// TTL for cached schemas before background refresh marks them stale.
@@ -1025,7 +1029,7 @@ impl Default for SchemaConfig {
 ///
 /// **Requires restart:** Kafka brokers/topics/auth, `ClickHouse` hosts/auth,
 /// payload format, transport type.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct HotReloadConfig {
     /// Enable config file watching (default: false)
@@ -1061,7 +1065,7 @@ impl Default for HotReloadConfig {
 ///
 /// CSV files are compatible with the elastic/ecs-mapper format:
 /// `source_field,destination_field,copy_action`
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct FieldMappingConfig {
     /// Master switch (default: false — no impact on existing pipelines)
@@ -1084,7 +1088,7 @@ pub struct FieldMappingConfig {
 }
 
 /// Per-field override for mapping action
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct FieldMappingOverride {
     /// Action for this field: "rename" or "copy"
     pub action: String,

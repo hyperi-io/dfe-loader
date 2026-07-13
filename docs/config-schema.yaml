@@ -1,0 +1,1648 @@
+$schema: https://json-schema.org/draft/2020-12/schema
+title: Config
+description: |-
+  Main configuration for dfe-loader.
+
+  ## Hot-Reload Behaviour
+
+  **Hot-reloaded (takes effect on next batch):**
+  - `routing.*` — routing rules, table mapping, org routing
+  - `timestamp_dq.*` — timestamp validation thresholds
+  - `metadata.*` — common header injection, tags, _raw handling
+  - `field_sanitization.*` — field name sanitisation rules
+  - `buffer.flush_rows` / `buffer.flush_bytes` / `buffer.flush_age_secs`
+  - `coercion.*` — type coercion config
+  - `enrichment.ip_fields` — which fields to enrich
+  - `field_mapping.*` — field mapping overrides
+
+  **Requires pod restart (connections/state established at startup):**
+  - `transport` — transport type (kafka/grpc) bound at startup
+  - `kafka.*` — Kafka consumer created at startup
+  - `grpc.*` — gRPC server binds at startup
+  - `clickhouse.*` — HTTP client + `clickhouse::Client` created at startup
+  - `payload.format` — format detection set at startup
+  - `metrics.*` — HTTP metrics server binds at startup
+  - `logging.*` — tracing subscriber installed at startup
+  - `scaling.*` / `keda.*` — scaling pressure built at startup
+  - `hot_reload.*` — watcher config set at startup
+  - `schema.*` — schema cache created at startup
+  - `geoip.*` — MMDB readers opened at startup
+  - `computed_columns.*` — computed column cache built at startup
+  - `column_directives.*` — column directive cache built at startup
+type: object
+properties:
+  transport:
+    description: 'Transport backend: "kafka" (default) or "grpc". **Restart required.**'
+    type: string
+    default: kafka
+  kafka:
+    description: Kafka consumer config. **Restart required.**
+    $ref: '#/$defs/KafkaConfig'
+    default:
+      brokers:
+      - localhost:9092
+      group: clickhouse-loader
+      topics: []
+      topic_regex: null
+      client_id: clickhouse-loader
+      sasl: null
+      tls: null
+      allow_insecure_transport: false
+      librdkafka_overrides:
+        statistics.interval.ms: '5000'
+  grpc:
+    description: gRPC transport config. **Restart required.**
+    $ref: '#/$defs/GrpcConfig'
+    default:
+      listen: null
+      recv_buffer_size: 10000
+      recv_timeout_ms: 100
+      max_message_size: 16777216
+      compression: false
+      default_topic: default_land
+  clickhouse:
+    description: '`ClickHouse` connection config. **Restart required.**'
+    $ref: '#/$defs/ClickHouseConfig'
+    default:
+      hosts:
+      - localhost:9000
+      database: default
+      username: default
+      password: '***REDACTED***'
+      protocol: native
+      tables: []
+      tls: null
+  payload:
+    description: Payload format detection. **Restart required.**
+    $ref: '#/$defs/PayloadConfig'
+    default:
+      format: auto
+      mismatch_threshold: 10
+      pipeline_mode: json_primary
+  metrics:
+    description: Metrics server config. **Restart required.**
+    $ref: '#/$defs/MetricsConfig'
+    default:
+      enabled: true
+      address: 0.0.0.0:9090
+  logging:
+    description: Logging config. **Restart required.**
+    $ref: '#/$defs/LoggingConfig'
+    default:
+      level: info
+      format: json
+  schema:
+    description: Schema cache config. **Restart required.**
+    $ref: '#/$defs/SchemaConfig'
+    default:
+      cache_ttl_secs: 300
+      refresh_on_error: true
+      pre_warm_retry_secs: 60
+      pending_max_per_table: 1000
+      pending_max_total: 10000
+      pending_max_age_secs: 30
+  geoip:
+    description: '`GeoIP` enrichment (MMDB readers). **Restart required.**'
+    $ref: '#/$defs/GeoIpConfig'
+    default:
+      enabled: false
+      provider: db_ip_lite
+      city_db_path: null
+      asn_db_path: null
+      auto_download:
+        enabled: true
+        data_dir: /var/lib/dfe/geoip
+        maxmind_account_id: null
+        maxmind_license_key: null
+        ipinfo_token: null
+        max_age_days: 30
+      cache_capacity: 100000
+  computed_columns:
+    description: Computed columns cache. **Restart required.**
+    $ref: '#/$defs/ComputedColumnsConfig'
+    default:
+      columns: {}
+      overrides: {}
+  column_directives:
+    description: Per-column directive config. **Restart required.**
+    $ref: '#/$defs/ColumnDirectivesConfig'
+    default:
+      global: {}
+      tables: {}
+  hot_reload:
+    description: Hot-reload watcher config. **Restart required.**
+    $ref: '#/$defs/HotReloadConfig'
+    default:
+      enabled: false
+      poll_interval_secs: 5
+      debounce_ms: 500
+  keda:
+    description: KEDA autoscaling config. **Restart required.**
+    $ref: '#/$defs/KedaConfig'
+    default:
+      enabled: true
+      min_replicas: 1
+      max_replicas: 10
+      polling_interval: 15
+      cooldown_period: 300
+      kafka_lag_threshold: 1000
+      activation_lag_threshold: 0
+      cpu_enabled: true
+      cpu_threshold: 80
+  scaling:
+    description: Scaling pressure config. **Restart required.**
+    $ref: '#/$defs/ScalingConfig'
+    default:
+      enabled: true
+      memory_gate_threshold: 0.8
+      weight_kafka_lag: 0.35
+      weight_buffer_depth: 0.25
+      weight_insert_latency: 0.15
+      weight_memory: 0.15
+      weight_errors: 0.1
+      saturation_kafka_lag: 100000.0
+      saturation_buffer_depth: 10000.0
+      saturation_insert_latency: 5.0
+      saturation_errors: 100.0
+  batch_processing:
+    description: Batch processing engine config (SIMD parse, pre-route, parallelism). **Restart required.**
+    $ref: '#/$defs/BatchProcessingConfig'
+    default:
+      max_chunk_size: 10000
+      format: auto
+      routing_field: null
+      pre_route_filters: []
+      parse_error_action: dlq
+      known_fields:
+      - _table
+      - _timestamp
+      - _source
+      - host
+      - source_type
+      - event_type
+  routing:
+    description: Routing rules and table mapping. **Hot-reloaded.**
+    $ref: '#/$defs/RoutingConfig'
+    default:
+      rules: []
+      db_fields: []
+      table_fields:
+      - _source
+      default_db: dfe
+      default_table: default
+      org_id_field: org_id
+      org_routes: []
+      source_to_table: {}
+      mapping_file: null
+      topic_suffixes:
+      - _land
+      - _load
+      compat_v2_source: false
+      dlq:
+        enabled: true
+        mode: cascade
+        topic_suffix: .dlq
+        file_enabled: true
+        file_path: /var/spool/dfe/dlq
+        kafka_enabled: true
+  buffer:
+    description: Buffer flush thresholds. **Hot-reloaded.**
+    $ref: '#/$defs/BufferConfig'
+    default:
+      flush_bytes: 1048576
+      flush_rows: 20000
+      flush_age_secs: 5
+  memory:
+    description: Memory limits. **Hot-reloaded.**
+    $ref: '#/$defs/MemoryConfig'
+    default:
+      limit_bytes: 0
+      pressure_threshold: 0.8
+  timestamp_dq:
+    description: Timestamp data quality validation. **Hot-reloaded.**
+    $ref: '#/$defs/TimestampDqConfig'
+    default:
+      enabled: true
+      max_future_seconds: 600
+      max_past_seconds: 0
+      invalid_action: replace_with_now
+      correct_known_bad: true
+  field_sanitization:
+    description: Field name sanitisation. **Hot-reloaded.**
+    $ref: '#/$defs/FieldSanitizationConfig'
+    default:
+      strip_at_prefix: true
+      handle_numeric_prefix: true
+      numeric_prefix: col_
+      collapse_underscores: true
+      trim_underscores: true
+      collision_strategy: last_wins
+  metadata:
+    description: Common header injection, tags, _raw handling. **Hot-reloaded.**
+    $ref: '#/$defs/MetadataConfig'
+    default:
+      enabled: true
+      inject_timestamp_load: true
+      extract_timestamp_collector: true
+      collector_timestamp_path: tags.collector.timestamp
+      tags_fields:
+      - tags
+      - _tags
+      - meta
+      - metadata.tags
+      tags_output: _tags
+      drop_tags: false
+      capture_mode: full
+      table_capture_modes: {}
+      capture_json: true
+      json_output: _json
+      capture_raw: true
+      raw_source_fields:
+      - logoriginal
+      raw_output: _raw
+      capture_source: true
+      source_fields:
+      - _source
+      source_output: _source
+      disable_json_tables: []
+      disable_raw_tables: []
+      remove_routing_fields: true
+  coercion:
+    description: Type coercion config. **Hot-reloaded.**
+    $ref: '#/$defs/CoercionConfig'
+    default:
+      type_mappings: {}
+      unknown_type_fallback: String
+      null_handling: default
+      null_strings:
+      - 'null'
+      - 'NULL'
+      - 'Null'
+      - None
+      - nil
+      - undefined
+      - \N
+      - <null>
+      - NA
+      - N/A
+      - n/a
+      - NaN
+      default_timezone: UTC
+      timezone_fields:
+      - tags_collector_timezone
+      array_to_json: true
+      strict: false
+  field_mapping:
+    description: Field mapping overrides. **Hot-reloaded.**
+    $ref: '#/$defs/FieldMappingConfig'
+    default:
+      enabled: false
+      default_action: rename
+      builtin: none
+      files: []
+      overrides: {}
+  enrichment:
+    description: IP enrichment field selection. **Hot-reloaded.**
+    $ref: '#/$defs/EnrichmentConfig'
+    default:
+      ip_fields:
+      - src_ip
+      - client_ip
+      - ip
+      - source_ip
+      reputation:
+        enabled: false
+        cache_capacity: 100000
+        blocklist_files: []
+      risk_scoring:
+        enabled: false
+        preset: global
+$defs:
+  KafkaConfig:
+    type: object
+    properties:
+      brokers:
+        type: array
+        items:
+          type: string
+        default:
+        - localhost:9092
+      group:
+        type: string
+        default: clickhouse-loader
+      topics:
+        description: |-
+          Explicit topic list. Empty = auto-discover all `*_load` / `*_land` topics
+          from the broker, with load-over-land fallback applied.
+        type: array
+        items:
+          type: string
+        default: []
+      topic_regex:
+        type:
+        - string
+        - 'null'
+        default: null
+      client_id:
+        type: string
+        default: clickhouse-loader
+      sasl:
+        anyOf:
+        - $ref: '#/$defs/SaslConfig'
+        - type: 'null'
+        default: null
+      tls:
+        anyOf:
+        - $ref: '#/$defs/TlsConfig'
+        - type: 'null'
+        default: null
+      allow_insecure_transport:
+        description: |-
+          Opt in to an unencrypted Kafka transport (`plaintext` / `sasl_plaintext`)
+          in production. rustlib (>=2.8) rejects unencrypted transports under a
+          production profile at transport construction unless this is set —
+          data and SASL/PLAIN credentials would otherwise ship in the clear. Leave
+          `false` (the default) and configure TLS, or set `true` only when the
+          in-cluster traffic is already mesh-encrypted.
+        type: boolean
+        default: false
+      librdkafka_overrides:
+        description: Raw librdkafka configuration overrides (highest priority).
+        type: object
+        additionalProperties:
+          type: string
+        default:
+          statistics.interval.ms: '5000'
+  SaslConfig:
+    type: object
+    properties:
+      enabled:
+        description: Enable SASL authentication
+        type: boolean
+        default: false
+      mechanism:
+        description: SASL mechanism (none, plain, `scram_sha_256`, `scram_sha_512`, oauthbearer, `aws_msk_iam`)
+        type: string
+        default: scram_sha_512
+      username:
+        type: string
+        default: ''
+      password:
+        type: string
+        x-dfe-secret: true
+        writeOnly: true
+        default: '***REDACTED***'
+      oauth_token_endpoint:
+        description: OAuth token endpoint URL
+        type:
+        - string
+        - 'null'
+        default: null
+      oauth_client_id:
+        description: OAuth client ID
+        type:
+        - string
+        - 'null'
+        default: null
+      oauth_client_secret:
+        description: OAuth client secret
+        type:
+        - string
+        - 'null'
+        x-dfe-secret: true
+        writeOnly: true
+        default: null
+      oauth_scope:
+        description: OAuth scope (space-separated)
+        type:
+        - string
+        - 'null'
+        default: null
+      oauth_extensions:
+        description: OAuth extensions (key=value pairs)
+        type:
+        - string
+        - 'null'
+        default: null
+      aws_region:
+        description: AWS region for MSK IAM
+        type:
+        - string
+        - 'null'
+        default: null
+      aws_access_key_id:
+        description: AWS access key ID (optional - can use instance profile/environment)
+        type:
+        - string
+        - 'null'
+        default: null
+      aws_secret_access_key:
+        description: AWS secret access key
+        type:
+        - string
+        - 'null'
+        x-dfe-secret: true
+        writeOnly: true
+        default: null
+      aws_session_token:
+        description: AWS session token (for temporary credentials)
+        type:
+        - string
+        - 'null'
+        x-dfe-secret: true
+        writeOnly: true
+        default: null
+      aws_profile:
+        description: AWS profile name (alternative to explicit credentials)
+        type:
+        - string
+        - 'null'
+        default: null
+  TlsConfig:
+    type: object
+    properties:
+      enabled:
+        type: boolean
+        default: false
+      ca_cert_file:
+        type:
+        - string
+        - 'null'
+        default: null
+      cert_file:
+        type:
+        - string
+        - 'null'
+        default: null
+      key_file:
+        type:
+        - string
+        - 'null'
+        default: null
+      skip_verify:
+        type: boolean
+        default: false
+  GrpcConfig:
+    description: |-
+      gRPC transport configuration for receiving messages from dfe-receiver.
+
+      When `transport = "grpc"`, the loader starts a gRPC server listening on
+      `listen` and accepts Push RPCs from remote senders (e.g. dfe-receiver).
+    type: object
+    properties:
+      listen:
+        description: |-
+          Server listen address (e.g., "0.0.0.0:6000").
+          Required when `transport = "grpc"`.
+        type:
+        - string
+        - 'null'
+        default: null
+      recv_buffer_size:
+        description: Receive buffer size (messages buffered from incoming RPCs).
+        type: integer
+        format: uint
+        minimum: 0
+        default: 10000
+      recv_timeout_ms:
+        description: Receive timeout in milliseconds (0 = non-blocking).
+        type: integer
+        format: uint64
+        minimum: 0
+        default: 100
+      max_message_size:
+        description: Maximum message size in bytes (both send and receive).
+        type: integer
+        format: uint
+        minimum: 0
+        default: 16777216
+      compression:
+        description: Enable gzip compression for gRPC messages.
+        type: boolean
+        default: false
+      default_topic:
+        description: |-
+          Default topic name for messages without a topic in gRPC metadata.
+          Used as the routing key when the sender doesn't set a topic.
+        type: string
+        default: default_land
+  ClickHouseConfig:
+    type: object
+    properties:
+      hosts:
+        type: array
+        items:
+          type: string
+        default:
+        - localhost:9000
+      database:
+        type: string
+        default: default
+      username:
+        type: string
+        default: default
+      password:
+        type: string
+        x-dfe-secret: true
+        writeOnly: true
+        default: '***REDACTED***'
+      protocol:
+        type: string
+        default: native
+      tables:
+        type: array
+        items:
+          type: string
+        default: []
+      tls:
+        anyOf:
+        - $ref: '#/$defs/TlsConfig'
+        - type: 'null'
+        default: null
+  PayloadConfig:
+    type: object
+    properties:
+      format:
+        description: 'Format mode: "auto" (default), "json", "messagepack"/"msgpack"'
+        type: string
+        default: auto
+      mismatch_threshold:
+        description: Mismatch threshold before auto-reset (auto mode only)
+        type: integer
+        format: uint8
+        minimum: 0
+        maximum: 255
+        default: 10
+      pipeline_mode:
+        description: |-
+          Pipeline processing mode.
+
+          - `"json_primary"` (default): Schema-guided SIMD extraction + zero-copy `_json` splice.
+            Only schema-matching columns are extracted; everything else is captured via `_json`.
+            Requires schema resolution before per-column extraction works; messages arriving
+            before schema is resolved fall back to the legacy path.
+
+          - `"legacy_flatten"`: Existing full-flatten + transform path. All fields are promoted
+            to the top level; `_json` is injected as a UTF-8 string copy of the raw payload.
+        type: string
+        default: json_primary
+  MetricsConfig:
+    type: object
+    properties:
+      enabled:
+        type: boolean
+        default: true
+      address:
+        type: string
+        default: 0.0.0.0:9090
+  LoggingConfig:
+    type: object
+    properties:
+      level:
+        type: string
+        default: info
+      format:
+        type: string
+        default: json
+  SchemaConfig:
+    type: object
+    properties:
+      cache_ttl_secs:
+        description: TTL for cached schemas before background refresh marks them stale.
+        type: integer
+        format: uint64
+        minimum: 0
+        default: 300
+      refresh_on_error:
+        description: Whether to refresh the schema cache on insert errors.
+        type: boolean
+        default: true
+      pre_warm_retry_secs:
+        description: |-
+          Total wall-clock budget for pre-warm retry on startup.
+          `0` disables retry — pre-warm runs once and moves on.
+        type: integer
+        format: uint64
+        minimum: 0
+        default: 60
+      pending_max_per_table:
+        description: |-
+          Max messages buffered per table while waiting for schema resolution.
+          Excess messages route to DLQ with a security event.
+        type: integer
+        format: uint
+        minimum: 0
+        default: 1000
+      pending_max_total:
+        description: |-
+          Max messages buffered across all tables.
+          Hitting this cap evicts the oldest entry FIFO across tables.
+        type: integer
+        format: uint
+        minimum: 0
+        default: 10000
+      pending_max_age_secs:
+        description: Max age of a pending message before it is routed to DLQ.
+        type: integer
+        format: uint64
+        minimum: 0
+        default: 30
+  GeoIpConfig:
+    description: '`GeoIP` enrichment configuration'
+    type: object
+    properties:
+      enabled:
+        description: Enable `GeoIP` enrichment
+        type: boolean
+        default: false
+      provider:
+        description: '`GeoIP` database provider'
+        $ref: '#/$defs/GeoIpProvider'
+        default: db_ip_lite
+      city_db_path:
+        description: Explicit path to city MMDB file (overrides auto-download)
+        type:
+        - string
+        - 'null'
+        default: null
+      asn_db_path:
+        description: Explicit path to ASN MMDB file (overrides auto-download)
+        type:
+        - string
+        - 'null'
+        default: null
+      auto_download:
+        description: Auto-download settings
+        $ref: '#/$defs/AutoDownloadConfig'
+        default:
+          enabled: true
+          data_dir: /var/lib/dfe/geoip
+          maxmind_account_id: null
+          maxmind_license_key: null
+          ipinfo_token: null
+          max_age_days: 30
+      cache_capacity:
+        description: LRU cache capacity for lookup results
+        type: integer
+        format: uint
+        minimum: 0
+        default: 100000
+  GeoIpProvider:
+    description: '`GeoIP` enrichment provider'
+    oneOf:
+    - description: DB-IP Lite — free, anonymous download, city-level, CC BY 4.0
+      type: string
+      const: db_ip_lite
+    - description: '`MaxMind` `GeoLite2` — free account required (`account_id` + `license_key`)'
+      type: string
+      const: max_mind_geo_lite2
+    - description: IPLocate.io — free, anonymous, country + ASN only
+      type: string
+      const: ip_locate
+    - description: '`IPinfo` Lite — free token required, country + ASN only'
+      type: string
+      const: ip_info_lite
+    - description: sapics/ip-location-db — free CC0, country + ASN only
+      type: string
+      const: sapics
+    - description: User provides MMDB file paths directly
+      type: string
+      const: custom
+  AutoDownloadConfig:
+    description: Auto-download settings for `GeoIP` databases
+    type: object
+    properties:
+      enabled:
+        description: Enable auto-download on startup if MMDB files missing or stale
+        type: boolean
+        default: true
+      data_dir:
+        description: Directory to store downloaded MMDB files
+        type: string
+        default: /var/lib/dfe/geoip
+      maxmind_account_id:
+        description: '`MaxMind` account ID (required for `max_mind_geo_lite2` provider)'
+        type:
+        - string
+        - 'null'
+        default: null
+      maxmind_license_key:
+        description: '`MaxMind` license key (required for `max_mind_geo_lite2` provider)'
+        type:
+        - string
+        - 'null'
+        default: null
+      ipinfo_token:
+        description: '`IPinfo` token (required for `ip_info_lite` provider)'
+        type:
+        - string
+        - 'null'
+        x-dfe-secret: true
+        writeOnly: true
+        default: null
+      max_age_days:
+        description: 'Max age in days before re-downloading (default: 30)'
+        type: integer
+        format: uint32
+        minimum: 0
+        default: 30
+  ComputedColumnsConfig:
+    description: |-
+      Config cascade overrides for computed columns.
+
+      CEL expressions that produce column values at insert time.
+      Expressions are also read from `ClickHouse` column comments (`@computed:` directive).
+
+      Precedence (highest wins):
+      1. Config per-table override (`overrides."db.table".column`)
+      2. Config global (`columns.column`)
+      3. `ClickHouse` column COMMENT `@computed:` directive
+    type: object
+    properties:
+      columns:
+        description: |-
+          Global computed columns (applied to all tables).
+          Key: destination column name, Value: CEL expression.
+        type: object
+        additionalProperties:
+          type: string
+        default: {}
+      overrides:
+        description: 'Per-table overrides. Key: "db.table", Value: column→expression map.'
+        type: object
+        additionalProperties:
+          type: object
+          additionalProperties:
+            type: string
+        default: {}
+  ColumnDirectivesConfig:
+    description: |-
+      Config section for all column-level directives.
+
+      The config equivalent of `ClickHouse` column COMMENT annotations.
+      Config always wins — DDL annotations only fill gaps not covered by config.
+    type: object
+    properties:
+      global:
+        description: 'Global: applies to matching column names across all tables.'
+        type: object
+        additionalProperties:
+          $ref: '#/$defs/ColumnDirectivesEntry'
+        default: {}
+      tables:
+        description: 'Per-table: key is `"db.table"`.'
+        type: object
+        additionalProperties:
+          type: object
+          additionalProperties:
+            $ref: '#/$defs/ColumnDirectivesEntry'
+        default: {}
+  ColumnDirectivesEntry:
+    description: Config entry for one column — all fields optional, only set fields take effect.
+    type: object
+    properties:
+      skip:
+        description: Omit this column from inserts.
+        type: boolean
+        default: false
+      default:
+        description: Default value when column is null or absent.
+      renamed:
+        description: 'Source field: `"field"` or `"first(a/b/c)"`.'
+        type:
+        - string
+        - 'null'
+      computed:
+        description: CEL expression producing this column's value.
+        type:
+        - string
+        - 'null'
+      coerce:
+        description: Type category override for coercion.
+        type:
+        - string
+        - 'null'
+  HotReloadConfig:
+    description: |-
+      Hot-reload configuration
+
+      Controls whether the config file is watched for changes at runtime.
+      When enabled, the config cascade is re-evaluated on file change and
+      safe-to-reload settings are applied without process restart.
+
+      **Safe to hot-reload:** buffer thresholds, routing, metadata, field
+      sanitisation, timestamp DQ, coercion settings.
+
+      **Requires restart:** Kafka brokers/topics/auth, `ClickHouse` hosts/auth,
+      payload format, transport type.
+    type: object
+    properties:
+      enabled:
+        description: 'Enable config file watching (default: false)'
+        type: boolean
+        default: false
+      poll_interval_secs:
+        description: Polling interval in seconds for checking file changes
+        type: integer
+        format: uint64
+        minimum: 0
+        default: 5
+      debounce_ms:
+        description: Debounce duration in milliseconds — minimum time between reloads
+        type: integer
+        format: uint64
+        minimum: 0
+        default: 500
+  KedaConfig:
+    description: |-
+      KEDA autoscaling thresholds (deployment-level config).
+
+      These values are the `SSoT` for the Helm chart's KEDA `ScaledObject`.
+      The contract sync test validates that chart/values.yaml matches these
+      defaults. Override at runtime via env vars:
+        `DFE_LOADER__KEDA__KAFKA_LAG_THRESHOLD=5000`
+    type: object
+    properties:
+      enabled:
+        type: boolean
+        default: true
+      min_replicas:
+        type: integer
+        format: uint32
+        minimum: 0
+        default: 1
+      max_replicas:
+        type: integer
+        format: uint32
+        minimum: 0
+        default: 10
+      polling_interval:
+        description: Seconds between KEDA polling the scaler
+        type: integer
+        format: uint32
+        minimum: 0
+        default: 15
+      cooldown_period:
+        description: Seconds before scale-down after load drops
+        type: integer
+        format: uint32
+        minimum: 0
+        default: 300
+      kafka_lag_threshold:
+        description: Scale when consumer group lag exceeds this per partition
+        type: integer
+        format: uint64
+        minimum: 0
+        default: 1000
+      activation_lag_threshold:
+        description: Wake from zero replicas when lag exceeds this
+        type: integer
+        format: uint64
+        minimum: 0
+        default: 0
+      cpu_enabled:
+        description: Enable CPU-based scaling trigger
+        type: boolean
+        default: true
+      cpu_threshold:
+        description: CPU utilisation percentage threshold
+        type: integer
+        format: uint32
+        minimum: 0
+        default: 80
+  ScalingConfig:
+    description: |-
+      Scaling pressure configuration for KEDA autoscaling.
+
+      Produces a 0-100 composite metric (`loader_scaling_pressure`) based on
+      weighted application signals with two hard gates (circuit breaker, memory).
+
+      Override weights at runtime via env vars:
+        `DFE_LOADER__SCALING__WEIGHT_KAFKA_LAG=0.45`
+        `DFE_LOADER__SCALING__SATURATION_BUFFER_DEPTH=20000`
+    type: object
+    properties:
+      enabled:
+        description: Enable scaling pressure calculation.
+        type: boolean
+        default: true
+      memory_gate_threshold:
+        description: Memory usage ratio (0.0-1.0) that forces `scaling_pressure` to 100.
+        type: number
+        format: double
+        default: 0.8
+      weight_kafka_lag:
+        type: number
+        format: double
+        default: 0.35
+      weight_buffer_depth:
+        type: number
+        format: double
+        default: 0.25
+      weight_insert_latency:
+        type: number
+        format: double
+        default: 0.15
+      weight_memory:
+        type: number
+        format: double
+        default: 0.15
+      weight_errors:
+        type: number
+        format: double
+        default: 0.1
+      saturation_kafka_lag:
+        type: number
+        format: double
+        default: 100000.0
+      saturation_buffer_depth:
+        type: number
+        format: double
+        default: 10000.0
+      saturation_insert_latency:
+        type: number
+        format: double
+        default: 5.0
+      saturation_errors:
+        type: number
+        format: double
+        default: 100.0
+  BatchProcessingConfig:
+    description: |-
+      Configuration for the batch processing engine.
+
+      All values are overridable via the 7-layer config cascade
+      (CLI > ENV > .env > settings.{env}.yaml > settings.yaml > defaults > scalo > hard-coded).
+    type: object
+    properties:
+      max_chunk_size:
+        description: |-
+          Maximum number of messages per rayon chunk.
+
+          Smaller chunks reduce per-task overhead; larger chunks amortise
+          the rayon work-stealing cost. Default 10 000 matches data-plane batch sizes.
+        type: integer
+        format: uint
+        minimum: 0
+        default: 10000
+      format:
+        description: Expected payload format (auto-detect by default).
+        $ref: '#/$defs/PayloadFormat'
+        default: auto
+      routing_field:
+        description: |-
+          JSON field used to route messages to the correct downstream sink.
+
+          For a loader this is typically `"_table"`.
+        type:
+        - string
+        - 'null'
+        default: null
+      pre_route_filters:
+        description: |-
+          Pre-route filters applied before routing decisions.
+
+          Evaluated in order -- first match wins.
+        type: array
+        items:
+          $ref: '#/$defs/PreRouteFilterConfig'
+        default: []
+      parse_error_action:
+        description: Action to take when a message fails JSON parsing.
+        $ref: '#/$defs/ParseErrorAction'
+        default: dlq
+      known_fields:
+        description: |-
+          Fields to pre-extract into [`super::types::ParsedMessage::extracted`]
+          for fast routing lookups.
+
+          Extracting these at parse time avoids repeated `value.get()` traversals
+          during routing and filtering.
+        type: array
+        items:
+          type: string
+        default:
+        - _table
+        - _timestamp
+        - _source
+        - host
+        - source_type
+        - event_type
+  PayloadFormat:
+    description: |-
+      Payload format for a raw message.
+
+      Mirrors `crate::transport::types::PayloadFormat` for use when the `transport`
+      feature is not enabled. When `transport` is enabled, conversions between the
+      two types are provided.
+    oneOf:
+    - description: Auto-detect from payload bytes.
+      type: string
+      const: auto
+    - description: JSON format.
+      type: string
+      const: json
+    - description: MessagePack format.
+      type: string
+      const: msgpack
+  PreRouteFilterConfig:
+    description: |-
+      Pre-route filter applied to each message before routing decisions.
+
+      Filters are evaluated in order. The first filter that matches determines
+      the message's [`super::types::PreRouteResult`].
+    oneOf:
+    - description: Route to DLQ if a required field is absent.
+      type: object
+      properties:
+        field:
+          description: Name of the required field.
+          type: string
+        type:
+          type: string
+          const: drop_field_missing
+      required:
+      - type
+      - field
+    - description: Route to DLQ if a field equals a specific value.
+      type: object
+      properties:
+        field:
+          description: Name of the field to check.
+          type: string
+        value:
+          description: Value that triggers DLQ routing.
+          type: string
+        type:
+          type: string
+          const: dlq_field_value
+      required:
+      - type
+      - field
+      - value
+  ParseErrorAction:
+    description: Action to take when a message fails to parse.
+    oneOf:
+    - description: Route failed messages to the dead-letter queue (default).
+      type: string
+      const: dlq
+    - description: Silently skip failed messages (counted but not DLQ'd).
+      type: string
+      const: skip
+    - description: Fail the entire batch on the first parse error.
+      type: string
+      const: fail_batch
+  RoutingConfig:
+    type: object
+    properties:
+      rules:
+        description: |-
+          CEL-based routing rules (top-to-bottom, first match wins).
+          Falls through to field-extraction routing if no rule matches.
+        type: array
+        items:
+          $ref: '#/$defs/RoutingRule'
+        default: []
+      db_fields:
+        description: |-
+          Fields to check for database name (first match wins, dot notation for nested)
+          Example: ["`org_id`", "tenant.id"]
+          NOTE: Leave empty to always use `default_db` (recommended for shared schema)
+        type: array
+        items:
+          type: string
+        default: []
+      table_fields:
+        description: |-
+          Fields to check for table name (first match wins, dot notation for nested)
+          Default: ["_source"] — aligned with _source field extraction
+        type: array
+        items:
+          type: string
+        default:
+        - _source
+      default_db:
+        description: |-
+          Default database if no `db_field` matches (or `db_fields` is empty), or if the
+          org is not listed in `org_routes`.
+          Default: "dfe" (shared multi-tenant schema)
+        type: string
+        default: dfe
+      default_table:
+        description: |-
+          Default table if no `table_field` matches
+          Default: "dfe"
+        type: string
+        default: default
+      org_id_field:
+        description: |-
+          Field to extract for _`org_id` column (stored in data for RLS)
+          Example: "`org_id`" or "tenant.id"
+          This field is extracted and stored as _`org_id`, regardless of routing behaviour
+        type:
+        - string
+        - 'null'
+        default: org_id
+      org_routes:
+        description: |-
+          Per-organisation database routing. Only orgs explicitly listed here receive
+          their own database — all other orgs always go to `default_db`.
+          Example: [{`org_id`: "acme"}, {`org_id`: "bigcorp", database: "`bigcorp_dfe`"}]
+        type: array
+        items:
+          $ref: '#/$defs/OrgRoute'
+        default: []
+      source_to_table:
+        description: |-
+          Source value to table name mapping
+          Maps extracted source values to destination table names
+        type: object
+        additionalProperties:
+          type: string
+        default: {}
+      mapping_file:
+        description: 'Legacy: mapping file path'
+        type:
+        - string
+        - 'null'
+        default: null
+      topic_suffixes:
+        description: |-
+          Topic suffixes to strip when deriving _source from Kafka topic name
+          Example: topic "`auth_land`" with suffix "_land" → _source = "auth"
+        type: array
+        items:
+          type: string
+        default:
+        - _land
+        - _load
+      compat_v2_source:
+        description: |-
+          Pre-DFE 2.2 compatibility: prepend `event_category/tags.event_category` to
+          `source_fields` and `table_fields` for backwards compatibility with older data formats
+        type: boolean
+        default: false
+      dlq:
+        description: DLQ configuration
+        $ref: '#/$defs/DlqConfig'
+        default:
+          enabled: true
+          mode: cascade
+          topic_suffix: .dlq
+          file_enabled: true
+          file_path: /var/spool/dfe/dlq
+          kafka_enabled: true
+  RoutingRule:
+    description: |-
+      CEL-based routing rule. When `when` evaluates to true against the message,
+      route to the specified `target` table (and optionally `db` database).
+
+      Rules are evaluated top-to-bottom, first match wins. If no rule matches,
+      falls through to field-extraction routing (`db_fields/table_fields`).
+    type: object
+    properties:
+      when:
+        description: CEL expression that must evaluate to true for this rule to match
+        type: string
+      target:
+        description: Target table name
+        type: string
+      db:
+        description: Target database (optional — uses `default_db` if omitted)
+        type:
+        - string
+        - 'null'
+        default: null
+    required:
+    - when
+    - target
+  OrgRoute:
+    description: |-
+      Explicit per-organisation database routing.
+
+      When an org is listed here, messages from that org are routed to the
+      specified database (or `org_id` if `database` is omitted). Orgs NOT
+      listed always go to `default_db`.
+    type: object
+    properties:
+      org_id:
+        description: Organisation identifier (matched against `org_id_field` value)
+        type: string
+      database:
+        description: Target database. If omitted, the `org_id` itself is used as the database name.
+        type:
+        - string
+        - 'null'
+        default: null
+    required:
+    - org_id
+  DlqConfig:
+    type: object
+    properties:
+      enabled:
+        type: boolean
+        default: true
+      mode:
+        description: 'Backend mode: cascade (default), `fan_out`, `file_only`, `kafka_only`'
+        type: string
+        default: cascade
+      topic_suffix:
+        type: string
+        default: .dlq
+      file_enabled:
+        description: File backend settings
+        type: boolean
+        default: true
+      file_path:
+        type: string
+        default: /var/spool/dfe/dlq
+      kafka_enabled:
+        description: Kafka backend settings
+        type: boolean
+        default: true
+  BufferConfig:
+    type: object
+    properties:
+      flush_bytes:
+        type: integer
+        format: uint
+        minimum: 0
+        default: 1048576
+      flush_rows:
+        type: integer
+        format: uint
+        minimum: 0
+        default: 20000
+      flush_age_secs:
+        type: integer
+        format: uint64
+        minimum: 0
+        default: 5
+  MemoryConfig:
+    type: object
+    properties:
+      limit_bytes:
+        description: Maximum memory for buffers in bytes. 0 = auto-detect (67% of available)
+        type: integer
+        format: uint
+        minimum: 0
+        default: 0
+      pressure_threshold:
+        description: Pressure threshold (0.0-1.0) - pause consumption above this
+        type: number
+        format: double
+        default: 0.8
+  TimestampDqConfig:
+    type: object
+    properties:
+      enabled:
+        type: boolean
+        default: true
+      max_future_seconds:
+        type: integer
+        format: int64
+        default: 600
+      max_past_seconds:
+        type: integer
+        format: int64
+        default: 0
+      invalid_action:
+        type: string
+        default: replace_with_now
+      correct_known_bad:
+        type: boolean
+        default: true
+  FieldSanitizationConfig:
+    type: object
+    properties:
+      strip_at_prefix:
+        type: boolean
+        default: true
+      handle_numeric_prefix:
+        type: boolean
+        default: true
+      numeric_prefix:
+        type: string
+        default: col_
+      collapse_underscores:
+        type: boolean
+        default: true
+      trim_underscores:
+        type: boolean
+        default: true
+      collision_strategy:
+        type: string
+        default: last_wins
+  MetadataConfig:
+    type: object
+    properties:
+      enabled:
+        description: |-
+          Master switch for common header field injection (default: true)
+          When false, no common header fields (_timestamp, _`org_id`, _raw, _json, _tags, _source)
+          are injected. Flattening and sanitization still apply.
+        type: boolean
+        default: true
+      inject_timestamp_load:
+        type: boolean
+        default: true
+      extract_timestamp_collector:
+        type: boolean
+        default: true
+      collector_timestamp_path:
+        type: string
+        default: tags.collector.timestamp
+      tags_fields:
+        description: Fields to check for tags (first match wins, dot notation for nested)
+        type: array
+        items:
+          type: string
+        default:
+        - tags
+        - _tags
+        - meta
+        - metadata.tags
+      tags_output:
+        description: Output field name for tags (underscore prefix avoids collision)
+        type: string
+        default: _tags
+      drop_tags:
+        description: Drop tags entirely after routing extraction (saves storage)
+        type: boolean
+        default: false
+      capture_mode:
+        description: |-
+          Controls how _json and _raw columns are populated.
+          All modes extract promoted fields to schema columns.
+        $ref: '#/$defs/CaptureMode'
+        default: full
+      table_capture_modes:
+        description: Per-table capture mode overrides (table name → mode)
+        type: object
+        additionalProperties:
+          $ref: '#/$defs/CaptureMode'
+        default: {}
+      capture_json:
+        description: Store complete original Kafka message as JSON before transformation
+        type: boolean
+        default: true
+      json_output:
+        description: Output field name for _json
+        type: string
+        default: _json
+      capture_raw:
+        description: Enable _raw field injection from source (zero-copy rename)
+        type: boolean
+        default: true
+      raw_source_fields:
+        description: 'Source fields to try for rename (first match wins). Default: ["logoriginal"]'
+        type: array
+        items:
+          type: string
+        default:
+        - logoriginal
+      raw_output:
+        description: Output field name for raw log line
+        type: string
+        default: _raw
+      capture_source:
+        description: Enable _source field injection (destination table identifier)
+        type: boolean
+        default: true
+      source_fields:
+        description: Fields to check for _source value in message data (first match wins)
+        type: array
+        items:
+          type: string
+        default:
+        - _source
+      source_output:
+        description: Output field name for _source
+        type: string
+        default: _source
+      disable_json_tables:
+        description: Tables where _json capture is disabled (e.g., ["dfe.metrics"])
+        type: array
+        items:
+          type: string
+        default: []
+      disable_raw_tables:
+        description: Tables where _raw capture is disabled (e.g., ["dfe.metrics"])
+        type: array
+        items:
+          type: string
+        default: []
+      remove_routing_fields:
+        description: Remove routing fields from output after extraction
+        type: boolean
+        default: true
+  CaptureMode:
+    description: |-
+      Per-table capture override configuration.
+
+      Controls how `_json` and `_raw` columns are populated.
+
+      All modes extract promoted fields to schema columns. The only difference
+      is where (or whether) the full payload is preserved.
+    oneOf:
+    - description: '`_json` = full payload (JSON type), `_raw` = extracted from raw_source_fields'
+      type: string
+      const: full
+    - description: '`_json` = NULL, `_raw` = entire Kafka payload as UTF-8 String'
+      type: string
+      const: raw_only
+    - description: '`_json` = NULL, `_raw` = NULL — only promoted schema fields'
+      type: string
+      const: extracted_only
+  CoercionConfig:
+    description: |-
+      Type coercion configuration
+
+      Following the Go clickhouse-loader pattern:
+      - Type mappings for custom types
+      - Configurable null handling
+      - Timezone handling for naive timestamps
+    type: object
+    properties:
+      type_mappings:
+        description: |-
+          Map custom type names to base coercer categories
+          e.g., {"MyCustomInt": "Int", "SpecialString": "String"}
+        type: object
+        additionalProperties:
+          type: string
+        default: {}
+      unknown_type_fallback:
+        description: 'Fallback coercer for unknown types (default: "String")'
+        type: string
+        default: String
+      null_handling:
+        description: How to handle null values in non-nullable columns
+        $ref: '#/$defs/NullHandling'
+        default: default
+      null_strings:
+        description: Strings to recognise as null (case-sensitive)
+        type: array
+        items:
+          type: string
+        default:
+        - 'null'
+        - 'NULL'
+        - 'Null'
+        - None
+        - nil
+        - undefined
+        - \N
+        - <null>
+        - NA
+        - N/A
+        - n/a
+        - NaN
+      default_timezone:
+        description: Default timezone for naive timestamps (IANA name or +HH:MM)
+        type: string
+        default: UTC
+      timezone_fields:
+        description: Event fields to check for timezone info
+        type: array
+        items:
+          type: string
+        default:
+        - tags_collector_timezone
+      array_to_json:
+        description: Convert arrays to JSON strings if true
+        type: boolean
+        default: true
+      strict:
+        description: 'Strict mode: fail on any coercion error'
+        type: boolean
+        default: false
+  NullHandling:
+    description: Null handling strategy
+    oneOf:
+    - description: Substitute type-appropriate default value (recommended)
+      type: string
+      const: default
+    - description: Return error for null in non-nullable column
+      type: string
+      const: error
+    - description: Pass null through (may cause `ClickHouse` errors)
+      type: string
+      const: passthrough
+  FieldMappingConfig:
+    description: |-
+      Field mapping configuration for normalising source field names.
+
+      Supports renaming or copying fields from source to destination names.
+      Rules come from two sources with clear precedence:
+      1. `ClickHouse` column comments (`@renamed` directives) — highest priority
+      2. External remap files (CSV/YAML/JSON) and built-in presets — lower priority
+
+      CSV files are compatible with the elastic/ecs-mapper format:
+      `source_field,destination_field,copy_action`
+    type: object
+    properties:
+      enabled:
+        description: 'Master switch (default: false — no impact on existing pipelines)'
+        type: boolean
+        default: false
+      default_action:
+        description: |-
+          Default action when not specified per-field: "rename" or "copy"
+          - rename: source field removed, value moved to destination (zero-copy)
+          - copy: source field retained, value cloned to destination
+        type: string
+        default: rename
+      builtin:
+        description: 'Built-in mapping preset: "ecs", "cim", "beats", or "none"'
+        type: string
+        default: none
+      files:
+        description: |-
+          External remap file paths (CSV/YAML/JSON, loaded in order)
+          Later files override earlier ones for the same destination field.
+        type: array
+        items:
+          type: string
+        default: []
+      overrides:
+        description: Per-destination field action overrides
+        type: object
+        additionalProperties:
+          $ref: '#/$defs/FieldMappingOverride'
+        default: {}
+  FieldMappingOverride:
+    description: Per-field override for mapping action
+    type: object
+    properties:
+      action:
+        description: 'Action for this field: "rename" or "copy"'
+        type: string
+    required:
+    - action
+  EnrichmentConfig:
+    description: IP enrichment pipeline configuration (`GeoIP` + reputation + risk scoring)
+    type: object
+    properties:
+      ip_fields:
+        description: |-
+          Fields to check for IP addresses (first match wins, order matters)
+
+          Common field names to try: ["`src_ip`", "`client_ip`", "ip", "`source_ip`"]
+        type: array
+        items:
+          type: string
+        default:
+        - src_ip
+        - client_ip
+        - ip
+        - source_ip
+      reputation:
+        description: IP reputation enrichment (VPN, Tor, proxy, botnet detection)
+        $ref: '#/$defs/ReputationEnrichmentConfig'
+        default:
+          enabled: false
+          cache_capacity: 100000
+          blocklist_files: []
+      risk_scoring:
+        description: Risk scoring (weighted composite score from geo + reputation data)
+        $ref: '#/$defs/RiskScoringConfig'
+        default:
+          enabled: false
+          preset: global
+  ReputationEnrichmentConfig:
+    description: Reputation enrichment configuration
+    type: object
+    properties:
+      enabled:
+        description: Enable reputation lookups
+        type: boolean
+        default: false
+      cache_capacity:
+        description: LRU cache capacity for lookup results
+        type: integer
+        format: uint
+        minimum: 0
+        default: 100000
+      blocklist_files:
+        description: Load blocklists from local files (plain text, one IP or CIDR per line)
+        type: array
+        items:
+          type: string
+        default: []
+  RiskScoringConfig:
+    description: Risk scoring configuration
+    type: object
+    properties:
+      enabled:
+        description: Enable risk scoring (requires at least `GeoIP` or reputation to be useful)
+        type: boolean
+        default: false
+      preset:
+        description: |-
+          Risk preset to use for country risk tables
+
+          Options: "global" (default), "`us_enterprise`", "`eu_enterprise`",
+                   "`apac_enterprise`", "`high_security`"
+        type: string
+        default: global

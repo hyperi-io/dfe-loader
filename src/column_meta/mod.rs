@@ -65,7 +65,7 @@ pub struct ColumnDirectives {
 }
 
 /// Config entry for one column — all fields optional, only set fields take effect.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default, schemars::JsonSchema)]
 pub struct ColumnDirectivesEntry {
     /// Omit this column from inserts.
     #[serde(default)]
@@ -84,7 +84,7 @@ pub struct ColumnDirectivesEntry {
 ///
 /// The config equivalent of `ClickHouse` column COMMENT annotations.
 /// Config always wins — DDL annotations only fill gaps not covered by config.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default, schemars::JsonSchema)]
 pub struct ColumnDirectivesConfig {
     /// Global: applies to matching column names across all tables.
     #[serde(default)]
