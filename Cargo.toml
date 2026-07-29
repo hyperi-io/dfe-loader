@@ -39,7 +39,7 @@ scalo = { version = ">=2.10.7, <3", features = ["config-schema", "transport-kafk
 schemars = { version = ">=1.2.1, <2", default-features = false, features = ["std", "derive", "preserve_order", "indexmap2"] }
 
 # CEL expression evaluation (same crate scalo uses, needed for Program type)
-cel = { version = ">=0.13, <0.14", features = ["json"] }
+cel = { version = ">=0.13, <0.15", features = ["json"] }
 
 # JSON parsing (SIMD-accelerated)
 sonic-rs = ">=0.5, <0.6"
@@ -69,7 +69,7 @@ tikv-jemalloc-ctl = { version = ">=0.7.0, <0.8", optional = true }
 tikv-jemallocator = { version = ">=0.7.0, <0.8", optional = true }
 
 # GeoIP enrichment (mmap for long-running apps, simdutf8 for SIMD UTF-8 validation)
-maxminddb = { version = ">=0.28, <0.29", features = ["mmap", "simdutf8"] }
+maxminddb = { version = ">=0.28, <0.31", features = ["mmap", "simdutf8"] }
 
 # GeoIP auto-download (HTTP + gzip decompression + tar extraction)
 # Pinned to 0.12 to match scalo (reqwest-middleware/vaultrs don't support 0.13 yet)
@@ -88,7 +88,7 @@ time = ">=0.3, <0.4"
 uuid = { version = ">=1.10, <2", features = ["v4", "v7"] }
 rustc-hash = ">=2.0, <3"  # FxHashMap - faster hashing for internal maps
 memchr = ">=2.0, <3"     # SIMD byte scanning for directive parser
-compact_str = ">=0.9.1, <0.10"  # Stack-allocated strings for short keys (≤23 bytes)
+compact_str = ">=0.9.1, <0.11"  # Stack-allocated strings for short keys (≤23 bytes)
 chrono = { version = ">=0.4, <0.5", features = ["serde"] }
 chrono-tz = ">=0.10.4, <0.11"
 bytes = ">=1.7, <2"
