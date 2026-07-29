@@ -1,0 +1,29 @@
+# SPDX-License-Identifier: BUSL-1.1
+# Copyright (c) 2026 HYPERI PTY LIMITED
+
+# Container-backed tests get their own concurrency budget. Each one starts a
+# real Kafka or ClickHouse container and waits for it to become ready, so
+# letting all of them start at once starves each other of CPU and pushes them
+# past testcontainers' readiness timeout.
+#
+# Capping the GROUP rather than the whole run is the point: the other ~1600
+# tests are pure CPU and stay fully parallel.
+[test-groups]
+containers = { max-threads = 2 }
+
+[[profile.default.overrides]]
+filter = 'test(/kafka_transport_e2e::/) or test(/clickhouse_inserter_e2e::/)'
+test-group = 'containers'
+
+[profile.default]
+# No retries, deliberately. Retries here previously masked three real defects:
+# an amd64-only Kafka image running under emulation, a broker probed before it
+# served consumers, and tests asserting a cold consumer's first poll is clean.
+# A retry would have kept all three green and unfixed.
+retries = 0
+# These tests are legitimately slower than unit tests; warn rather than kill,
+# but do not let a wedged container run forever.
+slow-timeout = { period = "60s", terminate-after = 5 }
+
+[profile.ci]
+retries = 0

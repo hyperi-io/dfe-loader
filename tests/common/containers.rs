@@ -12,7 +12,35 @@
 mod testcontainers_impl {
     use testcontainers::{ContainerAsync, runners::AsyncRunner};
     use testcontainers_modules::clickhouse::ClickHouse as ClickHouseImage;
-    use testcontainers_modules::kafka::Kafka as KafkaImage;
+    // The `apache` module, NOT the crate's default (`confluentinc/cp-kafka`).
+    // cp-kafka publishes amd64 only, so on an arm64 developer machine every
+    // broker runs a JVM under QEMU emulation: ~30s to become ready instead of
+    // ~1s, and once two of them are up they trade BrokerTransportFailure and
+    // produce timeouts. It reads as a flaky test suite and is not -- it is one
+    // emulated image. `apache/kafka-native` is multi-arch and a GraalVM native
+    // build, so it starts natively on both.
+    use testcontainers_modules::kafka::apache::{KAFKA_PORT, Kafka as KafkaImage};
+    use testcontainers::ImageExt;
+
+    /// Kafka to test against. Pinned rather than left to the module default,
+    /// which still points at 3.8.0 -- five minors back, and behind the 4.x line
+    /// that dropped ZooKeeper for KRaft. Test against what we deploy.
+    ///
+    /// Pinned HERE, in our source, on purpose. A test image chosen by a library
+    /// default is invisible to dependency review: Renovate reads Cargo.toml and
+    /// correctly reports testcontainers-modules current, while the image tag
+    /// baked into that crate's source ages silently. Hoisting it out is what
+    /// puts it back under review -- hence the annotation.
+    // renovate: datasource=docker depName=apache/kafka-native
+    const KAFKA_TAG: &str = "4.3.1";
+
+    /// ClickHouse to test against -- the version we actually deploy
+    /// (`docker-compose.dev.yaml`, and dfe-infra `versions.yaml`), not the
+    /// module default of 23.3.8.21-alpine, which is from March 2023. Testing
+    /// three years behind the deployed server is how a query that works in CI
+    /// meets a changed default in production.
+    // renovate: datasource=docker depName=clickhouse/clickhouse-server
+    const CLICKHOUSE_TAG: &str = "26.3";
 
     use dfe_loader::config::{ClickHouseConfig, KafkaConfig};
 
@@ -96,7 +124,7 @@ mod testcontainers_impl {
         pub async fn kafka_config(&self) -> Option<KafkaConfig> {
             let container = self.kafka.as_ref()?;
             let host = container.get_host().await.ok()?;
-            let port = container.get_host_port_ipv4(9093).await.ok()?;
+            let port = container.get_host_port_ipv4(KAFKA_PORT).await.ok()?;
 
             Some(KafkaConfig {
                 brokers: vec![format!("{}:{}", host, port)],
@@ -114,6 +142,12 @@ mod testcontainers_impl {
     /// Start ClickHouse container
     async fn start_clickhouse() -> ContainerAsync<ClickHouseImage> {
         ClickHouseImage::default()
+            .with_tag(CLICKHOUSE_TAG)
+            // From 25.x the entrypoint refuses to leave `default` passwordless
+            // unless told to, and rejects every connection with "Authentication
+            // failed" instead. The module's own config predates that. Tests
+            // connect as default with no password, so keep that and say so.
+            .with_env_var("CLICKHOUSE_SKIP_USER_SETUP", "1")
             .start()
             .await
             .expect("Failed to start ClickHouse container")
@@ -122,6 +156,7 @@ mod testcontainers_impl {
     /// Start Kafka container
     async fn start_kafka() -> ContainerAsync<KafkaImage> {
         KafkaImage::default()
+            .with_tag(KAFKA_TAG)
             .start()
             .await
             .expect("Failed to start Kafka container")

@@ -33,6 +33,7 @@ use std::time::Duration;
 
 use rdkafka::ClientConfig;
 use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
+use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::producer::{FutureProducer, FutureRecord};
 
 use dfe_loader::buffer::KafkaOffset;
@@ -61,11 +62,15 @@ async fn spin_up_kafka(
         .expect("Kafka container must be running");
 
     let host = container.get_host().await.expect("container get_host");
+    // The module's own constant, not a literal -- 9093 was the Confluent
+    // image's broker port and silently stopped existing when the harness moved
+    // to the Apache one.
     let port = container
-        .get_host_port_ipv4(9093)
+        .get_host_port_ipv4(testcontainers_modules::kafka::apache::KAFKA_PORT)
         .await
         .expect("Kafka port mapping");
     let bootstrap = format!("{host}:{port}");
+    wait_for_broker(&bootstrap).await;
 
     let config = KafkaConfig {
         brokers: vec![bootstrap.clone()],
@@ -123,6 +128,42 @@ async fn ensure_topic(bootstrap: &str, topic: &str) {
     let _ = admin
         .create_topics(&[new_topic], &AdminOptions::new())
         .await;
+}
+
+/// Block until the broker actually answers a metadata request.
+///
+/// Container "ready" is not the same as "serving". testcontainers returns as
+/// soon as its wait strategy is satisfied, which for the native Kafka image is
+/// a second or so before the listener accepts clients. Everything downstream
+/// then fails with BrokerTransportFailure, and because `ensure_topic` swallows
+/// its error the symptom surfaces later as a consumer reading a topic that was
+/// never created. The old emulated image hid this: it was so slow that the
+/// broker was always up by the time anything connected.
+async fn wait_for_broker(bootstrap: &str) {
+    let consumer: BaseConsumer = ClientConfig::new()
+        .set("bootstrap.servers", bootstrap)
+        .create()
+        .expect("probe consumer");
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        // Metadata alone is not enough. Under KRaft the group coordinator comes
+        // up after the broker listener, and a consumer that joins in between
+        // gets BrokerTransportFailure. fetch_group_list forces a coordinator
+        // lookup, so it only succeeds once group joins will work.
+        let serving = consumer
+            .fetch_metadata(None, Duration::from_secs(2))
+            .is_ok()
+            && consumer.fetch_group_list(None, Duration::from_secs(2)).is_ok();
+        if serving {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "broker at {bootstrap} never became ready to serve consumers"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
 }
 
 /// Produce `count` small JSON-ish payloads like `msg-0`, `msg-1`, ... for use
@@ -199,14 +240,26 @@ async fn test_kafka_transport_recv_empty() {
         .await
         .expect("adapter build");
 
-    // Consumer needs a moment to join the group and fetch metadata. A single
-    // recv(n) call should return an empty batch rather than hang or error.
+    // What is under test is that an empty topic yields an empty batch promptly
+    // instead of hanging -- not that the very first poll is clean. A cold
+    // consumer can surface one transient BrokerTransportFailure while it
+    // finishes connecting, which librdkafka then heals; every other consumer
+    // test here absorbs exactly that via `recv_until`. Retry on error and fail
+    // only if it never settles.
     let start = std::time::Instant::now();
-    let messages = adapter
-        .recv(10)
-        .await
-        .expect("recv should not error")
-        .messages;
+    let deadline = start + Duration::from_secs(10);
+    let messages = loop {
+        match adapter.recv(10).await {
+            Ok(batch) => break batch.messages,
+            Err(e) => {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "recv never returned cleanly on an empty topic: {e}"
+                );
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        }
+    };
     let elapsed = start.elapsed();
 
     assert!(
@@ -214,7 +267,7 @@ async fn test_kafka_transport_recv_empty() {
         "empty topic should yield zero messages, got {}",
         messages.len()
     );
-    // Sanity: rustlib's default recv timeout is 1s; don't hang for >10s.
+    // Sanity: scalo's default recv timeout is 1s; don't hang for >10s.
     assert!(
         elapsed < Duration::from_secs(10),
         "recv on empty topic took too long: {elapsed:?}"
@@ -236,7 +289,7 @@ async fn test_kafka_transport_send_recv_roundtrip() {
     ensure_topic(&bootstrap, topic).await;
 
     // Produce BEFORE the consumer starts — with auto.offset.reset=earliest
-    // (rustlib default) the consumer will replay these on first poll.
+    // (scalo default) the consumer will replay these on first poll.
     let payloads = gen_payloads(5);
     let producer = make_producer(&bootstrap);
     produce(&producer, topic, &payloads).await;
@@ -266,7 +319,7 @@ async fn test_kafka_transport_send_recv_roundtrip() {
             msg.key.is_none(),
             "TransportAdapter does not preserve keys from Kafka"
         );
-        // Broker assigns timestamps — rustlib exposes them.
+        // Broker assigns timestamps — scalo exposes them.
         assert!(
             msg.timestamp_ms.is_some(),
             "timestamp_ms should be populated by the broker"
@@ -393,7 +446,13 @@ async fn test_kafka_transport_max_messages_limit() {
     let deadline = std::time::Instant::now() + Duration::from_secs(30);
     let mut got = Vec::new();
     while got.len() < 3 && std::time::Instant::now() < deadline {
-        let batch = adapter.recv(3 - got.len()).await.expect("recv");
+        // Retry rather than expect: a cold consumer can surface one transient
+        // transport error before it settles, and the orchestrator this mimics
+        // keeps polling too. What is under test is the cap, not first-poll luck.
+        let Ok(batch) = adapter.recv(3 - got.len()).await else {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            continue;
+        };
         for m in batch.messages {
             got.push(m);
             if got.len() == 3 {
@@ -500,7 +559,7 @@ async fn test_transport_backend_kafka_dispatch() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_kafka_invalid_brokers() {
-    // Deliberately malformed broker list. rustlib constructs the rdkafka
+    // Deliberately malformed broker list. scalo constructs the rdkafka
     // consumer eagerly, and the broker name resolution triggers immediately.
     let config = KafkaConfig {
         // Invalid port (65536 is out of u16 range when rdkafka parses it).
@@ -559,7 +618,7 @@ async fn test_kafka_invalid_brokers() {
 // ============================================================================
 
 /// `convert_config` is the pure-function mapper from `KafkaConfig` to
-/// rustlib's `TransportKafkaConfig`. It does not touch the network — so this
+/// scalo's `TransportKafkaConfig`. It does not touch the network — so this
 /// test does not need the container, but we keep it here for proximity.
 #[tokio::test]
 async fn test_kafka_transport_convert_config_auto_discover() {
