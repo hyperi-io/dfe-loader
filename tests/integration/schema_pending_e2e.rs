@@ -6,8 +6,8 @@
 //! Proves the full path that the bug broke: a real `@renamed` column COMMENT
 //! in ClickHouse DDL is fetched, parsed into a directive, and applied by the
 //! `HeaderExtractor` (the json_primary path) so the renamed column is
-//! populated. Before the fix, a schema cache miss silently used the
-//! transformer path, which ignores `@renamed` and left the column NULL.
+//! populated. The bug: a schema cache miss silently used the transformer
+//! path, which ignores `@renamed`, leaving the column NULL.
 
 use dfe_loader::column_meta::{ColumnDirectivesConfig, ColumnMetaCache, parse_directives};
 use dfe_loader::config::{MetadataConfig, RoutingConfig};
