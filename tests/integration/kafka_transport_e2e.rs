@@ -154,7 +154,9 @@ async fn wait_for_broker(bootstrap: &str) {
         let serving = consumer
             .fetch_metadata(None, Duration::from_secs(2))
             .is_ok()
-            && consumer.fetch_group_list(None, Duration::from_secs(2)).is_ok();
+            && consumer
+                .fetch_group_list(None, Duration::from_secs(2))
+                .is_ok();
         if serving {
             return;
         }

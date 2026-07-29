@@ -24,7 +24,7 @@ use scalo::metrics::groups::{
 };
 use scalo::metrics::{MetricsManager, ServiceMetrics, TransportKind};
 
-/// Application metrics backed by rustlib `MetricsManager`.
+/// Application metrics backed by scalo `MetricsManager`.
 ///
 /// Registers metrics at three layers:
 /// - `dfe_*` platform metrics via `ServiceMetrics`
@@ -60,7 +60,7 @@ pub struct Metrics {
     eps_last_update: Arc<parking_lot::Mutex<Instant>>,
     eps_last_count: Arc<AtomicU64>,
 
-    // ClickHouse sink domain metrics (scaling-signal gap audit, rustlib 2.8.10).
+    // ClickHouse sink domain metrics (scaling-signal gap audit, scalo 2.8.10).
     // The engine can only correlate signals that EXIST — these surface the
     // ClickHouse sink's load (latency, errors, throughput, backlog, batch size)
     // so they can drive a domain scaling pressure or KEDA Prometheus trigger.

@@ -26,7 +26,7 @@ pub struct KafkaConfig {
     pub tls: Option<TlsConfig>,
 
     /// Opt in to an unencrypted Kafka transport (`plaintext` / `sasl_plaintext`)
-    /// in production. rustlib (>=2.8) rejects unencrypted transports under a
+    /// in production. scalo (>=2.8) rejects unencrypted transports under a
     /// production profile at transport construction unless this is set —
     /// data and SASL/PLAIN credentials would otherwise ship in the clear. Leave
     /// `false` (the default) and configure TLS, or set `true` only when the

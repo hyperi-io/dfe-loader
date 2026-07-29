@@ -12,7 +12,7 @@ use scalo::worker::{AdaptiveWorkerPool, WorkerPoolConfig};
 
 /// Detected parallelism available to this process.
 ///
-/// rustlib's `WorkerPoolConfig::resolve_max_threads` caps the configured
+/// scalo's `WorkerPoolConfig::resolve_max_threads` caps the configured
 /// `max_threads` at `available_parallelism()` and then validates
 /// `min_threads <= max_threads` — so a hard-coded `min_threads` above the
 /// core count makes `AdaptiveWorkerPool::new` panic. Sizing the pool from this
@@ -33,7 +33,7 @@ fn available() -> usize {
 /// instead of failing in that case.
 #[test]
 fn test_process_batch_uses_multiple_threads() {
-    // Size to the available cores (cap at 4). rustlib clamps max_threads to
+    // Size to the available cores (cap at 4). scalo clamps max_threads to
     // available_parallelism, so a fixed 4 would make min_threads > max_threads
     // on a single-core runner and panic in AdaptiveWorkerPool::new.
     let threads = available().min(4);

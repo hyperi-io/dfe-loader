@@ -441,7 +441,7 @@ impl Config {
 
     /// Build a deployment contract from loader config defaults.
     ///
-    /// Apps provide ~20% customisation; rustlib generates ~80% boilerplate
+    /// Apps provide ~20% customisation; scalo generates ~80% boilerplate
     /// (Dockerfile, Helm chart, Compose fragment).
     pub fn deployment_contract() -> scalo::deployment::DeploymentContract {
         use scalo::deployment::{
@@ -466,7 +466,7 @@ impl Config {
             description: "High-performance Kafka to ClickHouse data loader".into(),
             metrics_port: 9090,
             health: HealthContract {
-                liveness_path: "/healthz".into(),
+                liveness_path: "/livez".into(),
                 readiness_path: "/readyz".into(),
                 metrics_path: "/metrics".into(),
             },
@@ -512,7 +512,7 @@ impl Config {
             ),
             depends_on: vec!["kafka".into(), "clickhouse".into()],
             keda: Some(KedaContract::default()),
-            native_deps: NativeDepsContract::for_rustlib_features(
+            native_deps: NativeDepsContract::for_scalo_features(
                 &[
                     "transport-kafka",
                     "transport-grpc",
@@ -1765,7 +1765,7 @@ logging:
         );
         assert_eq!(contract.env_prefix, "DFE_LOADER");
         assert_eq!(contract.metrics_port, 9090);
-        assert_eq!(contract.health.liveness_path, "/healthz");
+        assert_eq!(contract.health.liveness_path, "/livez");
         assert_eq!(contract.health.readiness_path, "/readyz");
         assert_eq!(contract.health.metrics_path, "/metrics");
     }

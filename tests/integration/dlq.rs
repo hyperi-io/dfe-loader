@@ -3,7 +3,7 @@
 
 //! DLQ (Dead Letter Queue) integration tests
 //!
-//! Tests unified DLQ from rustlib with file and Kafka backends.
+//! Tests unified DLQ from scalo with file and Kafka backends.
 
 use dfe_loader::config::DlqConfig;
 
@@ -32,12 +32,12 @@ fn test_dlq_config_custom_suffix() {
 }
 
 #[test]
-fn test_dlq_config_to_rustlib() {
+fn test_dlq_config_to_scalo() {
     let config = DlqConfig::default();
-    let rustlib_config = config.to_rustlib_config();
-    assert!(rustlib_config.enabled);
-    assert_eq!(rustlib_config.mode, scalo::dlq::DlqMode::Cascade);
-    assert!(rustlib_config.file.enabled);
+    let scalo_config = config.to_scalo_config();
+    assert!(scalo_config.enabled);
+    assert_eq!(scalo_config.mode, scalo::dlq::DlqMode::Cascade);
+    assert!(scalo_config.file.enabled);
 }
 
 #[test]
@@ -47,8 +47,8 @@ fn test_dlq_config_file_only_mode() {
         kafka_enabled: false,
         ..DlqConfig::default()
     };
-    let rustlib_config = config.to_rustlib_config();
-    assert_eq!(rustlib_config.mode, scalo::dlq::DlqMode::FileOnly);
+    let scalo_config = config.to_scalo_config();
+    assert_eq!(scalo_config.mode, scalo::dlq::DlqMode::FileOnly);
 }
 
 #[test]
@@ -61,7 +61,7 @@ fn test_dlq_file_backend_write() {
         ..DlqConfig::default()
     };
 
-    let rustlib_config = config.to_rustlib_config();
+    let scalo_config = config.to_scalo_config();
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -69,7 +69,7 @@ fn test_dlq_file_backend_write() {
 
     rt.block_on(async {
         let shutdown = tokio_util::sync::CancellationToken::new();
-        let dlq = scalo::dlq::Dlq::spawn(&rustlib_config, "loader", None, shutdown.clone())
+        let dlq = scalo::dlq::Dlq::spawn(&scalo_config, "loader", None, shutdown.clone())
             .expect("create file-only DLQ");
 
         let entry = scalo::dlq::DlqEntry::new("loader", "parse_error", b"bad data".to_vec())

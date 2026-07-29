@@ -10,7 +10,7 @@
 
 #[cfg(feature = "testcontainers")]
 mod testcontainers_impl {
-    use testcontainers::{ContainerAsync, runners::AsyncRunner};
+    use testcontainers::{ContainerAsync, ImageExt, runners::AsyncRunner};
     use testcontainers_modules::clickhouse::ClickHouse as ClickHouseImage;
     // The `apache` module, NOT the crate's default (`confluentinc/cp-kafka`).
     // cp-kafka publishes amd64 only, so on an arm64 developer machine every
@@ -20,7 +20,6 @@ mod testcontainers_impl {
     // emulated image. `apache/kafka-native` is multi-arch and a GraalVM native
     // build, so it starts natively on both.
     use testcontainers_modules::kafka::apache::{KAFKA_PORT, Kafka as KafkaImage};
-    use testcontainers::ImageExt;
 
     /// Kafka to test against. Pinned rather than left to the module default,
     /// which still points at 3.8.0 -- five minors back, and behind the 4.x line

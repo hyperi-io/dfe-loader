@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 // Copyright (c) 2026 HYPERI PTY LIMITED
 
-//! Configuration hot-reload using rustlib's `ConfigReloader<T>`
+//! Configuration hot-reload using scalo's `ConfigReloader<T>`
 //!
 //! Wraps the generic `ConfigReloader` from `scalo` with
 //! dfe-loader-specific config loading and validation logic.
@@ -68,7 +68,7 @@ impl Default for WatcherConfig {
 
 /// Configuration file watcher with polling and SIGHUP support.
 ///
-/// Wraps rustlib's `ConfigReloader<Config>` with dfe-loader-specific
+/// Wraps scalo's `ConfigReloader<Config>` with dfe-loader-specific
 /// loading and validation logic. Works on all filesystem types
 /// including S3, NFS, and FUSE mounts.
 pub struct ConfigWatcher {

@@ -50,7 +50,7 @@ See [clickhouse/INSERT-FORMATS.md](clickhouse/INSERT-FORMATS.md).
 - **`top`** -- `dfe-loader top` renders those metrics as a TUI. `--once`,
   `--json`, and `--filter` make it scriptable; the JSON/TSV output pipes into
   shell tooling.
-- **Health** -- the probe trinity (`/healthz`, `/readyz`, `/startupz`) from the
+- **Health** -- the probes (`/livez`, `/readyz`) from the
   scalo health pillar, for Kubernetes liveness/readiness/startup.
 
 ## Hot-reload

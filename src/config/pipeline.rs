@@ -408,8 +408,8 @@ impl Default for DlqConfig {
 }
 
 impl DlqConfig {
-    /// Convert to rustlib `DlqConfig` for the unified DLQ module.
-    pub fn to_rustlib_config(&self) -> scalo::dlq::DlqConfig {
+    /// Convert to scalo `DlqConfig` for the unified DLQ module.
+    pub fn to_scalo_config(&self) -> scalo::dlq::DlqConfig {
         use scalo::dlq::{DlqMode, FileDlqConfig};
 
         let (mode, enabled) = match self.mode.as_str() {
@@ -1111,7 +1111,7 @@ mod tests {
     use super::*;
 
     // ========================================================================
-    // DlqConfig::to_rustlib_config — mode parsing
+    // DlqConfig::to_scalo_config — mode parsing
     // ========================================================================
 
     #[test]
@@ -1124,7 +1124,7 @@ mod tests {
             file_path: "/var/spool".to_string(),
             kafka_enabled: true,
         };
-        let rc = cfg.to_rustlib_config();
+        let rc = cfg.to_scalo_config();
         assert!(rc.enabled);
         // Cascade is the default variant
     }
@@ -1139,7 +1139,7 @@ mod tests {
             file_path: "/tmp".to_string(),
             kafka_enabled: true,
         };
-        let rc = cfg.to_rustlib_config();
+        let rc = cfg.to_scalo_config();
         // "disabled" mode overrides enabled flag to false
         assert!(!rc.enabled);
     }
@@ -1154,7 +1154,7 @@ mod tests {
             file_path: "/tmp".to_string(),
             kafka_enabled: false,
         };
-        let rc = cfg.to_rustlib_config();
+        let rc = cfg.to_scalo_config();
         assert!(rc.enabled);
     }
 
@@ -1165,7 +1165,7 @@ mod tests {
             mode: "file_only".to_string(),
             ..default_dlq_base()
         };
-        let rc = cfg.to_rustlib_config();
+        let rc = cfg.to_scalo_config();
         assert!(rc.enabled);
         assert!(rc.file.enabled);
     }
@@ -1177,7 +1177,7 @@ mod tests {
             mode: "kafka_only".to_string(),
             ..default_dlq_base()
         };
-        let rc = cfg.to_rustlib_config();
+        let rc = cfg.to_scalo_config();
         assert!(rc.enabled);
     }
 
@@ -1188,7 +1188,7 @@ mod tests {
             mode: "bogus_mode".to_string(),
             ..default_dlq_base()
         };
-        let rc = cfg.to_rustlib_config();
+        let rc = cfg.to_scalo_config();
         assert!(rc.enabled);
         // Unknown mode falls through to Cascade + enabled stays
     }
@@ -1200,7 +1200,7 @@ mod tests {
             mode: "cascade".to_string(),
             ..default_dlq_base()
         };
-        let rc = cfg.to_rustlib_config();
+        let rc = cfg.to_scalo_config();
         assert!(!rc.enabled);
     }
 
@@ -1212,7 +1212,7 @@ mod tests {
             topic_suffix: ".custom_dlq".to_string(),
             ..default_dlq_base()
         };
-        let rc = cfg.to_rustlib_config();
+        let rc = cfg.to_scalo_config();
         assert_eq!(rc.kafka.topic_suffix, ".custom_dlq");
     }
 
@@ -1224,7 +1224,7 @@ mod tests {
             file_path: "/custom/dlq/path".to_string(),
             ..default_dlq_base()
         };
-        let rc = cfg.to_rustlib_config();
+        let rc = cfg.to_scalo_config();
         assert_eq!(rc.file.path.to_string_lossy(), "/custom/dlq/path");
     }
 

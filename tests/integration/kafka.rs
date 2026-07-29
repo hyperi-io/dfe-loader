@@ -4,7 +4,7 @@
 //! Kafka integration tests
 //!
 //! Tests run against the configured Kafka cluster via .env settings.
-//! Uses rustlib `TransportAdapter` (not legacy direct-rdkafka consumer).
+//! Uses scalo `TransportAdapter` (not legacy direct-rdkafka consumer).
 
 use std::env;
 

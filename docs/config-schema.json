@@ -413,7 +413,7 @@
           "default": null
         },
         "allow_insecure_transport": {
-          "description": "Opt in to an unencrypted Kafka transport (`plaintext` / `sasl_plaintext`)\nin production. rustlib (>=2.8) rejects unencrypted transports under a\nproduction profile at transport construction unless this is set —\ndata and SASL/PLAIN credentials would otherwise ship in the clear. Leave\n`false` (the default) and configure TLS, or set `true` only when the\nin-cluster traffic is already mesh-encrypted.",
+          "description": "Opt in to an unencrypted Kafka transport (`plaintext` / `sasl_plaintext`)\nin production. scalo (>=2.8) rejects unencrypted transports under a\nproduction profile at transport construction unless this is set —\ndata and SASL/PLAIN credentials would otherwise ship in the clear. Leave\n`false` (the default) and configure TLS, or set `true` only when the\nin-cluster traffic is already mesh-encrypted.",
           "type": "boolean",
           "default": false
         },

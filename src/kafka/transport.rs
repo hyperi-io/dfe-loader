@@ -34,7 +34,7 @@ use super::KafkaMessage;
 /// A received block: the passing messages plus any inbound-filter DLQ entries.
 ///
 /// The DLQ entries are surfaced (never silently dropped) so the orchestrator
-/// can route them onward. The loader configures no inbound rustlib filters, so
+/// can route them onward. The loader configures no inbound scalo filters, so
 /// `dlq_entries` is empty in practice -- but the no-silent-drop contract is
 /// honoured regardless.
 pub struct ReceivedBatch {
@@ -55,7 +55,7 @@ pub struct TransportAdapter {
 impl TransportAdapter {
     /// Create a new transport adapter from local `KafkaConfig`.
     ///
-    /// Rustlib's `KafkaTransport::new()` handles auto-discovery when
+    /// scalo's `KafkaTransport::new()` handles auto-discovery when
     /// `config.topics` is empty — no app-side resolver needed.
     ///
     /// When `governor` is `Some`, the self-regulation inbound brake is attached
@@ -99,7 +99,7 @@ impl TransportAdapter {
             client_id: config.client_id.clone(),
             topics: config.topics.clone(),
             auto_discover: config.topics.is_empty(),
-            // rustlib (>=2.8) rejects an unencrypted transport under a production
+            // scalo (>=2.8) rejects an unencrypted transport under a production
             // profile at construction unless this is explicitly set. Secure by
             // default; operators opt in for mesh-encrypted in-cluster traffic.
             allow_insecure_transport: config.allow_insecure_transport,
@@ -107,7 +107,7 @@ impl TransportAdapter {
             ..Default::default()
         };
 
-        // Map topic_regex to rustlib's topic_include filter
+        // Map topic_regex to scalo's topic_include filter
         if let Some(ref regex) = config.topic_regex {
             transport_config.topic_include = vec![regex.clone()];
         }
@@ -933,7 +933,7 @@ mod tests {
         let config = crate::config::Config {
             transport: "kafka".to_string(),
             kafka: KafkaConfig {
-                // Invalid broker list — rustlib will reject this
+                // Invalid broker list — scalo will reject this
                 brokers: Vec::new(),
                 group: "test-group".to_string(),
                 topics: vec!["t".to_string()],

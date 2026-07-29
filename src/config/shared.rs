@@ -5,13 +5,13 @@
 //!
 //! Re-exports `scalo::config::shared::SharedConfig<Config>` as
 //! `SharedConfig` for backward compatibility. All DFE components share
-//! the same generic abstraction from rustlib.
+//! the same generic abstraction from scalo.
 
 use super::Config;
 
 /// Thread-safe shared configuration with hot-reload support.
 ///
-/// This is a type alias for the generic `SharedConfig<T>` from rustlib,
+/// This is a type alias for the generic `SharedConfig<T>` from scalo,
 /// specialised to dfe-loader's `Config` struct.
 ///
 /// ## Usage
@@ -106,7 +106,7 @@ mod tests {
         let config = Config::default();
         let shared = SharedConfig::new(config);
 
-        // get() clones the config (available from rustlib generic)
+        // get() clones the config (available from scalo generic)
         let cfg = shared.get();
         assert!(!cfg.kafka.brokers.is_empty());
     }
@@ -116,7 +116,7 @@ mod tests {
         let config = Config::default();
         let shared = SharedConfig::new(config);
 
-        // with() closure-based access (available from rustlib generic)
+        // with() closure-based access (available from scalo generic)
         let rows = shared.with(|c| c.buffer.flush_rows);
         assert!(rows > 0);
     }

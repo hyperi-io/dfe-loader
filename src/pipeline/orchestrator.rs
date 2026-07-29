@@ -240,8 +240,8 @@ impl Orchestrator {
         )
         .with_insert_format(insert_format);
 
-        // DLQ (unified rustlib module — cascade: Kafka primary, file fallback)
-        let dlq_config = self.config.routing.dlq.to_rustlib_config();
+        // DLQ (unified scalo module — cascade: Kafka primary, file fallback)
+        let dlq_config = self.config.routing.dlq.to_scalo_config();
         let transport_kafka_config = TransportAdapter::convert_config(&self.config.kafka);
         let dlq: Option<Arc<Dlq>> = if dlq_config.enabled {
             match Dlq::spawn(
@@ -676,7 +676,7 @@ impl Orchestrator {
                 // the outbound ClickHouse drain — gating the sink would deadlock.
                 received = transport.recv(RECV_BATCH_SIZE) => {
                     // Surface any inbound-filter DLQ entries (no silent drop). The
-                    // loader configures no inbound rustlib filters, so this is
+                    // loader configures no inbound scalo filters, so this is
                     // normally empty, but the contract is honoured regardless.
                     let messages = match received {
                         Ok(batch) => {
@@ -1218,7 +1218,7 @@ impl Default for Orchestrator {
 
 /// Build a `MemoryGuardConfig` from the loader's `MemoryConfig`.
 ///
-/// Maps dfe-loader config fields to the rustlib `MemoryGuardConfig`.
+/// Maps dfe-loader config fields to the scalo `MemoryGuardConfig`.
 /// Falls back to `DFE_LOADER_MEMORY_*` env vars when config values are default.
 fn memory_guard_config(config: &Config) -> MemoryGuardConfig {
     let mem = &config.memory;

@@ -40,7 +40,7 @@ fn test_generated_dockerfile_matches_existing() {
         "Should expose metrics port"
     );
     assert!(
-        generated.contains("localhost:9090/healthz"),
+        generated.contains("localhost:9090/livez"),
         "Should healthcheck against liveness endpoint"
     );
     assert!(
@@ -148,7 +148,7 @@ fn test_generated_compose_fragment() {
     assert!(compose.contains("9090:9090"));
     assert!(compose.contains("kafka:"));
     assert!(compose.contains("clickhouse:"));
-    assert!(compose.contains("localhost:9090/healthz"));
+    assert!(compose.contains("localhost:9090/livez"));
 }
 
 #[test]
