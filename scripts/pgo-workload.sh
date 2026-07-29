@@ -52,8 +52,13 @@ if [[ ! -x "$LOADER_BIN" ]]; then
 fi
 
 DURATION="${PGO_WORKLOAD_DURATION_SECS:-300}"
-KAFKA_IMAGE="${PGO_WORKLOAD_KAFKA_IMAGE:-apache/kafka:3.8.0}"
-CH_IMAGE="${PGO_WORKLOAD_CH_IMAGE:-clickhouse/clickhouse-server:25.3}"
+# Match what we deploy. A PGO profile is only as good as the traffic that
+# produced it: collect it against a two-year-old broker or a datastore two LTS
+# lines back and the optimiser tunes for code paths production no longer takes.
+# renovate: datasource=docker depName=apache/kafka
+KAFKA_IMAGE="${PGO_WORKLOAD_KAFKA_IMAGE:-apache/kafka:4.1.1}"
+# renovate: datasource=docker depName=clickhouse/clickhouse-server
+CH_IMAGE="${PGO_WORKLOAD_CH_IMAGE:-clickhouse/clickhouse-server:26.3}"
 KEEP="${PGO_WORKLOAD_KEEP:-0}"
 
 # Floor of 60s — shorter workloads produce bad PGO profiles
