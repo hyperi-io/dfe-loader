@@ -30,6 +30,10 @@ quality:
       - "default"                    # Default features
       - "default,jemalloc"           # With jemalloc allocator
       - "default,testcontainers"     # With testcontainers integration tests
+      # Required: transport-memory gates MemoryTransportAdapter, so without
+      # this set the transport-adapter suite is compiled out rather than run.
+      # helm_contract.rs asserts it stays listed.
+      - "default,transport-memory"   # With the in-memory transport adapter
 
 # Testing
 test:

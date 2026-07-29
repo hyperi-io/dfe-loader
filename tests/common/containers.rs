@@ -13,23 +13,19 @@ mod testcontainers_impl {
     use testcontainers::{ContainerAsync, ImageExt, runners::AsyncRunner};
     use testcontainers_modules::clickhouse::ClickHouse as ClickHouseImage;
     // The `apache` module, NOT the crate's default (`confluentinc/cp-kafka`).
-    // cp-kafka publishes amd64 only, so on an arm64 developer machine every
-    // broker runs a JVM under QEMU emulation: ~30s to become ready instead of
-    // ~1s, and once two of them are up they trade BrokerTransportFailure and
-    // produce timeouts. It reads as a flaky test suite and is not -- it is one
-    // emulated image. `apache/kafka-native` is multi-arch and a GraalVM native
-    // build, so it starts natively on both.
+    // cp-kafka is amd64-only, so on arm64 it runs a JVM under QEMU: ~30s to
+    // become ready instead of ~1s, and concurrent brokers then trade
+    // BrokerTransportFailure and produce timeouts. `apache/kafka-native` is
+    // multi-arch and a GraalVM native build.
     use testcontainers_modules::kafka::apache::{KAFKA_PORT, Kafka as KafkaImage};
 
     /// Kafka to test against. Pinned rather than left to the module default,
-    /// which still points at 3.8.0 -- five minors back, and behind the 4.x line
-    /// that dropped ZooKeeper for KRaft. Test against what we deploy.
+    /// which is 3.8.0 -- behind the 4.x line that dropped ZooKeeper for KRaft.
     ///
-    /// Pinned HERE, in our source, on purpose. A test image chosen by a library
-    /// default is invisible to dependency review: Renovate reads Cargo.toml and
-    /// correctly reports testcontainers-modules current, while the image tag
-    /// baked into that crate's source ages silently. Hoisting it out is what
-    /// puts it back under review -- hence the annotation.
+    /// Pinned in our own source because a tag chosen by a library default is
+    /// invisible to dependency review: Renovate reads Cargo.toml, reports the
+    /// crate current, and never sees the image. The annotation is what puts it
+    /// back under review.
     // renovate: datasource=docker depName=apache/kafka-native
     const KAFKA_TAG: &str = "4.3.1";
 

@@ -298,10 +298,8 @@ pub fn ensure_docker_infra() -> Result<bool, String> {
 /// Scoped deliberately to Docker, NOT to the live-service probes below.
 ///
 /// A testcontainers test that skips in CI passes VACUOUSLY -- CI provides the
-/// daemon, so its absence means the suite reported green while exercising none
-/// of the integration surface. Not hypothetical: a bad third-party URL reached
-/// CI because the local test that would have caught it skipped itself while
-/// Docker was down.
+/// daemon, so its absence means the suite reports green while exercising none of
+/// the integration surface.
 ///
 /// The live-service macros are a different case. They probe an EXTERNAL
 /// ClickHouse or Kafka -- a real cluster, or a dfe-docker compose stack cloned
