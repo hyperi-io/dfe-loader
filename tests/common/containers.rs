@@ -56,6 +56,12 @@ mod testcontainers_impl {
         /// * `need_clickhouse` - Start ClickHouse container
         /// * `need_kafka` - Start Kafka container
         pub async fn new(need_clickhouse: bool, need_kafka: bool) -> Self {
+            // CI provides the daemon, so its absence here means these tests
+            // would silently exercise nothing. Fail loudly instead. Locally a
+            // missing daemon is just a developer with Docker stopped, and the
+            // container start below reports that plainly enough.
+            crate::common::require_docker_in_ci();
+
             let clickhouse = if need_clickhouse {
                 Some(start_clickhouse().await)
             } else {

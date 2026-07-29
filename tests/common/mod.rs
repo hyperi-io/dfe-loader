@@ -293,20 +293,30 @@ pub fn ensure_docker_infra() -> Result<bool, String> {
 // Skip Macros
 // ============================================================================
 
-/// Panic if a backing service is missing while running in CI.
+/// Panic if the container runtime is missing while running in CI.
 ///
-/// Skipping is right on a developer machine, where the daemon may simply be
-/// down. In CI it makes the test pass VACUOUSLY: the suite reports green while
-/// exercising none of the integration surface. That is not hypothetical -- a
-/// bad third-party URL reached CI because the test that would have caught it
-/// skipped itself when the local daemon was down, and CI never re-checked.
+/// Scoped deliberately to Docker, NOT to the live-service probes below.
 ///
-/// A gate that disappears along with its environment is not a gate.
-pub fn require_service_in_ci(what: &str, detail: &str) {
+/// A testcontainers test that skips in CI passes VACUOUSLY -- CI provides the
+/// daemon, so its absence means the suite reported green while exercising none
+/// of the integration surface. Not hypothetical: a bad third-party URL reached
+/// CI because the local test that would have caught it skipped itself while
+/// Docker was down.
+///
+/// The live-service macros are a different case. They probe an EXTERNAL
+/// ClickHouse or Kafka -- a real cluster, or a dfe-docker compose stack cloned
+/// as a sibling -- which CI is not expected to provide. Failing on those would
+/// assert an environment nobody promised.
+///
+/// That does leave a real gap: the `coerce_integration` tests reach for a live
+/// ClickHouse at localhost:9000 and have never run in CI, so their coverage is
+/// developer-machine-only. Closing it means giving the shared rust-ci workflow
+/// a ClickHouse service, not loosening this guard.
+pub fn require_docker_in_ci() {
     assert!(
-        std::env::var_os("CI").is_none(),
-        "{what} unreachable in CI ({detail}) -- integration tests must RUN here, \
-         not skip. Skipping would report green while testing nothing."
+        std::env::var_os("CI").is_none() || has_docker(),
+        "Docker unreachable in CI -- container tests must RUN here, not skip. \
+         Skipping would report green while testing nothing."
     );
 }
 
@@ -317,10 +327,6 @@ macro_rules! skip_if_no_env {
         let ch = $crate::common::ClickHouseTestConfig::from_env();
         let kf = $crate::common::KafkaTestConfig::from_env();
         if !ch.is_reachable() && !kf.is_reachable() {
-            $crate::common::require_service_in_ci(
-                "no test environment",
-                &format!("TEST_MODE={}", $crate::common::TestMode::detect()),
-            );
             eprintln!(
                 "Skipping: no test environment reachable (TEST_MODE={})",
                 $crate::common::TestMode::detect()
@@ -336,7 +342,6 @@ macro_rules! skip_if_no_clickhouse {
     () => {
         let ch = $crate::common::ClickHouseTestConfig::from_env();
         if !ch.is_reachable() {
-            $crate::common::require_service_in_ci("ClickHouse", &ch.native_addr());
             eprintln!(
                 "Skipping: ClickHouse not reachable at {} (TEST_MODE={})",
                 ch.native_addr(),
@@ -353,7 +358,6 @@ macro_rules! skip_if_no_kafka {
     () => {
         let kf = $crate::common::KafkaTestConfig::from_env();
         if !kf.is_reachable() {
-            $crate::common::require_service_in_ci("Kafka", &kf.brokers);
             eprintln!(
                 "Skipping: Kafka not reachable at {} (TEST_MODE={})",
                 kf.brokers,
