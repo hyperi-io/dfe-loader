@@ -63,18 +63,18 @@ sonic-rs is the production JSON parser for all DFE hot-path operations:
 
 Benches: `benches/bakeoff.rs`, `benches/simdjson_spike.rs`.
 
-### Mison -- evaluated, rejected (2025-Q4, Phase 0)
+### Mison -- evaluated, rejected (2025-Q4)
 
 - **Result:** 4-7% throughput improvement over sonic-rs in targeted
   benchmarks.
 - **Rejection reason:** the improvement was insufficient to justify maintaining
   a separate codebase (mison required a fork with custom Rust bindings). The
-  cost/benefit was negative. All mison code was deleted in Phase 0 (commit
-  `2a7a635`).
+  cost/benefit was negative. All mison code was deleted in commit
+  `2a7a635`.
 - **Bench:** separate bake-off repo (not retained -- results documented here
   only).
 
-### simd-json (0.17) -- evaluated, rejected (2026-03-11, post-Phase 5.7)
+### simd-json (0.17) -- evaluated, rejected (2026-03-11)
 
 **Bench:** `benches/simdjson_spike.rs` -- flat30 and nested payloads, 15/30
 schema columns, batch sizes 100/1K/10K.

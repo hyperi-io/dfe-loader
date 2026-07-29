@@ -656,8 +656,8 @@ impl Inserter {
         let raw_payloads = batch.raw_payloads;
         let num_rows = rows.len();
 
-        // Apply schema-driven coercion if configured (Phase 5.6).
-        // Done once here — salvage sub-batches reuse already-coerced rows.
+        // Apply schema-driven coercion if configured. Done once here --
+        // salvage sub-batches reuse already-coerced rows.
         self.coerce_batch(&table, &mut rows).await;
 
         // Pass raw_payloads for zero-copy _json splice (json_primary path).

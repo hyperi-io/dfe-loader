@@ -4,7 +4,7 @@
 //! Data types integration tests
 //!
 //! Tests for various `ClickHouse` data types via `JSONEachRow` inserts.
-//! Includes Phase 5.6 coercion tests: verify that the Coercer correctly
+//! Includes coercion tests: verify that the Coercer correctly
 //! transforms ambiguous input values before they reach `ClickHouse`.
 
 #![allow(clippy::approx_constant)]
@@ -391,7 +391,7 @@ async fn test_realistic_event_table() {
 }
 
 // ============================================================================
-// Phase 5.6: Type Coercion tests
+// Type Coercion tests
 //
 // Each test verifies one coercion case against real ClickHouse:
 //   1. Build a table with a target column type

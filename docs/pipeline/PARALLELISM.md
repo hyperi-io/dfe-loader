@@ -184,7 +184,6 @@ src/pipeline/
 - CEL evaluation (1-5ms/msg) is the biggest parallel win.
 - Enrichment is in-memory (GeoIP cache uses `parking_lot::RwLock`, Sync-safe).
 - ClickHouse inserts unchanged (single batch per table, existing semaphore).
-- 396 tests pass.
 
 ### dfe-archiver
 
