@@ -318,6 +318,147 @@ pub fn require_docker_in_ci() {
     );
 }
 
+// =============================================================================
+// Container naming and cleanup
+// =============================================================================
+//
+// Every container this suite starts carries a name that says which repo, which
+// suite and which backing service it is, so an operator looking at `docker ps`
+// can tell what left it behind. testcontainers' default is a random hex name,
+// which is untraceable the moment one survives.
+//
+// Naming: `dfe-loader-test-integration-<test>-<service>`, because every
+// container here is owned by exactly ONE test. nextest runs each test in its own
+// process, so nothing is shared even when it looks like it should be -- the 15
+// tests calling `spin_up()` start 15 ClickHouse containers. That was already
+// true with testcontainers' random names; the only thing a single shared name
+// would add is a collision, where the first test wins and the other 14 fail with
+// "name is already in use". `container_name` still takes `None` for a container
+// started once for a whole binary, but no suite does that today.
+//
+// Cleanup is belt AND braces, because `Drop` alone is not enough:
+//
+//   - Normal completion and a panic both unwind, so `Drop` stops the container.
+//   - A SIGKILL, an abort, or Ctrl-C on the test run does NOT. `Drop` never
+//     runs and the container survives.
+//
+// testcontainers-rs 0.27 has no resource reaper (no Ryuk), so the second case
+// is the one that leaves crap behind. A deterministic name would then make it
+// WORSE than a random one -- the leaked container holds the name and every
+// later run fails with "name already in use". `reap_stale` closes that: remove
+// any container already holding the name before starting, so a leak costs the
+// next run nothing and self-heals.
+//
+// The label goes on as well, so a sweep can find these regardless of name:
+//   docker rm -f $(docker ps -aq --filter label=io.hyperi.test.suite=dfe-loader-integration)
+
+/// Label marking every container this suite starts, for bulk cleanup.
+pub const TEST_SUITE_LABEL: (&str, &str) = ("io.hyperi.test.suite", "dfe-loader-integration");
+
+/// Labels for a container this suite starts: what it is, and whose run owns it.
+///
+/// The name says what and why; these say WHO, which is what you need when
+/// several runs share a machine and one has left something behind. The pid is
+/// the owning test process -- `ps -p <pid>` answers "is that run still alive, or
+/// is this rubbish I can remove?".
+#[must_use]
+pub fn test_labels(service: &str) -> Vec<(String, String)> {
+    vec![
+        (
+            TEST_SUITE_LABEL.0.to_string(),
+            TEST_SUITE_LABEL.1.to_string(),
+        ),
+        ("io.hyperi.test.repo".to_string(), "dfe-loader".to_string()),
+        ("io.hyperi.test.service".to_string(), service.to_string()),
+        (
+            "io.hyperi.test.owner-pid".to_string(),
+            std::process::id().to_string(),
+        ),
+    ]
+}
+
+/// Container name for a backing service in this suite.
+///
+/// Pass `Some(test)` -- the owning test -- for anything a test starts for itself,
+/// which is everything here. `None` is for a container started once for a whole
+/// test binary; nothing does that today, and using it from several tests would
+/// make them collide on the name rather than share the container.
+///
+/// Names are lowercased and non-alphanumerics collapse to `-`, because Docker
+/// only accepts `[a-zA-Z0-9][a-zA-Z0-9_.-]*`, and the test paths `test_name!`
+/// produces have colons in them.
+#[must_use]
+pub fn container_name(test: Option<&str>, service: &str) -> String {
+    let slug = |s: &str| {
+        s.chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() {
+                    c.to_ascii_lowercase()
+                } else {
+                    '-'
+                }
+            })
+            .collect::<String>()
+    };
+    test.map_or_else(
+        || format!("dfe-loader-test-integration-{}", slug(service)),
+        |t| format!("dfe-loader-test-integration-{}-{}", slug(t), slug(service)),
+    )
+}
+
+/// The name of the test this expands inside, for naming its containers.
+///
+/// Rust has no way to read the current test's name, and a hand-written literal
+/// per call site would drift the moment a test is renamed. `type_name` of a
+/// function declared
+/// right here reports the path it is nested in, which is the calling test --
+/// hence a macro: expanded in a helper it would report the helper.
+///
+/// An `async fn` body becomes a generated future, so the path picks up
+/// `::{{closure}}`; the trailing generated segments are trimmed off.
+#[macro_export]
+macro_rules! test_name {
+    () => {{
+        fn probe() {}
+        fn path_of<T>(_: T) -> &'static str {
+            std::any::type_name::<T>()
+        }
+        let mut name = path_of(probe);
+        name = name.strip_suffix("::probe").unwrap_or(name);
+        name = name.strip_suffix("::{{closure}}").unwrap_or(name);
+        name.rsplit("::").next().unwrap_or(name)
+    }};
+}
+
+/// Remove a DEAD container holding `name`, so a leak from a killed run cannot
+/// block this one.
+///
+/// Never touches a RUNNING container. Two concurrent runs of this suite on one
+/// machine share these names, and force-removing a live one would sabotage the
+/// other run -- a confusing mid-test failure in a process that did nothing
+/// wrong. Leaving it means the start below fails with "name is already in use",
+/// which says what actually happened.
+///
+/// Best-effort otherwise: no Docker, nothing to remove, or an already-gone
+/// container are all fine. A failure here must not fail the test -- the start
+/// that follows reports the real problem.
+pub fn reap_stale(name: &str) {
+    let running = std::process::Command::new("docker")
+        .args(["ps", "--quiet", "--filter", &format!("name=^{name}$")])
+        .output();
+    // Non-empty stdout means a container by this name is up. Leave it alone.
+    if let Ok(out) = &running
+        && !out.stdout.is_empty()
+    {
+        return;
+    }
+    let _ = std::process::Command::new("docker")
+        .args(["rm", "--force", "--volumes", name])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+}
+
 /// Skip test if no test environment is available (either mode)
 #[macro_export]
 macro_rules! skip_if_no_env {
@@ -416,9 +557,7 @@ macro_rules! skip_if_not_replicated {
 /// and the live-service probes then report "not reachable" -- an absent config
 /// file reading as an absent service.
 pub fn load_dotenv() {
-    let _ = dotenvy::from_path(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(".env"),
-    );
+    let _ = dotenvy::from_path(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(".env"));
 }
 
 /// Check if external test environment is configured

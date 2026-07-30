@@ -28,6 +28,7 @@ use dfe_loader::clickhouse::{ClickHouseQueryClient, Inserter, InserterConfig, Sc
 
 use crate::common::containers::TestInfrastructure;
 use crate::common::unique_table_name;
+use crate::test_name;
 
 // ============================================================================
 // Helpers
@@ -38,12 +39,18 @@ use crate::common::unique_table_name;
 ///
 /// Returns `(infra, http_query_client, unified_client)`. Keep `infra` in scope
 /// until the end of the test — dropping it stops/removes the container.
-async fn spin_up() -> (
+///
+/// `test` names the container. Pass `test_name!()` from the calling test: each
+/// of these tests gets its own container (nextest runs them in separate
+/// processes), so they must not share a name.
+async fn spin_up(
+    test: &str,
+) -> (
     TestInfrastructure,
     Arc<ClickHouseQueryClient>,
     clickhouse::Client,
 ) {
-    let infra = TestInfrastructure::new(true, false).await;
+    let infra = TestInfrastructure::new(test, true, false).await;
     let container = infra
         .clickhouse
         .as_ref()
@@ -142,7 +149,7 @@ fn fast_fail_config() -> InserterConfig {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_inserter_basic_insert() {
-    let (_infra, client, ch) = spin_up().await;
+    let (_infra, client, ch) = spin_up(test_name!()).await;
     let table = unique_table_name("tc_basic");
     create_simple_table(&client, &table).await;
 
@@ -173,7 +180,7 @@ async fn test_inserter_basic_insert() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_inserter_rowbinary_insert() {
-    let (_infra, client, ch) = spin_up().await;
+    let (_infra, client, ch) = spin_up(test_name!()).await;
     let table = unique_table_name("tc_rowbin");
     create_simple_table(&client, &table).await;
 
@@ -198,7 +205,7 @@ async fn test_inserter_rowbinary_insert() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_inserter_batch_salvage() {
-    let (_infra, client, ch) = spin_up().await;
+    let (_infra, client, ch) = spin_up(test_name!()).await;
     let table = unique_table_name("tc_salvage");
     // id must be UInt64 — a non-numeric string will fail type coercion.
     create_simple_table(&client, &table).await;
@@ -274,7 +281,7 @@ async fn test_inserter_batch_salvage() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_inserter_retry_on_transient_error() {
-    let (_infra, client, ch) = spin_up().await;
+    let (_infra, client, ch) = spin_up(test_name!()).await;
     // Deliberately do NOT create the table — insert must fail.
     let table = unique_table_name("tc_missing");
 
@@ -300,7 +307,7 @@ async fn test_inserter_retry_on_transient_error() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_inserter_concurrent_inserts() {
-    let (_infra, client, ch) = spin_up().await;
+    let (_infra, client, ch) = spin_up(test_name!()).await;
     let table = unique_table_name("tc_concurrent");
     let ddl = format!(
         "CREATE TABLE {table} (
@@ -365,7 +372,7 @@ async fn test_inserter_concurrent_inserts() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_inserter_with_circuit_breaker() {
-    let (_infra, client, ch) = spin_up().await;
+    let (_infra, client, ch) = spin_up(test_name!()).await;
     let missing_table = unique_table_name("tc_cb_missing");
 
     let cb_cfg = CircuitBreakerConfig {
@@ -421,7 +428,7 @@ async fn test_inserter_with_circuit_breaker() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_inserter_schema_drift_recovery() {
-    let (_infra, client, ch) = spin_up().await;
+    let (_infra, client, ch) = spin_up(test_name!()).await;
     let table = unique_table_name("tc_drift");
 
     // Initial schema: id + name only.
@@ -501,7 +508,7 @@ async fn test_inserter_schema_drift_recovery() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_inserter_empty_batch() {
-    let (_infra, client, ch) = spin_up().await;
+    let (_infra, client, ch) = spin_up(test_name!()).await;
     let table = unique_table_name("tc_empty");
     create_simple_table(&client, &table).await;
 
@@ -525,7 +532,7 @@ async fn test_inserter_empty_batch() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_inserter_huge_batch() {
-    let (_infra, client, ch) = spin_up().await;
+    let (_infra, client, ch) = spin_up(test_name!()).await;
     let table = unique_table_name("tc_huge");
     create_simple_table(&client, &table).await;
 
@@ -560,7 +567,7 @@ async fn test_inserter_huge_batch() {
 async fn test_inserter_with_offset_commit() {
     use dfe_loader::buffer::KafkaOffset;
 
-    let (_infra, client, ch) = spin_up().await;
+    let (_infra, client, ch) = spin_up(test_name!()).await;
     let table = unique_table_name("tc_offsets");
     create_simple_table(&client, &table).await;
 
@@ -602,7 +609,7 @@ async fn test_inserter_with_offset_commit() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_client_http_create_database() {
-    let (_infra, client, _ch) = spin_up().await;
+    let (_infra, client, _ch) = spin_up(test_name!()).await;
     let db = format!("testdb_{}", chrono::Utc::now().timestamp_millis());
 
     client
@@ -625,7 +632,7 @@ async fn test_client_http_create_database() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_client_http_create_table() {
-    let (_infra, client, _ch) = spin_up().await;
+    let (_infra, client, _ch) = spin_up(test_name!()).await;
     let table = unique_table_name("tc_ct");
 
     // Table with various ClickHouse types — covers the type parser path.
@@ -688,7 +695,7 @@ async fn test_client_http_create_table() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_client_http_query_system_columns() {
-    let (_infra, client, _ch) = spin_up().await;
+    let (_infra, client, _ch) = spin_up(test_name!()).await;
     let table = unique_table_name("tc_syscols");
 
     let ddl = format!(
@@ -738,7 +745,7 @@ async fn test_client_http_query_system_columns() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_client_http_invalid_query() {
-    let (_infra, client, _ch) = spin_up().await;
+    let (_infra, client, _ch) = spin_up(test_name!()).await;
 
     // Malformed SQL.
     let err = client
@@ -776,7 +783,7 @@ async fn test_client_http_invalid_query() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_client_http_unicode_table_name() {
-    let (_infra, client, _ch) = spin_up().await;
+    let (_infra, client, _ch) = spin_up(test_name!()).await;
     // Backtick-quoted identifier with unicode characters.
     let table = "événements_тест";
 
