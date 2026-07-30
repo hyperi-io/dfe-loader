@@ -12,7 +12,9 @@ use dfe_loader::config::{KafkaConfig, SaslConfig, SaslMechanism};
 use dfe_loader::kafka::TransportAdapter;
 
 fn load_dotenv() {
-    let _ = dotenvy::from_path("/projects/dfe-loader/.env");
+    // Repo-relative: an absolute `/projects/...` path is a silent no-op on any
+    // other checkout. See `common::load_dotenv`.
+    let _ = dotenvy::from_path(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(".env"));
 }
 
 /// Skip test if no Kafka available

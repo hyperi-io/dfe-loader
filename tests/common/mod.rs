@@ -409,9 +409,16 @@ macro_rules! skip_if_not_replicated {
 // Backward-Compatible Helpers
 // ============================================================================
 
-/// Load environment variables from .env file
+/// Load environment variables from the repo's `.env`, if present.
+///
+/// Resolved from `CARGO_MANIFEST_DIR` rather than an absolute
+/// `/projects/...` path: a checkout elsewhere fails the load into `let _ =`,
+/// and the live-service probes then report "not reachable" -- an absent config
+/// file reading as an absent service.
 pub fn load_dotenv() {
-    let _ = dotenvy::from_path("/projects/dfe-loader/.env");
+    let _ = dotenvy::from_path(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(".env"),
+    );
 }
 
 /// Check if external test environment is configured
