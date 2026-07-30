@@ -11,7 +11,7 @@ language: rust
 
 # Runner settings (override GH_RUNNER_* variables)
 runners:
-  default: arc-runner-16cpu
+  default: arc-native-16cpu
 
 # Quality checks
 quality:
