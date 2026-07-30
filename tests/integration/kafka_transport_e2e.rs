@@ -55,7 +55,11 @@ async fn spin_up_kafka(
     group: &str,
     topics: Vec<String>,
 ) -> (TestInfrastructure, String, KafkaConfig) {
-    let infra = TestInfrastructure::new(false, true).await;
+    // The consumer group doubles as the container discriminator. It has to be
+    // distinct per test anyway -- two tests sharing a group would divide the
+    // partitions between them and consume each other's messages -- so it is
+    // already exactly what the container name needs.
+    let infra = TestInfrastructure::new(group, false, true).await;
     let container = infra
         .kafka
         .as_ref()

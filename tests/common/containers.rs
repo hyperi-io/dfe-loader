@@ -49,9 +49,13 @@ mod testcontainers_impl {
         /// Create new test infrastructure
         ///
         /// # Arguments
+        /// * `test` - The calling test, which names the containers it starts.
+        ///   Pass `test_name!()`. Two tests must not share a name: nextest runs
+        ///   each in its own process, so they start their own containers and a
+        ///   shared name collides rather than sharing.
         /// * `need_clickhouse` - Start ClickHouse container
         /// * `need_kafka` - Start Kafka container
-        pub async fn new(need_clickhouse: bool, need_kafka: bool) -> Self {
+        pub async fn new(test: &str, need_clickhouse: bool, need_kafka: bool) -> Self {
             // CI provides the daemon, so its absence here means these tests
             // would silently exercise nothing. Fail loudly instead. Locally a
             // missing daemon is just a developer with Docker stopped, and the
@@ -59,13 +63,13 @@ mod testcontainers_impl {
             crate::common::require_docker_in_ci();
 
             let clickhouse = if need_clickhouse {
-                Some(start_clickhouse().await)
+                Some(start_clickhouse(test).await)
             } else {
                 None
             };
 
             let kafka = if need_kafka {
-                Some(start_kafka().await)
+                Some(start_kafka(test).await)
             } else {
                 None
             };
@@ -84,7 +88,7 @@ mod testcontainers_impl {
         /// Currently recognises: `kafka`, `clickhouse`. Unknown entries are
         /// logged and ignored (so a new dep doesn't break existing tests
         /// before a corresponding image is wired in).
-        pub async fn from_contract() -> Self {
+        pub async fn from_contract(test: &str) -> Self {
             let contract = dfe_loader::config::Config::deployment_contract();
             let mut need_clickhouse = false;
             let mut need_kafka = false;
@@ -100,7 +104,7 @@ mod testcontainers_impl {
                     }
                 }
             }
-            Self::new(need_clickhouse, need_kafka).await
+            Self::new(test, need_clickhouse, need_kafka).await
         }
 
         /// Get ClickHouse configuration
@@ -141,7 +145,9 @@ mod testcontainers_impl {
     }
 
     /// Start ClickHouse container
-    async fn start_clickhouse() -> ContainerAsync<ClickHouseImage> {
+    async fn start_clickhouse(test: &str) -> ContainerAsync<ClickHouseImage> {
+        let name = crate::common::container_name(Some(test), "clickhouse");
+        crate::common::reap_stale(&name);
         ClickHouseImage::default()
             .with_tag(CLICKHOUSE_TAG)
             // From 25.x the entrypoint refuses to leave `default` passwordless
@@ -149,15 +155,21 @@ mod testcontainers_impl {
             // failed" instead. The module's own config predates that. Tests
             // connect as default with no password, so keep that and say so.
             .with_env_var("CLICKHOUSE_SKIP_USER_SETUP", "1")
+            .with_container_name(&name)
+            .with_labels(crate::common::test_labels("clickhouse"))
             .start()
             .await
             .expect("Failed to start ClickHouse container")
     }
 
     /// Start Kafka container
-    async fn start_kafka() -> ContainerAsync<KafkaImage> {
+    async fn start_kafka(test: &str) -> ContainerAsync<KafkaImage> {
+        let name = crate::common::container_name(Some(test), "kafka");
+        crate::common::reap_stale(&name);
         KafkaImage::default()
             .with_tag(KAFKA_TAG)
+            .with_container_name(&name)
+            .with_labels(crate::common::test_labels("kafka"))
             .start()
             .await
             .expect("Failed to start Kafka container")
@@ -170,7 +182,7 @@ mod testcontainers_impl {
     pub struct TestInfrastructure;
 
     impl TestInfrastructure {
-        pub async fn new(_need_clickhouse: bool, _need_kafka: bool) -> Self {
+        pub async fn new(_test: &str, _need_clickhouse: bool, _need_kafka: bool) -> Self {
             panic!(
                 "Testcontainers feature not enabled. Run with: cargo test --features testcontainers"
             );
