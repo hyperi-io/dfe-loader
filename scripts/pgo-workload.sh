@@ -68,7 +68,7 @@ DURATION="${PGO_WORKLOAD_DURATION_SECS:-300}"
 # renovate: datasource=docker depName=docker.redpanda.com/redpandadata/redpanda
 KAFKA_TAG="v26.1.8"
 # renovate: datasource=docker depName=clickhouse/clickhouse-server
-CH_TAG="26.3"
+CH_TAG="26.6"
 KAFKA_IMAGE="${PGO_WORKLOAD_KAFKA_IMAGE:-docker.redpanda.com/redpandadata/redpanda:${KAFKA_TAG}}"
 CH_IMAGE="${PGO_WORKLOAD_CH_IMAGE:-clickhouse/clickhouse-server:${CH_TAG}}"
 KEEP="${PGO_WORKLOAD_KEEP:-0}"
