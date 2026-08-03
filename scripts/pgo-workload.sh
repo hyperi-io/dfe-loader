@@ -60,11 +60,16 @@ DURATION="${PGO_WORKLOAD_DURATION_SECS:-300}"
 # covers every language in the fleet. Embedded in the ref it would need a
 # pattern that picks the right colon out of "${VAR:-name:tag}", and RE2 has no
 # lookahead to do that cleanly.
-# renovate: datasource=docker depName=apache/kafka
-KAFKA_TAG="4.1.1"
+#
+# Redpanda rather than the Kafka JVM (#58). The broker only has to speak the
+# protocol here -- it is not what we are profiling -- and the JVM's ~1.5-2GB
+# heap alongside ClickHouse and an instrumented binary does not fit a 4GB
+# runner, so the loader's consumer never connected and the build aborted.
+# renovate: datasource=docker depName=docker.redpanda.com/redpandadata/redpanda
+KAFKA_TAG="v26.1.8"
 # renovate: datasource=docker depName=clickhouse/clickhouse-server
 CH_TAG="26.3"
-KAFKA_IMAGE="${PGO_WORKLOAD_KAFKA_IMAGE:-apache/kafka:${KAFKA_TAG}}"
+KAFKA_IMAGE="${PGO_WORKLOAD_KAFKA_IMAGE:-docker.redpanda.com/redpandadata/redpanda:${KAFKA_TAG}}"
 CH_IMAGE="${PGO_WORKLOAD_CH_IMAGE:-clickhouse/clickhouse-server:${CH_TAG}}"
 KEEP="${PGO_WORKLOAD_KEEP:-0}"
 
@@ -150,10 +155,14 @@ trap cleanup EXIT INT TERM
 # ----------------------------------------------------------------------------
 
 echo "pgo-workload: starting ClickHouse ($CH_IMAGE)"
+# --memory caps the cgroup ClickHouse sizes its caches against. Uncapped it
+# reads the HOST's memory and reserves accordingly, which on a 4GB runner
+# leaves nothing for Redpanda and the instrumented binary.
 CH_CID=$(docker run -d --rm \
     -p 18123:8123 \
     -p 19000:9000 \
     -e CLICKHOUSE_SKIP_USER_SETUP=1 \
+    --memory=1536m \
     --ulimit nofile=262144:262144 \
     "$CH_IMAGE")
 echo "pgo-workload: ClickHouse CID: $CH_CID"
@@ -178,40 +187,45 @@ curl -sf -X POST "http://127.0.0.1:18123/" \
     >/dev/null
 
 # ----------------------------------------------------------------------------
-# Start Kafka (KRaft mode, single-node, auto-create topics)
+# Start the broker (Redpanda, single node, dev-container mode)
 # ----------------------------------------------------------------------------
 
-echo "pgo-workload: starting Kafka ($KAFKA_IMAGE)"
+echo "pgo-workload: starting Redpanda ($KAFKA_IMAGE)"
 KAFKA_CID=$(docker run -d --rm \
     -p 19092:9092 \
-    -e KAFKA_NODE_ID=1 \
-    -e KAFKA_PROCESS_ROLES=broker,controller \
-    -e KAFKA_LISTENERS='PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093' \
-    -e KAFKA_ADVERTISED_LISTENERS='PLAINTEXT://localhost:19092' \
-    -e KAFKA_LISTENER_SECURITY_PROTOCOL_MAP='CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT' \
-    -e KAFKA_CONTROLLER_QUORUM_VOTERS='1@localhost:9093' \
-    -e KAFKA_CONTROLLER_LISTENER_NAMES=CONTROLLER \
-    -e KAFKA_INTER_BROKER_LISTENER_NAME=PLAINTEXT \
-    -e KAFKA_AUTO_CREATE_TOPICS_ENABLE=true \
-    -e KAFKA_NUM_PARTITIONS=3 \
-    -e KAFKA_DEFAULT_REPLICATION_FACTOR=1 \
-    -e CLUSTER_ID="$(printf '%s' "pgo$(date +%s)$$" | base64 | head -c 22)" \
-    "$KAFKA_IMAGE")
-echo "pgo-workload: Kafka CID: $KAFKA_CID"
+    "$KAFKA_IMAGE" \
+    redpanda start \
+        --mode dev-container \
+        --smp 1 \
+        --memory 512M \
+        --kafka-addr PLAINTEXT://0.0.0.0:9092 \
+        --advertise-kafka-addr PLAINTEXT://localhost:19092)
+echo "pgo-workload: Redpanda CID: $KAFKA_CID"
 
-for attempt in $(seq 1 30); do
-    if (echo > /dev/tcp/127.0.0.1/19092) 2>/dev/null; then
-        sleep 2  # let RAFT bootstrap finish
-        echo "pgo-workload: Kafka ready (attempt $attempt)"
+# Ask the broker whether it can serve, rather than whether the port is open.
+# A bare /dev/tcp connect succeeds while the cluster is still forming, so the
+# old probe returned ready and the sleep 2 after it was covering for that.
+for attempt in $(seq 1 60); do
+    if docker exec "$KAFKA_CID" rpk cluster health 2>/dev/null | grep -q "Healthy:.*true"; then
+        echo "pgo-workload: Redpanda ready (attempt $attempt)"
         break
     fi
-    if [[ $attempt -eq 30 ]]; then
-        echo "error: Kafka did not become ready in 60s" >&2
+    if [[ $attempt -eq 60 ]]; then
+        echo "error: Redpanda did not become ready in 120s" >&2
         docker logs --tail 50 "$KAFKA_CID" >&2
         exit 1
     fi
     sleep 2
 done
+
+# The loader CONSUMES default_land. Redpanda auto-creates on produce but not
+# on subscribe, so without this the consumer sits on UnknownTopicOrPartition
+# and never reaches ready -- Apache Kafka's auto-create-on-subscribe was
+# hiding that. --network host so the client reaches the advertised
+# localhost:19092.
+docker run --rm --network host "$KAFKA_IMAGE" \
+    topic create default_land -p 3 -X brokers=localhost:19092 >/dev/null 2>&1 || true
+echo "pgo-workload: created topic 'default_land'"
 
 # ----------------------------------------------------------------------------
 # Write ephemeral loader config
