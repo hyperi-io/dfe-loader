@@ -35,7 +35,7 @@ services:
 
   # Kafka (Redpanda - Kafka-compatible, lighter weight)
   redpanda:
-    image: redpandadata/redpanda:v26.1.4@sha256:519c125d22c14b01562a428addcecea327f20eceee923805aff29fff53391cf8
+    image: redpandadata/redpanda:v26.1.14@sha256:e61a2b5ad26a7c37b50d04c4df42db84e5ddebaa2a453143942fb621b1b09498
     container_name: redpanda-dev
     command:
       - redpanda
