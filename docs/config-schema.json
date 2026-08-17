@@ -210,7 +210,7 @@
         "dlq": {
           "enabled": true,
           "mode": "cascade",
-          "topic": "dfe.dlq",
+          "topic": "dfe_loader_dlq",
           "topic_suffix": ".dlq",
           "file_enabled": true,
           "file_path": "/var/spool/dfe/dlq",
@@ -1366,7 +1366,7 @@
           "default": {
             "enabled": true,
             "mode": "cascade",
-            "topic": "dfe.dlq",
+            "topic": "dfe_loader_dlq",
             "topic_suffix": ".dlq",
             "file_enabled": true,
             "file_path": "/var/spool/dfe/dlq",
@@ -1435,9 +1435,9 @@
           "default": "cascade"
         },
         "topic": {
-          "description": "DLQ topic name: when non-empty, every Kafka DLQ write routes here\n(routing=common). Empty selects per-destination `{dest}{topic_suffix}`\nrouting.",
+          "description": "DLQ topic name: when non-empty, every Kafka DLQ write routes here\n(routing=common). Empty selects per-destination `{dest}{topic_suffix}`\nrouting -- reachable via config file only (flat-env drops empty values).",
           "type": "string",
-          "default": "dfe.dlq"
+          "default": "dfe_loader_dlq"
         },
         "topic_suffix": {
           "type": "string",
