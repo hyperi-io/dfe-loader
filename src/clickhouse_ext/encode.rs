@@ -1516,10 +1516,7 @@ mod tests {
 
     #[test]
     fn json_missing_value_becomes_empty_object() {
-        assert_eq!(
-            enc(json!({}), &[("data", "JSON")]),
-            vec![2, b'{', b'}']
-        );
+        assert_eq!(enc(json!({}), &[("data", "JSON")]), vec![2, b'{', b'}']);
     }
 
     #[test]
