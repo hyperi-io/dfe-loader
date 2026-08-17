@@ -11,7 +11,7 @@
 services:
   # ClickHouse for testing inserts
   clickhouse:
-    image: clickhouse/clickhouse-server:26.3@sha256:537014a67ce8bf1f5c79c2e2b26fb30b8285a86ffff03875bb14ed17ea35db62
+    image: clickhouse/clickhouse-server:26.3@sha256:2ef11bbe2e44ab7022f37ff3019b3f2125ed09e919ea6194660be6130b7ca4b7
     container_name: clickhouse-dev
     ports:
       - "9000:9000"   # Native protocol
