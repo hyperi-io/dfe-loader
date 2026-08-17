@@ -433,7 +433,12 @@ fn encode_typed(
             // JSON wire form is a length-prefixed String of the JSON text. A
             // Value::String is written verbatim (its content is the JSON);
             // other values are re-serialised to compact JSON text.
+            // Missing values and empty strings become {}: the column's JSON
+            // parser rejects the text `null` and empty input (code 117), and
+            // JSON cannot be Nullable.
             let json_bytes = match value {
+                Value::Null => Cow::Borrowed("{}".as_bytes()),
+                Value::String(s) if s.is_empty() => Cow::Borrowed("{}".as_bytes()),
                 Value::String(s) => Cow::Borrowed(s.as_bytes()),
                 _ => Cow::Owned(value.to_string().into_bytes()),
             };
@@ -484,6 +489,12 @@ fn write_default(pt: &ParsedType, buf: &mut Vec<u8>) {
             _ => 16,
         };
         buf.resize(buf.len() + size, 0);
+        return;
+    }
+    // JSON's no-value is the empty object: the column parser rejects empty
+    // input (code 117) and JSON cannot be Nullable.
+    if pt.tag == TypeTag::JSON {
+        write_string(b"{}", buf);
         return;
     }
     if let Some(size) = pt.fixed_byte_size() {
@@ -1501,6 +1512,27 @@ mod tests {
         write_varint(payload.len() as u64, &mut expected);
         expected.extend_from_slice(payload.as_bytes());
         assert_eq!(bytes, expected);
+    }
+
+    #[test]
+    fn json_missing_value_becomes_empty_object() {
+        assert_eq!(enc(json!({}), &[("data", "JSON")]), vec![2, b'{', b'}']);
+    }
+
+    #[test]
+    fn json_explicit_null_becomes_empty_object() {
+        assert_eq!(
+            enc(json!({"data": null}), &[("data", "JSON")]),
+            vec![2, b'{', b'}']
+        );
+    }
+
+    #[test]
+    fn json_empty_string_becomes_empty_object() {
+        assert_eq!(
+            enc(json!({"data": ""}), &[("data", "JSON")]),
+            vec![2, b'{', b'}']
+        );
     }
 
     #[test]
