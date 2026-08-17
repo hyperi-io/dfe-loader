@@ -491,6 +491,12 @@ fn write_default(pt: &ParsedType, buf: &mut Vec<u8>) {
         buf.resize(buf.len() + size, 0);
         return;
     }
+    // JSON's no-value is the empty object: the column parser rejects empty
+    // input (code 117) and JSON cannot be Nullable.
+    if pt.tag == TypeTag::JSON {
+        write_string(b"{}", buf);
+        return;
+    }
     if let Some(size) = pt.fixed_byte_size() {
         buf.resize(buf.len() + size, 0);
     } else {
