@@ -386,6 +386,10 @@ pub struct DlqConfig {
     pub enabled: bool,
     /// Backend mode: cascade (default), `fan_out`, `file_only`, `kafka_only`
     pub mode: String,
+    /// DLQ topic name: when non-empty, every Kafka DLQ write routes here
+    /// (routing=common). Empty selects per-destination `{dest}{topic_suffix}`
+    /// routing.
+    pub topic: String,
     pub topic_suffix: String,
     /// File backend settings
     pub file_enabled: bool,
@@ -399,6 +403,9 @@ impl Default for DlqConfig {
         Self {
             enabled: true,
             mode: "cascade".to_string(),
+            // scalo's KafkaDlqConfig default -- deployments override to the
+            // per-app standard topic (dfe_loader_dlq).
+            topic: "dfe.dlq".to_string(),
             topic_suffix: ".dlq".to_string(),
             file_enabled: true,
             file_path: "/var/spool/dfe/dlq".to_string(),
@@ -431,6 +438,12 @@ impl DlqConfig {
             kafka: scalo::dlq::KafkaDlqConfig {
                 enabled: self.kafka_enabled,
                 topic_suffix: self.topic_suffix.clone(),
+                common_topic: self.topic.clone(),
+                routing: if self.topic.is_empty() {
+                    scalo::dlq::DlqRouting::PerTable
+                } else {
+                    scalo::dlq::DlqRouting::Common
+                },
                 ..scalo::dlq::KafkaDlqConfig::default()
             },
             ..scalo::dlq::DlqConfig::default()
@@ -1119,10 +1132,7 @@ mod tests {
         let cfg = DlqConfig {
             enabled: true,
             mode: "cascade".to_string(),
-            topic_suffix: ".dlq".to_string(),
-            file_enabled: true,
-            file_path: "/var/spool".to_string(),
-            kafka_enabled: true,
+            ..default_dlq_base()
         };
         let rc = cfg.to_scalo_config();
         assert!(rc.enabled);
@@ -1134,10 +1144,7 @@ mod tests {
         let cfg = DlqConfig {
             enabled: true,
             mode: "disabled".to_string(),
-            topic_suffix: ".dlq".to_string(),
-            file_enabled: true,
-            file_path: "/tmp".to_string(),
-            kafka_enabled: true,
+            ..default_dlq_base()
         };
         let rc = cfg.to_scalo_config();
         // "disabled" mode overrides enabled flag to false
@@ -1149,10 +1156,9 @@ mod tests {
         let cfg = DlqConfig {
             enabled: true,
             mode: "fan_out".to_string(),
-            topic_suffix: ".dlq".to_string(),
             file_enabled: false,
-            file_path: "/tmp".to_string(),
             kafka_enabled: false,
+            ..default_dlq_base()
         };
         let rc = cfg.to_scalo_config();
         assert!(rc.enabled);
@@ -1217,6 +1223,18 @@ mod tests {
     }
 
     #[test]
+    fn dlq_config_topic_propagated_as_common_topic() {
+        let cfg = DlqConfig {
+            enabled: true,
+            mode: "kafka_only".to_string(),
+            topic: "dfe_loader_dlq".to_string(),
+            ..default_dlq_base()
+        };
+        let rc = cfg.to_scalo_config();
+        assert_eq!(rc.kafka.common_topic, "dfe_loader_dlq");
+    }
+
+    #[test]
     fn dlq_config_file_path_propagated() {
         let cfg = DlqConfig {
             enabled: true,
@@ -1232,6 +1250,7 @@ mod tests {
         DlqConfig {
             enabled: true,
             mode: "cascade".to_string(),
+            topic: "dfe.dlq".to_string(),
             topic_suffix: ".dlq".to_string(),
             file_enabled: true,
             file_path: "/var/spool".to_string(),
@@ -1278,6 +1297,7 @@ mod tests {
         let cfg = DlqConfig::default();
         assert!(cfg.enabled);
         assert_eq!(cfg.mode, "cascade");
+        assert_eq!(cfg.topic, "dfe.dlq");
         assert!(cfg.file_enabled);
         assert!(cfg.kafka_enabled);
     }

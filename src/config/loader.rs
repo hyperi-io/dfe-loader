@@ -237,6 +237,17 @@ impl ApplyFlatEnv for Config {
             self.clickhouse.password = SensitiveString::from(v);
         }
 
+        // DLQ (fleet-uniform names: DLQ_ENABLED / DLQ_TOPIC / DLQ_MODE)
+        if let Some(v) = flat_env::flat_env_bool(prefix, "DLQ_ENABLED") {
+            self.routing.dlq.enabled = v;
+        }
+        if let Some(v) = flat_env::flat_env_string(prefix, "DLQ_TOPIC") {
+            self.routing.dlq.topic = v;
+        }
+        if let Some(v) = flat_env::flat_env_string(prefix, "DLQ_MODE") {
+            self.routing.dlq.mode = v;
+        }
+
         // Buffer
         if let Some(v) = flat_env::flat_env_parsed::<usize>(prefix, "BUFFER_FLUSH_ROWS") {
             self.buffer.flush_rows = v;
@@ -1020,6 +1031,16 @@ mod tests {
             let config = Config::load(None).unwrap();
             assert_eq!(config.logging.level, "debug");
             unsafe { std::env::remove_var("DFE_LOADER_LOG_LEVEL") };
+        }
+
+        {
+            unsafe { std::env::set_var("DFE_LOADER_DLQ_TOPIC", "dfe_loader_dlq") };
+            unsafe { std::env::set_var("DFE_LOADER_DLQ_MODE", "kafka_only") };
+            let config = Config::load(None).unwrap();
+            assert_eq!(config.routing.dlq.topic, "dfe_loader_dlq");
+            assert_eq!(config.routing.dlq.mode, "kafka_only");
+            unsafe { std::env::remove_var("DFE_LOADER_DLQ_TOPIC") };
+            unsafe { std::env::remove_var("DFE_LOADER_DLQ_MODE") };
         }
 
         // Sub-test 2: YAML file loading
