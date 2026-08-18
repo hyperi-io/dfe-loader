@@ -388,7 +388,7 @@ pub struct DlqConfig {
     pub mode: String,
     /// DLQ topic name: when non-empty, every Kafka DLQ write routes here
     /// (routing=common). Empty selects per-destination `{dest}{topic_suffix}`
-    /// routing.
+    /// routing -- reachable via config file only (flat-env drops empty values).
     pub topic: String,
     pub topic_suffix: String,
     /// File backend settings
@@ -403,9 +403,9 @@ impl Default for DlqConfig {
         Self {
             enabled: true,
             mode: "cascade".to_string(),
-            // scalo's KafkaDlqConfig default -- deployments override to the
-            // per-app standard topic (dfe_loader_dlq).
-            topic: "dfe.dlq".to_string(),
+            // The fleet DLQ standard's per-app topic, so a non-chart deploy
+            // (compose, bare) dead-letters to the standard name by default.
+            topic: "dfe_loader_dlq".to_string(),
             topic_suffix: ".dlq".to_string(),
             file_enabled: true,
             file_path: "/var/spool/dfe/dlq".to_string(),
@@ -424,7 +424,13 @@ impl DlqConfig {
             "fan_out" => (DlqMode::FanOut, self.enabled),
             "file_only" => (DlqMode::FileOnly, self.enabled),
             "kafka_only" => (DlqMode::KafkaOnly, self.enabled),
-            _ => (DlqMode::Cascade, self.enabled),
+            "cascade" | "" => (DlqMode::Cascade, self.enabled),
+            other => {
+                // A typo'd mode must not silently pick a backend -- cascade
+                // includes the file backend, which is an EROFS no-op deployed.
+                tracing::warn!(mode = %other, "unknown dlq.mode, using cascade");
+                (DlqMode::Cascade, self.enabled)
+            }
         };
 
         scalo::dlq::DlqConfig {
@@ -1232,6 +1238,31 @@ mod tests {
         };
         let rc = cfg.to_scalo_config();
         assert_eq!(rc.kafka.common_topic, "dfe_loader_dlq");
+        assert_eq!(rc.kafka.routing, scalo::dlq::DlqRouting::Common);
+    }
+
+    #[test]
+    fn dlq_config_empty_topic_keeps_per_table_routing() {
+        let cfg = DlqConfig {
+            enabled: true,
+            mode: "kafka_only".to_string(),
+            topic: String::new(),
+            ..default_dlq_base()
+        };
+        let rc = cfg.to_scalo_config();
+        assert_eq!(rc.kafka.routing, scalo::dlq::DlqRouting::PerTable);
+    }
+
+    #[test]
+    fn dlq_config_unknown_mode_falls_back_to_cascade() {
+        let cfg = DlqConfig {
+            enabled: true,
+            mode: "kafka-only".to_string(),
+            ..default_dlq_base()
+        };
+        let rc = cfg.to_scalo_config();
+        assert_eq!(rc.mode, scalo::dlq::DlqMode::Cascade);
+        assert!(rc.enabled);
     }
 
     #[test]
@@ -1297,7 +1328,7 @@ mod tests {
         let cfg = DlqConfig::default();
         assert!(cfg.enabled);
         assert_eq!(cfg.mode, "cascade");
-        assert_eq!(cfg.topic, "dfe.dlq");
+        assert_eq!(cfg.topic, "dfe_loader_dlq");
         assert!(cfg.file_enabled);
         assert!(cfg.kafka_enabled);
     }
