@@ -112,7 +112,7 @@ routing:
   default_db: dfe
 
   # Default table if no table_field matches
-  default_table: dfe
+  default_table: default
 
   # Per-organisation database routing.
   # Only orgs explicitly listed here get their own database — all others go to default_db.
