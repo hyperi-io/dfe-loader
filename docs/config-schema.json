@@ -47,7 +47,7 @@
         "hosts": [
           "localhost:9000"
         ],
-        "database": "default",
+        "database": "dfe",
         "username": "default",
         "password": "***REDACTED***",
         "protocol": "native",
@@ -634,7 +634,7 @@
         },
         "database": {
           "type": "string",
-          "default": "default"
+          "default": "dfe"
         },
         "username": {
           "type": "string",
@@ -1308,7 +1308,7 @@
           "default": "dfe"
         },
         "default_table": {
-          "description": "Default table if no `table_field` matches\nDefault: \"dfe\"",
+          "description": "Default table if no `table_field` matches\nDefault: \"default\"",
           "type": "string",
           "default": "default"
         },

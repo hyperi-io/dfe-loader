@@ -15,7 +15,7 @@
         "name": "database",
         "type": "string",
         "required": false,
-        "default": "default",
+        "default": "dfe",
         "description": "Target database."
       },
       {

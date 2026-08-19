@@ -133,7 +133,7 @@ impl Default for ClickHouseConfig {
     fn default() -> Self {
         Self {
             hosts: vec!["localhost:9000".to_string()],
-            database: "default".to_string(),
+            database: "dfe".to_string(),
             username: "default".to_string(),
             password: SensitiveString::default(),
             protocol: "native".to_string(),
@@ -569,7 +569,7 @@ impl Config {
                 .description("ClickHouse loader sink: batches parsed records and inserts into ClickHouse over the native or HTTP protocol.")
                 .maturity("stable")
                 .field(FieldSpec::list("hosts").required().description("ClickHouse host:port list."))
-                .field(FieldSpec::string("database").default_value("default").description("Target database."))
+                .field(FieldSpec::string("database").default_value("dfe").description("Target database."))
                 .field(FieldSpec::string("username").default_value("default").description("ClickHouse user."))
                 .field(FieldSpec::secret("password").description("ClickHouse password."))
                 .field(FieldSpec::enumeration("protocol", ["native", "http"]).default_value("native").description("Wire protocol.")),
@@ -1239,7 +1239,7 @@ kafka:
     fn test_default_clickhouse_config() {
         let config = Config::default();
         assert_eq!(config.clickhouse.hosts, vec!["localhost:9000"]);
-        assert_eq!(config.clickhouse.database, "default");
+        assert_eq!(config.clickhouse.database, "dfe");
         assert_eq!(config.clickhouse.username, "default");
         assert_eq!(config.clickhouse.protocol, "native");
         assert!(config.clickhouse.tables.is_empty());
