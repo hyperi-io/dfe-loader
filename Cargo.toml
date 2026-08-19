@@ -23,7 +23,7 @@ path = "src/main.rs"
 # respects this and skips the binary in detect-build-config.
 [[bin]]
 name = "pgo-driver"
-path = "src/bin/pgo-driver.rs"
+path = "src/bin/pgo_driver.rs"
 required-features = ["pgo-driver"]
 
 [dependencies]
