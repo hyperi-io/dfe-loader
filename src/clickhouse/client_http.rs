@@ -613,7 +613,7 @@ mod tests {
         let client = ClickHouseQueryClient::new(&config);
         assert!(client.is_ok());
         let client = client.unwrap();
-        assert_eq!(client.database(), "default");
+        assert_eq!(client.database(), "dfe");
     }
 
     // ============================================================

@@ -52,7 +52,7 @@ kafka:
 clickhouse:
   hosts:
     - localhost:9000
-  database: default
+  database: dfe
   # username may be a literal value, env:VAR, or vault:path:key
   username: default
   # password may be a literal value, env:VAR, or vault:path:key

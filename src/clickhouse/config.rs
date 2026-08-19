@@ -207,7 +207,7 @@ impl Default for ClickHouseConfig {
             hosts: vec!["localhost:9000".to_string()],
             transport: Transport::Native,
             insert_format: InsertFormat::RowBinary,
-            database: "default".to_string(),
+            database: "dfe".to_string(),
             username: "default".to_string(),
             password: String::new(),
             tls: false,
@@ -369,7 +369,7 @@ mod tests {
         let config = ClickHouseConfig::default();
         assert_eq!(config.hosts, vec!["localhost:9000"]);
         assert_eq!(config.transport, Transport::Native);
-        assert_eq!(config.database, "default");
+        assert_eq!(config.database, "dfe");
         assert_eq!(config.username, "default");
         assert!(config.password.is_empty());
         assert!(!config.tls);

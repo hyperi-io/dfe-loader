@@ -66,7 +66,7 @@ properties:
     default:
       hosts:
       - localhost:9000
-      database: default
+      database: dfe
       username: default
       password: '***REDACTED***'
       protocol: native
@@ -538,7 +538,7 @@ $defs:
         - localhost:9000
       database:
         type: string
-        default: default
+        default: dfe
       username:
         type: string
         default: default
@@ -1132,7 +1132,7 @@ $defs:
       default_table:
         description: |-
           Default table if no `table_field` matches
-          Default: "dfe"
+          Default: "default"
         type: string
         default: default
       org_id_field:

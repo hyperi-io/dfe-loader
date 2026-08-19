@@ -112,7 +112,7 @@ pub struct RoutingConfig {
     pub default_db: String,
 
     /// Default table if no `table_field` matches
-    /// Default: "dfe"
+    /// Default: "default"
     pub default_table: String,
 
     /// Field to extract for _`org_id` column (stored in data for RLS)

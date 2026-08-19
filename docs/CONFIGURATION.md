@@ -41,6 +41,12 @@ ENV names are auto-derived: `clickhouse.transport` -> `LOADER_CLICKHOUSE_TRANSPO
 | `clickhouse.transport` | `native` (default), `http` | TCP native protocol (port 9000/9440) vs HTTP (8123/8543) |
 | `clickhouse.insert_format` | `row_binary` (default), `json_each_row` | binary (server skips JSON parsing) vs self-describing JSON |
 | `clickhouse.hosts` | list | multi-host failover (native pool round-robins, skips a refusing endpoint) |
+| `clickhouse.database` | string, `dfe` (default) | database the connection targets -- DDL, schema reflection, and any table name that arrives without a `db.` prefix |
+
+`clickhouse.database` is the CONNECTION database and is separate from
+`routing.default_db` (also `dfe`), which is the database a routed row lands in.
+Both are cascade-overridable like any other setting -- `LOADER_CLICKHOUSE_DATABASE`
+or `clickhouse.database` in yaml.
 
 The transport and format compose. The default `native + row_binary` is the
 fast path; `json_each_row` is the diagnostic fallback:
