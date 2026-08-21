@@ -10,6 +10,8 @@
 
 #[cfg(feature = "testcontainers")]
 mod testcontainers_impl {
+    use std::time::Duration;
+
     use testcontainers::{ContainerAsync, ImageExt, runners::AsyncRunner};
     use testcontainers_modules::clickhouse::ClickHouse as ClickHouseImage;
     // The `apache` module, NOT the crate's default (`confluentinc/cp-kafka`).
@@ -157,6 +159,10 @@ mod testcontainers_impl {
             .with_env_var("CLICKHOUSE_SKIP_USER_SETUP", "1")
             .with_container_name(&name)
             .with_labels(crate::common::test_labels("clickhouse"))
+            // The 60s testcontainers default is too tight under CI container
+            // contention: the server cold-start intermittently overruns it and
+            // fails the run with WaitContainer(StartupTimeout).
+            .with_startup_timeout(Duration::from_secs(180))
             .start()
             .await
             .expect("Failed to start ClickHouse container")
