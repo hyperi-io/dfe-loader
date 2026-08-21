@@ -358,6 +358,9 @@ impl GrpcTransportAdapter {
     }
 
     /// Commit (no-op — gRPC ACK is the Push RPC response itself).
+    // async is deliberate: TransportBackend::commit awaits every adapter arm
+    // uniformly, and the Kafka adapter's commit genuinely awaits.
+    #[allow(clippy::unused_async_trait_impl)]
     pub async fn commit(&self, _offsets: &[crate::buffer::KafkaOffset]) -> Result<()> {
         Ok(())
     }
@@ -482,6 +485,9 @@ mod memory_adapter {
         }
 
         /// Commit offsets (no-op for memory, but tracks for verification).
+        // async is deliberate: it mirrors the awaitable transport commit
+        // interface the real backends implement.
+        #[allow(clippy::unused_async_trait_impl)]
         pub async fn commit(&self, _offsets: &[KafkaOffset]) -> Result<()> {
             // Memory transport tracks commits internally
             // We could call transport.commit() but it's a no-op

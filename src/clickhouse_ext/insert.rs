@@ -112,7 +112,11 @@ impl DynamicInsert {
     ///
     /// `raw_names` are column names supplied via raw passthrough (e.g. `_json`)
     /// that must be in the INSERT even if absent from the row map.
-    async fn ensure_sink(
+    ///
+    /// Synchronous: opening the sink is a pure builder step with no suspension
+    /// point. It sits between the async `ensure_schema` and `encode_and_write`
+    /// in the write path.
+    fn ensure_sink(
         &mut self,
         row: &Map<String, Value>,
         raw_names: &[&str],
@@ -169,8 +173,8 @@ impl DynamicInsert {
     /// type, an encoding failure, or a transport error.
     pub async fn write_map(&mut self, row: &Map<String, Value>) -> Result<(), DynamicError> {
         self.ensure_schema().await?;
-        self.ensure_sink(row, &[]).await?;
-        self.encode_and_write(row, None).await
+        self.ensure_sink(row, &[])?;
+        self.encode_and_write(row, None)
     }
 
     /// Like [`write_map`][Self::write_map], but the named columns are written
@@ -188,13 +192,15 @@ impl DynamicInsert {
     ) -> Result<(), DynamicError> {
         let raw_names: Vec<&str> = raw_columns.iter().map(|(n, _)| *n).collect();
         self.ensure_schema().await?;
-        self.ensure_sink(row, &raw_names).await?;
+        self.ensure_sink(row, &raw_names)?;
         self.encode_and_write(row, raw_columns.first().copied())
-            .await
     }
 
     /// Build the dynamic row (with optional raw passthrough) and write it.
-    async fn encode_and_write(
+    ///
+    /// Synchronous: RowBinary encode and the buffered write are in-memory with
+    /// no suspension point. The actual network flush happens in `end`.
+    fn encode_and_write(
         &mut self,
         row: &Map<String, Value>,
         raw: Option<(&str, &[u8])>,
