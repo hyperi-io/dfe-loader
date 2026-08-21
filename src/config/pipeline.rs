@@ -877,7 +877,8 @@ impl ScalingConfig {
 )]
 #[serde(rename_all = "snake_case")]
 pub enum CaptureMode {
-    /// `_json` = full payload (JSON type), `_raw` = extracted from raw_source_fields
+    /// `_json` = full payload (JSON type); `_raw` = full payload (UTF-8 text),
+    /// or the @renamed raw_source_fields value when one is present.
     #[default]
     Full,
     /// `_json` = NULL, `_raw` = entire Kafka payload as UTF-8 String

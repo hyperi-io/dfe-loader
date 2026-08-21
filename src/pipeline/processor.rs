@@ -202,7 +202,8 @@ impl MessageProcessor<'_> {
                         if let Ok(json_str) = std::str::from_utf8(&msg.payload) {
                             d.insert("_json".to_string(), Value::String(json_str.to_string()));
                         }
-                        // _raw: already extracted by transformer from raw_source_fields
+                        // _raw: the transformer applies @renamed; the raw
+                        // payload capture below fills it when @renamed did not.
                     }
                     CaptureMode::RawOnly => {
                         // _json: not populated
@@ -220,11 +221,22 @@ impl MessageProcessor<'_> {
             (d, None)
         };
 
-        // raw_only: write entire Kafka payload to _raw as UTF-8 string.
-        // Done after both paths since it's the same for extractor and transformer.
-        if capture_mode == CaptureMode::RawOnly
-            && let Ok(raw_str) = std::str::from_utf8(&msg.payload)
-        {
+        // Capture the original event payload into _raw as UTF-8 text.
+        // - RawOnly: _raw is the sole capture; the full payload always wins.
+        // - Full: _raw mirrors _json via @captured: raw_payload (dfe-engine#182).
+        //   The json_primary extractor wires _json only, so without this the API
+        //   /ingest path leaves _raw NULL. Never clobber a _raw already set by
+        //   @renamed (logoriginal) or upstream.
+        // - ExtractedOnly: captures neither _json nor _raw.
+        let capture_full_raw = match capture_mode {
+            CaptureMode::RawOnly => true,
+            CaptureMode::Full => {
+                self.config.metadata.capture_raw
+                    && !data.contains_key(self.config.metadata.raw_output.as_str())
+            }
+            CaptureMode::ExtractedOnly => false,
+        };
+        if capture_full_raw && let Ok(raw_str) = std::str::from_utf8(&msg.payload) {
             data.insert(
                 self.config.metadata.raw_output.clone(),
                 Value::String(raw_str.to_string()),
@@ -1538,6 +1550,146 @@ mod tests {
         assert!(
             !processed.data.contains_key("src_field"),
             "source field should be renamed away, not left at top level"
+        );
+    }
+
+    // ========================================================================
+    // capture_mode=Full: _raw is captured from the raw payload (@captured:
+    // raw_payload). Regression for dfe-engine#182 — the API /ingest path left
+    // _raw NULL because Full mode only wired _json.
+    // ========================================================================
+
+    #[test]
+    fn capture_mode_full_populates_raw_from_payload_182() {
+        let harness = TestHarness::with_config(config_with_capture_mode(CaptureMode::Full));
+        let proc = harness.processor();
+        let payload = capture_sample_payload();
+        let processed = proc
+            .process(&harness.make_msg(&payload))
+            .expect("processed");
+
+        // _json still spliced (legacy path inserts it into the map)
+        assert!(
+            processed.data.contains_key("_json"),
+            "Full mode must still populate _json"
+        );
+        // _raw is now the full original payload as text (the #182 fix)
+        let raw = processed
+            .data
+            .get("_raw")
+            .and_then(|v| v.as_str())
+            .expect("Full mode must populate _raw from the raw payload");
+        assert_eq!(
+            raw.as_bytes(),
+            payload.as_slice(),
+            "_raw must be the full original payload as UTF-8 text"
+        );
+    }
+
+    #[test]
+    fn capture_mode_full_does_not_clobber_renamed_raw() {
+        // A logoriginal field is @renamed → _raw by the transformer; the raw
+        // payload capture must not overwrite it.
+        let harness = TestHarness::with_config(config_with_capture_mode(CaptureMode::Full));
+        let proc = harness.processor();
+        let payload = serde_json::to_vec(&json!({
+            "event_category": "security",
+            "logoriginal": "the original syslog line"
+        }))
+        .expect("serialize");
+        let processed = proc
+            .process(&harness.make_msg(&payload))
+            .expect("processed");
+
+        assert_eq!(
+            processed.data.get("_raw").and_then(|v| v.as_str()),
+            Some("the original syslog line"),
+            "an @renamed _raw must survive — payload capture must not clobber it"
+        );
+    }
+
+    #[test]
+    fn capture_mode_full_capture_raw_disabled_leaves_raw_absent() {
+        let mut config = config_with_capture_mode(CaptureMode::Full);
+        config.metadata.capture_raw = false;
+        let harness = TestHarness::with_config(config);
+        let proc = harness.processor();
+        let processed = proc
+            .process(&harness.make_msg(&capture_sample_payload()))
+            .expect("processed");
+
+        assert!(
+            !processed.data.contains_key("_raw"),
+            "capture_raw=false must leave _raw absent even in Full mode"
+        );
+    }
+
+    /// Regression for dfe-engine#182 on the ACTUAL failing path: json_primary
+    /// (API /ingest) in Full capture mode. The extractor wires _json only, so
+    /// before the fix _raw landed NULL. Once a schema is cached the processor
+    /// must populate _raw with the full original payload as text.
+    #[test]
+    fn json_primary_full_populates_raw_from_payload_182() {
+        use crate::clickhouse::{ColumnInfo, ParsedType, TableSchema};
+
+        let harness = TestHarness::with_config(config_with_capture_mode(CaptureMode::Full));
+        let payload = br#"{"event_category":"security","action":"login"}"#;
+        let msg = harness.make_msg(payload);
+
+        // Schema miss buffers first — discover the routed table.
+        let table = match harness.processor_json_primary().process(&msg) {
+            Err(crate::Error::SchemaPending { table }) => table,
+            Ok(_) => panic!("expected SchemaPending before schema cached, got Ok"),
+            Err(e) => panic!("expected SchemaPending, got Err({e:?})"),
+        };
+
+        // Cache a schema carrying the _raw String column.
+        let (db, tbl) = table.split_once('.').expect("db.table");
+        let schema = TableSchema {
+            database: db.to_string(),
+            table: tbl.to_string(),
+            columns: vec![
+                ColumnInfo {
+                    name: "action".to_string(),
+                    type_name: "String".to_string(),
+                    parsed_type: ParsedType::parse("String"),
+                    position: 0,
+                    default_kind: String::new(),
+                    default_expression: String::new(),
+                    comment: String::new(),
+                    is_in_primary_key: false,
+                    is_in_sorting_key: false,
+                },
+                ColumnInfo {
+                    name: "_raw".to_string(),
+                    type_name: "String".to_string(),
+                    parsed_type: ParsedType::parse("String"),
+                    position: 1,
+                    default_kind: String::new(),
+                    default_expression: String::new(),
+                    comment: String::new(),
+                    is_in_primary_key: false,
+                    is_in_sorting_key: false,
+                },
+            ],
+            comment: String::new(),
+        };
+        harness.schema_cache.insert(table.clone(), schema);
+
+        // Reprocess through the extractor path: _raw must be the full payload.
+        let processed = harness
+            .processor_json_primary()
+            .process(&msg)
+            .expect("extractor path should succeed once schema is cached");
+        let raw = processed
+            .data
+            .get("_raw")
+            .and_then(|v| v.as_str())
+            .expect("json_primary Full mode must populate _raw (dfe-engine#182)");
+        assert_eq!(
+            raw.as_bytes(),
+            payload.as_slice(),
+            "_raw must be the full original ingest payload as UTF-8 text"
         );
     }
 }

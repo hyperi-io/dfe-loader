@@ -1689,7 +1689,7 @@
       "description": "Per-table capture override configuration.\n\nControls how `_json` and `_raw` columns are populated.\n\nAll modes extract promoted fields to schema columns. The only difference\nis where (or whether) the full payload is preserved.",
       "oneOf": [
         {
-          "description": "`_json` = full payload (JSON type), `_raw` = extracted from raw_source_fields",
+          "description": "`_json` = full payload (JSON type); `_raw` = full payload (UTF-8 text),\nor the @renamed raw_source_fields value when one is present.",
           "type": "string",
           "const": "full"
         },
