@@ -132,11 +132,13 @@ pub struct ClickHouseConfig {
 impl Default for ClickHouseConfig {
     fn default() -> Self {
         Self {
-            hosts: vec!["localhost:9000".to_string()],
+            hosts: vec!["localhost:8123".to_string()],
             database: "dfe".to_string(),
             username: "default".to_string(),
             password: SensitiveString::default(),
-            protocol: "native".to_string(),
+            // http only: the pinned clickhouse client has no TCP row fetch, so
+            // schema queries against a native port stall silently (#115).
+            protocol: "http".to_string(),
             tables: Vec::new(),
             tls: None,
         }
@@ -145,9 +147,11 @@ impl Default for ClickHouseConfig {
 
 impl From<&ClickHouseConfig> for crate::clickhouse::ClickHouseConfig {
     fn from(cfg: &ClickHouseConfig) -> Self {
+        // Fallback arm is Http: an unrecognised protocol must not resurrect the
+        // silent native schema stall (#115); validate() rejects it upstream.
         let transport = match cfg.protocol.to_lowercase().as_str() {
-            "http" => crate::clickhouse::Transport::Http,
-            _ => crate::clickhouse::Transport::Native,
+            "native" => crate::clickhouse::Transport::Native,
+            _ => crate::clickhouse::Transport::Http,
         };
         // Explicit tls config wins; when unset (None), auto-detect a secure
         // endpoint from the host so bare cloud configs still connect over TLS.
@@ -427,6 +431,22 @@ impl Config {
                 "At least one ClickHouse host must be configured".into(),
             ));
         }
+        match self.clickhouse.protocol.to_lowercase().as_str() {
+            "http" => {}
+            "native" => {
+                return Err(crate::Error::Config(
+                    "clickhouse.protocol 'native' cannot serve the schema fetch: the pinned \
+                     clickhouse client has no TCP row fetch, so every message stalls pending \
+                     schema. Use protocol 'http' with the HTTP port (8123-family)."
+                        .into(),
+                ));
+            }
+            other => {
+                return Err(crate::Error::Config(format!(
+                    "unknown clickhouse.protocol '{other}' (expected 'http')"
+                )));
+            }
+        }
 
         // Memory validation
         if self.memory.pressure_threshold < 0.0 || self.memory.pressure_threshold > 1.0 {
@@ -566,13 +586,13 @@ impl Config {
         use scalo::deployment::{Capability, FieldSpec};
         vec![
             Capability::sink("clickhouse")
-                .description("ClickHouse loader sink: batches parsed records and inserts into ClickHouse over the native or HTTP protocol.")
+                .description("ClickHouse loader sink: batches parsed records and inserts into ClickHouse over HTTP.")
                 .maturity("stable")
-                .field(FieldSpec::list("hosts").required().description("ClickHouse host:port list."))
+                .field(FieldSpec::list("hosts").required().description("ClickHouse host:port list (HTTP port)."))
                 .field(FieldSpec::string("database").default_value("dfe").description("Target database."))
                 .field(FieldSpec::string("username").default_value("default").description("ClickHouse user."))
                 .field(FieldSpec::secret("password").description("ClickHouse password."))
-                .field(FieldSpec::enumeration("protocol", ["native", "http"]).default_value("native").description("Wire protocol.")),
+                .field(FieldSpec::enumeration("protocol", ["native", "http"]).default_value("http").description("Wire protocol. 'native' is rejected at startup: the pinned clickhouse client has no TCP row fetch, so schema queries stall silently.")),
             Capability::new("transform", "pipeline")
                 .description("Per-record enrichment + shaping pipeline applied before insert.")
                 .maturity("stable")
@@ -598,7 +618,7 @@ mod tests {
         let config = Config::default();
         assert_eq!(config.kafka.brokers, vec!["localhost:9092"]);
         assert_eq!(config.kafka.group, "clickhouse-loader");
-        assert_eq!(config.clickhouse.hosts, vec!["localhost:9000"]);
+        assert_eq!(config.clickhouse.hosts, vec!["localhost:8123"]);
         assert_eq!(config.buffer.flush_bytes, 1_048_576);
     }
 
@@ -1238,10 +1258,10 @@ kafka:
     #[test]
     fn test_default_clickhouse_config() {
         let config = Config::default();
-        assert_eq!(config.clickhouse.hosts, vec!["localhost:9000"]);
+        assert_eq!(config.clickhouse.hosts, vec!["localhost:8123"]);
         assert_eq!(config.clickhouse.database, "dfe");
         assert_eq!(config.clickhouse.username, "default");
-        assert_eq!(config.clickhouse.protocol, "native");
+        assert_eq!(config.clickhouse.protocol, "http");
         assert!(config.clickhouse.tables.is_empty());
         assert!(config.clickhouse.tls.is_none());
     }
@@ -1402,17 +1422,43 @@ kafka:
     }
 
     #[test]
-    fn test_clickhouse_config_unknown_protocol_defaults_to_native() {
+    fn test_clickhouse_config_unknown_protocol_falls_back_to_http() {
+        // An unrecognised protocol must not resurrect the silent native
+        // schema stall (#115); validate() rejects it before this mapping runs.
         let cfg = ClickHouseConfig {
-            hosts: vec!["ch:9000".to_string()],
+            hosts: vec!["ch:8123".to_string()],
             protocol: "mystery".to_string(),
             ..ClickHouseConfig::default()
         };
         let client_cfg: crate::clickhouse::ClickHouseConfig = (&cfg).into();
         assert!(matches!(
             client_cfg.transport,
-            crate::clickhouse::Transport::Native
+            crate::clickhouse::Transport::Http
         ));
+    }
+
+    #[test]
+    fn test_validate_rejects_native_protocol() {
+        let mut config = Config::default();
+        config.clickhouse.protocol = "native".to_string();
+        let err = config.validate().unwrap_err().to_string();
+        assert!(err.contains("no TCP row fetch"), "{err}");
+        assert!(err.contains("'http'"), "{err}");
+    }
+
+    #[test]
+    fn test_validate_rejects_unknown_protocol() {
+        let mut config = Config::default();
+        config.clickhouse.protocol = "mystery".to_string();
+        let err = config.validate().unwrap_err().to_string();
+        assert!(err.contains("unknown clickhouse.protocol"), "{err}");
+    }
+
+    #[test]
+    fn test_validate_accepts_http_protocol_any_case() {
+        let mut config = Config::default();
+        config.clickhouse.protocol = "HTTP".to_string();
+        assert!(config.validate().is_ok());
     }
 
     // ========================================================================
@@ -1456,7 +1502,7 @@ kafka:
         // Every section should have its Default values
         assert_eq!(config.kafka.brokers, vec!["localhost:9092"]);
         assert_eq!(config.buffer.flush_rows, 20_000);
-        assert_eq!(config.clickhouse.hosts, vec!["localhost:9000"]);
+        assert_eq!(config.clickhouse.hosts, vec!["localhost:8123"]);
         assert_eq!(config.routing.default_db, "dfe");
     }
 

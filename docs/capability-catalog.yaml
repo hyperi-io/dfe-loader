@@ -1,12 +1,12 @@
 - kind: sink
   name: clickhouse
-  description: 'ClickHouse loader sink: batches parsed records and inserts into ClickHouse over the native or HTTP protocol.'
+  description: 'ClickHouse loader sink: batches parsed records and inserts into ClickHouse over HTTP.'
   maturity: stable
   fields:
   - name: hosts
     type: list
     required: true
-    description: ClickHouse host:port list.
+    description: ClickHouse host:port list (HTTP port).
   - name: database
     type: string
     required: false
@@ -25,8 +25,8 @@
   - name: protocol
     type: enum
     required: false
-    default: native
-    description: Wire protocol.
+    default: http
+    description: 'Wire protocol. ''native'' is rejected at startup: the pinned clickhouse client has no TCP row fetch, so schema queries stall silently.'
     enum_values:
     - native
     - http
