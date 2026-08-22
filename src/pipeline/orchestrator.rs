@@ -1442,25 +1442,31 @@ async fn warm_tables_once(
 
     let mut out = Vec::with_capacity(results.len());
     for (table, schema_res, comments_res, comment_res) in results {
-        if let Ok(schema) = schema_res {
-            schema_cache.insert(table.clone(), schema);
-            if let Ok(comments) = comments_res {
-                let directives = comments
-                    .into_iter()
-                    .map(|(col, comment)| (col, parse_directives(&comment)))
-                    .collect();
-                col_meta_cache.apply_ddl(&table, directives);
+        match schema_res {
+            Ok(schema) => {
+                schema_cache.insert(table.clone(), schema);
+                if let Ok(comments) = comments_res {
+                    let directives = comments
+                        .into_iter()
+                        .map(|(col, comment)| (col, parse_directives(&comment)))
+                        .collect();
+                    col_meta_cache.apply_ddl(&table, directives);
+                }
+                if let Ok(comment) = comment_res
+                    && !comment.is_empty()
+                    && let Ok(mut guard) = comments_out.lock()
+                {
+                    guard.push((table.clone(), comment));
+                }
+                debug!(table = %table, "Pre-warmed schema cache");
+                out.push((table, true));
             }
-            if let Ok(comment) = comment_res
-                && !comment.is_empty()
-                && let Ok(mut guard) = comments_out.lock()
-            {
-                guard.push((table.clone(), comment));
+            Err(e) => {
+                // Name the fault: a swallowed fetch error here once hid a
+                // wrong-protocol config behind a bare failed-count (#115).
+                warn!(table = %table, error = %e, "Schema pre-warm fetch failed");
+                out.push((table, false));
             }
-            debug!(table = %table, "Pre-warmed schema cache");
-            out.push((table, true));
-        } else {
-            out.push((table, false));
         }
     }
     out

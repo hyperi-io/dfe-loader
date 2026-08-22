@@ -45,12 +45,12 @@
       "$ref": "#/$defs/ClickHouseConfig",
       "default": {
         "hosts": [
-          "localhost:9000"
+          "localhost:8123"
         ],
         "database": "dfe",
         "username": "default",
         "password": "***REDACTED***",
-        "protocol": "native",
+        "protocol": "http",
         "tables": [],
         "tls": null
       }
@@ -629,7 +629,7 @@
             "type": "string"
           },
           "default": [
-            "localhost:9000"
+            "localhost:8123"
           ]
         },
         "database": {
@@ -648,7 +648,7 @@
         },
         "protocol": {
           "type": "string",
-          "default": "native"
+          "default": "http"
         },
         "tables": {
           "type": "array",

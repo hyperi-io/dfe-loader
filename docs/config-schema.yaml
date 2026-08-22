@@ -65,11 +65,11 @@ properties:
     $ref: '#/$defs/ClickHouseConfig'
     default:
       hosts:
-      - localhost:9000
+      - localhost:8123
       database: dfe
       username: default
       password: '***REDACTED***'
-      protocol: native
+      protocol: http
       tables: []
       tls: null
   payload:
@@ -535,7 +535,7 @@ $defs:
         items:
           type: string
         default:
-        - localhost:9000
+        - localhost:8123
       database:
         type: string
         default: dfe
@@ -549,7 +549,7 @@ $defs:
         default: '***REDACTED***'
       protocol:
         type: string
-        default: native
+        default: http
       tables:
         type: array
         items:
