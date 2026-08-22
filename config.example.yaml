@@ -51,16 +51,17 @@ kafka:
 
 clickhouse:
   hosts:
-    - localhost:9000
+    - localhost:8123
   database: dfe
   # username may be a literal value, env:VAR, or vault:path:key
   username: default
   # password may be a literal value, env:VAR, or vault:path:key
   # (vault: requires the `secrets` feature, which the loader does not enable today)
   password: ""
-  # Protocol: "native" (default) - HTTP not supported in Rust version
-  # Native protocol is required for performance
-  protocol: native
+  # Protocol: "http" (default and only accepted value) with the HTTP port.
+  # "native" is rejected at startup: the pinned clickhouse client has no TCP
+  # row fetch, so schema queries stall silently.
+  protocol: http
   tables:
     - auth_events
     - api_events
@@ -82,11 +83,11 @@ clickhouse:
 # =============================================================================
 # clickhouse:
 #   hosts:
-#     - your-instance.region.clickhouse.cloud:9440
+#     - your-instance.region.clickhouse.cloud:8443
 #   database: default
 #   username: default
 #   password: env:CLICKHOUSE_CLOUD_PASSWORD
-#   protocol: native
+#   protocol: http
 #   tls:
 #     enabled: true
 #   tables:
