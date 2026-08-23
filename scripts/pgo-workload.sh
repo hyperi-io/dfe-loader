@@ -248,11 +248,11 @@ kafka:
 
 clickhouse:
   hosts:
-    - "localhost:19000"
+    - "localhost:18123"
   database: "dfe"
   username: "default"
   password: ""
-  protocol: "native"
+  protocol: "http"
   tables: []
 
 routing:
