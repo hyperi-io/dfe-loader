@@ -41,10 +41,10 @@ properties:
     default:
       brokers:
       - localhost:9092
-      group: clickhouse-loader
+      group: dfe-loader
       topics: []
       topic_regex: null
-      client_id: clickhouse-loader
+      client_id: dfe-loader
       sasl: null
       tls: null
       allow_insecure_transport: false
@@ -330,7 +330,7 @@ $defs:
         - localhost:9092
       group:
         type: string
-        default: clickhouse-loader
+        default: dfe-loader
       topics:
         description: |-
           Explicit topic list. Empty = auto-discover all `*_load` / `*_land` topics
@@ -346,7 +346,7 @@ $defs:
         default: null
       client_id:
         type: string
-        default: clickhouse-loader
+        default: dfe-loader
       sasl:
         anyOf:
         - $ref: '#/$defs/SaslConfig'

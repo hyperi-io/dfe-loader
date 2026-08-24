@@ -16,10 +16,10 @@
         "brokers": [
           "localhost:9092"
         ],
-        "group": "clickhouse-loader",
+        "group": "dfe-loader",
         "topics": [],
         "topic_regex": null,
-        "client_id": "clickhouse-loader",
+        "client_id": "dfe-loader",
         "sasl": null,
         "tls": null,
         "allow_insecure_transport": false,
@@ -370,7 +370,7 @@
         },
         "group": {
           "type": "string",
-          "default": "clickhouse-loader"
+          "default": "dfe-loader"
         },
         "topics": {
           "description": "Explicit topic list. Empty = auto-discover all `*_load` / `*_land` topics\nfrom the broker, with load-over-land fallback applied.",
@@ -389,7 +389,7 @@
         },
         "client_id": {
           "type": "string",
-          "default": "clickhouse-loader"
+          "default": "dfe-loader"
         },
         "sasl": {
           "anyOf": [

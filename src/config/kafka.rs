@@ -54,10 +54,13 @@ impl Default for KafkaConfig {
 
         Self {
             brokers: vec!["localhost:9092".to_string()],
-            group: "clickhouse-loader".to_string(),
+            // DFE consumer groups carry the `dfe-` prefix: a managed broker
+            // grants group access on that prefix, and a group outside it is
+            // refused with GroupAuthorizationFailed.
+            group: "dfe-loader".to_string(),
             topics: vec![], // Empty = auto-discover
             topic_regex: None,
-            client_id: "clickhouse-loader".to_string(),
+            client_id: "dfe-loader".to_string(),
             sasl: None,
             tls: None,
             allow_insecure_transport: false,
