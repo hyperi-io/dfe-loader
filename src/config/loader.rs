@@ -617,7 +617,8 @@ mod tests {
     fn test_default_config() {
         let config = Config::default();
         assert_eq!(config.kafka.brokers, vec!["localhost:9092"]);
-        assert_eq!(config.kafka.group, "clickhouse-loader");
+        // The `dfe-` prefix is a broker-ACL contract, not cosmetic.
+        assert_eq!(config.kafka.group, "dfe-loader");
         assert_eq!(config.clickhouse.hosts, vec!["localhost:8123"]);
         assert_eq!(config.buffer.flush_bytes, 1_048_576);
     }

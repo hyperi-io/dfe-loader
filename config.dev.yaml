@@ -7,10 +7,10 @@
 kafka:
   brokers:
     - localhost:9092
-  group: clickhouse-loader-dev
+  group: dfe-loader-dev
   topics:
     - events
-  client_id: clickhouse-loader-dev
+  client_id: dfe-loader-dev
 
 clickhouse:
   hosts:
