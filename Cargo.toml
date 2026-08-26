@@ -7,7 +7,7 @@ description = "Loads Kafka and gRPC streams into ClickHouse, batching small writ
 license = "BUSL-1.1"
 repository = "https://github.com/hyperi-io/dfe-loader"
 rust-version = "1.95"
-exclude = ["ci/", "docs/", "reference/", "scripts/", "schemas/"]
+exclude = ["ci/", "docs/", "reference/", "scripts/"]
 
 [lib]
 name = "dfe_loader"
