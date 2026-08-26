@@ -63,8 +63,8 @@ flowchart TB
 This expression language describes how source data fields map to destination
 columns during the **data preparation stage** of the pipeline. It is used in:
 
-- DDL schema files (`schemas/*.sql`)
-- Schema definition CSVs (`schemas/*.csv`)
+- dfe-schemas YAML definitions, in a column's `expr` field
+- The column COMMENTs those become in the deployed DDL
 - Any table definition that needs field mapping documentation
 
 ## Expression types

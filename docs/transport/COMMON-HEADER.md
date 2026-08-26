@@ -58,9 +58,9 @@ schema itself. The loader injects these system fields into every event.
 +----------------------------------+
 ```
 
-The profile system (see `schemas/profiles/*.yaml`) controls which common header
-fields are injected. The profile does NOT define data-specific columns -- those
-come from the source data or are defined in the table's own DDL.
+The profile system (dfe-schemas `common-header/*.yaml`) controls which common
+header fields are injected. The profile does NOT define data-specific columns --
+those come from the source data or are defined in the table's own DDL.
 
 ## Common header DDL (default table)
 
@@ -758,17 +758,15 @@ topic_replication_factor = 1
 
 | File | Purpose |
 |------|---------|
-| `schemas/common-header/timeseries.yaml` | Default profile -- full common header (via [dfe-schemas](../deployment/SCHEMAS.md) submodule) |
-| `schemas/common-header/minimal.yaml` | Minimal profile -- no _raw,_tags, _source (via dfe-schemas submodule) |
-| `schemas/common-header/passthrough.yaml` | Passthrough profile -- no field injection (via dfe-schemas submodule) |
-| `schemas/profiles/` | Bundled fallback profiles (kept in sync with submodule) |
-| `src/schema/profile.rs` | Profile types, registry, DDL generation, migration |
+| `src/clickhouse/schema.rs` | Reads the deployed columns from `system.columns` on a TTL |
+| `src/column_meta/mod.rs` | Parses the `@directive` annotations out of column comments |
 | `src/schema/mod.rs` | Schema parsing, table tags, capability detection |
 | `src/transform/transformer.rs` | Profile-driven field injection |
-| `src/pipeline/auto_init.rs` | Auto-creates default table from profile DDL |
-| `schemas/common_table.sql` | Legacy DDL template (fallback) |
-| `schemas/common_header.csv` | Legacy field definitions (fallback) |
-| `tests/fixtures/ddl.rs` | Test DDL builders |
+
+The profile YAML itself lives in
+[dfe-schemas](https://github.com/hyperi-io/dfe-schemas) under `common-header/`
+and reaches the loader only as deployed ClickHouse columns -- see
+[SCHEMAS.md](../deployment/SCHEMAS.md).
 
 ## Migration from v1
 
