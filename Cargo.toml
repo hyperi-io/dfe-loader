@@ -32,7 +32,7 @@ tokio = { version = ">=1.48, <2", features = ["full"] }
 tokio-util = { version = ">=0.7, <0.8", features = ["rt"] }
 
 # Shared library with transport abstraction
-scalo = { version = ">=2.10.7, <3", features = ["config-schema", "transport-kafka", "transport-grpc", "dlq-kafka", "config", "config-reload", "deployment", "version-check", "scaling", "cli-service", "top", "logger", "metrics", "service-metrics", "expression", "memory", "worker-batch", "governor", "secrets"] }
+scalo = { version = ">=2.10.14, <3", features = ["config-schema", "transport-kafka", "transport-grpc", "dlq-kafka", "config", "config-reload", "deployment", "version-check", "scaling", "cli-service", "top", "logger", "metrics", "service-metrics", "expression", "memory", "worker-batch", "governor", "secrets"] }
 
 # JSON Schema derivation for the reflectable config-schema capability
 # (scalo-rs#6). Same version range as scalo so cargo unifies to one schemars.
