@@ -115,6 +115,17 @@ impl ServiceApp for App {
                 "Resolved configuration"
             );
 
+            // Fire-and-forget startup version check; no-op unless the cascade
+            // sets version_check.enabled + api_url.
+            {
+                use scalo::version_check::{VersionCheck, VersionCheckConfig};
+                let checker = VersionCheck::new(VersionCheckConfig::from_cascade(
+                    "dfe-loader",
+                    env!("CARGO_PKG_VERSION"),
+                ));
+                checker.check_on_startup();
+            }
+
             // Share the runtime's single ScalingPressure engine (registered via
             // the `scaling_components` override below and served at
             // /scaling/pressure to KEDA). scalo 2.10 unified scaling onto this one
