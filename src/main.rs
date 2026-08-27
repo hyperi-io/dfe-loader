@@ -115,17 +115,6 @@ impl ServiceApp for App {
                 "Resolved configuration"
             );
 
-            // Fire-and-forget startup version check; no-op unless the cascade
-            // sets version_check.enabled + api_url.
-            {
-                use scalo::version_check::{VersionCheck, VersionCheckConfig};
-                let checker = VersionCheck::new(VersionCheckConfig::from_cascade(
-                    "dfe-loader",
-                    env!("CARGO_PKG_VERSION"),
-                ));
-                checker.check_on_startup();
-            }
-
             // Share the runtime's single ScalingPressure engine (registered via
             // the `scaling_components` override below and served at
             // /scaling/pressure to KEDA). scalo 2.10 unified scaling onto this one
@@ -246,6 +235,15 @@ impl ServiceApp for App {
 
     fn deployment_contract(&self) -> Option<scalo::deployment::DeploymentContract> {
         Some(Config::deployment_contract())
+    }
+
+    fn version_check_defaults(&self) -> scalo::version_check::VersionCheckConfig {
+        // The runtime overlays the version_check cascade keys on this, so a
+        // deployment's explicit enabled: false always wins.
+        scalo::version_check::VersionCheckConfig {
+            api_url: "https://releases.hyperi.io/api/v1/check".into(),
+            ..Default::default()
+        }
     }
 }
 
