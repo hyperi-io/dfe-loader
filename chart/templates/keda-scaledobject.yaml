@@ -20,7 +20,15 @@ spec:
       metadata:
         bootstrapServers: {{ .Values.config.kafka.brokers | quote }}
         consumerGroup: {{ .Values.keda.kafka.consumerGroup | default .Values.config.kafka.group_id | quote }}
-        topic: {{ .Values.keda.kafka.topic | default (index .Values.config.kafka.topics 0) | quote }}
+        {{- /* `default (index X 0)` would eagerly evaluate `index nil 0` and fail
+            lint when no topics are set. Use explicit conditional instead. */}}
+        {{- if .Values.keda.kafka.topic }}
+        topic: {{ .Values.keda.kafka.topic | quote }}
+        {{- else if .Values.config.kafka.topics }}
+        topic: {{ (index .Values.config.kafka.topics 0) | quote }}
+        {{- else }}
+        topic: ""
+        {{- end }}
         lagThreshold: {{ .Values.keda.kafka.lagThreshold | quote }}
         activationLagThreshold: {{ .Values.keda.kafka.activationLagThreshold | quote }}
         saslType: scram_sha512
@@ -31,16 +39,5 @@ spec:
       metricType: Utilization
       metadata:
         value: {{ .Values.keda.cpu.threshold | quote }}
-    {{- end }}
-    {{- if .Values.keda.scalingPressure.enabled }}
-    # Correlated-composite scaling pressure (rustlib ScalingEngine).
-    # The composite is a capped per-pod 0-100 score: query avg()s it across
-    # pods and metricType Value scales proportionally to hold avg <= threshold.
-    - type: prometheus
-      metricType: Value
-      metadata:
-        serverAddress: {{ .Values.keda.scalingPressure.serverAddress | quote }}
-        query: {{ .Values.keda.scalingPressure.query | quote }}
-        threshold: {{ .Values.keda.scalingPressure.threshold | quote }}
     {{- end }}
 {{- end }}

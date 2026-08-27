@@ -61,7 +61,7 @@ Service account name.
 {{- end }}
 
 {{/*
-kafka secret name — use existing or generate from fullname.
+kafka secret name -- use existing or generate from fullname.
 */}}
 {{- define "dfe-loader.kafkaSecretName" -}}
 {{- if .Values.kafka.existingSecret }}
@@ -72,7 +72,7 @@ kafka secret name — use existing or generate from fullname.
 {{- end }}
 
 {{/*
-clickhouse secret name — use existing or generate from fullname.
+clickhouse secret name -- use existing or generate from fullname.
 */}}
 {{- define "dfe-loader.clickhouseSecretName" -}}
 {{- if .Values.clickhouse.existingSecret }}
