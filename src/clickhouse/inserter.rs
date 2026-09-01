@@ -46,7 +46,7 @@ use crate::clickhouse::circuit_breaker::CircuitBreaker;
 use crate::clickhouse::client_http::escape_identifier;
 use crate::clickhouse::config::InsertFormat;
 use crate::clickhouse::error::{
-    ClickHouseError, ErrorCategory, classify_dynamic_error, classify_insert_end_error,
+    ErrorCategory, classify_dynamic_error, classify_insert_end_error, classify_json_insert_error,
     is_schema_drift_error,
 };
 use crate::clickhouse::{ClickHouseQueryClient, SchemaCache};
@@ -692,89 +692,67 @@ impl Inserter {
             // both transports via insert_native_with_columns.
             let mut insert = self.ch_client.insert_formatted_with(sql.clone());
 
-            if let Err(e) = insert.send(body.clone()).await {
-                // Bytes clone is O(1)
-                let ch_err = ClickHouseError::Insert(format!("{e}"));
-                let category = ch_err.category();
+            // One INSERT carries one verdict, and which call surfaces it is an
+            // accident of buffering: the fork queues the body on a channel, so
+            // a server rejection reaches a small batch at end() and a large one
+            // at send(), where the closed channel makes it return the response
+            // error instead. Classifying only one of them is what let a
+            // rejected JSON batch read as retryable and come back forever.
+            // Bytes clone is O(1).
+            let outcome = match insert.send(body.clone()).await {
+                Ok(()) => insert.end().await,
+                Err(e) => Err(e),
+            };
 
-                match category {
-                    ErrorCategory::Transient | ErrorCategory::Unknown => {
-                        if attempt < self.max_retries {
-                            let delay = self.backoff_delay(attempt);
-                            debug!(
-                                table = %table,
-                                attempt = attempt,
-                                delay_ms = delay.as_millis(),
-                                error = %e,
-                                "Insert retry"
-                            );
-                            warn!(
-                                table = %table,
-                                attempt = attempt,
-                                delay_ms = delay.as_millis(),
-                                error = %e,
-                                "Transient error, backing off"
-                            );
-                            sleep(delay).await;
-                            last_error = Some(ch_err);
-                            continue;
-                        }
-                        error!(
-                            table = %table,
-                            attempts = self.max_retries + 1,
-                            error = %e,
-                            "Max retries exhausted for transient error"
-                        );
-                        last_error = Some(ch_err);
-                    }
-                    ErrorCategory::Data => {
-                        debug!(table = %table, error = %e, "Data error, returning for salvage");
-                        return Err(crate::Error::ClickHousePermanent(ch_err.to_string()));
-                    }
-                    ErrorCategory::Fatal => {
-                        error!(table = %table, error = %e, "Fatal error, not retrying");
-                        return Err(ch_err.into());
-                    }
-                }
-                continue;
-            }
+            let Err(e) = outcome else {
+                debug!(
+                    table = %table,
+                    rows = rows.len(),
+                    duration_ms = insert_start.elapsed().as_millis(),
+                    "Insert completed"
+                );
+                return Ok(rows.len());
+            };
 
-            // send() succeeded, now end the insert
-            match insert.end().await {
-                Ok(()) => {
+            let message = format!("JSONEachRow insert: {e}");
+            match classify_json_insert_error(&e) {
+                ErrorCategory::Data => {
                     debug!(
                         table = %table,
-                        rows = rows.len(),
-                        duration_ms = insert_start.elapsed().as_millis(),
-                        "Insert completed"
+                        error = %e,
+                        "Server rejected the payload, returning for salvage"
                     );
-                    return Ok(rows.len());
+                    return Err(crate::Error::ClickHousePermanent(message));
                 }
-                Err(e) => {
-                    let ch_err = ClickHouseError::Insert(format!("{e}"));
+                ErrorCategory::Fatal => {
+                    error!(table = %table, error = %e, "Fatal error, not retrying");
+                    return Err(crate::Error::ClickHouse(message));
+                }
+                ErrorCategory::Transient | ErrorCategory::Unknown => {
+                    last_error = Some(crate::Error::ClickHouse(message));
                     if attempt < self.max_retries {
                         let delay = self.backoff_delay(attempt);
-                        debug!(
+                        warn!(
                             table = %table,
-                            attempt = attempt,
+                            attempt,
                             delay_ms = delay.as_millis(),
                             error = %e,
-                            "Insert retry"
+                            "Transient error, backing off"
                         );
-                        warn!(table = %table, attempt, error = %e, "Insert end() failed, retrying");
                         sleep(delay).await;
-                        last_error = Some(ch_err);
                         continue;
                     }
-                    last_error = Some(ch_err);
+                    error!(
+                        table = %table,
+                        attempts = self.max_retries + 1,
+                        error = %e,
+                        "Max retries exhausted for transient error"
+                    );
                 }
             }
         }
 
-        Err(match last_error {
-            Some(e) => e.into(),
-            None => crate::Error::Buffer("Max retries exceeded".into()),
-        })
+        Err(last_error.unwrap_or_else(|| crate::Error::Buffer("Max retries exceeded".into())))
     }
 
     /// Insert a `FlushBatch` with error-aware retry and salvage.
