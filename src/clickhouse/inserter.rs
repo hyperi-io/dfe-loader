@@ -411,7 +411,11 @@ impl Inserter {
                         write_failed = true;
                         break;
                     }
-                    return Err(crate::Error::ClickHouse(format!("RowBinary encode: {e}")));
+                    // A value that will not encode for this column encodes no
+                    // better on the next delivery, so it must not be retried.
+                    return Err(crate::Error::ClickHousePermanent(format!(
+                        "RowBinary encode: {e}"
+                    )));
                 }
             }
 
@@ -484,7 +488,13 @@ impl Inserter {
                             "Data error suggests schema drift, invalidated loader schema cache"
                         );
                     }
-                    return Err(crate::Error::ClickHouse(format!("RowBinary insert: {e}")));
+                    let message = format!("RowBinary insert: {e}");
+                    // A data-class rejection is deterministic for this payload;
+                    // anything else may clear on a retry.
+                    if ClickHouseError::Insert(message.clone()).is_data_error() {
+                        return Err(crate::Error::ClickHousePermanent(message));
+                    }
+                    return Err(crate::Error::ClickHouse(message));
                 }
             }
         }
@@ -523,7 +533,7 @@ impl Inserter {
         if raw_payloads.is_empty() {
             for row in rows {
                 sonic_rs::to_writer(&mut body, row).map_err(|e| {
-                    crate::Error::ClickHouse(format!("JSON serialisation error: {e}"))
+                    crate::Error::ClickHousePermanent(format!("JSON serialisation error: {e}"))
                 })?;
                 body.push(b'\n');
             }
@@ -532,7 +542,7 @@ impl Inserter {
                 if raw.is_empty() {
                     // Transformer-path row: _json already in the map (or absent).
                     sonic_rs::to_writer(&mut body, row).map_err(|e| {
-                        crate::Error::ClickHouse(format!("JSON serialisation error: {e}"))
+                        crate::Error::ClickHousePermanent(format!("JSON serialisation error: {e}"))
                     })?;
                     body.push(b'\n');
                 } else {
@@ -595,7 +605,7 @@ impl Inserter {
                     }
                     ErrorCategory::Data => {
                         debug!(table = %table, error = %e, "Data error, returning for salvage");
-                        return Err(ch_err.into());
+                        return Err(crate::Error::ClickHousePermanent(ch_err.to_string()));
                     }
                     ErrorCategory::Fatal => {
                         error!(table = %table, error = %e, "Fatal error, not retrying");
@@ -667,13 +677,15 @@ impl Inserter {
                 return InsertResult::success(count);
             }
             Err(e) => {
-                let is_data_error = matches!(
-                    e,
-                    crate::Error::ClickHouse(ref msg) if {
-                        let ch_err = crate::clickhouse::ClickHouseError::Insert(msg.clone());
-                        ch_err.is_data_error()
-                    }
-                ) || e.to_string().to_lowercase().contains("type mismatch")
+                let is_data_error = matches!(e, crate::Error::ClickHousePermanent(_))
+                    || matches!(
+                        e,
+                        crate::Error::ClickHouse(ref msg) if {
+                            let ch_err = crate::clickhouse::ClickHouseError::Insert(msg.clone());
+                            ch_err.is_data_error()
+                        }
+                    )
+                    || e.to_string().to_lowercase().contains("type mismatch")
                     || e.to_string().to_lowercase().contains("incorrect data")
                     || e.to_string().to_lowercase().contains("cannot parse");
 
@@ -967,8 +979,9 @@ fn write_row_with_json(body: &mut Vec<u8>, row: &Map<String, Value>, raw: &[u8])
         body.extend_from_slice(raw);
         body.push(b'}');
     } else {
-        sonic_rs::to_writer(&mut *body, row)
-            .map_err(|e| crate::Error::ClickHouse(format!("JSON serialisation error: {e}")))?;
+        sonic_rs::to_writer(&mut *body, row).map_err(|e| {
+            crate::Error::ClickHousePermanent(format!("JSON serialisation error: {e}"))
+        })?;
         let last = body.len() - 1;
         debug_assert_eq!(body[last], b'}', "sonic_rs must produce a closing brace");
         body[last] = b',';

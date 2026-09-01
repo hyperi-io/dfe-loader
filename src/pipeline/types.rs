@@ -25,6 +25,21 @@ pub struct ProcessedMessage {
     pub kafka_offset: KafkaOffset,
 }
 
+/// Outcome of one schema-resolution attempt for a table.
+///
+/// The two failure arms must stay apart: an absent table falls back to the
+/// default table, while an unreachable ClickHouse keeps buffering and retrying.
+/// Collapsing them would dump every source's events into the default table
+/// during an outage.
+pub enum SchemaResolution {
+    /// Schema fetched.
+    Resolved(crate::clickhouse::TableSchema),
+    /// The table does not exist — the query answered, with no columns.
+    TableNotFound,
+    /// The fetch failed; whether the table exists is unknown.
+    Unavailable,
+}
+
 /// Result of async per-table schema resolution.
 ///
 /// Fetched by a background resolver task. Applied to per-table caches
@@ -35,8 +50,9 @@ pub struct TableResolutionResult {
     pub table: String,
     /// Table-level COMMENT string (for DDL capture tags).
     pub comment: String,
-    /// Full schema from `system.columns` (for field mapping + `SharedSchemaCache`).
-    pub schema: Option<crate::clickhouse::TableSchema>,
+    /// Schema from `system.columns` (for field mapping + `SharedSchemaCache`),
+    /// or why it could not be fetched.
+    pub schema: SchemaResolution,
     /// Parsed per-column directives (skip/default/renamed/computed/coerce).
     pub column_directives: rustc_hash::FxHashMap<String, crate::column_meta::ColumnDirectives>,
 }

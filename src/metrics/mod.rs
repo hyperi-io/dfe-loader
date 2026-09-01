@@ -301,6 +301,26 @@ impl Metrics {
         metrics::counter!("dfe_loader_pending_schema_expired_total").increment(1);
     }
 
+    /// Record a row DLQ'd because ClickHouse rejected it deterministically and
+    /// retrying it would wedge the partition.
+    pub fn record_permanent_reject(&self, table: &str) {
+        metrics::counter!(
+            "dfe_loader_permanent_reject_total",
+            "table" => table.to_string()
+        )
+        .increment(1);
+    }
+
+    /// Record a message re-routed to the default table because ClickHouse
+    /// confirmed its destination table does not exist.
+    pub fn record_unknown_table_fallback(&self, table: &str) {
+        metrics::counter!(
+            "dfe_loader_unknown_table_fallback_total",
+            "table" => table.to_string()
+        )
+        .increment(1);
+    }
+
     /// Update the gauge of messages currently held in the pending-schema buffer.
     pub fn update_pending_schema_messages(&self, n: usize) {
         metrics::gauge!("dfe_loader_pending_schema_messages").set(n as f64);

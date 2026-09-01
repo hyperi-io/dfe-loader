@@ -29,7 +29,8 @@ use scalo::memory::{MemoryGuard, MemoryGuardConfig};
 use crate::Result;
 use crate::buffer::{BufferManager, FlushBatch, KafkaOffset};
 use crate::clickhouse::{
-    ClickHouseQueryClient, Inserter, InserterConfig, SchemaCache, SharedSchemaCache,
+    ClickHouseError, ClickHouseQueryClient, Inserter, InserterConfig, SchemaCache,
+    SharedSchemaCache,
 };
 use crate::column_meta::{ColumnMetaCache, parse_directives};
 use crate::config::{Config, SharedConfig};
@@ -57,7 +58,7 @@ pub struct PipelineStats {
 
 use super::capture::CaptureOverrides;
 use super::enrichment::EnrichmentPipeline;
-use super::types::TableResolutionResult;
+use super::types::{SchemaResolution, TableResolutionResult};
 
 /// Orchestrates the Kafka → `ClickHouse` pipeline
 pub struct Orchestrator {
@@ -350,10 +351,23 @@ impl Orchestrator {
                                     .into_iter()
                                     .map(|(col, comment)| (col, parse_directives(&comment)))
                                     .collect();
+                                // Keep the reason: the event loop can only fall
+                                // back to the default table safely if it can tell
+                                // an absent table from an unreachable ClickHouse.
+                                let schema = match schema_res {
+                                    Ok(s) => SchemaResolution::Resolved(s),
+                                    Err(ClickHouseError::TableNotFound(_)) => {
+                                        SchemaResolution::TableNotFound
+                                    }
+                                    Err(e) => {
+                                        debug!(table = %table, error = %e, "Schema fetch failed, will retry");
+                                        SchemaResolution::Unavailable
+                                    }
+                                };
                                 let _ = tx.send(TableResolutionResult {
                                     table,
                                     comment: comment_res.unwrap_or_default(),
-                                    schema: schema_res.ok(),
+                                    schema,
                                     column_directives,
                                 }).await;
                             });
@@ -389,6 +403,14 @@ impl Orchestrator {
         // Drained when the background resolver populates the schema (later task).
         let mut pending_schema_buffer = super::pending_schema::PendingSchemaBuffer::new(
             super::pending_schema::PendingSchemaConfig::from_schema_config(&self.config.schema),
+        );
+
+        // Tables ClickHouse has confirmed absent. The processor re-routes their
+        // messages to the default table; a failed fetch never lands here.
+        let mut absent_tables: FxHashSet<String> = FxHashSet::default();
+        let default_table = format!(
+            "{}.{}",
+            self.config.routing.default_db, self.config.routing.default_table
         );
 
         // Per-table capture overrides (_json/_raw disable via config + DDL tags)
@@ -622,7 +644,7 @@ impl Orchestrator {
                     // Check for buffers ready to flush
                     let batches = buffer_manager.get_ready_for_flush();
                     if !batches.is_empty() {
-                        self.flush_batches_transport(&inserter, &transport, batches).await;
+                        self.flush_batches_transport(&inserter, &transport, &dlq_tx, dlq.is_some(), batches).await;
                     }
                 }
 
@@ -646,19 +668,53 @@ impl Orchestrator {
                     // and computed column caches, which read from it.
                     col_meta_cache.apply_ddl(table, result.column_directives);
 
-                    // Apply field mapping (needs schema; uses ColumnMetaCache for rename rules)
-                    if let Some(ref mut fm) = field_mapping_cache
-                        && let Some(ref schema) = result.schema {
-                            fm.build_and_cache(table, schema, &col_meta_cache);
-                            debug!(table = %table, "Applied field mapping from background resolver");
-                        }
-
                     // Apply computed columns (uses ColumnMetaCache for CEL expressions)
                     computed_column_cache.build_and_cache(table, &col_meta_cache);
 
-                    // Populate SchemaCache for HeaderExtractor (Change A)
-                    if let Some(schema) = result.schema {
-                        schema_cache.insert(table.clone(), schema);
+                    match result.schema {
+                        SchemaResolution::Resolved(schema) => {
+                            // Apply field mapping (needs schema; uses ColumnMetaCache for rename rules)
+                            if let Some(ref mut fm) = field_mapping_cache {
+                                fm.build_and_cache(table, &schema, &col_meta_cache);
+                                debug!(table = %table, "Applied field mapping from background resolver");
+                            }
+                            // Populate SchemaCache for HeaderExtractor (Change A)
+                            schema_cache.insert(table.clone(), schema);
+                        }
+                        SchemaResolution::TableNotFound => {
+                            // An unknown source is a routing miss, so its events
+                            // fall back to the default table rather than ageing
+                            // out to the DLQ.
+                            if absent_tables.insert(table.clone()) {
+                                warn!(
+                                    table = %table,
+                                    default_table = %default_table,
+                                    "Destination table does not exist, falling back to the default table"
+                                );
+                            }
+                            let n = pending_schema_buffer.len_per_table(table);
+                            if n > 0 {
+                                static ABSENT_TABLE_TS: std::sync::atomic::AtomicU64 =
+                                    std::sync::atomic::AtomicU64::new(0);
+                                if scalo::logger::log_debounced(&ABSENT_TABLE_TS, 60_000) {
+                                    warn!(
+                                        table = %table,
+                                        pending = n,
+                                        "Re-routing pending messages for an unknown table (max 1 per 60s)"
+                                    );
+                                }
+                            }
+                            if let Some(ref m) = self.metrics {
+                                for _ in 0..n {
+                                    m.record_unknown_table_fallback(table);
+                                }
+                            }
+                        }
+                        SchemaResolution::Unavailable => {
+                            // Keep buffering: the per-tick re-request loop retries
+                            // until ClickHouse answers, or the age cap DLQs.
+                            debug!(table = %table, "Schema unresolved, still buffering");
+                        }
                     }
                 }
 
@@ -755,7 +811,8 @@ impl Orchestrator {
                                     m.record_received();
                                 }
                             }
-                            let ready = pending_schema_buffer.take_ready(&schema_cache);
+                            let ready = pending_schema_buffer
+                                .take_ready(&schema_cache, &absent_tables);
                             if ready.is_empty() {
                                 Ok(fresh)
                             } else {
@@ -862,6 +919,8 @@ impl Orchestrator {
                                 field_mapping_cache: field_mapping_cache.as_ref(),
                                 computed_column_cache: &computed_column_cache,
                                 capture_overrides: &capture_overrides,
+                                absent_tables: &absent_tables,
+                                default_table: &default_table,
                             };
 
                             // Process batch — engine pool preferred, then worker pool,
@@ -1023,7 +1082,7 @@ impl Orchestrator {
                             // nothing is ready — no separate should_flush() guard needed
                             let batches = buffer_manager.get_ready_for_flush();
                             if !batches.is_empty() {
-                                self.flush_batches_transport(&inserter, &transport, batches).await;
+                                self.flush_batches_transport(&inserter, &transport, &dlq_tx, dlq.is_some(), batches).await;
                             }
                         }
                         Ok(_) => {
@@ -1048,8 +1107,14 @@ impl Orchestrator {
         let final_batches = buffer_manager.flush_all();
         if !final_batches.is_empty() {
             info!(batches = final_batches.len(), "Flushing remaining buffers");
-            self.flush_batches_transport(&inserter, &transport, final_batches)
-                .await;
+            self.flush_batches_transport(
+                &inserter,
+                &transport,
+                &dlq_tx,
+                dlq.is_some(),
+                final_batches,
+            )
+            .await;
         }
 
         // Stop schema cache background refresh task.
@@ -1079,6 +1144,8 @@ impl Orchestrator {
         &mut self,
         inserter: &Inserter,
         transport: &TransportBackend,
+        dlq_tx: &mpsc::Sender<DlqEntry>,
+        dlq_enabled: bool,
         batches: Vec<FlushBatch>,
     ) {
         use std::time::Instant;
@@ -1092,6 +1159,8 @@ impl Orchestrator {
         // A failure in Table A must not block offset commit for Table B (correctness fix).
         let mut per_batch_offsets: Vec<Vec<KafkaOffset>> = Vec::with_capacity(batches.len());
         let mut per_batch_bytes: Vec<u64> = Vec::with_capacity(batches.len());
+        let mut per_batch_tables: Vec<String> = Vec::with_capacity(batches.len());
+        let mut per_batch_payloads: Vec<Vec<Arc<[u8]>>> = Vec::with_capacity(batches.len());
         let batches_for_insert: Vec<FlushBatch> = batches
             .into_iter()
             .map(|mut b| {
@@ -1099,6 +1168,10 @@ impl Orchestrator {
                 // Track original payload bytes for memory guard release
                 let batch_bytes: u64 = b.raw_payloads.iter().map(|p| p.len() as u64).sum();
                 per_batch_bytes.push(batch_bytes);
+                per_batch_tables.push(b.table.to_string());
+                // Refcount clones only, so a permanently rejected batch can still
+                // reach the DLQ without copying any payload.
+                per_batch_payloads.push(b.raw_payloads.clone());
                 b
             })
             .collect();
@@ -1130,10 +1203,12 @@ impl Orchestrator {
         let mut cycle_err = 0usize;
 
         // Commit offsets independently per batch — Table A success/failure is isolated
-        for ((result, offsets), batch_bytes) in results
+        for ((((result, offsets), batch_bytes), table), payloads) in results
             .into_iter()
             .zip(per_batch_offsets)
             .zip(per_batch_bytes)
+            .zip(per_batch_tables)
+            .zip(per_batch_payloads)
         {
             // Release tracked memory regardless of insert outcome.
             // Success: data is in ClickHouse, memory freed.
@@ -1166,6 +1241,40 @@ impl Orchestrator {
                                 error!(error = %e, "Failed to commit Kafka offsets");
                             }
                         }
+                    }
+                }
+                Err(crate::Error::ClickHousePermanent(reason)) => {
+                    // The sink answered, so the circuit gate must not read this
+                    // cycle as a dead sink.
+                    cycle_ok += 1;
+                    self.stats.errors += 1;
+                    let dlq_n = route_rejected_batch_to_dlq(
+                        dlq_tx,
+                        dlq_enabled,
+                        &self.metrics,
+                        &table,
+                        &payloads,
+                        &offsets,
+                        &reason,
+                    );
+                    self.stats.messages_dlq += dlq_n;
+                    error!(
+                        table = %table,
+                        rows = payloads.len(),
+                        dlq = dlq_n,
+                        error = %reason,
+                        "Batch permanently rejected — DLQ'd and offsets committed"
+                    );
+                    if let Some(ref m) = self.metrics {
+                        m.record_error();
+                        m.record_clickhouse_insert_error();
+                    }
+                    // Committing is what breaks the livelock: withholding here
+                    // re-delivers a batch that can never encode.
+                    if !offsets.is_empty()
+                        && let Err(e) = transport.commit(&offsets).await
+                    {
+                        error!(error = %e, "Failed to commit Kafka offsets after permanent rejection");
                     }
                 }
                 Err(e) => {
@@ -1501,6 +1610,62 @@ fn pending_reason_label(reason: &super::pending_schema::ExpireReason) -> &'stati
     }
 }
 
+/// Route a permanently rejected flush batch to the DLQ, one entry per row.
+///
+/// Returns the number of entries accepted by the DLQ channel. A batch with no
+/// raw payloads (capture mode `extracted_only`) still emits one entry naming the
+/// table, so the loss is surfaced rather than silent.
+fn route_rejected_batch_to_dlq(
+    dlq_tx: &mpsc::Sender<DlqEntry>,
+    dlq_enabled: bool,
+    metrics: &Option<Metrics>,
+    table: &str,
+    payloads: &[Arc<[u8]>],
+    offsets: &[KafkaOffset],
+    reason: &str,
+) -> u64 {
+    let reason = format!("clickhouse_permanent_reject table={table}: {reason}");
+    scalo::logger::security::record_dlq("clickhouse_permanent_reject", &reason, Some(table));
+
+    let mut sent = 0u64;
+    if payloads.iter().all(|p| p.is_empty()) {
+        if dlq_enabled
+            && dlq_tx
+                .try_send(DlqEntry::new("loader", reason, Vec::new()))
+                .is_ok()
+        {
+            sent += 1;
+        }
+        if let Some(m) = metrics {
+            m.record_dlq();
+            m.record_permanent_reject(table);
+        }
+        return sent;
+    }
+
+    for (i, payload) in payloads.iter().enumerate() {
+        if let Some(m) = metrics {
+            m.record_dlq();
+            m.record_permanent_reject(table);
+        }
+        if !dlq_enabled {
+            continue;
+        }
+        let mut entry = DlqEntry::new("loader", reason.clone(), payload.to_vec());
+        if let Some(offset) = offsets.get(i) {
+            entry = entry.with_source(scalo::dlq::DlqSource::kafka(
+                &*offset.topic,
+                offset.partition,
+                offset.offset,
+            ));
+        }
+        if dlq_tx.try_send(entry).is_ok() {
+            sent += 1;
+        }
+    }
+    sent
+}
+
 /// Route a pending-schema message to the DLQ (with a security event) and
 /// release its tracked memory. Used by the per-tick expire sweep and the
 /// shutdown drain — these messages never received a schema, so the loss is
@@ -1575,6 +1740,76 @@ mod tests {
         let updated = shared.read();
         assert_eq!(updated.buffer.flush_rows, 99999);
         assert_eq!(shared.version(), 1);
+    }
+
+    #[test]
+    fn rejected_batch_dlqs_every_row_with_the_reason() {
+        let (dlq_tx, mut dlq_rx) = mpsc::channel::<DlqEntry>(8);
+        let payloads: Vec<Arc<[u8]>> = vec![
+            Arc::from(&b"{\"tags\":[\"a\"]}"[..]),
+            Arc::from(&b"{\"tags\":[\"b\"]}"[..]),
+        ];
+        let offsets = vec![
+            KafkaOffset {
+                topic: Arc::from("dfe-events"),
+                partition: 0,
+                offset: 10,
+            },
+            KafkaOffset {
+                topic: Arc::from("dfe-events"),
+                partition: 0,
+                offset: 11,
+            },
+        ];
+
+        let sent = route_rejected_batch_to_dlq(
+            &dlq_tx,
+            true,
+            &None,
+            "dfe.default",
+            &payloads,
+            &offsets,
+            "RowBinary insert: server error code 117: Cannot insert data into JSON column",
+        );
+
+        assert_eq!(sent, 2);
+        let entry = dlq_rx.try_recv().expect("first DLQ entry");
+        assert!(entry.reason.contains("clickhouse_permanent_reject"));
+        assert!(entry.reason.contains("dfe.default"));
+        assert!(entry.reason.contains("code 117"));
+        assert_eq!(entry.payload, b"{\"tags\":[\"a\"]}");
+        assert!(dlq_rx.try_recv().is_ok());
+        assert!(dlq_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn rejected_batch_without_raw_payloads_still_surfaces_one_entry() {
+        let (dlq_tx, mut dlq_rx) = mpsc::channel::<DlqEntry>(8);
+        let payloads: Vec<Arc<[u8]>> = vec![Arc::from(&[][..]), Arc::from(&[][..])];
+
+        let sent = route_rejected_batch_to_dlq(
+            &dlq_tx,
+            true,
+            &None,
+            "dfe.default",
+            &payloads,
+            &[],
+            "boom",
+        );
+
+        assert_eq!(sent, 1, "the loss is surfaced, never silent");
+        let entry = dlq_rx.try_recv().expect("DLQ entry");
+        assert!(entry.reason.contains("clickhouse_permanent_reject"));
+    }
+
+    #[test]
+    fn permanent_reject_is_a_distinct_error_from_a_transient_one() {
+        // The flush path branches on this: permanent DLQs and commits,
+        // transient withholds offsets so Kafka re-delivers.
+        let permanent = crate::Error::ClickHousePermanent("code 117".into());
+        let transient = crate::Error::ClickHouse("connection reset".into());
+        assert!(matches!(permanent, crate::Error::ClickHousePermanent(_)));
+        assert!(!matches!(transient, crate::Error::ClickHousePermanent(_)));
     }
 
     #[tokio::test]

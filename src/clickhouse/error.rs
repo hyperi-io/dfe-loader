@@ -39,9 +39,16 @@ pub enum ClickHouseError {
     #[error("insert error: {0}")]
     Insert(String),
 
-    /// Schema introspection error.
+    /// Schema introspection error — the query itself failed, so whether the
+    /// table exists is unknown.
     #[error("schema error: {0}")]
     Schema(String),
+
+    /// The table is genuinely absent: the introspection query succeeded and
+    /// returned no columns. Callers must not conflate this with `Schema`, which
+    /// a transient outage also produces.
+    #[error("table not found: {0}")]
+    TableNotFound(String),
 
     /// Type conversion error.
     #[error("type conversion error: {0}")]
@@ -70,7 +77,9 @@ impl ClickHouseError {
     pub fn category(&self) -> ErrorCategory {
         match self {
             ClickHouseError::Connection(_) => ErrorCategory::Transient,
-            ClickHouseError::Query(_) | ClickHouseError::Schema(_) => ErrorCategory::Fatal,
+            ClickHouseError::Query(_)
+            | ClickHouseError::Schema(_)
+            | ClickHouseError::TableNotFound(_) => ErrorCategory::Fatal,
             ClickHouseError::TypeConversion(_) => ErrorCategory::Data,
             ClickHouseError::Insert(msg) => classify_from_message(msg),
         }
@@ -139,9 +148,15 @@ fn classify_from_message(msg: &str) -> ErrorCategory {
         return ErrorCategory::Transient;
     }
 
-    // Data error patterns
+    // Data error patterns. ClickHouse error code 117 is INCORRECT_DATA and the
+    // JSON-column rejections below are deterministic for a given payload, so
+    // they must never be retried.
     if msg_lower.contains("type mismatch")
         || msg_lower.contains("incorrect data")
+        || msg_lower.contains("code: 117")
+        || msg_lower.contains("code 117")
+        || msg_lower.contains("cannot insert data into json column")
+        || msg_lower.contains("cannot read json object")
         || msg_lower.contains("corrupt")
         || msg_lower.contains("out of range")
         || msg_lower.contains("cannot parse")
@@ -187,6 +202,40 @@ mod tests {
         let err = ClickHouseError::Query("syntax error".into());
         assert!(err.is_fatal());
         assert!(!err.is_transient());
+    }
+
+    #[test]
+    fn test_table_not_found_is_distinct_from_schema() {
+        // The two must never collapse: a failed query says nothing about
+        // whether the table exists.
+        let absent = ClickHouseError::TableNotFound("dfe.acme_widgets".into());
+        let failed = ClickHouseError::Schema("Failed to fetch schema: connection reset".into());
+
+        assert!(matches!(absent, ClickHouseError::TableNotFound(_)));
+        assert!(!matches!(failed, ClickHouseError::TableNotFound(_)));
+        assert!(absent.to_string().contains("dfe.acme_widgets"));
+        assert!(absent.is_fatal());
+        assert!(failed.is_fatal());
+    }
+
+    #[test]
+    fn test_json_column_rejection_is_a_data_error() {
+        // ClickHouse code 117 on a JSON column is deterministic for the payload,
+        // so it must never be retried.
+        let err = ClickHouseError::Insert(
+            "server error code 117: Cannot insert data into JSON column: \
+             Cannot read JSON object from JSON element"
+                .into(),
+        );
+        assert!(err.is_data_error());
+        assert!(!err.is_transient());
+    }
+
+    #[test]
+    fn test_connection_reset_stays_transient() {
+        let err = ClickHouseError::Insert("connection reset by peer".into());
+        assert!(err.is_transient());
+        assert!(!err.is_data_error());
     }
 
     #[test]

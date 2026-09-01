@@ -12,9 +12,13 @@
 //! |--------------------|---------------|------------------------------------------------|
 //! | `@skip`            | `skip: true`  | Omit column from insert entirely               |
 //! | `@default:value`   | `default:`    | Substitute when column is null or absent       |
+//! | `@source:path`     | `renamed:`    | Source field path(s), with optional `\| fallback` |
 //! | `@renamed:path`    | `renamed:`    | Source field path(s) for this column           |
 //! | `@computed:expr`   | `computed:`   | CEL expression producing this column's value   |
 //! | `@coerce:category` | `coerce:`     | Override type category for coercion            |
+//!
+//! `@source` is the vocabulary dfe-schemas emits; `@renamed` is the equivalent
+//! hand-written form. Both resolve to the same `renamed` source-path list.
 //!
 //! **Resolution order (highest → lowest priority):**
 //! 1. Config `column_directives.tables."db.table"."col"` — per-table per-column
@@ -265,8 +269,9 @@ impl ColumnMetaCache {
 
 /// Parse all column COMMENT directives into a `ColumnDirectives`.
 ///
-/// Handles `@skip`, `@default:value`, `@renamed:path`, `@computed:expr`, `@coerce:type`.
-/// Multiple directives in one comment are space-separated.
+/// Handles `@skip`, `@default:value`, `@source:path`, `@renamed:path`,
+/// `@computed:expr`, `@coerce:type`. Multiple directives in one comment are
+/// space-separated.
 ///
 /// # Examples
 ///
@@ -282,6 +287,11 @@ impl ColumnMetaCache {
 ///
 /// let d = parse_directives("@renamed:first(src_ip/srcip/source_ip)");
 /// assert_eq!(d.renamed, vec!["src_ip", "srcip", "source_ip"]);
+///
+/// // @source is the dfe-schemas form, and the DDL generator appends the
+/// // human description after " - ".
+/// let d = parse_directives("@source: host.name - Host the event came from");
+/// assert_eq!(d.renamed, vec!["host.name"]);
 /// ```
 pub fn parse_directives(comment: &str) -> ColumnDirectives {
     let mut d = ColumnDirectives::default();
@@ -321,7 +331,24 @@ pub fn parse_directives(comment: &str) -> ColumnDirectives {
             "renamed" if has_colon => {
                 pos += 1;
                 let val = read_until_next_directive(comment, &mut pos);
-                d.renamed = parse_renamed_value(val);
+                d.renamed = parse_renamed_value(strip_path_description(val));
+            }
+            "source" if has_colon => {
+                pos += 1;
+                let val = strip_path_description(read_until_next_directive(comment, &mut pos));
+                // `@source: path | fallback` fills the column when every source
+                // path is absent -- exactly what `default` already does, so the
+                // fallback lands there rather than growing a second mechanism.
+                let (path, fallback) = match val.split_once('|') {
+                    Some((p, f)) => (p.trim(), Some(f.trim())),
+                    None => (val, None),
+                };
+                d.renamed = parse_renamed_value(path);
+                if d.default.is_none()
+                    && let Some(fallback) = fallback
+                {
+                    d.default = parse_scalar_value(fallback);
+                }
             }
             "computed" if has_colon => {
                 pos += 1;
@@ -342,6 +369,41 @@ pub fn parse_directives(comment: &str) -> ColumnDirectives {
     }
 
     d
+}
+
+/// Directive names the parser recognises.
+///
+/// A `@` only starts a directive when the word after it is one of these. ECS
+/// puts its most important field at `@timestamp`, which collides with the
+/// directive sigil -- `@source: @timestamp` must read the field, not stop dead.
+const DIRECTIVE_NAMES: [&[u8]; 6] = [
+    b"skip",
+    b"default",
+    b"source",
+    b"renamed",
+    b"computed",
+    b"coerce",
+];
+
+/// Whether the `@` at byte index `at` begins a known directive.
+fn is_directive_start(bytes: &[u8], at: usize) -> bool {
+    let start = at + 1;
+    let mut end = start;
+    while end < bytes.len() && bytes[end] != b':' && !bytes[end].is_ascii_whitespace() {
+        end += 1;
+    }
+    DIRECTIVE_NAMES.contains(&&bytes[start..end])
+}
+
+/// Trim the human description the DDL generator appends to a directive.
+///
+/// Column COMMENTs are emitted as `<directive> - <description>`, and a source
+/// field path never contains a space-hyphen-space, so the first one ends the path.
+fn strip_path_description(s: &str) -> &str {
+    match s.find(" - ") {
+        Some(i) => s[..i].trim_end(),
+        None => s,
+    }
 }
 
 /// Read from `pos` until whitespace+`@` or end of string. Returns trimmed slice.
@@ -373,7 +435,7 @@ fn read_until_next_directive<'a>(s: &'a str, pos: &mut usize) -> &'a str {
             while j < bytes.len() && bytes[j].is_ascii_whitespace() {
                 j += 1;
             }
-            if j < bytes.len() && bytes[j] == b'@' {
+            if j < bytes.len() && bytes[j] == b'@' && is_directive_start(bytes, j) {
                 let end = strip_trailing_separators(bytes, start, i);
                 *pos = j;
                 return s[start..end].trim();
@@ -475,6 +537,102 @@ mod tests {
     fn test_parse_renamed_first() {
         let d = parse_directives("@renamed:first(src_ip/srcip/source_ip)");
         assert_eq!(d.renamed, vec!["src_ip", "srcip", "source_ip"]);
+    }
+
+    // ========================================================================
+    // @source — the vocabulary dfe-schemas emits
+    // ========================================================================
+
+    #[test]
+    fn test_parse_source_simple() {
+        let d = parse_directives("@source: message");
+        assert_eq!(d.renamed, vec!["message"]);
+    }
+
+    #[test]
+    fn test_parse_source_dotted_path() {
+        let d = parse_directives("@source: log.file.path");
+        assert_eq!(d.renamed, vec!["log.file.path"]);
+    }
+
+    #[test]
+    fn test_parse_source_first_list() {
+        let d = parse_directives("@source: first(timestamp/timeUnixNano)");
+        assert_eq!(d.renamed, vec!["timestamp", "timeUnixNano"]);
+    }
+
+    #[test]
+    fn test_parse_source_fallback_becomes_default() {
+        let d = parse_directives("@source: timestamp | now()");
+        assert_eq!(d.renamed, vec!["timestamp"]);
+        assert_eq!(d.default, Some(Value::String("now()".into())));
+    }
+
+    #[test]
+    fn test_parse_source_custom_fallback() {
+        let d = parse_directives("@source: status | unknown");
+        assert_eq!(d.renamed, vec!["status"]);
+        assert_eq!(d.default, Some(Value::String("unknown".into())));
+    }
+
+    #[test]
+    fn test_parse_source_at_timestamp_field() {
+        // ECS puts its most important field at @timestamp, which collides with
+        // the directive sigil.
+        let d = parse_directives("@source: @timestamp");
+        assert_eq!(d.renamed, vec!["@timestamp"]);
+    }
+
+    #[test]
+    fn test_parse_source_at_timestamp_with_ddl_description() {
+        // The exact COMMENT the engine emits for dfe-schemas filebeat.timestamp.
+        let d = parse_directives("@source: @timestamp - Event timestamp (ECS @timestamp)");
+        assert_eq!(d.renamed, vec!["@timestamp"]);
+    }
+
+    #[test]
+    fn test_parse_source_at_timestamp_inside_first_list() {
+        let d = parse_directives("@source: first(timestamp/@timestamp/time)");
+        assert_eq!(d.renamed, vec!["timestamp", "@timestamp", "time"]);
+    }
+
+    #[test]
+    fn test_parse_source_strips_ddl_description() {
+        let d = parse_directives("@source: host.name - Host the event was collected from");
+        assert_eq!(d.renamed, vec!["host.name"]);
+    }
+
+    #[test]
+    fn test_parse_source_path_may_contain_spaces() {
+        let d = parse_directives("@source: Report Refresh Date - Reporting date");
+        assert_eq!(d.renamed, vec!["Report Refresh Date"]);
+    }
+
+    #[test]
+    fn test_parse_source_alongside_another_directive() {
+        let d = parse_directives("@source: agent.type @coerce:LowCardinality");
+        assert_eq!(d.renamed, vec!["agent.type"]);
+        assert_eq!(d.coerce.as_deref(), Some("LowCardinality"));
+    }
+
+    #[test]
+    fn test_parse_source_explicit_default_wins_over_fallback() {
+        let d = parse_directives("@default:zero @source: value | fallback");
+        assert_eq!(d.default, Some(Value::String("zero".into())));
+        assert_eq!(d.renamed, vec!["value"]);
+    }
+
+    #[test]
+    fn test_parse_renamed_strips_ddl_description() {
+        let d = parse_directives("@renamed: src_ip - Source address");
+        assert_eq!(d.renamed, vec!["src_ip"]);
+    }
+
+    #[test]
+    fn test_unknown_at_word_is_not_a_directive_boundary() {
+        assert!(!is_directive_start(b"@timestamp", 0));
+        assert!(is_directive_start(b"@source: x", 0));
+        assert!(is_directive_start(b"@skip", 0));
     }
 
     #[test]

@@ -16,7 +16,7 @@
 //!
 //! ## What this does NOT do
 //!
-//! - No flattening — only top-level field extraction per schema column
+//! - No flattening — a dotted source path is walked in place, never materialised
 //! - No `_json` injection — that is spliced zero-copy at serialisation time
 //! - No coercion — `DeltaCoercer` runs on the returned map after extraction
 //!
@@ -28,8 +28,10 @@
 //! | `_json` | Skipped — zero-copy splice at serialisation time |
 //! | `_timestamp_received` | Always set to current UTC time |
 //! | `@skip` directive | Excluded from insert |
+//! | `@source:host.name` | Dotted path descends the parsed payload |
 //! | `@renamed:first(a/b/c)` | First-match source field lookup |
 //! | `@default:value` | Applied when all source fields are absent |
+//! | `@source:field \| now()` | Fallback resolved to the ingest timestamp |
 
 use chrono::Utc;
 use serde_json::{Map, Value};
@@ -155,7 +157,7 @@ impl HeaderExtractor {
 
             // Apply column default when all source fields were absent.
             if !found && let Some(ref default) = directives.default {
-                map.insert(name.clone(), default.clone());
+                map.insert(name.clone(), resolve_default(default, &now));
             }
         }
 
@@ -164,10 +166,48 @@ impl HeaderExtractor {
     }
 }
 
+/// Resolve a parsed `@default` / `@source` fallback against this extraction's clock.
+///
+/// `now()` is the one fallback that cannot be a parse-time constant, so it is
+/// carried through as a literal marker and resolved here, once per row.
+#[inline]
+fn resolve_default(default: &Value, now: &chrono::DateTime<Utc>) -> Value {
+    if default.as_str() == Some("now()") {
+        return Value::String(fmt_ts(now));
+    }
+    default.clone()
+}
+
+/// Remove a source field from the parsed object, descending a dotted path.
+///
+/// A flat key (and a payload already flattened to literal dotted keys) takes a
+/// single hash lookup; only a genuine miss on a dotted path walks the tree, so
+/// nested ECS payloads map without a flatten pass. Nothing is allocated either way.
+#[inline]
+fn remove_path(parsed: &mut Map<String, Value>, path: &str) -> Option<Value> {
+    if let Some(v) = parsed.remove(path) {
+        return Some(v);
+    }
+    if !path.contains('.') {
+        return None;
+    }
+
+    let mut parts = path.split('.');
+    let mut current = parsed.get_mut(parts.next()?)?;
+    let mut parts = parts.peekable();
+    while let Some(part) = parts.next() {
+        if parts.peek().is_none() {
+            return current.as_object_mut()?.remove(part);
+        }
+        current = current.as_object_mut()?.get_mut(part)?;
+    }
+    None
+}
+
 /// Move a source field from the parsed object into the output map (zero-clone).
 ///
-/// Uses `remove()` to take ownership of the Value — no allocation for the value
-/// itself. The key allocation (`dest.to_string()`) is unavoidable since
+/// Uses `remove_path()` to take ownership of the Value — no allocation for the
+/// value itself. The key allocation (`dest.to_string()`) is unavoidable since
 /// `Map<String, Value>` requires owned keys.
 #[inline]
 fn lookup_move(
@@ -176,7 +216,7 @@ fn lookup_move(
     dest: &str,
     map: &mut Map<String, Value>,
 ) -> bool {
-    if let Some(v) = parsed.remove(source) {
+    if let Some(v) = remove_path(parsed, source) {
         map.insert(dest.to_string(), v);
         true
     } else {
@@ -193,7 +233,7 @@ fn lookup_first_move(
     map: &mut Map<String, Value>,
 ) -> bool {
     for source in sources {
-        if let Some(v) = parsed.remove(source.as_str()) {
+        if let Some(v) = remove_path(parsed, source.as_str()) {
             map.insert(dest.to_string(), v);
             return true;
         }
@@ -463,6 +503,166 @@ mod tests {
         } else {
             panic!("_timestamp must be a string value");
         }
+    }
+
+    // ========================================================================
+    // Nested ECS payloads via @source dotted paths
+    // ========================================================================
+
+    /// The dfe-schemas filebeat meta schema, as the loader sees it after the
+    /// engine has joined each column's expr and comment into the DDL COMMENT.
+    fn filebeat_col_meta() -> ColumnMetaCache {
+        use crate::column_meta::parse_directives;
+        use rustc_hash::FxHashMap;
+
+        let comments = [
+            (
+                "timestamp",
+                "@source: @timestamp - Event timestamp (ECS @timestamp)",
+            ),
+            (
+                "host_name",
+                "@source: host.name - Host the event was collected from",
+            ),
+            ("agent_type", "@source: agent.type - Shipping agent type"),
+            (
+                "log_file_path",
+                "@source: log.file.path - Source file the line was read from",
+            ),
+            (
+                "source_ip",
+                "@source: source.ip - Source address (ECS source.ip)",
+            ),
+            (
+                "process_pid",
+                "@source: process.pid - Process ID (ECS process.pid)",
+            ),
+            ("message", "@source: message - Log line content"),
+        ];
+        let mut ddl = FxHashMap::default();
+        for (col, comment) in comments {
+            ddl.insert(col.to_string(), parse_directives(comment));
+        }
+        let cache = ColumnMetaCache::new(ColumnDirectivesConfig::default());
+        cache.apply_ddl("dfe.filebeat", ddl);
+        cache
+    }
+
+    const FILEBEAT_PAYLOAD: &[u8] = br#"{
+        "@timestamp": "2026-08-18T04:11:00.123Z",
+        "host": {"name": "web-01", "os": {"family": "debian"}},
+        "agent": {"type": "filebeat", "version": "8.17.0"},
+        "log": {"file": {"path": "/var/log/syslog"}},
+        "source": {"ip": "10.0.0.9"},
+        "process": {"name": "sshd", "pid": 4242},
+        "message": "Accepted password for derek",
+        "ecs": {"version": "8.11.0"}
+    }"#;
+
+    #[test]
+    fn test_nested_ecs_paths_populate_typed_columns() {
+        let extractor = default_extractor();
+        let schema = make_schema(&[
+            "timestamp",
+            "host_name",
+            "agent_type",
+            "log_file_path",
+            "message",
+        ]);
+        let col_meta = filebeat_col_meta();
+
+        let map = extractor.extract(FILEBEAT_PAYLOAD, "dfe.filebeat", &schema, &col_meta);
+
+        assert_eq!(
+            map.get("host_name"),
+            Some(&Value::String("web-01".into())),
+            "host.name must descend the nested payload"
+        );
+        assert_eq!(
+            map.get("agent_type"),
+            Some(&Value::String("filebeat".into())),
+            "agent.type must descend the nested payload"
+        );
+        assert_eq!(
+            map.get("log_file_path"),
+            Some(&Value::String("/var/log/syslog".into())),
+            "log.file.path must descend two levels"
+        );
+        assert_eq!(
+            map.get("timestamp"),
+            Some(&Value::String("2026-08-18T04:11:00.123Z".into())),
+            "@timestamp must survive the directive sigil"
+        );
+        assert_eq!(
+            map.get("message"),
+            Some(&Value::String("Accepted password for derek".into())),
+            "the flat column must keep working"
+        );
+    }
+
+    #[test]
+    fn test_nested_path_moves_non_string_leaf() {
+        let extractor = default_extractor();
+        let schema = make_schema(&["process_pid", "source_ip"]);
+        let col_meta = filebeat_col_meta();
+
+        let map = extractor.extract(FILEBEAT_PAYLOAD, "dfe.filebeat", &schema, &col_meta);
+        assert_eq!(map.get("process_pid"), Some(&serde_json::json!(4242)));
+        assert_eq!(
+            map.get("source_ip"),
+            Some(&Value::String("10.0.0.9".into()))
+        );
+    }
+
+    #[test]
+    fn test_dotted_path_misses_leave_column_absent() {
+        let extractor = default_extractor();
+        // "host" is a scalar here, so host.name cannot resolve.
+        let raw = br#"{"host": "web-01", "agent": {}}"#;
+        let schema = make_schema(&["host_name", "agent_type"]);
+        let col_meta = filebeat_col_meta();
+
+        let map = extractor.extract(raw, "dfe.filebeat", &schema, &col_meta);
+        assert!(!map.contains_key("host_name"));
+        assert!(!map.contains_key("agent_type"));
+    }
+
+    #[test]
+    fn test_literal_dotted_key_still_matches() {
+        // A payload already flattened upstream keeps working — the literal key
+        // is the fast path, tried before any descent.
+        let extractor = default_extractor();
+        let raw = br#"{"host.name": "web-02"}"#;
+        let schema = make_schema(&["host_name"]);
+        let col_meta = filebeat_col_meta();
+
+        let map = extractor.extract(raw, "dfe.filebeat", &schema, &col_meta);
+        assert_eq!(map.get("host_name"), Some(&Value::String("web-02".into())));
+    }
+
+    #[test]
+    fn test_source_now_fallback_resolves_to_ingest_time() {
+        use crate::column_meta::parse_directives;
+        use rustc_hash::FxHashMap;
+
+        let extractor = default_extractor();
+        let raw = br#"{"other": "data"}"#;
+        let schema = make_schema(&["event_time"]);
+
+        let col_meta = ColumnMetaCache::new(ColumnDirectivesConfig::default());
+        let mut ddl = FxHashMap::default();
+        ddl.insert(
+            "event_time".to_string(),
+            parse_directives("@source: timestamp | now()"),
+        );
+        col_meta.apply_ddl("dfe.events", ddl);
+
+        let map = extractor.extract(raw, "dfe.events", &schema, &col_meta);
+        let Some(Value::String(ts)) = map.get("event_time") else {
+            panic!("event_time must be a string timestamp");
+        };
+        assert_ne!(ts, "now()", "the now() marker must be resolved, not stored");
+        assert!(ts.starts_with("202"), "expected a current timestamp: {ts}");
     }
 
     #[test]

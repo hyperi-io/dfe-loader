@@ -16,7 +16,7 @@
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::clickhouse::SchemaCache;
 use crate::kafka::KafkaMessage;
@@ -144,16 +144,23 @@ impl PendingSchemaBuffer {
         }
     }
 
-    /// Drain messages whose table now has a cached schema.
+    /// Drain messages whose table now has a cached schema, or whose table
+    /// ClickHouse has confirmed absent.
     ///
+    /// An absent table's messages are released so the processor can re-route
+    /// them to the default table; holding them would only age them out to DLQ.
     /// Clears the per-table request timestamp so a later miss for the same
     /// table triggers a fresh resolution request.
-    pub fn take_ready(&mut self, schema_cache: &SchemaCache) -> Vec<KafkaMessage> {
+    pub fn take_ready(
+        &mut self,
+        schema_cache: &SchemaCache,
+        absent: &FxHashSet<String>,
+    ) -> Vec<KafkaMessage> {
         let mut out = Vec::new();
         let ready_tables: Vec<String> = self
             .per_table
             .keys()
-            .filter(|t| schema_cache.get(t).is_some())
+            .filter(|t| schema_cache.get(t).is_some() || absent.contains(*t))
             .cloned()
             .collect();
         for table in ready_tables {
@@ -335,7 +342,7 @@ mod tests {
         let cache = SchemaCache::new(300);
         cache.insert("dfe.t1".into(), dummy_schema("dfe.t1"));
 
-        let ready = buf.take_ready(&cache);
+        let ready = buf.take_ready(&cache, &FxHashSet::default());
         assert_eq!(ready.len(), 2);
         assert_eq!(buf.len(), 1); // t2 still pending
         assert_eq!(buf.len_per_table("dfe.t1"), 0);
@@ -343,6 +350,66 @@ mod tests {
         // Re-enqueue t1 -> resolution must be requested again.
         let out = buf.enqueue("dfe.t1".into(), make_msg(b"d")).unwrap();
         assert_eq!(out, EnqueueOutcome::NeedsResolution);
+    }
+
+    #[test]
+    fn take_ready_releases_tables_confirmed_absent() {
+        let mut buf = PendingSchemaBuffer::new(small_cfg());
+        buf.enqueue("dfe.acme_widgets".into(), make_msg(b"a"))
+            .unwrap();
+        buf.enqueue("dfe.acme_widgets".into(), make_msg(b"b"))
+            .unwrap();
+        buf.enqueue("dfe.unreachable".into(), make_msg(b"c"))
+            .unwrap();
+
+        let cache = SchemaCache::new(300);
+        let mut absent = FxHashSet::default();
+        absent.insert("dfe.acme_widgets".to_string());
+
+        let ready = buf.take_ready(&cache, &absent);
+        assert_eq!(ready.len(), 2, "the absent table's messages are released");
+        assert_eq!(
+            buf.len(),
+            1,
+            "a table ClickHouse never answered for stays buffered"
+        );
+        assert_eq!(buf.len_per_table("dfe.unreachable"), 1);
+    }
+
+    #[test]
+    fn unreachable_table_stays_pending_then_expires_to_dlq() {
+        // A ClickHouse outage must keep buffering and retrying, and only the age
+        // cap may give up — never a fallback that would dump the source into
+        // the default table.
+        let cfg = PendingSchemaConfig {
+            max_per_table: 100,
+            max_total: 100,
+            max_age: Duration::from_millis(20),
+        };
+        let mut buf = PendingSchemaBuffer::new(cfg);
+        buf.enqueue("dfe.unreachable".into(), make_msg(b"x"))
+            .unwrap();
+
+        let cache = SchemaCache::new(300);
+        let absent = FxHashSet::default();
+        assert!(
+            buf.take_ready(&cache, &absent).is_empty(),
+            "nothing is released while resolution is merely failing"
+        );
+        assert_eq!(buf.len(), 1);
+
+        // The re-request loop keeps asking while the buffer holds the message.
+        let later = Instant::now() + Duration::from_secs(3);
+        assert_eq!(
+            buf.tables_needing_rerequest(later, Duration::from_secs(2)),
+            vec!["dfe.unreachable".to_string()]
+        );
+
+        std::thread::sleep(Duration::from_millis(40));
+        let expired = buf.expire(Instant::now());
+        assert_eq!(expired.len(), 1);
+        assert!(matches!(expired[0].1, ExpireReason::AgeExceeded { .. }));
+        assert_eq!(buf.len(), 0);
     }
 
     #[test]

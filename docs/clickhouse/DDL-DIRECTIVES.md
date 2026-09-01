@@ -1974,7 +1974,7 @@ For hot paths, extract values to top-level fields first using `@source` with dot
 notation:
 
 ```sql
--- Step 1: Extract IP to top-level (done during flatten)
+-- Step 1: Extract IP to top-level (done during schema-guided extraction)
 -- @source: payload.client.ip
 `client_ip` IPv4,
 
@@ -1985,7 +1985,9 @@ notation:
 
 This pattern:
 
-1. Extracts nested values during the flatten phase (~free - already iterating)
+1. Extracts nested values during the single SIMD parse the extractor already
+   does (`json_primary`, the default mode); under `legacy_flatten` the same
+   values come out of the flatten phase instead
 2. Uses extracted values in expressions (avoids JSON parsing cost)
 3. Results in ~50ns instead of ~550ns per record
 
