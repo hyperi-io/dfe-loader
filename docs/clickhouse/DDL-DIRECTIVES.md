@@ -820,7 +820,10 @@ Provides a fallback when the source is missing or invalid:
 
 - `now()` - Current timestamp
 - `uuid()` - Generate UUID (v7, time-ordered)
-- `null` - Explicit NULL
+- `null` - Leaves the column ABSENT from the row, which is not the same as
+  writing a NULL. For a Nullable column the result is identical, and for a
+  non-Nullable one it lets the column's DEFAULT apply instead of failing the
+  row - which an explicit NULL would not
 - `"literal"` - String literal (quote it)
 - `0`, `false` - Numeric/boolean literals
 

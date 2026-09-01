@@ -190,6 +190,40 @@ pub struct FailedRow {
     pub offset: Option<KafkaOffset>,
     /// Error message
     pub reason: String,
+    /// The promoted row, serialised, for the DLQ to carry when the batch's
+    /// parallel raw-payload slot is empty. See [`rejected_row_bytes`].
+    pub row_json: Option<Vec<u8>>,
+}
+
+/// Whether binary-split salvage can actually isolate this failure to a row.
+///
+/// Only a data error belongs to a row. Anything else -- an unreachable sink, a
+/// missing GRANT, a column type this build cannot encode -- is equally true of
+/// every row in the slice, so splitting on it issues ~2N inserts against
+/// something already struggling and isolates nothing.
+fn is_salvageable(err: &crate::Error) -> bool {
+    matches!(err, crate::Error::ClickHousePermanent(_))
+}
+
+/// The bytes a permanently rejected row must carry to the DLQ.
+///
+/// `raw_payloads[i]` is empty for every capture mode that keeps no raw bytes:
+/// `raw_only` and `extracted_only`, the whole `legacy_flatten` path, and any
+/// `MessagePack` payload. DLQ'ing an empty entry for those and then committing
+/// the offset loses the event from `ClickHouse`, the DLQ and Kafka at once, so
+/// fall back to the promoted row -- under `raw_only` it still holds the payload
+/// as `_raw`, under `legacy_flatten` full capture as `_json`.
+///
+/// Returns `None` when the raw slot already has the bytes: the flush path reads
+/// those directly and re-serialising would only duplicate them.
+fn rejected_row_bytes(
+    raw: Option<&Arc<[u8]>>,
+    row: Option<&Map<String, Value>>,
+) -> Option<Vec<u8>> {
+    if raw.is_some_and(|p| !p.is_empty()) {
+        return None;
+    }
+    row.and_then(|r| serde_json::to_vec(r).ok())
 }
 
 /// Handles batch inserts to `ClickHouse` with retry logic.
@@ -771,7 +805,7 @@ impl Inserter {
                 // rejection is the only thing salvage can isolate. Splitting
                 // anything else issues 2N inserts against a sink that is
                 // already struggling, for rows that were never at fault.
-                let is_data_error = matches!(e, crate::Error::ClickHousePermanent(_));
+                let is_data_error = is_salvageable(&e);
 
                 // max_dynamic_paths guidance: metric always, log debounced.
                 {
@@ -819,6 +853,7 @@ impl Inserter {
                             row_index: i,
                             offset: offsets.get(i).cloned(),
                             reason: reason.clone(),
+                            row_json: rejected_row_bytes(raw_payloads.get(i), rows.get(i)),
                         })
                         .collect();
                     return InsertResult::with_failures(0, failed);
@@ -892,6 +927,7 @@ impl Inserter {
                         row_index: start_index + i,
                         offset: offsets.get(i).cloned(),
                         reason: "Max salvage depth exceeded".to_string(),
+                        row_json: rejected_row_bytes(raw_payloads.get(i), rows.get(i)),
                     });
                 }
                 return;
@@ -904,11 +940,12 @@ impl Inserter {
                         out.inserted += 1;
                     }
                     Err(e) => {
-                        if matches!(e, crate::Error::ClickHousePermanent(_)) {
+                        if is_salvageable(&e) {
                             out.failed.push(FailedRow {
                                 row_index: start_index,
                                 offset: offsets.first().cloned(),
                                 reason: e.to_string(),
+                                row_json: rejected_row_bytes(raw_payloads.first(), rows.first()),
                             });
                         } else {
                             out.retry_reason.get_or_insert_with(|| e.to_string());
@@ -921,11 +958,31 @@ impl Inserter {
             // Try the whole slice first (might succeed now, e.g., transient
             // error). Skipped at depth 0: the caller has just made that exact
             // attempt, and repeating it doubles the cost of every rejection.
-            if depth > 0
-                && let Ok(count) = self.insert_rows(table, rows, raw_payloads).await
-            {
-                out.inserted += count;
-                return;
+            //
+            // Splitting is only ever right for a DATA error. A transient one
+            // here means the sink is struggling, and halving on it issues ~2N
+            // more inserts into that -- for rows that were never at fault. The
+            // is_data_error guard at the entry point only covers depth 0, so
+            // the same classification has to happen on every deeper attempt.
+            if depth > 0 {
+                match self.insert_rows(table, rows, raw_payloads).await {
+                    Ok(count) => {
+                        out.inserted += count;
+                        return;
+                    }
+                    Err(e) if !is_salvageable(&e) => {
+                        debug!(
+                            table = %table,
+                            depth = depth,
+                            rows = num_rows,
+                            error = %e,
+                            "Transient failure mid-salvage, withholding instead of splitting"
+                        );
+                        out.retry_reason.get_or_insert_with(|| e.to_string());
+                        return;
+                    }
+                    Err(_) => {}
+                }
             }
             // Split and recurse
 
@@ -1071,11 +1128,13 @@ mod tests {
                 row_index: 5,
                 offset: None,
                 reason: "Schema mismatch".to_string(),
+                row_json: None,
             },
             FailedRow {
                 row_index: 10,
                 offset: None,
                 reason: "Invalid data".to_string(),
+                row_json: None,
             },
         ];
         let result = InsertResult::with_failures(98, failed);
@@ -1432,6 +1491,7 @@ mod tests {
                 row_index: i,
                 offset: None,
                 reason: format!("Error at row {i}"),
+                row_json: None,
             })
             .collect();
         let result = InsertResult::with_failures(0, failed);
@@ -1456,6 +1516,7 @@ mod tests {
             row_index: 7,
             offset: Some(offset.clone()),
             reason: "Type mismatch".to_string(),
+            row_json: None,
         };
         assert_eq!(row.row_index, 7);
         assert!(row.offset.is_some());
@@ -1471,8 +1532,44 @@ mod tests {
             row_index: 0,
             offset: None,
             reason: "No offset (manual insert path)".to_string(),
+            row_json: None,
         };
         assert!(row.offset.is_none());
+    }
+
+    #[test]
+    fn a_row_with_no_raw_payload_carries_its_own_bytes() {
+        // raw_only, extracted_only, legacy_flatten and MessagePack all leave
+        // raw_payloads[i] empty. Without the fallback the DLQ entry is empty
+        // and the offset commits over the top of it.
+        let mut row = Map::new();
+        row.insert("_raw".to_string(), Value::String("{\"a\":1}".to_string()));
+        let empty: Arc<[u8]> = Arc::from(&[][..]);
+
+        let bytes = rejected_row_bytes(Some(&empty), Some(&row)).expect("row must be serialised");
+        let back: Value = serde_json::from_slice(&bytes).expect("valid JSON");
+        assert_eq!(back["_raw"], "{\"a\":1}");
+    }
+
+    #[test]
+    fn a_row_that_still_has_its_raw_payload_is_not_re_serialised() {
+        let mut row = Map::new();
+        row.insert("n".to_string(), Value::from(1));
+        let raw: Arc<[u8]> = Arc::from(&b"{\"n\":1}"[..]);
+        assert_eq!(rejected_row_bytes(Some(&raw), Some(&row)), None);
+    }
+
+    #[test]
+    fn only_a_data_error_is_worth_splitting() {
+        // Splitting a transient failure issues ~2N inserts into a sink that is
+        // already struggling, and isolates nothing.
+        assert!(is_salvageable(&crate::Error::ClickHousePermanent(
+            "code 117".into()
+        )));
+        assert!(!is_salvageable(&crate::Error::ClickHouse(
+            "connection reset by peer".into()
+        )));
+        assert!(!is_salvageable(&crate::Error::Buffer("closed".into())));
     }
 
     #[test]
@@ -1481,6 +1578,7 @@ mod tests {
             row_index: 1,
             offset: None,
             reason: "Erreur: données invalides 世界 🚫".to_string(),
+            row_json: None,
         };
         assert!(row.reason.contains("世界"));
         assert!(row.reason.contains("🚫"));

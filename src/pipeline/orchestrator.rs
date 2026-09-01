@@ -265,6 +265,21 @@ impl Orchestrator {
             None
         };
 
+        // A DLQ whose backends all failed to build still spawns Ok: scalo hands
+        // back a DISABLED Dlq, whose send() counts a drop and returns Ok. So
+        // is_some() answers "was a DLQ asked for", not "will it keep anything",
+        // and reading it to gate an offset commit throws the rows away and
+        // commits over the top. Read what the DLQ can actually do instead --
+        // a read-only rootfs on a gRPC-transport pod reaches this by config
+        // alone (dlq.enabled with neither the file nor the Kafka backend).
+        let dlq_enabled = dlq_accepts(dlq.as_ref());
+        if dlq.is_some() && !dlq_enabled {
+            error!(
+                "DLQ is configured but no backend started — nothing can be DLQ'd, \
+                 so permanently rejected rows will withhold their offsets"
+            );
+        }
+
         // Bounded DLQ channel — avoids unbounded tokio::spawn per failed message.
         // Background task drains the channel and forwards to the actual DLQ backend.
         let (dlq_tx, mut dlq_rx) = mpsc::channel::<DlqEntry>(DLQ_CHANNEL_CAPACITY);
@@ -548,7 +563,7 @@ impl Orchestrator {
                     for (msg, reason) in drained {
                         route_pending_to_dlq(
                             &dlq_tx,
-                            dlq.is_some(),
+                            dlq_enabled,
                             &self.memory_guard,
                             &self.metrics,
                             msg,
@@ -645,7 +660,7 @@ impl Orchestrator {
                     // Check for buffers ready to flush
                     let batches = buffer_manager.get_ready_for_flush();
                     if !batches.is_empty() {
-                        self.flush_batches_transport(&inserter, &transport, &dlq_tx, dlq.is_some(), batches).await;
+                        self.flush_batches_transport(&inserter, &transport, dlq.as_ref(), batches).await;
                     }
                 }
 
@@ -720,7 +735,15 @@ impl Orchestrator {
                                     );
                                 }
                             }
-                            if let Some(ref m) = self.metrics {
+                            // Only a table the capped set actually took gets a
+                            // metric label. The routed name comes from a
+                            // payload field with no allowlist, so counting a
+                            // rejected one would let untrusted input grow the
+                            // label set past ABSENT_TABLE_CAPACITY -- the very
+                            // thing the cap exists to stop.
+                            if let Some(ref m) = self.metrics
+                                && marked != super::types::AbsentOutcome::Rejected
+                            {
                                 m.record_unknown_table_fallback_n(table, n as u64);
                             }
                         }
@@ -751,7 +774,7 @@ impl Orchestrator {
                     let messages = match received {
                         Ok(batch) => {
                             for entry in batch.dlq_entries {
-                                if dlq.is_some() {
+                                if dlq_enabled {
                                     let dlq_entry = DlqEntry::new(
                                         "loader",
                                         entry.reason,
@@ -791,7 +814,7 @@ impl Orchestrator {
                         for (msg, reason) in expired {
                             route_pending_to_dlq(
                                 &dlq_tx,
-                                dlq.is_some(),
+                                dlq_enabled,
                                 &self.memory_guard,
                                 &self.metrics,
                                 msg,
@@ -896,7 +919,7 @@ impl Orchestrator {
                                 // Send DLQ entries for pre-route failures
                                 for (idx, reason) in &dlq_entries {
                                     let msg = &batch[*idx];
-                                    if dlq.is_some() {
+                                    if dlq_enabled {
                                         let entry = DlqEntry::new("loader", reason.clone(), msg.payload.clone())
                                             .with_source(scalo::dlq::DlqSource::kafka(
                                                 &*msg.topic,
@@ -982,7 +1005,7 @@ impl Orchestrator {
                                 computed_column_cache: &mut computed_column_cache,
                                 metrics: &self.metrics,
                                 dlq_tx: &dlq_tx,
-                                dlq_enabled: dlq.is_some(),
+                                dlq_enabled,
                                 memory_guard: &self.memory_guard,
                                 pending_schema: &mut pending_schema_buffer,
                             };
@@ -1104,7 +1127,7 @@ impl Orchestrator {
                             // nothing is ready — no separate should_flush() guard needed
                             let batches = buffer_manager.get_ready_for_flush();
                             if !batches.is_empty() {
-                                self.flush_batches_transport(&inserter, &transport, &dlq_tx, dlq.is_some(), batches).await;
+                                self.flush_batches_transport(&inserter, &transport, dlq.as_ref(), batches).await;
                             }
                         }
                         Ok(_) => {
@@ -1129,14 +1152,8 @@ impl Orchestrator {
         let final_batches = buffer_manager.flush_all();
         if !final_batches.is_empty() {
             info!(batches = final_batches.len(), "Flushing remaining buffers");
-            self.flush_batches_transport(
-                &inserter,
-                &transport,
-                &dlq_tx,
-                dlq.is_some(),
-                final_batches,
-            )
-            .await;
+            self.flush_batches_transport(&inserter, &transport, dlq.as_ref(), final_batches)
+                .await;
         }
 
         // Stop schema cache background refresh task.
@@ -1161,13 +1178,18 @@ impl Orchestrator {
 
     // process_message moved to super::processor::MessageProcessor
 
-    /// Flush batches to `ClickHouse` and commit Kafka offsets via transport on success
+    /// Flush batches to `ClickHouse`, then commit ONE Kafka watermark for the
+    /// whole cycle.
+    ///
+    /// A batch is per TABLE; a Kafka commit is per PARTITION. Committing batch
+    /// by batch therefore buries whatever another table withheld on the same
+    /// partition -- see [`committable_offsets`], which is where that decision
+    /// now lives.
     async fn flush_batches_transport(
         &mut self,
         inserter: &Inserter,
         transport: &TransportBackend,
-        dlq_tx: &mpsc::Sender<DlqEntry>,
-        dlq_enabled: bool,
+        dlq: Option<&Arc<Dlq>>,
         batches: Vec<FlushBatch>,
     ) {
         use std::time::Instant;
@@ -1228,7 +1250,21 @@ impl Orchestrator {
         let mut cycle_ok = 0usize;
         let mut cycle_err = 0usize;
 
-        // Commit offsets independently per batch — Table A success/failure is isolated
+        // Offsets are sorted into three piles across the WHOLE cycle and
+        // resolved once at the end. Nothing commits inside the loop.
+        let mut committable: Vec<KafkaOffset> = Vec::new();
+        let mut withheld: Vec<KafkaOffset> = Vec::new();
+        // Rows the DLQ has ACCEPTED but not yet proven durable. They join
+        // `committable` only once the flush barrier below returns.
+        let mut dlq_pending: Vec<KafkaOffset> = Vec::new();
+
+        // ONE DLQ budget for the whole cycle, not one per batch. The batch loop
+        // is sequential and the select! loop is blocked for its duration, so a
+        // per-batch deadline multiplies by the number of rejecting tables --
+        // and scalo warns that backing off recv past max.poll.interval.ms
+        // (default 300s) evicts the pod from the consumer group.
+        let dlq_deadline = tokio::time::Instant::now() + DLQ_ROUTE_DEADLINE;
+
         for (((((_, result), offsets), batch_bytes), table), payloads) in results
             .into_iter()
             .zip(per_batch_offsets)
@@ -1266,10 +1302,11 @@ impl Orchestrator {
                         // ClickHouse-specific terminal insert error (2.8.10 audit).
                         m.record_clickhouse_insert_error();
                     }
+                    withheld.extend(offsets);
                 }
                 BatchDisposition::Settled if result.failed.is_empty() => {
                     cycle_ok += 1;
-                    commit_offsets(transport, &self.metrics, &offsets).await;
+                    committable.extend(offsets);
                 }
                 BatchDisposition::Settled => {
                     // The sink answered, so the circuit gate must not read this
@@ -1282,28 +1319,29 @@ impl Orchestrator {
                     }
                     let rejected = result.failed.len();
                     let delivery = route_rejected_rows_to_dlq(
-                        dlq_tx,
-                        dlq_enabled,
+                        dlq,
                         &self.metrics,
                         &table,
                         &payloads,
                         &result.failed,
-                        DLQ_ROUTE_DEADLINE,
+                        dlq_deadline,
                     )
                     .await;
                     self.stats.messages_dlq += delivery.delivered;
 
                     // Committing is what breaks the livelock, but only once
-                    // every rejected row is somewhere other than Kafka.
+                    // every rejected row is somewhere other than Kafka — and
+                    // "accepted" is not yet "written", so these offsets wait
+                    // for the flush barrier below.
                     if delivery.complete {
                         error!(
                             table = %table,
                             inserted = result.inserted,
                             rejected,
                             dlq = delivery.delivered,
-                            "Rows permanently rejected — DLQ'd and offsets committed"
+                            "Rows permanently rejected — DLQ took the batch"
                         );
-                        commit_offsets(transport, &self.metrics, &offsets).await;
+                        dlq_pending.extend(offsets);
                     } else {
                         error!(
                             table = %table,
@@ -1312,10 +1350,47 @@ impl Orchestrator {
                             dlq = delivery.delivered,
                             "DLQ took only part of a rejected batch — offsets withheld"
                         );
+                        withheld.extend(offsets);
                     }
                 }
             }
         }
+
+        // The DLQ accepting an entry means QUEUED, not written: it sits in
+        // scalo's bounded sink until the drain reaches a backend. Committing on
+        // the acceptance alone loses those rows to a pod that dies in between,
+        // so the barrier runs before anything the DLQ took is committed. The
+        // same cycle budget bounds it — a wedged backend must not hold the
+        // consumer past max.poll.interval.ms.
+        if !dlq_pending.is_empty() {
+            let flushed = match dlq {
+                Some(d) => match tokio::time::timeout_at(dlq_deadline, d.flush()).await {
+                    Ok(Ok(())) => true,
+                    Ok(Err(e)) => {
+                        error!(error = %e, "DLQ flush failed — offsets withheld");
+                        false
+                    }
+                    Err(_elapsed) => {
+                        error!("DLQ flush did not complete within the deadline — offsets withheld");
+                        false
+                    }
+                },
+                // Unreachable: a complete delivery requires an enabled DLQ.
+                None => false,
+            };
+            if flushed {
+                committable.append(&mut dlq_pending);
+            } else {
+                withheld.append(&mut dlq_pending);
+            }
+        }
+
+        // ONE commit for the cycle, bounded by the lowest withheld offset on
+        // each partition. Doing it per batch buries a sibling table's withheld
+        // offset, and `get_ready_for_flush` iterates an FxHashMap, so batch
+        // order is not even deterministic.
+        let to_commit = committable_offsets(committable, &withheld);
+        commit_offsets(transport, &self.metrics, &to_commit).await;
 
         // Refresh the ClickHouse rows-per-second gauge once per flush cycle.
         if let Some(ref m) = self.metrics {
@@ -1622,14 +1697,81 @@ const ABSENT_TABLE_TTL: Duration = Duration::from_secs(60);
 /// growing both the set and the per-table metric label set.
 const ABSENT_TABLE_CAPACITY: usize = 1024;
 
-/// Total budget for handing one rejected batch to the DLQ. Backpressure is the
-/// point, but a wedged DLQ backend must not stall the pipeline indefinitely.
+/// Total budget for handing a whole flush CYCLE's rejected rows to the DLQ,
+/// including the durability barrier at the end of it.
+///
+/// Backpressure is the point, but this cannot be a per-batch budget: batches
+/// are routed sequentially with the `select!` loop blocked, so ten rejecting
+/// tables behind a wedged DLQ would multiply it by ten. scalo documents that
+/// backing off `recv` past `max.poll.interval.ms` (default 300s) evicts the pod
+/// from the consumer group, which costs far more than the rows it was waiting
+/// on -- those are still in Kafka.
 const DLQ_ROUTE_DEADLINE: Duration = Duration::from_secs(30);
 
-/// Depth of the channel between the hot path and the DLQ backend task. Far
-/// smaller than a flush batch, which is why rejected rows are sent with
-/// backpressure rather than dropped on a full channel.
+/// Depth of the channel between the hot path and the DLQ backend task.
+///
+/// Carries the fire-and-forget losses only -- pre-route rejects, inbound-filter
+/// rejects, and pending-schema expiries. Permanently rejected ROWS bypass it and
+/// talk to the DLQ directly, because an entry parked in here is invisible to
+/// `Dlq::flush` and their offsets commit on that barrier.
 const DLQ_CHANNEL_CAPACITY: usize = 1_000;
+
+/// Which of a flush cycle's offsets may actually be committed.
+///
+/// Kafka's commit is a per-PARTITION watermark, not a per-message ack: scalo's
+/// `build_commit_tpl` takes the highest offset per partition and SETS it as
+/// `highest + 1`. A flush batch, though, is per TABLE, and one partition feeds
+/// many tables through `source_to_table`. So committing batch by batch buries
+/// whatever a sibling table withheld:
+///
+/// ```text
+/// partition 0: offset 100 -> dfe.foo, 101 -> dfe.bar, 102 -> dfe.foo
+/// batch dfe.foo [100, 102] succeeds -> commits partition 0 at 103
+/// batch dfe.bar [101]      withheld -> unreachable, in neither CH nor the DLQ
+/// ```
+///
+/// The watermark is therefore computed once for the whole cycle: on each
+/// partition, everything at or above the LOWEST withheld offset is dropped from
+/// the commit, so the stored watermark can never pass a row that still needs to
+/// come back. Rows above it re-deliver as duplicates, which is what at-least-
+/// once buys.
+///
+/// This also settles a second hazard: `BufferManager::get_ready_for_flush`
+/// iterates an `FxHashMap`, so batch order is nondeterministic and a low-offset
+/// batch committing after a high one used to rewind the watermark. One commit
+/// per cycle cannot rewind.
+///
+/// `withheld` may name partitions absent from `committable` and vice versa;
+/// both are handled.
+fn committable_offsets(
+    committable: Vec<KafkaOffset>,
+    withheld: &[KafkaOffset],
+) -> Vec<KafkaOffset> {
+    if withheld.is_empty() {
+        return committable;
+    }
+
+    let mut floor: rustc_hash::FxHashMap<(&str, i32), i64> = rustc_hash::FxHashMap::default();
+    for off in withheld {
+        floor
+            .entry((&*off.topic, off.partition))
+            .and_modify(|lowest| {
+                if off.offset < *lowest {
+                    *lowest = off.offset;
+                }
+            })
+            .or_insert(off.offset);
+    }
+
+    committable
+        .into_iter()
+        .filter(|off| {
+            floor
+                .get(&(&*off.topic, off.partition))
+                .is_none_or(|lowest| off.offset < *lowest)
+        })
+        .collect()
+}
 
 /// Commit a batch's Kafka offsets.
 async fn commit_offsets(
@@ -1686,28 +1828,41 @@ struct DlqDelivery {
     complete: bool,
 }
 
+/// Whether the DLQ will actually keep what it is handed.
+///
+/// `Dlq::spawn` returns `Ok(Dlq::disabled())` when the config asks for a DLQ
+/// but no backend builds -- a read-only rootfs on a gRPC-transport pod reaches
+/// that by config alone. A disabled `Dlq` counts a drop and returns `Ok` from
+/// `send`, so `is_some()` answers "was one asked for", never "will it keep
+/// anything". Only the latter may gate an offset commit.
+fn dlq_accepts(dlq: Option<&Arc<Dlq>>) -> bool {
+    dlq.is_some_and(|d| d.is_enabled())
+}
+
 /// Route permanently rejected rows to the DLQ, one entry each.
 ///
-/// Sends with backpressure rather than `try_send`. The channel holds
-/// `DLQ_CHANNEL_CAPACITY` and a batch holds up to `buffer.flush_rows`, so a
-/// non-blocking send silently discards the difference — and the offsets would
-/// commit over the top of it. `deadline` bounds the total wait so a wedged DLQ
-/// backend cannot stall the pipeline; the shortfall is reported instead, and
-/// the caller withholds the offsets so Kafka re-delivers.
+/// Talks to the DLQ DIRECTLY rather than through the orchestrator's forwarding
+/// channel. That channel exists so the fire-and-forget paths never block the
+/// event loop, but it puts a queue in front of the one `Dlq::flush` barriers --
+/// an entry still sitting in it is invisible to the flush, so the caller would
+/// be committing on a barrier that never covered it. This path already awaits
+/// with backpressure, so the hop bought nothing and cost the durability proof.
 ///
-/// With no DLQ configured nothing is delivered and nothing may be committed:
-/// a livelock keeps the events in Kafka, which a shredder does not.
+/// `expiry` is the cycle-wide deadline: backpressure is the point, but a wedged
+/// DLQ backend must not hold the consumer past `max.poll.interval.ms`. Any
+/// shortfall is reported instead, and the caller withholds the offsets so Kafka
+/// re-delivers.
 ///
-/// Rows with no raw payload (capture mode `extracted_only`) still emit one
-/// entry naming the table, so the loss is surfaced rather than silent.
+/// With no DLQ, or one whose backends never started, nothing is delivered and
+/// nothing may be committed: a livelock keeps the events in Kafka, which a
+/// shredder does not.
 async fn route_rejected_rows_to_dlq(
-    dlq_tx: &mpsc::Sender<DlqEntry>,
-    dlq_enabled: bool,
+    dlq: Option<&Arc<Dlq>>,
     metrics: &Option<Metrics>,
     table: &str,
     payloads: &[Arc<[u8]>],
     failed: &[FailedRow],
-    deadline: Duration,
+    expiry: tokio::time::Instant,
 ) -> DlqDelivery {
     if failed.is_empty() {
         return DlqDelivery {
@@ -1728,22 +1883,34 @@ async fn route_rejected_rows_to_dlq(
     );
     scalo::logger::security::record_dlq("clickhouse_permanent_reject", &summary, Some(table));
 
-    if !dlq_enabled {
+    let Some(dlq) = dlq.filter(|d| d.is_enabled()) else {
         error!(
             table = %table,
             rows = failed.len(),
-            "Rows permanently rejected with no DLQ configured — offsets withheld"
+            "Rows permanently rejected with no working DLQ — offsets withheld"
         );
         return DlqDelivery::default();
-    }
+    };
 
-    let expiry = tokio::time::Instant::now() + deadline;
     let mut delivered = 0u64;
 
     for row in failed {
-        let payload = payloads
-            .get(row.row_index)
-            .map_or_else(Vec::new, |p| p.to_vec());
+        let Some(payload) = rejected_payload(payloads, row) else {
+            // Nothing at all to hand over: the offset is the only remaining
+            // copy, so it stays put. Unreachable in practice -- the inserter
+            // serialises the promoted row whenever the raw slot is empty.
+            error!(
+                table = %table,
+                row_index = row.row_index,
+                delivered,
+                rejected = failed.len(),
+                "Rejected row has no payload to DLQ — offsets withheld"
+            );
+            return DlqDelivery {
+                delivered,
+                complete: false,
+            };
+        };
         let mut entry = DlqEntry::new(
             "loader",
             format!("clickhouse_permanent_reject table={table}: {}", row.reason),
@@ -1756,19 +1923,20 @@ async fn route_rejected_rows_to_dlq(
                 offset.offset,
             ));
         }
-        match tokio::time::timeout_at(expiry, dlq_tx.send(entry)).await {
+        match tokio::time::timeout_at(expiry, dlq.send(entry)).await {
             Ok(Ok(())) => {
                 delivered += 1;
                 if let Some(m) = metrics {
                     m.record_dlq();
                 }
             }
-            Ok(Err(_closed)) => {
+            Ok(Err(e)) => {
                 error!(
                     table = %table,
                     delivered,
                     rejected = failed.len(),
-                    "DLQ channel closed mid-batch — offsets withheld"
+                    error = %e,
+                    "DLQ stopped accepting mid-batch — offsets withheld"
                 );
                 return DlqDelivery {
                     delivered,
@@ -1780,7 +1948,7 @@ async fn route_rejected_rows_to_dlq(
                     table = %table,
                     delivered,
                     rejected = failed.len(),
-                    "DLQ did not drain within the deadline — offsets withheld"
+                    "DLQ did not drain within the cycle deadline — offsets withheld"
                 );
                 return DlqDelivery {
                     delivered,
@@ -1794,6 +1962,24 @@ async fn route_rejected_rows_to_dlq(
         delivered,
         complete: true,
     }
+}
+
+/// The bytes to hand the DLQ for one rejected row.
+///
+/// `raw_payloads[i]` is empty for every capture mode that keeps no raw bytes --
+/// `raw_only` (which this repo's own guidance recommends for high-cardinality
+/// tables), `extracted_only`, the whole `legacy_flatten` path, and any
+/// `MessagePack` payload. DLQ'ing an empty entry for those and committing the
+/// offset drops the event from `ClickHouse`, the DLQ and Kafka at once, so the
+/// inserter attaches the serialised promoted row, which still carries the
+/// payload as `_raw` or `_json`.
+///
+/// `None` means there is genuinely nothing to write, and the caller withholds.
+fn rejected_payload(payloads: &[Arc<[u8]>], row: &FailedRow) -> Option<Vec<u8>> {
+    if let Some(raw) = payloads.get(row.row_index).filter(|p| !p.is_empty()) {
+        return Some(raw.to_vec());
+    }
+    row.row_json.clone().filter(|b| !b.is_empty())
 }
 
 /// Route a pending-schema message to the DLQ (with a security event) and
@@ -1882,28 +2068,82 @@ mod tests {
                     offset: 10 + i as i64,
                 }),
                 reason: reason.to_string(),
+                row_json: None,
             })
             .collect()
     }
 
-    /// Drain the DLQ channel into a counter, as the background DLQ task does.
-    fn spawn_drain(mut rx: mpsc::Receiver<DlqEntry>) -> tokio::task::JoinHandle<Vec<DlqEntry>> {
-        tokio::spawn(async move {
-            let mut seen = Vec::new();
-            while let Some(entry) = rx.recv().await {
-                seen.push(entry);
+    fn offset(topic: &str, partition: i32, offset: i64) -> KafkaOffset {
+        KafkaOffset {
+            topic: Arc::from(topic),
+            partition,
+            offset,
+        }
+    }
+
+    /// A per-test spool directory for the file-backed DLQ.
+    fn dlq_dir(name: &str) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static SEQ: AtomicU32 = AtomicU32::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "dfe-loader-dlq-{name}-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    /// A REAL file-backed DLQ. No broker, no mock: the entries land as NDJSON,
+    /// which is what makes the `flush` durability barrier checkable.
+    fn file_dlq(dir: &std::path::Path) -> Arc<Dlq> {
+        let config = scalo::dlq::DlqConfig {
+            enabled: true,
+            mode: scalo::dlq::DlqMode::FileOnly,
+            file: scalo::dlq::FileDlqConfig {
+                enabled: true,
+                path: dir.to_path_buf(),
+                compress_rotated: false,
+                ..scalo::dlq::FileDlqConfig::default()
+            },
+            ..scalo::dlq::DlqConfig::default()
+        };
+        Arc::new(
+            Dlq::spawn(&config, "loader", None, CancellationToken::new()).expect("spawn file DLQ"),
+        )
+    }
+
+    /// Every NDJSON line the file backend has written under `dir`.
+    fn spooled_lines(dir: &std::path::Path) -> Vec<String> {
+        fn walk(dir: &std::path::Path, out: &mut Vec<String>) {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    walk(&path, out);
+                } else if let Ok(body) = std::fs::read_to_string(&path) {
+                    out.extend(body.lines().filter(|l| !l.is_empty()).map(str::to_string));
+                }
             }
-            seen
-        })
+        }
+        let mut out = Vec::new();
+        walk(dir, &mut out);
+        out
+    }
+
+    fn in_30s() -> tokio::time::Instant {
+        tokio::time::Instant::now() + Duration::from_secs(30)
     }
 
     #[tokio::test]
     async fn a_batch_larger_than_the_dlq_channel_loses_nothing() {
-        // DLQ_CHANNEL_CAPACITY is 1_000 and buffer.flush_rows defaults to
-        // 20_000, so a non-blocking send discards 95% of a rejected batch and
-        // the offsets commit over the top of it.
-        let (dlq_tx, dlq_rx) = mpsc::channel::<DlqEntry>(DLQ_CHANNEL_CAPACITY);
-        let drain = spawn_drain(dlq_rx);
+        // buffer.flush_rows defaults to 20_000, far past any queue in the
+        // chain, so a non-blocking send would discard most of a rejected batch
+        // and the offsets would commit over the top of it.
+        let dir = dlq_dir("bigbatch");
+        let dlq = file_dlq(&dir);
 
         let rows = 20_000;
         let payloads: Vec<Arc<[u8]>> = (0..rows)
@@ -1912,84 +2152,154 @@ mod tests {
         let failed = rejected_rows(rows, "server error code 117");
 
         let delivery = route_rejected_rows_to_dlq(
-            &dlq_tx,
-            true,
+            Some(&dlq),
             &None,
             "dfe.default",
             &payloads,
             &failed,
-            Duration::from_secs(30),
+            in_30s(),
         )
         .await;
-
-        drop(dlq_tx);
-        let received = drain.await.expect("drain task");
+        dlq.flush().await.expect("durability barrier");
 
         assert_eq!(delivery.delivered, rows as u64);
         assert!(
             delivery.complete,
             "the offsets may only commit when complete"
         );
+        let spooled = spooled_lines(&dir);
         assert_eq!(
-            received.len(),
+            spooled.len(),
             rows,
-            "every rejected row must reach the DLQ"
+            "every rejected row must be durably written before the offsets commit"
         );
-        assert!(received[0].reason.contains("clickhouse_permanent_reject"));
-        assert!(received[0].reason.contains("dfe.default"));
-        assert!(received[0].reason.contains("code 117"));
-        assert_eq!(received[0].payload, b"{\"n\":0}");
+        assert!(spooled[0].contains("clickhouse_permanent_reject"));
+        assert!(spooled[0].contains("dfe.default"));
+        assert!(spooled[0].contains("code 117"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
-    async fn a_dlq_that_never_drains_withholds_the_offsets() {
-        // Nothing reads the channel, so the send blocks and the deadline fires.
-        // Reporting the shortfall is what keeps the events in Kafka.
-        let (dlq_tx, _dlq_rx) = mpsc::channel::<DlqEntry>(2);
+    async fn a_dlq_that_stops_accepting_withholds_the_offsets() {
+        // The drain has exited, so the send fails part-way. Reporting the
+        // shortfall is what keeps the events in Kafka.
+        let dir = dlq_dir("closed");
+        let dlq = file_dlq(&dir);
+        dlq.shutdown().await.expect("stop the drain");
+
         let payloads: Vec<Arc<[u8]>> = (0..10).map(|_| Arc::from(&b"{}"[..])).collect();
         let failed = rejected_rows(10, "code 117");
 
         let delivery = route_rejected_rows_to_dlq(
-            &dlq_tx,
-            true,
+            Some(&dlq),
             &None,
             "dfe.default",
             &payloads,
             &failed,
-            Duration::from_millis(50),
+            in_30s(),
         )
         .await;
 
         assert!(!delivery.complete, "a partial delivery must not commit");
         assert!(delivery.delivered < 10);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_wedged_dlq_gives_up_at_the_cycle_deadline() {
+        // The budget is per flush CYCLE, so the caller hands in an absolute
+        // instant. One already past means no row may be committed on.
+        let dir = dlq_dir("deadline");
+        let dlq = file_dlq(&dir);
+        dlq.shutdown().await.expect("stop the drain");
+
+        let payloads: Vec<Arc<[u8]>> = vec![Arc::from(&b"{}"[..])];
+        let delivery = route_rejected_rows_to_dlq(
+            Some(&dlq),
+            &None,
+            "dfe.default",
+            &payloads,
+            &rejected_rows(1, "code 117"),
+            tokio::time::Instant::now(),
+        )
+        .await;
+
+        assert!(!delivery.complete);
+        assert_eq!(delivery.delivered, 0);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
     async fn no_dlq_configured_never_commits_a_permanent_rejection() {
         // With no DLQ the only copy left is in Kafka, so the offsets stay put.
-        let (dlq_tx, _dlq_rx) = mpsc::channel::<DlqEntry>(8);
         let payloads: Vec<Arc<[u8]>> = vec![Arc::from(&b"{}"[..])];
         let failed = rejected_rows(1, "code 117");
 
-        let delivery = route_rejected_rows_to_dlq(
-            &dlq_tx,
-            false,
-            &None,
-            "dfe.default",
-            &payloads,
-            &failed,
-            Duration::from_secs(1),
-        )
-        .await;
+        let delivery =
+            route_rejected_rows_to_dlq(None, &None, "dfe.default", &payloads, &failed, in_30s())
+                .await;
 
         assert_eq!(delivery, DlqDelivery::default());
         assert!(!delivery.complete);
     }
 
     #[tokio::test]
+    async fn a_degraded_dlq_is_not_a_working_one() {
+        // scalo's Dlq::spawn returns Ok(disabled) when the config enables a DLQ
+        // but no backend builds -- a read-only rootfs on a gRPC-transport pod
+        // gets here by config alone. A disabled Dlq counts a drop and returns
+        // Ok from send(), so reading is_some() commits the offsets for rows it
+        // just threw away.
+        let config = scalo::dlq::DlqConfig {
+            enabled: true,
+            mode: scalo::dlq::DlqMode::Cascade,
+            file: scalo::dlq::FileDlqConfig {
+                enabled: false,
+                ..scalo::dlq::FileDlqConfig::default()
+            },
+            kafka: scalo::dlq::KafkaDlqConfig {
+                enabled: false,
+                ..scalo::dlq::KafkaDlqConfig::default()
+            },
+            ..scalo::dlq::DlqConfig::default()
+        };
+        let degraded = Arc::new(
+            Dlq::spawn(&config, "loader", None, CancellationToken::new())
+                .expect("spawn returns Ok"),
+        );
+
+        assert!(
+            !degraded.is_enabled(),
+            "no backend built, so nothing is kept"
+        );
+        assert!(
+            !dlq_accepts(Some(&degraded)),
+            "is_some() is true here — only is_enabled() may gate a commit"
+        );
+
+        let payloads: Vec<Arc<[u8]>> = vec![Arc::from(&b"{\"n\":1}"[..])];
+        let delivery = route_rejected_rows_to_dlq(
+            Some(&degraded),
+            &None,
+            "dfe.default",
+            &payloads,
+            &rejected_rows(1, "code 117"),
+            in_30s(),
+        )
+        .await;
+
+        assert!(
+            !delivery.complete,
+            "a DLQ that keeps nothing must not release the offsets"
+        );
+        assert_eq!(delivery.delivered, 0);
+        assert_eq!(degraded.dropped(), 0, "nothing was handed to it to drop");
+    }
+
+    #[tokio::test]
     async fn rejected_rows_carry_their_own_reason_and_kafka_source() {
-        let (dlq_tx, dlq_rx) = mpsc::channel::<DlqEntry>(8);
-        let drain = spawn_drain(dlq_rx);
+        let dir = dlq_dir("source");
+        let dlq = file_dlq(&dir);
         let payloads: Vec<Arc<[u8]>> = vec![
             Arc::from(&b"{\"tags\":[\"a\"]}"[..]),
             Arc::from(&b"{\"tags\":[\"b\"]}"[..]),
@@ -2003,70 +2313,216 @@ mod tests {
                 offset: 77,
             }),
             reason: "RowBinary encode: unsupported value".to_string(),
+            row_json: None,
         }];
 
         let delivery = route_rejected_rows_to_dlq(
-            &dlq_tx,
-            true,
+            Some(&dlq),
             &None,
             "dfe.default",
             &payloads,
             &failed,
-            Duration::from_secs(1),
+            in_30s(),
         )
         .await;
-        drop(dlq_tx);
-        let received = drain.await.expect("drain task");
+        dlq.flush().await.expect("durability barrier");
 
         assert_eq!(delivery.delivered, 1);
         assert!(delivery.complete);
-        assert_eq!(received.len(), 1, "only the isolated row is DLQ'd");
-        assert_eq!(received[0].payload, b"{\"tags\":[\"b\"]}");
-        assert!(received[0].reason.contains("unsupported value"));
+        let spooled = spooled_lines(&dir);
+        assert_eq!(spooled.len(), 1, "only the isolated row is DLQ'd");
+        assert!(spooled[0].contains("unsupported value"));
+        assert!(spooled[0].contains("dfe-events"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
-    async fn rejected_rows_without_raw_payloads_still_surface() {
-        // Capture mode extracted_only keeps no raw bytes, so the entry carries
-        // the reason alone rather than vanishing.
-        let (dlq_tx, dlq_rx) = mpsc::channel::<DlqEntry>(8);
-        let drain = spawn_drain(dlq_rx);
-        let payloads: Vec<Arc<[u8]>> = vec![Arc::from(&[][..]), Arc::from(&[][..])];
+    async fn a_rejected_row_with_no_raw_payload_is_never_dlqd_empty() {
+        // raw_only keeps no raw bytes -- and this repo's own guidance
+        // recommends it for high-cardinality tables. DLQ'ing an empty entry and
+        // committing loses the event from ClickHouse, the DLQ and Kafka at
+        // once, so the inserter attaches the promoted row instead.
+        let dir = dlq_dir("norawpayload");
+        let dlq = file_dlq(&dir);
+        let payloads: Vec<Arc<[u8]>> = vec![Arc::from(&[][..])];
+        let failed = vec![FailedRow {
+            row_index: 0,
+            offset: Some(offset("dfe-events", 0, 10)),
+            reason: "code 117".to_string(),
+            row_json: Some(br#"{"_raw":"{\"user\":\"kaz\"}"}"#.to_vec()),
+        }];
 
         let delivery = route_rejected_rows_to_dlq(
-            &dlq_tx,
-            true,
+            Some(&dlq),
             &None,
             "dfe.default",
             &payloads,
-            &rejected_rows(2, "boom"),
-            Duration::from_secs(1),
+            &failed,
+            in_30s(),
         )
         .await;
-        drop(dlq_tx);
-        let received = drain.await.expect("drain task");
+        dlq.flush().await.expect("durability barrier");
 
-        assert_eq!(delivery.delivered, 2, "the loss is surfaced, never silent");
+        assert_eq!(delivery.delivered, 1);
         assert!(delivery.complete);
-        assert!(received[0].reason.contains("clickhouse_permanent_reject"));
-        assert!(received[0].payload.is_empty());
+        let spooled = spooled_lines(&dir);
+        assert_eq!(spooled.len(), 1);
+        // The file backend base64s the payload, so an empty one spools as "".
+        let entry: serde_json::Value = serde_json::from_str(&spooled[0]).expect("NDJSON entry");
+        assert!(
+            !entry["payload"].as_str().expect("payload field").is_empty(),
+            "the payload must survive, not just the reason: {}",
+            spooled[0]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_empty_raw_slot_falls_back_to_the_promoted_row() {
+        // raw_payloads[i] is empty under raw_only, extracted_only, the whole
+        // legacy_flatten path and any MessagePack payload. The promoted row
+        // still holds the bytes as _raw or _json.
+        let row_bytes = br#"{"_raw":"{\"user\":\"kaz\"}"}"#.to_vec();
+        let failed = FailedRow {
+            row_index: 0,
+            offset: None,
+            reason: "code 117".to_string(),
+            row_json: Some(row_bytes.clone()),
+        };
+        let empty: Vec<Arc<[u8]>> = vec![Arc::from(&[][..])];
+        assert_eq!(rejected_payload(&empty, &failed), Some(row_bytes));
+
+        // A raw payload that IS present still wins — no re-serialisation.
+        let raw: Vec<Arc<[u8]>> = vec![Arc::from(&b"{\"user\":\"kaz\"}"[..])];
+        assert_eq!(
+            rejected_payload(&raw, &failed),
+            Some(b"{\"user\":\"kaz\"}".to_vec())
+        );
+
+        // Nothing at all: the caller must withhold rather than DLQ air.
+        let nothing = FailedRow {
+            row_index: 0,
+            offset: None,
+            reason: "code 117".to_string(),
+            row_json: None,
+        };
+        assert_eq!(rejected_payload(&empty, &nothing), None);
+    }
+
+    #[tokio::test]
+    async fn a_rejected_row_with_nothing_at_all_withholds_rather_than_dlqing_air() {
+        // Both slots empty means the offset is the only copy left. Committing
+        // an empty DLQ entry over the top of it is the loss this guards.
+        let dir = dlq_dir("nothing");
+        let dlq = file_dlq(&dir);
+        let payloads: Vec<Arc<[u8]>> = vec![Arc::from(&[][..])];
+
+        let delivery = route_rejected_rows_to_dlq(
+            Some(&dlq),
+            &None,
+            "dfe.default",
+            &payloads,
+            &rejected_rows(1, "boom"),
+            in_30s(),
+        )
+        .await;
+
+        assert_eq!(delivery.delivered, 0);
+        assert!(!delivery.complete, "nothing was kept, so nothing commits");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
     async fn a_batch_with_nothing_rejected_is_committable() {
-        let (dlq_tx, _dlq_rx) = mpsc::channel::<DlqEntry>(1);
-        let delivery = route_rejected_rows_to_dlq(
-            &dlq_tx,
-            true,
-            &None,
-            "dfe.default",
-            &[],
-            &[],
-            Duration::from_secs(1),
-        )
-        .await;
+        let delivery =
+            route_rejected_rows_to_dlq(None, &None, "dfe.default", &[], &[], in_30s()).await;
         assert!(delivery.complete);
         assert_eq!(delivery.delivered, 0);
+    }
+
+    // ========================================================================
+    // Cycle-wide commit watermark
+    // ========================================================================
+
+    #[tokio::test]
+    async fn a_withheld_offset_is_never_buried_by_a_committed_one() {
+        // The default DFE shape: one topic, one partition, two tables via
+        // source_to_table. scalo's build_commit_tpl SETS the partition to the
+        // highest offset + 1, so committing dfe.foo's batch on its own stores
+        // 103 and offset 101 becomes unreachable -- not in ClickHouse, not in
+        // the DLQ, and the consumer resumes past it.
+        let foo = vec![offset("dfe-events", 0, 100), offset("dfe-events", 0, 102)];
+        let bar = vec![offset("dfe-events", 0, 101)];
+
+        let to_commit = committable_offsets(foo, &bar);
+
+        let highest = to_commit.iter().map(|o| o.offset).max();
+        assert_eq!(
+            highest,
+            Some(100),
+            "the watermark must stop below the withheld offset, not at 102"
+        );
+        assert!(
+            to_commit.iter().all(|o| o.offset < 101),
+            "nothing at or above the withheld offset may commit"
+        );
+    }
+
+    #[test]
+    fn the_watermark_does_not_depend_on_batch_order() {
+        // get_ready_for_flush iterates an FxHashMap, so batch order is
+        // nondeterministic. One watermark per cycle cannot rewind.
+        let withheld = vec![offset("t", 0, 55)];
+        let ascending = committable_offsets(
+            vec![offset("t", 0, 50), offset("t", 0, 60), offset("t", 0, 54)],
+            &withheld,
+        );
+        let descending = committable_offsets(
+            vec![offset("t", 0, 60), offset("t", 0, 54), offset("t", 0, 50)],
+            &withheld,
+        );
+        let mut a: Vec<i64> = ascending.iter().map(|o| o.offset).collect();
+        let mut b: Vec<i64> = descending.iter().map(|o| o.offset).collect();
+        a.sort_unstable();
+        b.sort_unstable();
+        assert_eq!(a, vec![50, 54]);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn a_withhold_on_one_partition_does_not_hold_another() {
+        // The watermark is per partition, so a wedged table on partition 0 must
+        // not stall partition 1's progress.
+        let committable = vec![
+            offset("dfe-events", 0, 100),
+            offset("dfe-events", 1, 500),
+            offset("other", 0, 900),
+        ];
+        let withheld = vec![offset("dfe-events", 0, 99)];
+
+        let to_commit = committable_offsets(committable, &withheld);
+        let mut got: Vec<(i32, i64)> = to_commit
+            .iter()
+            .map(|o| (o.partition, o.offset))
+            .collect::<Vec<_>>();
+        got.sort_unstable();
+        assert_eq!(got, vec![(0, 900), (1, 500)]);
+    }
+
+    #[test]
+    fn nothing_withheld_commits_everything() {
+        let committable = vec![offset("t", 0, 1), offset("t", 1, 2)];
+        assert_eq!(committable_offsets(committable, &[]).len(), 2);
+    }
+
+    #[test]
+    fn a_topic_only_named_in_the_withheld_pile_blocks_nothing_else() {
+        let to_commit = committable_offsets(
+            vec![offset("a", 0, 10)],
+            &[offset("b", 0, 1), offset("a", 0, 11)],
+        );
+        assert_eq!(to_commit.len(), 1);
+        assert_eq!(to_commit[0].offset, 10);
     }
 
     #[test]
