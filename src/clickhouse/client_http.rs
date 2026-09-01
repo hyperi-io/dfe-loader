@@ -206,10 +206,10 @@ impl ClickHouseQueryClient {
                 ClickHouseError::Schema(format!("Failed to fetch schema for {table}: {e}"))
             })?;
 
+        // The query succeeded and system.columns has nothing: the table really is
+        // absent. Distinct from Schema above, which a transient outage produces.
         if rows.is_empty() {
-            return Err(ClickHouseError::Schema(format!(
-                "Table {db}.{tbl} not found or has no columns"
-            )));
+            return Err(ClickHouseError::TableNotFound(format!("{db}.{tbl}")));
         }
 
         let columns: Vec<ColumnInfo> = rows
@@ -289,10 +289,14 @@ impl ClickHouseQueryClient {
     }
 
     /// Check if a table exists.
+    ///
+    /// Only a `TableNotFound` answers "no". A failed query means the answer is
+    /// unknown and propagates as an error — reporting it as absent would let a
+    /// transient outage look like a deleted table.
     pub async fn table_exists(&self, table: &str) -> Result<bool> {
         match self.fetch_table_schema(table).await {
             Ok(_) => Ok(true),
-            Err(ClickHouseError::Schema(_)) => Ok(false),
+            Err(ClickHouseError::TableNotFound(_)) => Ok(false),
             Err(e) => Err(e),
         }
     }

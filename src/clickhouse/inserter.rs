@@ -45,7 +45,10 @@ use crate::buffer::{FlushBatch, KafkaOffset};
 use crate::clickhouse::circuit_breaker::CircuitBreaker;
 use crate::clickhouse::client_http::escape_identifier;
 use crate::clickhouse::config::InsertFormat;
-use crate::clickhouse::error::{ClickHouseError, ErrorCategory, is_schema_drift_error};
+use crate::clickhouse::error::{
+    ErrorCategory, classify_dynamic_error, classify_insert_end_error, classify_json_insert_error,
+    is_schema_drift_error,
+};
 use crate::clickhouse::{ClickHouseQueryClient, SchemaCache};
 use crate::transform::Coercer;
 
@@ -100,13 +103,26 @@ fn calc_backoff(base_ms: u64, attempt: u32, max_ms: u64) -> Duration {
     Duration::from_millis(delay_ms.min(max_ms))
 }
 
+/// What the flush path must do with a batch's Kafka offsets.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BatchDisposition {
+    /// Every row is either in `ClickHouse` or in `InsertResult::failed`.
+    /// Commit once the failed rows are somewhere durable.
+    Settled,
+    /// Something can still clear. Withhold the offsets and let Kafka
+    /// re-deliver -- the safe direction, since the payload is still in Kafka.
+    Retry(String),
+}
+
 /// Result of a batch insert with salvage
 #[derive(Debug)]
 pub struct InsertResult {
     /// Number of rows successfully inserted
     pub inserted: usize,
-    /// Failed rows with their Kafka offsets and error reason
+    /// Rows `ClickHouse` can never accept, with their Kafka offsets and reason
     pub failed: Vec<FailedRow>,
+    /// Whether the batch's offsets may be committed.
+    pub disposition: BatchDisposition,
 }
 
 impl InsertResult {
@@ -114,11 +130,54 @@ impl InsertResult {
         Self {
             inserted: count,
             failed: Vec::new(),
+            disposition: BatchDisposition::Settled,
         }
     }
 
     pub fn with_failures(inserted: usize, failed: Vec<FailedRow>) -> Self {
-        Self { inserted, failed }
+        Self {
+            inserted,
+            failed,
+            disposition: BatchDisposition::Settled,
+        }
+    }
+
+    /// A batch whose offsets must be withheld so Kafka re-delivers it.
+    pub fn retry(inserted: usize, reason: impl Into<String>) -> Self {
+        Self {
+            inserted,
+            failed: Vec::new(),
+            disposition: BatchDisposition::Retry(reason.into()),
+        }
+    }
+
+    /// Whether the flush path may commit this batch's offsets once the failed
+    /// rows are accepted by the DLQ.
+    #[must_use]
+    pub fn is_settled(&self) -> bool {
+        self.disposition == BatchDisposition::Settled
+    }
+}
+
+/// Running state of a binary-split salvage.
+#[derive(Debug, Default)]
+struct Salvage {
+    inserted: usize,
+    /// Rows isolated as unencodable -- these go to the DLQ.
+    failed: Vec<FailedRow>,
+    /// Set by the first row that failed for a reason that can still clear.
+    retry_reason: Option<String>,
+}
+
+/// Split a slice held parallel to the rows, tolerating a short or empty one.
+///
+/// `offsets` is empty on the gRPC path and `raw_payloads` is empty in
+/// `extracted_only` capture mode, so neither can be indexed blind.
+fn split_parallel<T>(s: &[T], mid: usize) -> (&[T], &[T]) {
+    if s.len() < mid {
+        (s, &[])
+    } else {
+        s.split_at(mid)
     }
 }
 
@@ -131,6 +190,40 @@ pub struct FailedRow {
     pub offset: Option<KafkaOffset>,
     /// Error message
     pub reason: String,
+    /// The promoted row, serialised, for the DLQ to carry when the batch's
+    /// parallel raw-payload slot is empty. See [`rejected_row_bytes`].
+    pub row_json: Option<Vec<u8>>,
+}
+
+/// Whether binary-split salvage can actually isolate this failure to a row.
+///
+/// Only a data error belongs to a row. Anything else -- an unreachable sink, a
+/// missing GRANT, a column type this build cannot encode -- is equally true of
+/// every row in the slice, so splitting on it issues ~2N inserts against
+/// something already struggling and isolates nothing.
+fn is_salvageable(err: &crate::Error) -> bool {
+    matches!(err, crate::Error::ClickHousePermanent(_))
+}
+
+/// The bytes a permanently rejected row must carry to the DLQ.
+///
+/// `raw_payloads[i]` is empty for every capture mode that keeps no raw bytes:
+/// `raw_only` and `extracted_only`, the whole `legacy_flatten` path, and any
+/// `MessagePack` payload. DLQ'ing an empty entry for those and then committing
+/// the offset loses the event from `ClickHouse`, the DLQ and Kafka at once, so
+/// fall back to the promoted row -- under `raw_only` it still holds the payload
+/// as `_raw`, under `legacy_flatten` full capture as `_json`.
+///
+/// Returns `None` when the raw slot already has the bytes: the flush path reads
+/// those directly and re-serialising would only duplicate them.
+fn rejected_row_bytes(
+    raw: Option<&Arc<[u8]>>,
+    row: Option<&Map<String, Value>>,
+) -> Option<Vec<u8>> {
+    if raw.is_some_and(|p| !p.is_empty()) {
+        return None;
+    }
+    row.and_then(|r| serde_json::to_vec(r).ok())
 }
 
 /// Handles batch inserts to `ClickHouse` with retry logic.
@@ -411,7 +504,33 @@ impl Inserter {
                         write_failed = true;
                         break;
                     }
-                    return Err(crate::Error::ClickHouse(format!("RowBinary encode: {e}")));
+                    // A schema fetch that never reached the server, or a table
+                    // still being created, is a fault of the moment: drop the
+                    // cached schema and try again with a fresh one.
+                    if matches!(
+                        e,
+                        crate::clickhouse_ext::DynamicError::SchemaFetch { .. }
+                            | crate::clickhouse_ext::DynamicError::EmptySchema { .. }
+                    ) {
+                        insert.invalidate_schema();
+                        if let Some(cache) = &self.schema_cache {
+                            cache.invalidate(table);
+                        }
+                        last_error = Some(crate::Error::ClickHouse(format!(
+                            "Schema unavailable during write: {e}"
+                        )));
+                        write_failed = true;
+                        break;
+                    }
+                    // Only an encoding failure is a verdict on the payload. A
+                    // type this build cannot encode is a loader gap, so those
+                    // offsets are withheld and the rows come back.
+                    return Err(match classify_dynamic_error(&e) {
+                        ErrorCategory::Data => {
+                            crate::Error::ClickHousePermanent(format!("RowBinary encode: {e}"))
+                        }
+                        _ => crate::Error::ClickHouse(format!("RowBinary encode: {e}")),
+                    });
                 }
             }
 
@@ -470,21 +589,36 @@ impl Inserter {
                     ));
                 }
                 Err(e) => {
-                    // insert.end() consumed the DynamicInsert, so we cannot
-                    // call invalidate_schema() on it. Invalidate the loader's
-                    // schema cache so the NEXT batch re-fetches fresh schema.
-                    // The current batch is returned as an error (salvage/DLQ).
+                    let message = format!("RowBinary insert: {e}");
+                    // insert.end() consumed the DynamicInsert, so the loader's
+                    // own cache is the only one left to invalidate; the next
+                    // attempt re-fetches through it.
                     if is_schema_drift_error(&e.to_string()) {
                         if let Some(cache) = &self.schema_cache {
                             cache.invalidate(table);
                         }
-                        warn!(
-                            table = %table,
-                            error = %e,
-                            "Data error suggests schema drift, invalidated loader schema cache"
-                        );
+                        if attempt < self.max_retries {
+                            let delay = self.backoff_delay(attempt);
+                            warn!(
+                                table = %table,
+                                attempt,
+                                error = %e,
+                                delay_ms = delay.as_millis(),
+                                "Schema drift on end(), re-fetching and retrying"
+                            );
+                            sleep(delay).await;
+                            last_error = Some(crate::Error::ClickHouse(message));
+                            continue;
+                        }
+                        last_error = Some(crate::Error::ClickHouse(message));
+                        break;
                     }
-                    return Err(crate::Error::ClickHouse(format!("RowBinary insert: {e}")));
+                    // Permanent means the payload can never encode. Drift was
+                    // ruled out above, so the message classification decides.
+                    return Err(match classify_insert_end_error(&message) {
+                        ErrorCategory::Data => crate::Error::ClickHousePermanent(message),
+                        _ => crate::Error::ClickHouse(message),
+                    });
                 }
             }
         }
@@ -523,7 +657,7 @@ impl Inserter {
         if raw_payloads.is_empty() {
             for row in rows {
                 sonic_rs::to_writer(&mut body, row).map_err(|e| {
-                    crate::Error::ClickHouse(format!("JSON serialisation error: {e}"))
+                    crate::Error::ClickHousePermanent(format!("JSON serialisation error: {e}"))
                 })?;
                 body.push(b'\n');
             }
@@ -532,7 +666,7 @@ impl Inserter {
                 if raw.is_empty() {
                     // Transformer-path row: _json already in the map (or absent).
                     sonic_rs::to_writer(&mut body, row).map_err(|e| {
-                        crate::Error::ClickHouse(format!("JSON serialisation error: {e}"))
+                        crate::Error::ClickHousePermanent(format!("JSON serialisation error: {e}"))
                     })?;
                     body.push(b'\n');
                 } else {
@@ -558,89 +692,67 @@ impl Inserter {
             // both transports via insert_native_with_columns.
             let mut insert = self.ch_client.insert_formatted_with(sql.clone());
 
-            if let Err(e) = insert.send(body.clone()).await {
-                // Bytes clone is O(1)
-                let ch_err = ClickHouseError::Insert(format!("{e}"));
-                let category = ch_err.category();
+            // One INSERT carries one verdict, and which call surfaces it is an
+            // accident of buffering: the fork queues the body on a channel, so
+            // a server rejection reaches a small batch at end() and a large one
+            // at send(), where the closed channel makes it return the response
+            // error instead. Classifying only one of them is what let a
+            // rejected JSON batch read as retryable and come back forever.
+            // Bytes clone is O(1).
+            let outcome = match insert.send(body.clone()).await {
+                Ok(()) => insert.end().await,
+                Err(e) => Err(e),
+            };
 
-                match category {
-                    ErrorCategory::Transient | ErrorCategory::Unknown => {
-                        if attempt < self.max_retries {
-                            let delay = self.backoff_delay(attempt);
-                            debug!(
-                                table = %table,
-                                attempt = attempt,
-                                delay_ms = delay.as_millis(),
-                                error = %e,
-                                "Insert retry"
-                            );
-                            warn!(
-                                table = %table,
-                                attempt = attempt,
-                                delay_ms = delay.as_millis(),
-                                error = %e,
-                                "Transient error, backing off"
-                            );
-                            sleep(delay).await;
-                            last_error = Some(ch_err);
-                            continue;
-                        }
-                        error!(
-                            table = %table,
-                            attempts = self.max_retries + 1,
-                            error = %e,
-                            "Max retries exhausted for transient error"
-                        );
-                        last_error = Some(ch_err);
-                    }
-                    ErrorCategory::Data => {
-                        debug!(table = %table, error = %e, "Data error, returning for salvage");
-                        return Err(ch_err.into());
-                    }
-                    ErrorCategory::Fatal => {
-                        error!(table = %table, error = %e, "Fatal error, not retrying");
-                        return Err(ch_err.into());
-                    }
-                }
-                continue;
-            }
+            let Err(e) = outcome else {
+                debug!(
+                    table = %table,
+                    rows = rows.len(),
+                    duration_ms = insert_start.elapsed().as_millis(),
+                    "Insert completed"
+                );
+                return Ok(rows.len());
+            };
 
-            // send() succeeded, now end the insert
-            match insert.end().await {
-                Ok(()) => {
+            let message = format!("JSONEachRow insert: {e}");
+            match classify_json_insert_error(&e) {
+                ErrorCategory::Data => {
                     debug!(
                         table = %table,
-                        rows = rows.len(),
-                        duration_ms = insert_start.elapsed().as_millis(),
-                        "Insert completed"
+                        error = %e,
+                        "Server rejected the payload, returning for salvage"
                     );
-                    return Ok(rows.len());
+                    return Err(crate::Error::ClickHousePermanent(message));
                 }
-                Err(e) => {
-                    let ch_err = ClickHouseError::Insert(format!("{e}"));
+                ErrorCategory::Fatal => {
+                    error!(table = %table, error = %e, "Fatal error, not retrying");
+                    return Err(crate::Error::ClickHouse(message));
+                }
+                ErrorCategory::Transient | ErrorCategory::Unknown => {
+                    last_error = Some(crate::Error::ClickHouse(message));
                     if attempt < self.max_retries {
                         let delay = self.backoff_delay(attempt);
-                        debug!(
+                        warn!(
                             table = %table,
-                            attempt = attempt,
+                            attempt,
                             delay_ms = delay.as_millis(),
                             error = %e,
-                            "Insert retry"
+                            "Transient error, backing off"
                         );
-                        warn!(table = %table, attempt, error = %e, "Insert end() failed, retrying");
                         sleep(delay).await;
-                        last_error = Some(ch_err);
                         continue;
                     }
-                    last_error = Some(ch_err);
+                    error!(
+                        table = %table,
+                        attempts = self.max_retries + 1,
+                        error = %e,
+                        "Max retries exhausted for transient error"
+                    );
                 }
             }
         }
 
-        Err(match last_error {
-            Some(e) => e.into(),
-            None => crate::Error::Buffer("Max retries exceeded".into()),
-        })
+        Err(last_error.unwrap_or_else(|| crate::Error::Buffer("Max retries exceeded".into())))
     }
 
     /// Insert a `FlushBatch` with error-aware retry and salvage.
@@ -660,22 +772,18 @@ impl Inserter {
         // salvage sub-batches reuse already-coerced rows.
         self.coerce_batch(&table, &mut rows).await;
 
-        // Pass raw_payloads for zero-copy _json splice (json_primary path).
-        // Salvage sub-batches use &[] — the salvage path is error recovery only.
+        // Pass raw_payloads for zero-copy _json splice (json_primary path);
+        // salvage sub-batches keep their slice of it.
         match self.insert_rows(&table, &rows, &raw_payloads).await {
             Ok(count) => {
                 return InsertResult::success(count);
             }
             Err(e) => {
-                let is_data_error = matches!(
-                    e,
-                    crate::Error::ClickHouse(ref msg) if {
-                        let ch_err = crate::clickhouse::ClickHouseError::Insert(msg.clone());
-                        ch_err.is_data_error()
-                    }
-                ) || e.to_string().to_lowercase().contains("type mismatch")
-                    || e.to_string().to_lowercase().contains("incorrect data")
-                    || e.to_string().to_lowercase().contains("cannot parse");
+                // insert_rows has already classified this, so a permanent
+                // rejection is the only thing salvage can isolate. Splitting
+                // anything else issues 2N inserts against a sink that is
+                // already struggling, for rows that were never at fault.
+                let is_data_error = is_salvageable(&e);
 
                 // max_dynamic_paths guidance: metric always, log debounced.
                 {
@@ -704,26 +812,26 @@ impl Inserter {
                     }
                 }
 
-                if !self.enable_salvage || num_rows <= 1 || !is_data_error {
+                if !is_data_error {
+                    // A missing table or a missing grant is an operator fix,
+                    // not a bad payload, so the rows wait in Kafka for it.
+                    error!(
+                        table = %table,
+                        rows = num_rows,
+                        error = %e,
+                        "Insert failed — offsets withheld, messages will re-deliver"
+                    );
+                    return InsertResult::retry(0, e.to_string());
+                }
+
+                if !self.enable_salvage || num_rows <= 1 {
                     let reason = e.to_string();
-                    let is_fatal = e.to_string().to_lowercase().contains("unknown table")
-                        || e.to_string().to_lowercase().contains("access denied");
-
-                    if is_fatal {
-                        error!(
-                            table = %table,
-                            rows = num_rows,
-                            error = %e,
-                            "Fatal error, batch failed (not sending to DLQ)"
-                        );
-                        return InsertResult::with_failures(0, Vec::new());
-                    }
-
                     let failed: Vec<FailedRow> = (0..num_rows)
                         .map(|i| FailedRow {
                             row_index: i,
                             offset: offsets.get(i).cloned(),
                             reason: reason.clone(),
+                            row_json: rejected_row_bytes(raw_payloads.get(i), rows.get(i)),
                         })
                         .collect();
                     return InsertResult::with_failures(0, failed);
@@ -739,36 +847,48 @@ impl Inserter {
         }
 
         // Binary-split salvage (only for data errors)
-        let mut inserted = 0;
-        let mut failed = Vec::new();
+        let mut salvage = Salvage::default();
 
-        self.salvage_batch(&table, &rows, &offsets, 0, 0, &mut inserted, &mut failed)
+        self.salvage_batch(&table, &rows, &offsets, &raw_payloads, 0, 0, &mut salvage)
             .await;
 
         info!(
             table = %table,
-            inserted = inserted,
-            failed = failed.len(),
+            inserted = salvage.inserted,
+            failed = salvage.failed.len(),
             "Batch salvage complete"
         );
 
-        InsertResult::with_failures(inserted, failed)
+        // One row that needs to come back drags the batch's offsets with it:
+        // the offsets are committed as a block, so a partial commit would lose
+        // the rows behind it.
+        match salvage.retry_reason {
+            Some(reason) => InsertResult {
+                inserted: salvage.inserted,
+                failed: Vec::new(),
+                disposition: BatchDisposition::Retry(reason),
+            },
+            None => InsertResult::with_failures(salvage.inserted, salvage.failed),
+        }
     }
 
     /// Recursively salvage a batch using binary split.
     ///
     /// Splits `rows` slice in half, retries each half. Recurses until
     /// single-row failures are isolated for DLQ routing.
+    ///
+    /// `raw_payloads` is sliced in step with `rows` so a salvaged row keeps its
+    /// zero-copy `_json`; dropping it would land the row with an empty `_json`.
     #[allow(clippy::too_many_arguments)]
     fn salvage_batch<'a>(
         &'a self,
         table: &'a str,
         rows: &'a [Map<String, Value>],
         offsets: &'a [KafkaOffset],
+        raw_payloads: &'a [Arc<[u8]>],
         start_index: usize,
         depth: u32,
-        inserted: &'a mut usize,
-        failed: &'a mut Vec<FailedRow>,
+        out: &'a mut Salvage,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
         Box::pin(async move {
             let num_rows = rows.len();
@@ -781,10 +901,11 @@ impl Inserter {
                     "Max salvage depth exceeded, marking all rows as failed"
                 );
                 for i in 0..num_rows {
-                    failed.push(FailedRow {
+                    out.failed.push(FailedRow {
                         row_index: start_index + i,
                         offset: offsets.get(i).cloned(),
                         reason: "Max salvage depth exceeded".to_string(),
+                        row_json: rejected_row_bytes(raw_payloads.get(i), rows.get(i)),
                     });
                 }
                 return;
@@ -792,41 +913,62 @@ impl Inserter {
 
             // Base case: single row
             if num_rows == 1 {
-                match self.insert_rows(table, rows, &[]).await {
+                match self.insert_rows(table, rows, raw_payloads).await {
                     Ok(_) => {
-                        *inserted += 1;
+                        out.inserted += 1;
                     }
                     Err(e) => {
-                        failed.push(FailedRow {
-                            row_index: start_index,
-                            offset: offsets.first().cloned(),
-                            reason: e.to_string(),
-                        });
+                        if is_salvageable(&e) {
+                            out.failed.push(FailedRow {
+                                row_index: start_index,
+                                offset: offsets.first().cloned(),
+                                reason: e.to_string(),
+                                row_json: rejected_row_bytes(raw_payloads.first(), rows.first()),
+                            });
+                        } else {
+                            out.retry_reason.get_or_insert_with(|| e.to_string());
+                        }
                     }
                 }
                 return;
             }
 
-            // Try the whole slice first (might succeed now, e.g., transient error)
-            if let Ok(count) = self.insert_rows(table, rows, &[]).await {
-                *inserted += count;
-                return;
+            // Try the whole slice first (might succeed now, e.g., transient
+            // error). Skipped at depth 0: the caller has just made that exact
+            // attempt, and repeating it doubles the cost of every rejection.
+            //
+            // Splitting is only ever right for a DATA error. A transient one
+            // here means the sink is struggling, and halving on it issues ~2N
+            // more inserts into that -- for rows that were never at fault. The
+            // is_data_error guard at the entry point only covers depth 0, so
+            // the same classification has to happen on every deeper attempt.
+            if depth > 0 {
+                match self.insert_rows(table, rows, raw_payloads).await {
+                    Ok(count) => {
+                        out.inserted += count;
+                        return;
+                    }
+                    Err(e) if !is_salvageable(&e) => {
+                        debug!(
+                            table = %table,
+                            depth = depth,
+                            rows = num_rows,
+                            error = %e,
+                            "Transient failure mid-salvage, withholding instead of splitting"
+                        );
+                        out.retry_reason.get_or_insert_with(|| e.to_string());
+                        return;
+                    }
+                    Err(_) => {}
+                }
             }
             // Split and recurse
 
             // Split in half
             let mid = num_rows / 2;
             let (left_rows, right_rows) = rows.split_at(mid);
-            let left_offsets = if offsets.len() >= mid {
-                &offsets[..mid]
-            } else {
-                offsets
-            };
-            let right_offsets = if offsets.len() > mid {
-                &offsets[mid..]
-            } else {
-                &[]
-            };
+            let (left_offsets, right_offsets) = split_parallel(offsets, mid);
+            let (left_raw, right_raw) = split_parallel(raw_payloads, mid);
 
             debug!(
                 table = %table,
@@ -840,10 +982,10 @@ impl Inserter {
                 table,
                 left_rows,
                 left_offsets,
+                left_raw,
                 start_index,
                 depth + 1,
-                inserted,
-                failed,
+                out,
             )
             .await;
 
@@ -851,19 +993,13 @@ impl Inserter {
                 table,
                 right_rows,
                 right_offsets,
+                right_raw,
                 start_index + mid,
                 depth + 1,
-                inserted,
-                failed,
+                out,
             )
             .await;
         })
-    }
-
-    /// Insert a `FlushBatch` — simple version without salvage.
-    pub async fn insert_batch(&self, batch: FlushBatch) -> Result<usize> {
-        self.insert_rows(&batch.table, &batch.rows, &batch.raw_payloads)
-            .await
     }
 
     /// Insert multiple batches concurrently with salvage.
@@ -901,51 +1037,13 @@ impl Inserter {
             match handle.await {
                 Ok((table, result)) => results.push((table, result)),
                 Err(e) => {
+                    // A panicked task proves nothing about the payload, so the
+                    // offsets stay withheld rather than being DLQ'd blind.
                     results.push((
                         "unknown".to_string(),
-                        InsertResult::with_failures(
-                            0,
-                            vec![FailedRow {
-                                row_index: 0,
-                                offset: None,
-                                reason: format!("Insert task panicked: {e}"),
-                            }],
-                        ),
+                        InsertResult::retry(0, format!("Insert task panicked: {e}")),
                     ));
                 }
-            }
-        }
-
-        results
-    }
-
-    /// Insert multiple batches concurrently (simple version).
-    pub async fn insert_batches(&self, batches: Vec<FlushBatch>) -> Vec<Result<usize>> {
-        let mut handles = Vec::with_capacity(batches.len());
-
-        for batch in batches {
-            let semaphore = self.semaphore.clone();
-            let inserter = Self {
-                semaphore: None,
-                ..self.clone()
-            };
-
-            handles.push(tokio::spawn(async move {
-                let _permit = match &semaphore {
-                    Some(sem) => Some(sem.acquire().await.expect("Semaphore closed")),
-                    None => None,
-                };
-                inserter.insert_batch(batch).await
-            }));
-        }
-
-        let mut results = Vec::with_capacity(handles.len());
-        for handle in handles {
-            match handle.await {
-                Ok(result) => results.push(result),
-                Err(e) => results.push(Err(crate::Error::Buffer(format!(
-                    "Insert task panicked: {e}"
-                )))),
             }
         }
 
@@ -967,8 +1065,9 @@ fn write_row_with_json(body: &mut Vec<u8>, row: &Map<String, Value>, raw: &[u8])
         body.extend_from_slice(raw);
         body.push(b'}');
     } else {
-        sonic_rs::to_writer(&mut *body, row)
-            .map_err(|e| crate::Error::ClickHouse(format!("JSON serialisation error: {e}")))?;
+        sonic_rs::to_writer(&mut *body, row).map_err(|e| {
+            crate::Error::ClickHousePermanent(format!("JSON serialisation error: {e}"))
+        })?;
         let last = body.len() - 1;
         debug_assert_eq!(body[last], b'}', "sonic_rs must produce a closing brace");
         body[last] = b',';
@@ -1007,11 +1106,13 @@ mod tests {
                 row_index: 5,
                 offset: None,
                 reason: "Schema mismatch".to_string(),
+                row_json: None,
             },
             FailedRow {
                 row_index: 10,
                 offset: None,
                 reason: "Invalid data".to_string(),
+                row_json: None,
             },
         ];
         let result = InsertResult::with_failures(98, failed);
@@ -1019,6 +1120,37 @@ mod tests {
         assert_eq!(result.failed.len(), 2);
         assert_eq!(result.failed[0].row_index, 5);
         assert_eq!(result.failed[1].row_index, 10);
+        assert!(result.is_settled());
+    }
+
+    #[test]
+    fn a_retry_disposition_carries_no_dlq_rows() {
+        // Withholding is the safe direction: the payload is still in Kafka, so
+        // nothing may be DLQ'd and nothing may be committed.
+        let result = InsertResult::retry(0, "connection reset by peer");
+        assert!(!result.is_settled());
+        assert!(result.failed.is_empty());
+        assert_eq!(
+            result.disposition,
+            BatchDisposition::Retry("connection reset by peer".to_string())
+        );
+    }
+
+    #[test]
+    fn split_parallel_tolerates_a_short_or_empty_companion() {
+        // offsets is empty on the gRPC path and raw_payloads is empty in
+        // extracted_only capture mode.
+        let full = [1, 2, 3, 4];
+        assert_eq!(split_parallel(&full, 2), (&full[..2], &full[2..]));
+
+        let empty: [i32; 0] = [];
+        assert_eq!(split_parallel(&empty, 2), (&empty[..], &empty[..]));
+
+        let short = [1];
+        assert_eq!(split_parallel(&short, 2), (&short[..], &empty[..]));
+
+        // An exact-length split leaves an empty right half, not a panic.
+        assert_eq!(split_parallel(&full, 4), (&full[..], &empty[..]));
     }
 
     #[test]
@@ -1337,6 +1469,7 @@ mod tests {
                 row_index: i,
                 offset: None,
                 reason: format!("Error at row {i}"),
+                row_json: None,
             })
             .collect();
         let result = InsertResult::with_failures(0, failed);
@@ -1361,6 +1494,7 @@ mod tests {
             row_index: 7,
             offset: Some(offset.clone()),
             reason: "Type mismatch".to_string(),
+            row_json: None,
         };
         assert_eq!(row.row_index, 7);
         assert!(row.offset.is_some());
@@ -1376,8 +1510,44 @@ mod tests {
             row_index: 0,
             offset: None,
             reason: "No offset (manual insert path)".to_string(),
+            row_json: None,
         };
         assert!(row.offset.is_none());
+    }
+
+    #[test]
+    fn a_row_with_no_raw_payload_carries_its_own_bytes() {
+        // raw_only, extracted_only, legacy_flatten and MessagePack all leave
+        // raw_payloads[i] empty. Without the fallback the DLQ entry is empty
+        // and the offset commits over the top of it.
+        let mut row = Map::new();
+        row.insert("_raw".to_string(), Value::String("{\"a\":1}".to_string()));
+        let empty: Arc<[u8]> = Arc::from(&[][..]);
+
+        let bytes = rejected_row_bytes(Some(&empty), Some(&row)).expect("row must be serialised");
+        let back: Value = serde_json::from_slice(&bytes).expect("valid JSON");
+        assert_eq!(back["_raw"], "{\"a\":1}");
+    }
+
+    #[test]
+    fn a_row_that_still_has_its_raw_payload_is_not_re_serialised() {
+        let mut row = Map::new();
+        row.insert("n".to_string(), Value::from(1));
+        let raw: Arc<[u8]> = Arc::from(&b"{\"n\":1}"[..]);
+        assert_eq!(rejected_row_bytes(Some(&raw), Some(&row)), None);
+    }
+
+    #[test]
+    fn only_a_data_error_is_worth_splitting() {
+        // Splitting a transient failure issues ~2N inserts into a sink that is
+        // already struggling, and isolates nothing.
+        assert!(is_salvageable(&crate::Error::ClickHousePermanent(
+            "code 117".into()
+        )));
+        assert!(!is_salvageable(&crate::Error::ClickHouse(
+            "connection reset by peer".into()
+        )));
+        assert!(!is_salvageable(&crate::Error::Buffer("closed".into())));
     }
 
     #[test]
@@ -1386,6 +1556,7 @@ mod tests {
             row_index: 1,
             offset: None,
             reason: "Erreur: données invalides 世界 🚫".to_string(),
+            row_json: None,
         };
         assert!(row.reason.contains("世界"));
         assert!(row.reason.contains("🚫"));

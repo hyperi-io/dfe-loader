@@ -118,7 +118,7 @@ impl TypeTag {
 /// # Examples
 ///
 /// ```
-/// use cext_dev::ParsedType;
+/// use dfe_loader::clickhouse_ext::ParsedType;
 ///
 /// let t = ParsedType::parse("LowCardinality(Nullable(String))");
 /// assert_eq!(t.base, "String");

@@ -46,6 +46,12 @@ pub(crate) struct MessageProcessor<'a> {
     pub field_mapping_cache: Option<&'a FieldMappingCache>,
     pub computed_column_cache: &'a ComputedColumnCache,
     pub capture_overrides: &'a CaptureOverrides,
+    /// Tables ClickHouse has confirmed absent; their messages re-route to
+    /// `default_table` instead of buffering until the pending-schema age cap.
+    /// Entries expire, so a table that later appears is resolved again.
+    pub absent_tables: &'a super::types::AbsentTables,
+    /// Pre-built `db.table` for the routing default.
+    pub default_table: &'a str,
 }
 
 impl MessageProcessor<'_> {
@@ -116,7 +122,7 @@ impl MessageProcessor<'_> {
         };
 
         // Step 3: Route to table (db.table)
-        let table = match self.router.route_value(&value) {
+        let routed = match self.router.route_value(&value) {
             RouteResult::Table(t) => {
                 if tracing::enabled!(tracing::Level::TRACE) {
                     trace!(table = %t, "Message routed");
@@ -129,6 +135,16 @@ impl MessageProcessor<'_> {
                 return Err(crate::Error::Json(format!("DLQ: {reason}")));
             }
         };
+
+        // An unknown source names a table that does not exist, so it lands in the
+        // default table rather than the DLQ. The emptiness check keeps the common
+        // case free of a hash lookup.
+        let (table, fell_back_from) =
+            if !self.absent_tables.is_empty() && self.absent_tables.contains(&routed) {
+                (self.default_table.to_string(), Some(routed))
+            } else {
+                (routed, None)
+            };
 
         // Step 4: Build the promoted field map.
         //
@@ -279,6 +295,7 @@ impl MessageProcessor<'_> {
             data,
             raw_payload,
             kafka_offset,
+            fell_back_from,
         })
     }
 }
@@ -313,6 +330,8 @@ mod tests {
         col_meta_cache: ColumnMetaCache,
         computed_column_cache: ComputedColumnCache,
         capture_overrides: CaptureOverrides,
+        absent_tables: crate::pipeline::types::AbsentTables,
+        default_table: String,
     }
 
     impl TestHarness {
@@ -339,6 +358,10 @@ mod tests {
             let col_meta_cache = ColumnMetaCache::new(ColumnDirectivesConfig::default());
             let computed_column_cache = ComputedColumnCache::new(ComputedColumnsConfig::default());
             let capture_overrides = CaptureOverrides::new(&config.metadata);
+            let default_table = format!(
+                "{}.{}",
+                config.routing.default_db, config.routing.default_table
+            );
 
             Self {
                 config,
@@ -351,6 +374,11 @@ mod tests {
                 col_meta_cache,
                 computed_column_cache,
                 capture_overrides,
+                absent_tables: crate::pipeline::types::AbsentTables::new(
+                    std::time::Duration::from_secs(60),
+                    16,
+                ),
+                default_table,
             }
         }
 
@@ -368,6 +396,8 @@ mod tests {
                 field_mapping_cache: None,
                 computed_column_cache: &self.computed_column_cache,
                 capture_overrides: &self.capture_overrides,
+                absent_tables: &self.absent_tables,
+                default_table: &self.default_table,
             }
         }
 
@@ -385,6 +415,8 @@ mod tests {
                 field_mapping_cache: None,
                 computed_column_cache: &self.computed_column_cache,
                 capture_overrides: &self.capture_overrides,
+                absent_tables: &self.absent_tables,
+                default_table: &self.default_table,
             }
         }
 
@@ -628,6 +660,53 @@ mod tests {
     }
 
     #[test]
+    fn process_absent_table_falls_back_to_default_table() {
+        let mut config = Config::default();
+        config.routing.table_fields = vec!["_source".to_string()];
+        config.routing.default_db = "dfe".to_string();
+        config.routing.default_table = "default".to_string();
+
+        let mut harness = TestHarness::with_config(config);
+        harness
+            .absent_tables
+            .insert("dfe.acme_widgets", std::time::Instant::now());
+        let proc = harness.processor();
+
+        let payload = serde_json::to_vec(&json!({"_source": "acme_widgets"})).expect("serialize");
+        let msg = harness.make_msg(&payload);
+
+        let processed = proc.process(&msg).expect("should succeed");
+        assert_eq!(
+            processed.table, "dfe.default",
+            "an unknown source must land in the default table, not the DLQ"
+        );
+        assert_eq!(
+            processed.fell_back_from.as_deref(),
+            Some("dfe.acme_widgets"),
+            "the rewrite must be countable, not invisible after the first backlog"
+        );
+    }
+
+    #[test]
+    fn process_unknown_table_not_yet_confirmed_absent_keeps_its_route() {
+        // Nothing is in the absent set, so routing is untouched — a ClickHouse
+        // outage must never silently redirect a source to the default table.
+        let mut config = Config::default();
+        config.routing.table_fields = vec!["_source".to_string()];
+        config.routing.default_db = "dfe".to_string();
+        config.routing.default_table = "default".to_string();
+
+        let harness = TestHarness::with_config(config);
+        let proc = harness.processor();
+
+        let payload = serde_json::to_vec(&json!({"_source": "acme_widgets"})).expect("serialize");
+        let msg = harness.make_msg(&payload);
+
+        let processed = proc.process(&msg).expect("should succeed");
+        assert_eq!(processed.table, "dfe.acme_widgets");
+    }
+
+    #[test]
     fn process_nested_table_field_via_dot_notation() {
         let mut config = Config::default();
         config.routing.table_fields = vec![
@@ -778,6 +857,8 @@ mod tests {
         let col_meta_cache = ColumnMetaCache::new(ColumnDirectivesConfig::default());
         let computed_column_cache = ComputedColumnCache::new(ComputedColumnsConfig::default());
         let capture_overrides = CaptureOverrides::new(&config.metadata);
+        let absent_tables =
+            crate::pipeline::types::AbsentTables::new(std::time::Duration::from_secs(60), 16);
 
         let proc = MessageProcessor {
             config: &config,
@@ -792,6 +873,8 @@ mod tests {
             field_mapping_cache: None,
             computed_column_cache: &computed_column_cache,
             capture_overrides: &capture_overrides,
+            absent_tables: &absent_tables,
+            default_table: "dfe.default",
         };
 
         let value = json!({"event_category": "test"});
@@ -1306,6 +1389,8 @@ mod tests {
             field_mapping_cache: None,
             computed_column_cache: &harness.computed_column_cache,
             capture_overrides: &harness.capture_overrides,
+            absent_tables: &harness.absent_tables,
+            default_table: &harness.default_table,
         };
 
         let payload = serde_json::to_vec(&json!({"event_category": "x"})).expect("serialize");

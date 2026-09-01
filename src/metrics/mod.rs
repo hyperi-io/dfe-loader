@@ -301,6 +301,33 @@ impl Metrics {
         metrics::counter!("dfe_loader_pending_schema_expired_total").increment(1);
     }
 
+    /// Record a row DLQ'd because ClickHouse rejected it deterministically and
+    /// retrying it would wedge the partition.
+    pub fn record_permanent_reject(&self, table: &str) {
+        metrics::counter!(
+            "dfe_loader_permanent_reject_total",
+            "table" => table.to_string()
+        )
+        .increment(1);
+    }
+
+    /// Record `n` messages re-routed to the default table because `ClickHouse`
+    /// confirmed their destination table does not exist.
+    ///
+    /// Counted in bulk per table per batch: steady-state fallback traffic is
+    /// the part that matters, and a per-row call would allocate the label on
+    /// every message.
+    pub fn record_unknown_table_fallback_n(&self, table: &str, n: u64) {
+        if n == 0 {
+            return;
+        }
+        metrics::counter!(
+            "dfe_loader_unknown_table_fallback_total",
+            "table" => table.to_string()
+        )
+        .increment(n);
+    }
+
     /// Update the gauge of messages currently held in the pending-schema buffer.
     pub fn update_pending_schema_messages(&self, n: usize) {
         metrics::gauge!("dfe_loader_pending_schema_messages").set(n as f64);

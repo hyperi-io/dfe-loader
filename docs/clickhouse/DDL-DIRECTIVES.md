@@ -819,10 +819,19 @@ Provides a fallback when the source is missing or invalid:
 ```
 
 - `now()` - Current timestamp
-- `uuid()` - Generate UUID
-- `null` - Explicit NULL
-- `"literal"` - String literal
+- `uuid()` - Generate UUID (v7, time-ordered)
+- `null` - Leaves the column ABSENT from the row, which is not the same as
+  writing a NULL. For a Nullable column the result is identical, and for a
+  non-Nullable one it lets the column's DEFAULT apply instead of failing the
+  row - which an explicit NULL would not
+- `"literal"` - String literal (quote it)
 - `0`, `false` - Numeric/boolean literals
+
+This vocabulary is closed. A fallback outside it is a field reference the
+loader cannot resolve, so it is ignored and the column is left absent rather
+than filled with the text of the expression - `@source: first(_source) |
+topic_name` leaves `_source` absent, it does not write the string
+`topic_name`. The loader logs the ignored fallback once per five minutes.
 
 ### List operator (`/`)
 
@@ -1974,7 +1983,7 @@ For hot paths, extract values to top-level fields first using `@source` with dot
 notation:
 
 ```sql
--- Step 1: Extract IP to top-level (done during flatten)
+-- Step 1: Extract IP to top-level (done during schema-guided extraction)
 -- @source: payload.client.ip
 `client_ip` IPv4,
 
@@ -1985,7 +1994,9 @@ notation:
 
 This pattern:
 
-1. Extracts nested values during the flatten phase (~free - already iterating)
+1. Extracts nested values during the single SIMD parse the extractor already
+   does (`json_primary`, the default mode); under `legacy_flatten` the same
+   values come out of the flatten phase instead
 2. Uses extracted values in expressions (avoids JSON parsing cost)
 3. Results in ~50ns instead of ~550ns per record
 

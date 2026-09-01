@@ -82,10 +82,16 @@ impl BatchCoordinator<'_> {
         messages: impl Iterator<Item = &'a KafkaMessage>,
     ) -> BatchOutcome {
         let mut outcome = BatchOutcome::default();
+        // Aggregated per table so the counter is touched once per batch, not
+        // once per message.
+        let mut fallbacks: rustc_hash::FxHashMap<String, u64> = rustc_hash::FxHashMap::default();
 
         for (msg, result) in messages.zip(results) {
             match result {
-                Ok(processed) => {
+                Ok(mut processed) => {
+                    if let Some(original) = processed.fell_back_from.take() {
+                        *fallbacks.entry(original).or_insert(0) += 1;
+                    }
                     // mark_pending BEFORE ensure_cached — new tables must be queued
                     // for DDL tag resolution before their config-list defaults are cached.
                     // Reversing this order would silently break DDL tag application.
@@ -199,6 +205,12 @@ impl BatchCoordinator<'_> {
             }
         }
 
+        if let Some(m) = self.metrics {
+            for (table, n) in fallbacks {
+                m.record_unknown_table_fallback_n(&table, n);
+            }
+        }
+
         outcome
     }
 }
@@ -257,6 +269,7 @@ mod tests {
                 partition: 0,
                 offset: 1,
             },
+            fell_back_from: None,
         }
     }
 
