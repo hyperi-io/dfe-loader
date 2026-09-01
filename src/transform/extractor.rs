@@ -168,14 +168,19 @@ impl HeaderExtractor {
 
 /// Resolve a parsed `@default` / `@source` fallback against this extraction's clock.
 ///
-/// `now()` is the one fallback that cannot be a parse-time constant, so it is
-/// carried through as a literal marker and resolved here, once per row.
+/// `now()` and `uuid()` are the two fallbacks that cannot be parse-time
+/// constants, so they travel as literal markers and are resolved here, once per
+/// row. `uuid()` is v7 to match the time-ordered form the schemas use.
+///
+/// The parser has already rejected any fallback outside the documented
+/// vocabulary, so nothing reaching here is a stray field name.
 #[inline]
 fn resolve_default(default: &Value, now: &chrono::DateTime<Utc>) -> Value {
-    if default.as_str() == Some("now()") {
-        return Value::String(fmt_ts(now));
+    match default.as_str() {
+        Some("now()") => Value::String(fmt_ts(now)),
+        Some("uuid()") => Value::String(uuid::Uuid::now_v7().to_string()),
+        _ => default.clone(),
     }
-    default.clone()
 }
 
 /// Remove a source field from the parsed object, descending a dotted path.
@@ -555,7 +560,7 @@ mod tests {
         "log": {"file": {"path": "/var/log/syslog"}},
         "source": {"ip": "10.0.0.9"},
         "process": {"name": "sshd", "pid": 4242},
-        "message": "Accepted password for derek",
+        "message": "Accepted password for svc-ingest",
         "ecs": {"version": "8.11.0"}
     }"#;
 
@@ -595,7 +600,7 @@ mod tests {
         );
         assert_eq!(
             map.get("message"),
-            Some(&Value::String("Accepted password for derek".into())),
+            Some(&Value::String("Accepted password for svc-ingest".into())),
             "the flat column must keep working"
         );
     }
@@ -663,6 +668,68 @@ mod tests {
         };
         assert_ne!(ts, "now()", "the now() marker must be resolved, not stored");
         assert!(ts.starts_with("202"), "expected a current timestamp: {ts}");
+    }
+
+    #[test]
+    fn test_source_field_reference_fallback_leaves_the_column_absent() {
+        use crate::column_meta::parse_directives;
+        use rustc_hash::FxHashMap;
+
+        // Verbatim from a deployed dfe.filebeat. `topic_name` names a field the
+        // extractor cannot see, so _source must stay absent rather than be
+        // stamped with the string "topic_name" -- it is a LowCardinality
+        // dimension operators group by.
+        let extractor = default_extractor();
+        let raw = br#"{"message": "no source key here"}"#;
+        let schema = make_schema(&["_source"]);
+
+        let col_meta = ColumnMetaCache::new(ColumnDirectivesConfig::default());
+        let mut ddl = FxHashMap::default();
+        ddl.insert(
+            "_source".to_string(),
+            parse_directives(
+                "@source: first(_source) | topic_name - Data source label (falls back to the topic)",
+            ),
+        );
+        col_meta.apply_ddl("dfe.filebeat", ddl);
+
+        let map = extractor.extract(raw, "dfe.filebeat", &schema, &col_meta);
+        assert!(
+            !map.contains_key("_source"),
+            "an unresolvable fallback must not become a literal: {:?}",
+            map.get("_source")
+        );
+    }
+
+    #[test]
+    fn test_source_uuid_fallback_resolves_to_a_uuid() {
+        use crate::column_meta::parse_directives;
+        use rustc_hash::FxHashMap;
+
+        let extractor = default_extractor();
+        let raw = br#"{"other": "data"}"#;
+        let schema = make_schema(&["trace_id"]);
+
+        let col_meta = ColumnMetaCache::new(ColumnDirectivesConfig::default());
+        let mut ddl = FxHashMap::default();
+        ddl.insert(
+            "trace_id".to_string(),
+            parse_directives("@source: trace.id | uuid()"),
+        );
+        col_meta.apply_ddl("dfe.events", ddl);
+
+        let map = extractor.extract(raw, "dfe.events", &schema, &col_meta);
+        let Some(Value::String(id)) = map.get("trace_id") else {
+            panic!("trace_id must be a string uuid");
+        };
+        assert_ne!(
+            id, "uuid()",
+            "the uuid() marker must be resolved, not stored"
+        );
+        assert!(
+            uuid::Uuid::parse_str(id).is_ok(),
+            "expected a uuid, got: {id}"
+        );
     }
 
     #[test]

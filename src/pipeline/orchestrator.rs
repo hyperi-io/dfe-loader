@@ -29,8 +29,8 @@ use scalo::memory::{MemoryGuard, MemoryGuardConfig};
 use crate::Result;
 use crate::buffer::{BufferManager, FlushBatch, KafkaOffset};
 use crate::clickhouse::{
-    ClickHouseError, ClickHouseQueryClient, Inserter, InserterConfig, SchemaCache,
-    SharedSchemaCache,
+    BatchDisposition, ClickHouseError, ClickHouseQueryClient, FailedRow, Inserter, InserterConfig,
+    SchemaCache, SharedSchemaCache,
 };
 use crate::column_meta::{ColumnMetaCache, parse_directives};
 use crate::config::{Config, SharedConfig};
@@ -266,9 +266,7 @@ impl Orchestrator {
         };
 
         // Bounded DLQ channel — avoids unbounded tokio::spawn per failed message.
-        // Hot path uses try_send() (non-blocking, drops on full).
         // Background task drains the channel and forwards to the actual DLQ backend.
-        const DLQ_CHANNEL_CAPACITY: usize = 1_000;
         let (dlq_tx, mut dlq_rx) = mpsc::channel::<DlqEntry>(DLQ_CHANNEL_CAPACITY);
         if let Some(ref dlq_arc) = dlq {
             let dlq_bg = Arc::clone(dlq_arc);
@@ -407,7 +405,10 @@ impl Orchestrator {
 
         // Tables ClickHouse has confirmed absent. The processor re-routes their
         // messages to the default table; a failed fetch never lands here.
-        let mut absent_tables: FxHashSet<String> = FxHashSet::default();
+        // Entries expire so a table created after its source started producing
+        // begins receiving its own data without a pod restart.
+        let mut absent_tables =
+            super::types::AbsentTables::new(ABSENT_TABLE_TTL, ABSENT_TABLE_CAPACITY);
         let default_table = format!(
             "{}.{}",
             self.config.routing.default_db, self.config.routing.default_table
@@ -673,6 +674,8 @@ impl Orchestrator {
 
                     match result.schema {
                         SchemaResolution::Resolved(schema) => {
+                            // The table exists now, so stop diverting its events.
+                            absent_tables.remove(table);
                             // Apply field mapping (needs schema; uses ColumnMetaCache for rename rules)
                             if let Some(ref mut fm) = field_mapping_cache {
                                 fm.build_and_cache(table, &schema, &col_meta_cache);
@@ -685,12 +688,25 @@ impl Orchestrator {
                             // An unknown source is a routing miss, so its events
                             // fall back to the default table rather than ageing
                             // out to the DLQ.
-                            if absent_tables.insert(table.clone()) {
-                                warn!(
+                            let marked = absent_tables.insert(table, std::time::Instant::now());
+                            match marked {
+                                super::types::AbsentOutcome::Recorded => warn!(
                                     table = %table,
                                     default_table = %default_table,
                                     "Destination table does not exist, falling back to the default table"
-                                );
+                                ),
+                                super::types::AbsentOutcome::Refreshed => {}
+                                super::types::AbsentOutcome::Rejected => {
+                                    static ABSENT_FULL_TS: std::sync::atomic::AtomicU64 =
+                                        std::sync::atomic::AtomicU64::new(0);
+                                    if scalo::logger::log_debounced(&ABSENT_FULL_TS, 60_000) {
+                                        warn!(
+                                            table = %table,
+                                            tracked = absent_tables.len(),
+                                            "Absent-table set is full, check routing for unbounded table names (max 1 per 60s)"
+                                        );
+                                    }
+                                }
                             }
                             let n = pending_schema_buffer.len_per_table(table);
                             if n > 0 {
@@ -705,9 +721,7 @@ impl Orchestrator {
                                 }
                             }
                             if let Some(ref m) = self.metrics {
-                                for _ in 0..n {
-                                    m.record_unknown_table_fallback(table);
-                                }
+                                m.record_unknown_table_fallback_n(table, n as u64);
                             }
                         }
                         SchemaResolution::Unavailable => {
@@ -791,6 +805,14 @@ impl Orchestrator {
                         for table in pending_schema_buffer
                             .tables_needing_rerequest(now_pending, PENDING_REREQUEST_INTERVAL)
                         {
+                            let _ = resolve_tx.try_send(table);
+                        }
+                        // Re-resolve tables whose "does not exist" answer has
+                        // aged out. Their messages buffer again until the
+                        // answer arrives, so a table created in the meantime
+                        // starts receiving its own data.
+                        for table in absent_tables.expired(now_pending) {
+                            debug!(table = %table, "Absent-table entry expired, re-resolving");
                             let _ = resolve_tx.try_send(table);
                         }
                     }
@@ -1184,7 +1206,11 @@ impl Orchestrator {
         }
 
         let start = Instant::now();
-        let results = inserter.insert_batches(batches_for_insert).await;
+        // Salvage is on by default: one unencodable row costs one row, not the
+        // whole batch it happened to share a flush with.
+        let results = inserter
+            .insert_batches_with_salvage(batches_for_insert)
+            .await;
         let latency = start.elapsed().as_secs_f64();
 
         // Drain the in-flight gauge once the concurrent inserts complete.
@@ -1203,7 +1229,7 @@ impl Orchestrator {
         let mut cycle_err = 0usize;
 
         // Commit offsets independently per batch — Table A success/failure is isolated
-        for ((((result, offsets), batch_bytes), table), payloads) in results
+        for (((((_, result), offsets), batch_bytes), table), payloads) in results
             .into_iter()
             .zip(per_batch_offsets)
             .zip(per_batch_bytes)
@@ -1215,76 +1241,77 @@ impl Orchestrator {
             // Failure: offsets withheld, Kafka re-delivers — we'll re-track on re-consume.
             self.memory_guard.release(batch_bytes);
 
-            match result {
-                Ok(count) => {
-                    cycle_ok += 1;
-                    self.stats.rows_inserted += count as u64;
+            if result.inserted > 0 {
+                self.stats.rows_inserted += result.inserted as u64;
+                if let Some(ref m) = self.metrics {
+                    m.record_flush(result.inserted, latency);
+                    m.record_insert_quantities(batch_bytes, 1);
+                    // ClickHouse flush-size (bytes) distribution (2.8.10 audit).
+                    m.record_flush_bytes(batch_bytes);
+                }
+            }
+
+            match result.disposition {
+                BatchDisposition::Retry(reason) => {
+                    cycle_err += 1;
+                    self.stats.errors += 1;
+                    error!(
+                        table = %table,
+                        rows = payloads.len(),
+                        error = %reason,
+                        "Batch insert failed — offsets withheld, messages will re-deliver"
+                    );
                     if let Some(ref m) = self.metrics {
-                        m.record_flush(count, latency);
-                        m.record_insert_quantities(batch_bytes, 1);
-                        // ClickHouse flush-size (bytes) distribution (2.8.10 audit).
-                        m.record_flush_bytes(batch_bytes);
-                    }
-                    if !offsets.is_empty() {
-                        match transport.commit(&offsets).await {
-                            Ok(()) => {
-                                debug!(
-                                    offsets = offsets.len(),
-                                    rows = count,
-                                    "Kafka offsets committed"
-                                );
-                                if let Some(ref m) = self.metrics {
-                                    m.record_offsets_committed(offsets.len());
-                                }
-                            }
-                            Err(e) => {
-                                error!(error = %e, "Failed to commit Kafka offsets");
-                            }
-                        }
+                        m.record_error();
+                        // ClickHouse-specific terminal insert error (2.8.10 audit).
+                        m.record_clickhouse_insert_error();
                     }
                 }
-                Err(crate::Error::ClickHousePermanent(reason)) => {
+                BatchDisposition::Settled if result.failed.is_empty() => {
+                    cycle_ok += 1;
+                    commit_offsets(transport, &self.metrics, &offsets).await;
+                }
+                BatchDisposition::Settled => {
                     // The sink answered, so the circuit gate must not read this
                     // cycle as a dead sink.
                     cycle_ok += 1;
                     self.stats.errors += 1;
-                    let dlq_n = route_rejected_batch_to_dlq(
+                    if let Some(ref m) = self.metrics {
+                        m.record_error();
+                        m.record_clickhouse_insert_error();
+                    }
+                    let rejected = result.failed.len();
+                    let delivery = route_rejected_rows_to_dlq(
                         dlq_tx,
                         dlq_enabled,
                         &self.metrics,
                         &table,
                         &payloads,
-                        &offsets,
-                        &reason,
-                    );
-                    self.stats.messages_dlq += dlq_n;
-                    error!(
-                        table = %table,
-                        rows = payloads.len(),
-                        dlq = dlq_n,
-                        error = %reason,
-                        "Batch permanently rejected — DLQ'd and offsets committed"
-                    );
-                    if let Some(ref m) = self.metrics {
-                        m.record_error();
-                        m.record_clickhouse_insert_error();
-                    }
-                    // Committing is what breaks the livelock: withholding here
-                    // re-delivers a batch that can never encode.
-                    if !offsets.is_empty()
-                        && let Err(e) = transport.commit(&offsets).await
-                    {
-                        error!(error = %e, "Failed to commit Kafka offsets after permanent rejection");
-                    }
-                }
-                Err(e) => {
-                    cycle_err += 1;
-                    error!(error = %e, "Batch insert failed — offsets withheld, messages will re-deliver");
-                    self.stats.errors += 1;
-                    if let Some(ref m) = self.metrics {
-                        m.record_error();
-                        // ClickHouse-specific terminal insert error (2.8.10 audit).
-                        m.record_clickhouse_insert_error();
+                        &result.failed,
+                        DLQ_ROUTE_DEADLINE,
+                    )
+                    .await;
+                    self.stats.messages_dlq += delivery.delivered;
+
+                    // Committing is what breaks the livelock, but only once
+                    // every rejected row is somewhere other than Kafka.
+                    if delivery.complete {
+                        error!(
+                            table = %table,
+                            inserted = result.inserted,
+                            rejected,
+                            dlq = delivery.delivered,
+                            "Rows permanently rejected — DLQ'd and offsets committed"
+                        );
+                        commit_offsets(transport, &self.metrics, &offsets).await;
+                    } else {
+                        error!(
+                            table = %table,
+                            inserted = result.inserted,
+                            rejected,
+                            dlq = delivery.delivered,
+                            "DLQ took only part of a rejected batch — offsets withheld"
+                        );
                     }
                 }
             }
@@ -1585,6 +1612,45 @@ async fn warm_tables_once(
 /// pending-schema buffer (e.g. resolution failed due to a transient CH outage).
 const PENDING_REREQUEST_INTERVAL: Duration = Duration::from_secs(2);
 
+/// How long a "table does not exist" answer is trusted before the destination
+/// is resolved again. Bounds how long a source keeps landing in the default
+/// table after its own table is created.
+const ABSENT_TABLE_TTL: Duration = Duration::from_secs(60);
+
+/// Upper bound on tables tracked as absent. The routed table name comes from a
+/// payload field with no allowlist, so this is what stops untrusted input
+/// growing both the set and the per-table metric label set.
+const ABSENT_TABLE_CAPACITY: usize = 1024;
+
+/// Total budget for handing one rejected batch to the DLQ. Backpressure is the
+/// point, but a wedged DLQ backend must not stall the pipeline indefinitely.
+const DLQ_ROUTE_DEADLINE: Duration = Duration::from_secs(30);
+
+/// Depth of the channel between the hot path and the DLQ backend task. Far
+/// smaller than a flush batch, which is why rejected rows are sent with
+/// backpressure rather than dropped on a full channel.
+const DLQ_CHANNEL_CAPACITY: usize = 1_000;
+
+/// Commit a batch's Kafka offsets.
+async fn commit_offsets(
+    transport: &TransportBackend,
+    metrics: &Option<Metrics>,
+    offsets: &[KafkaOffset],
+) {
+    if offsets.is_empty() {
+        return;
+    }
+    match transport.commit(offsets).await {
+        Ok(()) => {
+            debug!(offsets = offsets.len(), "Kafka offsets committed");
+            if let Some(m) = metrics {
+                m.record_offsets_committed(offsets.len());
+            }
+        }
+        Err(e) => error!(error = %e, "Failed to commit Kafka offsets"),
+    }
+}
+
 /// Human-readable DLQ reason string for an expired / evicted / shutdown-drained
 /// pending-schema message.
 fn format_pending_reason(reason: &super::pending_schema::ExpireReason) -> String {
@@ -1610,60 +1676,124 @@ fn pending_reason_label(reason: &super::pending_schema::ExpireReason) -> &'stati
     }
 }
 
-/// Route a permanently rejected flush batch to the DLQ, one entry per row.
+/// How much of a permanently rejected batch the DLQ actually took.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct DlqDelivery {
+    /// Entries the DLQ channel accepted.
+    delivered: u64,
+    /// Whether every rejected row now exists somewhere other than Kafka.
+    /// Only then may the offsets be committed.
+    complete: bool,
+}
+
+/// Route permanently rejected rows to the DLQ, one entry each.
 ///
-/// Returns the number of entries accepted by the DLQ channel. A batch with no
-/// raw payloads (capture mode `extracted_only`) still emits one entry naming the
-/// table, so the loss is surfaced rather than silent.
-fn route_rejected_batch_to_dlq(
+/// Sends with backpressure rather than `try_send`. The channel holds
+/// `DLQ_CHANNEL_CAPACITY` and a batch holds up to `buffer.flush_rows`, so a
+/// non-blocking send silently discards the difference — and the offsets would
+/// commit over the top of it. `deadline` bounds the total wait so a wedged DLQ
+/// backend cannot stall the pipeline; the shortfall is reported instead, and
+/// the caller withholds the offsets so Kafka re-delivers.
+///
+/// With no DLQ configured nothing is delivered and nothing may be committed:
+/// a livelock keeps the events in Kafka, which a shredder does not.
+///
+/// Rows with no raw payload (capture mode `extracted_only`) still emit one
+/// entry naming the table, so the loss is surfaced rather than silent.
+async fn route_rejected_rows_to_dlq(
     dlq_tx: &mpsc::Sender<DlqEntry>,
     dlq_enabled: bool,
     metrics: &Option<Metrics>,
     table: &str,
     payloads: &[Arc<[u8]>],
-    offsets: &[KafkaOffset],
-    reason: &str,
-) -> u64 {
-    let reason = format!("clickhouse_permanent_reject table={table}: {reason}");
-    scalo::logger::security::record_dlq("clickhouse_permanent_reject", &reason, Some(table));
-
-    let mut sent = 0u64;
-    if payloads.iter().all(|p| p.is_empty()) {
-        if dlq_enabled
-            && dlq_tx
-                .try_send(DlqEntry::new("loader", reason, Vec::new()))
-                .is_ok()
-        {
-            sent += 1;
-        }
-        if let Some(m) = metrics {
-            m.record_dlq();
-            m.record_permanent_reject(table);
-        }
-        return sent;
+    failed: &[FailedRow],
+    deadline: Duration,
+) -> DlqDelivery {
+    if failed.is_empty() {
+        return DlqDelivery {
+            delivered: 0,
+            complete: true,
+        };
     }
 
-    for (i, payload) in payloads.iter().enumerate() {
-        if let Some(m) = metrics {
-            m.record_dlq();
+    if let Some(m) = metrics {
+        for _ in failed {
             m.record_permanent_reject(table);
         }
-        if !dlq_enabled {
-            continue;
-        }
-        let mut entry = DlqEntry::new("loader", reason.clone(), payload.to_vec());
-        if let Some(offset) = offsets.get(i) {
+    }
+
+    let summary = format!(
+        "clickhouse_permanent_reject table={table}: {}",
+        failed[0].reason
+    );
+    scalo::logger::security::record_dlq("clickhouse_permanent_reject", &summary, Some(table));
+
+    if !dlq_enabled {
+        error!(
+            table = %table,
+            rows = failed.len(),
+            "Rows permanently rejected with no DLQ configured — offsets withheld"
+        );
+        return DlqDelivery::default();
+    }
+
+    let expiry = tokio::time::Instant::now() + deadline;
+    let mut delivered = 0u64;
+
+    for row in failed {
+        let payload = payloads
+            .get(row.row_index)
+            .map_or_else(Vec::new, |p| p.to_vec());
+        let mut entry = DlqEntry::new(
+            "loader",
+            format!("clickhouse_permanent_reject table={table}: {}", row.reason),
+            payload,
+        );
+        if let Some(offset) = &row.offset {
             entry = entry.with_source(scalo::dlq::DlqSource::kafka(
                 &*offset.topic,
                 offset.partition,
                 offset.offset,
             ));
         }
-        if dlq_tx.try_send(entry).is_ok() {
-            sent += 1;
+        match tokio::time::timeout_at(expiry, dlq_tx.send(entry)).await {
+            Ok(Ok(())) => {
+                delivered += 1;
+                if let Some(m) = metrics {
+                    m.record_dlq();
+                }
+            }
+            Ok(Err(_closed)) => {
+                error!(
+                    table = %table,
+                    delivered,
+                    rejected = failed.len(),
+                    "DLQ channel closed mid-batch — offsets withheld"
+                );
+                return DlqDelivery {
+                    delivered,
+                    complete: false,
+                };
+            }
+            Err(_elapsed) => {
+                error!(
+                    table = %table,
+                    delivered,
+                    rejected = failed.len(),
+                    "DLQ did not drain within the deadline — offsets withheld"
+                );
+                return DlqDelivery {
+                    delivered,
+                    complete: false,
+                };
+            }
         }
     }
-    sent
+
+    DlqDelivery {
+        delivered,
+        complete: true,
+    }
 }
 
 /// Route a pending-schema message to the DLQ (with a security event) and
@@ -1742,64 +1872,201 @@ mod tests {
         assert_eq!(shared.version(), 1);
     }
 
-    #[test]
-    fn rejected_batch_dlqs_every_row_with_the_reason() {
-        let (dlq_tx, mut dlq_rx) = mpsc::channel::<DlqEntry>(8);
+    fn rejected_rows(n: usize, reason: &str) -> Vec<FailedRow> {
+        (0..n)
+            .map(|i| FailedRow {
+                row_index: i,
+                offset: Some(KafkaOffset {
+                    topic: Arc::from("dfe-events"),
+                    partition: 0,
+                    offset: 10 + i as i64,
+                }),
+                reason: reason.to_string(),
+            })
+            .collect()
+    }
+
+    /// Drain the DLQ channel into a counter, as the background DLQ task does.
+    fn spawn_drain(mut rx: mpsc::Receiver<DlqEntry>) -> tokio::task::JoinHandle<Vec<DlqEntry>> {
+        tokio::spawn(async move {
+            let mut seen = Vec::new();
+            while let Some(entry) = rx.recv().await {
+                seen.push(entry);
+            }
+            seen
+        })
+    }
+
+    #[tokio::test]
+    async fn a_batch_larger_than_the_dlq_channel_loses_nothing() {
+        // DLQ_CHANNEL_CAPACITY is 1_000 and buffer.flush_rows defaults to
+        // 20_000, so a non-blocking send discards 95% of a rejected batch and
+        // the offsets commit over the top of it.
+        let (dlq_tx, dlq_rx) = mpsc::channel::<DlqEntry>(DLQ_CHANNEL_CAPACITY);
+        let drain = spawn_drain(dlq_rx);
+
+        let rows = 20_000;
+        let payloads: Vec<Arc<[u8]>> = (0..rows)
+            .map(|i| Arc::from(format!("{{\"n\":{i}}}").into_bytes().as_slice()))
+            .collect();
+        let failed = rejected_rows(rows, "server error code 117");
+
+        let delivery = route_rejected_rows_to_dlq(
+            &dlq_tx,
+            true,
+            &None,
+            "dfe.default",
+            &payloads,
+            &failed,
+            Duration::from_secs(30),
+        )
+        .await;
+
+        drop(dlq_tx);
+        let received = drain.await.expect("drain task");
+
+        assert_eq!(delivery.delivered, rows as u64);
+        assert!(
+            delivery.complete,
+            "the offsets may only commit when complete"
+        );
+        assert_eq!(
+            received.len(),
+            rows,
+            "every rejected row must reach the DLQ"
+        );
+        assert!(received[0].reason.contains("clickhouse_permanent_reject"));
+        assert!(received[0].reason.contains("dfe.default"));
+        assert!(received[0].reason.contains("code 117"));
+        assert_eq!(received[0].payload, b"{\"n\":0}");
+    }
+
+    #[tokio::test]
+    async fn a_dlq_that_never_drains_withholds_the_offsets() {
+        // Nothing reads the channel, so the send blocks and the deadline fires.
+        // Reporting the shortfall is what keeps the events in Kafka.
+        let (dlq_tx, _dlq_rx) = mpsc::channel::<DlqEntry>(2);
+        let payloads: Vec<Arc<[u8]>> = (0..10).map(|_| Arc::from(&b"{}"[..])).collect();
+        let failed = rejected_rows(10, "code 117");
+
+        let delivery = route_rejected_rows_to_dlq(
+            &dlq_tx,
+            true,
+            &None,
+            "dfe.default",
+            &payloads,
+            &failed,
+            Duration::from_millis(50),
+        )
+        .await;
+
+        assert!(!delivery.complete, "a partial delivery must not commit");
+        assert!(delivery.delivered < 10);
+    }
+
+    #[tokio::test]
+    async fn no_dlq_configured_never_commits_a_permanent_rejection() {
+        // With no DLQ the only copy left is in Kafka, so the offsets stay put.
+        let (dlq_tx, _dlq_rx) = mpsc::channel::<DlqEntry>(8);
+        let payloads: Vec<Arc<[u8]>> = vec![Arc::from(&b"{}"[..])];
+        let failed = rejected_rows(1, "code 117");
+
+        let delivery = route_rejected_rows_to_dlq(
+            &dlq_tx,
+            false,
+            &None,
+            "dfe.default",
+            &payloads,
+            &failed,
+            Duration::from_secs(1),
+        )
+        .await;
+
+        assert_eq!(delivery, DlqDelivery::default());
+        assert!(!delivery.complete);
+    }
+
+    #[tokio::test]
+    async fn rejected_rows_carry_their_own_reason_and_kafka_source() {
+        let (dlq_tx, dlq_rx) = mpsc::channel::<DlqEntry>(8);
+        let drain = spawn_drain(dlq_rx);
         let payloads: Vec<Arc<[u8]>> = vec![
             Arc::from(&b"{\"tags\":[\"a\"]}"[..]),
             Arc::from(&b"{\"tags\":[\"b\"]}"[..]),
         ];
-        let offsets = vec![
-            KafkaOffset {
+        // Salvage isolated row 1 only; row 0 landed.
+        let failed = vec![FailedRow {
+            row_index: 1,
+            offset: Some(KafkaOffset {
                 topic: Arc::from("dfe-events"),
-                partition: 0,
-                offset: 10,
-            },
-            KafkaOffset {
-                topic: Arc::from("dfe-events"),
-                partition: 0,
-                offset: 11,
-            },
-        ];
+                partition: 3,
+                offset: 77,
+            }),
+            reason: "RowBinary encode: unsupported value".to_string(),
+        }];
 
-        let sent = route_rejected_batch_to_dlq(
+        let delivery = route_rejected_rows_to_dlq(
             &dlq_tx,
             true,
             &None,
             "dfe.default",
             &payloads,
-            &offsets,
-            "RowBinary insert: server error code 117: Cannot insert data into JSON column",
-        );
+            &failed,
+            Duration::from_secs(1),
+        )
+        .await;
+        drop(dlq_tx);
+        let received = drain.await.expect("drain task");
 
-        assert_eq!(sent, 2);
-        let entry = dlq_rx.try_recv().expect("first DLQ entry");
-        assert!(entry.reason.contains("clickhouse_permanent_reject"));
-        assert!(entry.reason.contains("dfe.default"));
-        assert!(entry.reason.contains("code 117"));
-        assert_eq!(entry.payload, b"{\"tags\":[\"a\"]}");
-        assert!(dlq_rx.try_recv().is_ok());
-        assert!(dlq_rx.try_recv().is_err());
+        assert_eq!(delivery.delivered, 1);
+        assert!(delivery.complete);
+        assert_eq!(received.len(), 1, "only the isolated row is DLQ'd");
+        assert_eq!(received[0].payload, b"{\"tags\":[\"b\"]}");
+        assert!(received[0].reason.contains("unsupported value"));
     }
 
-    #[test]
-    fn rejected_batch_without_raw_payloads_still_surfaces_one_entry() {
-        let (dlq_tx, mut dlq_rx) = mpsc::channel::<DlqEntry>(8);
+    #[tokio::test]
+    async fn rejected_rows_without_raw_payloads_still_surface() {
+        // Capture mode extracted_only keeps no raw bytes, so the entry carries
+        // the reason alone rather than vanishing.
+        let (dlq_tx, dlq_rx) = mpsc::channel::<DlqEntry>(8);
+        let drain = spawn_drain(dlq_rx);
         let payloads: Vec<Arc<[u8]>> = vec![Arc::from(&[][..]), Arc::from(&[][..])];
 
-        let sent = route_rejected_batch_to_dlq(
+        let delivery = route_rejected_rows_to_dlq(
             &dlq_tx,
             true,
             &None,
             "dfe.default",
             &payloads,
-            &[],
-            "boom",
-        );
+            &rejected_rows(2, "boom"),
+            Duration::from_secs(1),
+        )
+        .await;
+        drop(dlq_tx);
+        let received = drain.await.expect("drain task");
 
-        assert_eq!(sent, 1, "the loss is surfaced, never silent");
-        let entry = dlq_rx.try_recv().expect("DLQ entry");
-        assert!(entry.reason.contains("clickhouse_permanent_reject"));
+        assert_eq!(delivery.delivered, 2, "the loss is surfaced, never silent");
+        assert!(delivery.complete);
+        assert!(received[0].reason.contains("clickhouse_permanent_reject"));
+        assert!(received[0].payload.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_batch_with_nothing_rejected_is_committable() {
+        let (dlq_tx, _dlq_rx) = mpsc::channel::<DlqEntry>(1);
+        let delivery = route_rejected_rows_to_dlq(
+            &dlq_tx,
+            true,
+            &None,
+            "dfe.default",
+            &[],
+            &[],
+            Duration::from_secs(1),
+        )
+        .await;
+        assert!(delivery.complete);
+        assert_eq!(delivery.delivered, 0);
     }
 
     #[test]

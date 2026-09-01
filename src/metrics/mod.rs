@@ -311,14 +311,21 @@ impl Metrics {
         .increment(1);
     }
 
-    /// Record a message re-routed to the default table because ClickHouse
-    /// confirmed its destination table does not exist.
-    pub fn record_unknown_table_fallback(&self, table: &str) {
+    /// Record `n` messages re-routed to the default table because `ClickHouse`
+    /// confirmed their destination table does not exist.
+    ///
+    /// Counted in bulk per table per batch: steady-state fallback traffic is
+    /// the part that matters, and a per-row call would allocate the label on
+    /// every message.
+    pub fn record_unknown_table_fallback_n(&self, table: &str, n: u64) {
+        if n == 0 {
+            return;
+        }
         metrics::counter!(
             "dfe_loader_unknown_table_fallback_total",
             "table" => table.to_string()
         )
-        .increment(1);
+        .increment(n);
     }
 
     /// Update the gauge of messages currently held in the pending-schema buffer.

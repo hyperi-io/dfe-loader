@@ -48,7 +48,8 @@ pub(crate) struct MessageProcessor<'a> {
     pub capture_overrides: &'a CaptureOverrides,
     /// Tables ClickHouse has confirmed absent; their messages re-route to
     /// `default_table` instead of buffering until the pending-schema age cap.
-    pub absent_tables: &'a rustc_hash::FxHashSet<String>,
+    /// Entries expire, so a table that later appears is resolved again.
+    pub absent_tables: &'a super::types::AbsentTables,
     /// Pre-built `db.table` for the routing default.
     pub default_table: &'a str,
 }
@@ -138,11 +139,12 @@ impl MessageProcessor<'_> {
         // An unknown source names a table that does not exist, so it lands in the
         // default table rather than the DLQ. The emptiness check keeps the common
         // case free of a hash lookup.
-        let table = if !self.absent_tables.is_empty() && self.absent_tables.contains(&routed) {
-            self.default_table.to_string()
-        } else {
-            routed
-        };
+        let (table, fell_back_from) =
+            if !self.absent_tables.is_empty() && self.absent_tables.contains(&routed) {
+                (self.default_table.to_string(), Some(routed))
+            } else {
+                (routed, None)
+            };
 
         // Step 4: Build the promoted field map.
         //
@@ -293,6 +295,7 @@ impl MessageProcessor<'_> {
             data,
             raw_payload,
             kafka_offset,
+            fell_back_from,
         })
     }
 }
@@ -327,7 +330,7 @@ mod tests {
         col_meta_cache: ColumnMetaCache,
         computed_column_cache: ComputedColumnCache,
         capture_overrides: CaptureOverrides,
-        absent_tables: rustc_hash::FxHashSet<String>,
+        absent_tables: crate::pipeline::types::AbsentTables,
         default_table: String,
     }
 
@@ -371,7 +374,10 @@ mod tests {
                 col_meta_cache,
                 computed_column_cache,
                 capture_overrides,
-                absent_tables: rustc_hash::FxHashSet::default(),
+                absent_tables: crate::pipeline::types::AbsentTables::new(
+                    std::time::Duration::from_secs(60),
+                    16,
+                ),
                 default_table,
             }
         }
@@ -661,7 +667,9 @@ mod tests {
         config.routing.default_table = "default".to_string();
 
         let mut harness = TestHarness::with_config(config);
-        harness.absent_tables.insert("dfe.acme_widgets".to_string());
+        harness
+            .absent_tables
+            .insert("dfe.acme_widgets", std::time::Instant::now());
         let proc = harness.processor();
 
         let payload = serde_json::to_vec(&json!({"_source": "acme_widgets"})).expect("serialize");
@@ -671,6 +679,11 @@ mod tests {
         assert_eq!(
             processed.table, "dfe.default",
             "an unknown source must land in the default table, not the DLQ"
+        );
+        assert_eq!(
+            processed.fell_back_from.as_deref(),
+            Some("dfe.acme_widgets"),
+            "the rewrite must be countable, not invisible after the first backlog"
         );
     }
 
@@ -844,7 +857,8 @@ mod tests {
         let col_meta_cache = ColumnMetaCache::new(ColumnDirectivesConfig::default());
         let computed_column_cache = ComputedColumnCache::new(ComputedColumnsConfig::default());
         let capture_overrides = CaptureOverrides::new(&config.metadata);
-        let absent_tables = rustc_hash::FxHashSet::default();
+        let absent_tables =
+            crate::pipeline::types::AbsentTables::new(std::time::Duration::from_secs(60), 16);
 
         let proc = MessageProcessor {
             config: &config,

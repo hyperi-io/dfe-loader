@@ -16,7 +16,7 @@
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashMap;
 
 use crate::clickhouse::SchemaCache;
 use crate::kafka::KafkaMessage;
@@ -154,13 +154,13 @@ impl PendingSchemaBuffer {
     pub fn take_ready(
         &mut self,
         schema_cache: &SchemaCache,
-        absent: &FxHashSet<String>,
+        absent: &super::types::AbsentTables,
     ) -> Vec<KafkaMessage> {
         let mut out = Vec::new();
         let ready_tables: Vec<String> = self
             .per_table
             .keys()
-            .filter(|t| schema_cache.get(t).is_some() || absent.contains(*t))
+            .filter(|t| schema_cache.get(t).is_some() || absent.contains(t))
             .cloned()
             .collect();
         for table in ready_tables {
@@ -286,6 +286,10 @@ mod tests {
         }
     }
 
+    fn no_absent_tables() -> crate::pipeline::types::AbsentTables {
+        crate::pipeline::types::AbsentTables::new(Duration::from_secs(60), 16)
+    }
+
     fn small_cfg() -> PendingSchemaConfig {
         PendingSchemaConfig {
             max_per_table: 3,
@@ -342,7 +346,7 @@ mod tests {
         let cache = SchemaCache::new(300);
         cache.insert("dfe.t1".into(), dummy_schema("dfe.t1"));
 
-        let ready = buf.take_ready(&cache, &FxHashSet::default());
+        let ready = buf.take_ready(&cache, &no_absent_tables());
         assert_eq!(ready.len(), 2);
         assert_eq!(buf.len(), 1); // t2 still pending
         assert_eq!(buf.len_per_table("dfe.t1"), 0);
@@ -363,8 +367,8 @@ mod tests {
             .unwrap();
 
         let cache = SchemaCache::new(300);
-        let mut absent = FxHashSet::default();
-        absent.insert("dfe.acme_widgets".to_string());
+        let mut absent = no_absent_tables();
+        absent.insert("dfe.acme_widgets", std::time::Instant::now());
 
         let ready = buf.take_ready(&cache, &absent);
         assert_eq!(ready.len(), 2, "the absent table's messages are released");
@@ -391,7 +395,7 @@ mod tests {
             .unwrap();
 
         let cache = SchemaCache::new(300);
-        let absent = FxHashSet::default();
+        let absent = no_absent_tables();
         assert!(
             buf.take_ready(&cache, &absent).is_empty(),
             "nothing is released while resolution is merely failing"

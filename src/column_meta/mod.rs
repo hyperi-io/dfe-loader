@@ -347,7 +347,7 @@ pub fn parse_directives(comment: &str) -> ColumnDirectives {
                 if d.default.is_none()
                     && let Some(fallback) = fallback
                 {
-                    d.default = parse_scalar_value(fallback);
+                    d.default = parse_fallback_value(fallback);
                 }
             }
             "computed" if has_colon => {
@@ -465,6 +465,44 @@ pub fn parse_renamed_value(s: &str) -> Vec<String> {
     }
 }
 
+/// Parse the `| fallback` half of an `@source` directive.
+///
+/// The vocabulary is closed (`docs/clickhouse/DDL-DIRECTIVES.md`): `now()`,
+/// `uuid()`, `null`, a quoted string literal, a number, a bool. Anything else
+/// is a FIELD REFERENCE the extractor cannot resolve -- `@source: first(_source)
+/// | topic_name` is the live example, and treating it as a literal writes the
+/// string "topic_name" into every `_source` that had no value. An unresolvable
+/// fallback leaves the column absent instead.
+///
+/// `null` also leaves the column absent: for a Nullable column that IS NULL,
+/// and for a non-Nullable one it lets the column DEFAULT apply rather than
+/// failing the row.
+fn parse_fallback_value(s: &str) -> Option<Value> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+    // Resolved per row in the extractor, so they travel as markers.
+    if s == "now()" || s == "uuid()" {
+        return Some(Value::String(s.to_string()));
+    }
+    match serde_json::from_str::<Value>(s) {
+        Ok(Value::Null) => None,
+        Ok(v) => Some(v),
+        Err(_) => {
+            static UNKNOWN_FALLBACK_TS: std::sync::atomic::AtomicU64 =
+                std::sync::atomic::AtomicU64::new(0);
+            if scalo::logger::log_debounced(&UNKNOWN_FALLBACK_TS, 300_000) {
+                tracing::warn!(
+                    fallback = %s,
+                    "Unsupported @source fallback ignored, column left absent (max 1 per 5m)"
+                );
+            }
+            None
+        }
+    }
+}
+
 /// Parse a scalar value from a string for `@default:value`.
 ///
 /// Tries JSON first (handles numbers, booleans, quoted strings), then falls back
@@ -569,10 +607,51 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_source_custom_fallback() {
-        let d = parse_directives("@source: status | unknown");
+    fn test_parse_source_quoted_literal_fallback() {
+        let d = parse_directives("@source: status | \"unknown\"");
         assert_eq!(d.renamed, vec!["status"]);
         assert_eq!(d.default, Some(Value::String("unknown".into())));
+    }
+
+    #[test]
+    fn test_parse_source_bare_word_fallback_is_ignored() {
+        // Verbatim from a deployed dfe.filebeat. `topic_name` is a FIELD
+        // REFERENCE the extractor cannot resolve, so inserting it as a literal
+        // would stamp the string "topic_name" into every _source with no value.
+        let d = parse_directives(
+            "@source: first(_source) | topic_name - Data source label (falls back to the topic)",
+        );
+        assert_eq!(d.renamed, vec!["_source"]);
+        assert_eq!(
+            d.default, None,
+            "an unresolvable fallback must leave the column absent"
+        );
+    }
+
+    #[test]
+    fn test_parse_source_fallback_vocabulary() {
+        // docs/clickhouse/DDL-DIRECTIVES.md defines exactly these forms.
+        let cases: [(&str, Option<Value>); 7] = [
+            ("@source: t | now()", Some(Value::String("now()".into()))),
+            ("@source: t | uuid()", Some(Value::String("uuid()".into()))),
+            ("@source: t | null", None),
+            ("@source: t | \"lit\"", Some(Value::String("lit".into()))),
+            ("@source: t | 0", Some(Value::Number(0.into()))),
+            ("@source: t | 42", Some(Value::Number(42.into()))),
+            ("@source: t | false", Some(Value::Bool(false))),
+        ];
+        for (comment, expected) in cases {
+            assert_eq!(parse_directives(comment).default, expected, "{comment}");
+        }
+    }
+
+    #[test]
+    fn test_parse_default_directive_still_takes_a_bare_string() {
+        // The closed vocabulary applies to the `|` fallback only -- @default is
+        // its own directive and has always taken a bare value.
+        let d = parse_directives("@default:unknown @source: status");
+        assert_eq!(d.default, Some(Value::String("unknown".into())));
+        assert_eq!(d.renamed, vec!["status"]);
     }
 
     #[test]
@@ -617,7 +696,7 @@ mod tests {
 
     #[test]
     fn test_parse_source_explicit_default_wins_over_fallback() {
-        let d = parse_directives("@default:zero @source: value | fallback");
+        let d = parse_directives("@default:zero @source: value | \"fallback\"");
         assert_eq!(d.default, Some(Value::String("zero".into())));
         assert_eq!(d.renamed, vec!["value"]);
     }

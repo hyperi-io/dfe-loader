@@ -132,8 +132,59 @@ pub fn is_max_dynamic_paths_error(err: &str) -> bool {
         || (err.contains("LOGICAL_ERROR") && err.contains("dynamic path"))
 }
 
+/// Classify a failure returned by `insert.end()`.
+///
+/// Drift is checked FIRST and always wins. DFE promotes JSON paths to columns
+/// at runtime, so an `ALTER` landing mid-flush is normal operation, and the
+/// wording a server picks for it overlaps the data-error patterns -- "cannot
+/// parse", "type mismatch", "incorrect data" all appear in both. Reading one
+/// of those as a permanent verdict destroys a batch the next schema fetch
+/// would have encoded correctly, so drift withholds the offsets and comes
+/// back instead.
+#[must_use]
+pub fn classify_insert_end_error(msg: &str) -> ErrorCategory {
+    if is_schema_drift_error(msg) {
+        return ErrorCategory::Transient;
+    }
+    classify_from_message(msg)
+}
+
+/// Classify a dynamic-insert (`RowBinary` encode) failure, transient first.
+///
+/// Permanent means one thing only: this payload can never encode. A message
+/// naming a network or resource fault is never a verdict on the payload, so
+/// it is tested before the variant is.
+///
+/// Of the variants, only [`DynamicError::EncodingError`] is a payload verdict
+/// -- the encoder held a schema, read the value against it, and could not
+/// represent it, which the next delivery repeats exactly. Every other variant
+/// clears without the payload changing:
+///
+/// - `SchemaFetch` -- the `system.columns` query never landed. A ClickHouse
+///   blip during the first flush after a restart hits this on a cold cache.
+/// - `UnsupportedType` -- THIS BUILD has no encoder for the column type. A
+///   new `Variant` or nested `Tuple` column is a loader gap, not bad data.
+/// - `EmptySchema` -- the table has no columns yet, i.e. it is mid-creation.
+/// - `SchemaMismatch` -- the cached schema is stale; a re-fetch fixes it.
+#[must_use]
+pub fn classify_dynamic_error(err: &crate::clickhouse_ext::DynamicError) -> ErrorCategory {
+    use crate::clickhouse_ext::DynamicError;
+
+    if classify_from_message(&err.to_string()) == ErrorCategory::Transient {
+        return ErrorCategory::Transient;
+    }
+    match err {
+        DynamicError::EncodingError { .. } => ErrorCategory::Data,
+        DynamicError::SchemaFetch { .. }
+        | DynamicError::UnsupportedType { .. }
+        | DynamicError::EmptySchema { .. }
+        | DynamicError::SchemaMismatch { .. } => ErrorCategory::Transient,
+    }
+}
+
 /// Classify error from HTTP response message.
-fn classify_from_message(msg: &str) -> ErrorCategory {
+#[must_use]
+pub fn classify_from_message(msg: &str) -> ErrorCategory {
     let msg_lower = msg.to_lowercase();
 
     // Transient patterns
@@ -322,5 +373,109 @@ mod tests {
     fn test_classify_from_message_enum_unknown() {
         let err = ClickHouseError::Insert("Unknown element 'foo' for type Enum8".into());
         assert!(err.is_data_error());
+    }
+
+    // ========================================================================
+    // Transient-first classification -- nothing reaches a permanent verdict
+    // without passing through here.
+    // ========================================================================
+
+    use crate::clickhouse_ext::DynamicError;
+
+    fn fetch_failure(message: &str) -> DynamicError {
+        DynamicError::SchemaFetch {
+            table: "dfe.filebeat".to_string(),
+            source: clickhouse::error::Error::Custom(message.to_string()),
+        }
+    }
+
+    #[test]
+    fn schema_fetch_failure_is_transient_not_permanent() {
+        // A cold cache issues a live system.columns query on the first flush
+        // after a restart. A ClickHouse blip there must not destroy the batch.
+        assert_eq!(
+            classify_dynamic_error(&fetch_failure("connection reset by peer")),
+            ErrorCategory::Transient
+        );
+        // Even with no transient keyword in the message, the VARIANT decides.
+        assert_eq!(
+            classify_dynamic_error(&fetch_failure("boom")),
+            ErrorCategory::Transient
+        );
+    }
+
+    #[test]
+    fn unsupported_type_is_transient_not_permanent() {
+        // This says the LOADER cannot encode the type, not that the payload is
+        // bad -- a new Variant or nested Tuple column must not turn its table
+        // into a permanent shredder.
+        let err = DynamicError::UnsupportedType {
+            column: "attributes".to_string(),
+            type_str: "Variant(String, UInt64)".to_string(),
+        };
+        assert_eq!(classify_dynamic_error(&err), ErrorCategory::Transient);
+    }
+
+    #[test]
+    fn empty_and_mismatched_schema_are_transient() {
+        assert_eq!(
+            classify_dynamic_error(&DynamicError::EmptySchema {
+                table: "dfe.brand_new".to_string(),
+            }),
+            ErrorCategory::Transient
+        );
+        assert_eq!(
+            classify_dynamic_error(&DynamicError::SchemaMismatch {
+                table: "dfe.filebeat".to_string(),
+                message: "column count changed".to_string(),
+            }),
+            ErrorCategory::Transient
+        );
+    }
+
+    #[test]
+    fn only_an_encoding_failure_is_a_payload_verdict() {
+        let err = DynamicError::EncodingError {
+            column: "source_ip".to_string(),
+            message: "expected an IPv4 string, got an object".to_string(),
+        };
+        assert_eq!(classify_dynamic_error(&err), ErrorCategory::Data);
+    }
+
+    #[test]
+    fn an_encoding_failure_that_names_a_network_fault_stays_transient() {
+        // Transient patterns are tested before the variant is, so a wrapped
+        // transport fault never reads as "this payload can never encode".
+        let err = DynamicError::EncodingError {
+            column: "_json".to_string(),
+            message: "connection reset by peer".to_string(),
+        };
+        assert_eq!(classify_dynamic_error(&err), ErrorCategory::Transient);
+    }
+
+    #[test]
+    fn drift_wording_beats_the_data_patterns_on_end() {
+        // These three strings match BOTH is_schema_drift_error and the Data
+        // patterns. Drift self-heals on a re-fetch, so it must win.
+        for msg in [
+            "Cannot parse input: expected column source_ip",
+            "Type mismatch for column agent_type",
+            "DB::Exception: INCORRECT_DATA",
+            "Unknown column host_name",
+        ] {
+            assert_eq!(
+                classify_insert_end_error(msg),
+                ErrorCategory::Transient,
+                "drift must withhold offsets, not DLQ: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_non_drift_data_rejection_stays_permanent_on_end() {
+        assert_eq!(
+            classify_insert_end_error("server error code 117: Cannot insert data into JSON column"),
+            ErrorCategory::Data
+        );
     }
 }

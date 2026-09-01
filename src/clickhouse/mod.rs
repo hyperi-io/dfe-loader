@@ -52,5 +52,5 @@ pub use types::{
 pub use circuit_breaker::{
     CircuitBreaker, CircuitBreakerConfig, CircuitBreakerStats, CircuitState,
 };
-pub use inserter::{FailedRow, InsertResult, Inserter, InserterConfig};
+pub use inserter::{BatchDisposition, FailedRow, InsertResult, Inserter, InserterConfig};
 pub use schema::{SchemaCache, SchemaCacheConfig, SchemaCacheStats, SharedSchemaCache};

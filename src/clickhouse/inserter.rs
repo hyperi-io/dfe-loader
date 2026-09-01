@@ -45,7 +45,10 @@ use crate::buffer::{FlushBatch, KafkaOffset};
 use crate::clickhouse::circuit_breaker::CircuitBreaker;
 use crate::clickhouse::client_http::escape_identifier;
 use crate::clickhouse::config::InsertFormat;
-use crate::clickhouse::error::{ClickHouseError, ErrorCategory, is_schema_drift_error};
+use crate::clickhouse::error::{
+    ClickHouseError, ErrorCategory, classify_dynamic_error, classify_insert_end_error,
+    is_schema_drift_error,
+};
 use crate::clickhouse::{ClickHouseQueryClient, SchemaCache};
 use crate::transform::Coercer;
 
@@ -100,13 +103,26 @@ fn calc_backoff(base_ms: u64, attempt: u32, max_ms: u64) -> Duration {
     Duration::from_millis(delay_ms.min(max_ms))
 }
 
+/// What the flush path must do with a batch's Kafka offsets.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BatchDisposition {
+    /// Every row is either in `ClickHouse` or in `InsertResult::failed`.
+    /// Commit once the failed rows are somewhere durable.
+    Settled,
+    /// Something can still clear. Withhold the offsets and let Kafka
+    /// re-deliver -- the safe direction, since the payload is still in Kafka.
+    Retry(String),
+}
+
 /// Result of a batch insert with salvage
 #[derive(Debug)]
 pub struct InsertResult {
     /// Number of rows successfully inserted
     pub inserted: usize,
-    /// Failed rows with their Kafka offsets and error reason
+    /// Rows `ClickHouse` can never accept, with their Kafka offsets and reason
     pub failed: Vec<FailedRow>,
+    /// Whether the batch's offsets may be committed.
+    pub disposition: BatchDisposition,
 }
 
 impl InsertResult {
@@ -114,11 +130,54 @@ impl InsertResult {
         Self {
             inserted: count,
             failed: Vec::new(),
+            disposition: BatchDisposition::Settled,
         }
     }
 
     pub fn with_failures(inserted: usize, failed: Vec<FailedRow>) -> Self {
-        Self { inserted, failed }
+        Self {
+            inserted,
+            failed,
+            disposition: BatchDisposition::Settled,
+        }
+    }
+
+    /// A batch whose offsets must be withheld so Kafka re-delivers it.
+    pub fn retry(inserted: usize, reason: impl Into<String>) -> Self {
+        Self {
+            inserted,
+            failed: Vec::new(),
+            disposition: BatchDisposition::Retry(reason.into()),
+        }
+    }
+
+    /// Whether the flush path may commit this batch's offsets once the failed
+    /// rows are accepted by the DLQ.
+    #[must_use]
+    pub fn is_settled(&self) -> bool {
+        self.disposition == BatchDisposition::Settled
+    }
+}
+
+/// Running state of a binary-split salvage.
+#[derive(Debug, Default)]
+struct Salvage {
+    inserted: usize,
+    /// Rows isolated as unencodable -- these go to the DLQ.
+    failed: Vec<FailedRow>,
+    /// Set by the first row that failed for a reason that can still clear.
+    retry_reason: Option<String>,
+}
+
+/// Split a slice held parallel to the rows, tolerating a short or empty one.
+///
+/// `offsets` is empty on the gRPC path and `raw_payloads` is empty in
+/// `extracted_only` capture mode, so neither can be indexed blind.
+fn split_parallel<T>(s: &[T], mid: usize) -> (&[T], &[T]) {
+    if s.len() < mid {
+        (s, &[])
+    } else {
+        s.split_at(mid)
     }
 }
 
@@ -411,11 +470,33 @@ impl Inserter {
                         write_failed = true;
                         break;
                     }
-                    // A value that will not encode for this column encodes no
-                    // better on the next delivery, so it must not be retried.
-                    return Err(crate::Error::ClickHousePermanent(format!(
-                        "RowBinary encode: {e}"
-                    )));
+                    // A schema fetch that never reached the server, or a table
+                    // still being created, is a fault of the moment: drop the
+                    // cached schema and try again with a fresh one.
+                    if matches!(
+                        e,
+                        crate::clickhouse_ext::DynamicError::SchemaFetch { .. }
+                            | crate::clickhouse_ext::DynamicError::EmptySchema { .. }
+                    ) {
+                        insert.invalidate_schema();
+                        if let Some(cache) = &self.schema_cache {
+                            cache.invalidate(table);
+                        }
+                        last_error = Some(crate::Error::ClickHouse(format!(
+                            "Schema unavailable during write: {e}"
+                        )));
+                        write_failed = true;
+                        break;
+                    }
+                    // Only an encoding failure is a verdict on the payload. A
+                    // type this build cannot encode is a loader gap, so those
+                    // offsets are withheld and the rows come back.
+                    return Err(match classify_dynamic_error(&e) {
+                        ErrorCategory::Data => {
+                            crate::Error::ClickHousePermanent(format!("RowBinary encode: {e}"))
+                        }
+                        _ => crate::Error::ClickHouse(format!("RowBinary encode: {e}")),
+                    });
                 }
             }
 
@@ -474,27 +555,36 @@ impl Inserter {
                     ));
                 }
                 Err(e) => {
-                    // insert.end() consumed the DynamicInsert, so we cannot
-                    // call invalidate_schema() on it. Invalidate the loader's
-                    // schema cache so the NEXT batch re-fetches fresh schema.
-                    // The current batch is returned as an error (salvage/DLQ).
+                    let message = format!("RowBinary insert: {e}");
+                    // insert.end() consumed the DynamicInsert, so the loader's
+                    // own cache is the only one left to invalidate; the next
+                    // attempt re-fetches through it.
                     if is_schema_drift_error(&e.to_string()) {
                         if let Some(cache) = &self.schema_cache {
                             cache.invalidate(table);
                         }
-                        warn!(
-                            table = %table,
-                            error = %e,
-                            "Data error suggests schema drift, invalidated loader schema cache"
-                        );
+                        if attempt < self.max_retries {
+                            let delay = self.backoff_delay(attempt);
+                            warn!(
+                                table = %table,
+                                attempt,
+                                error = %e,
+                                delay_ms = delay.as_millis(),
+                                "Schema drift on end(), re-fetching and retrying"
+                            );
+                            sleep(delay).await;
+                            last_error = Some(crate::Error::ClickHouse(message));
+                            continue;
+                        }
+                        last_error = Some(crate::Error::ClickHouse(message));
+                        break;
                     }
-                    let message = format!("RowBinary insert: {e}");
-                    // A data-class rejection is deterministic for this payload;
-                    // anything else may clear on a retry.
-                    if ClickHouseError::Insert(message.clone()).is_data_error() {
-                        return Err(crate::Error::ClickHousePermanent(message));
-                    }
-                    return Err(crate::Error::ClickHouse(message));
+                    // Permanent means the payload can never encode. Drift was
+                    // ruled out above, so the message classification decides.
+                    return Err(match classify_insert_end_error(&message) {
+                        ErrorCategory::Data => crate::Error::ClickHousePermanent(message),
+                        _ => crate::Error::ClickHouse(message),
+                    });
                 }
             }
         }
@@ -670,24 +760,18 @@ impl Inserter {
         // salvage sub-batches reuse already-coerced rows.
         self.coerce_batch(&table, &mut rows).await;
 
-        // Pass raw_payloads for zero-copy _json splice (json_primary path).
-        // Salvage sub-batches use &[] — the salvage path is error recovery only.
+        // Pass raw_payloads for zero-copy _json splice (json_primary path);
+        // salvage sub-batches keep their slice of it.
         match self.insert_rows(&table, &rows, &raw_payloads).await {
             Ok(count) => {
                 return InsertResult::success(count);
             }
             Err(e) => {
-                let is_data_error = matches!(e, crate::Error::ClickHousePermanent(_))
-                    || matches!(
-                        e,
-                        crate::Error::ClickHouse(ref msg) if {
-                            let ch_err = crate::clickhouse::ClickHouseError::Insert(msg.clone());
-                            ch_err.is_data_error()
-                        }
-                    )
-                    || e.to_string().to_lowercase().contains("type mismatch")
-                    || e.to_string().to_lowercase().contains("incorrect data")
-                    || e.to_string().to_lowercase().contains("cannot parse");
+                // insert_rows has already classified this, so a permanent
+                // rejection is the only thing salvage can isolate. Splitting
+                // anything else issues 2N inserts against a sink that is
+                // already struggling, for rows that were never at fault.
+                let is_data_error = matches!(e, crate::Error::ClickHousePermanent(_));
 
                 // max_dynamic_paths guidance: metric always, log debounced.
                 {
@@ -716,21 +800,20 @@ impl Inserter {
                     }
                 }
 
-                if !self.enable_salvage || num_rows <= 1 || !is_data_error {
+                if !is_data_error {
+                    // A missing table or a missing grant is an operator fix,
+                    // not a bad payload, so the rows wait in Kafka for it.
+                    error!(
+                        table = %table,
+                        rows = num_rows,
+                        error = %e,
+                        "Insert failed — offsets withheld, messages will re-deliver"
+                    );
+                    return InsertResult::retry(0, e.to_string());
+                }
+
+                if !self.enable_salvage || num_rows <= 1 {
                     let reason = e.to_string();
-                    let is_fatal = e.to_string().to_lowercase().contains("unknown table")
-                        || e.to_string().to_lowercase().contains("access denied");
-
-                    if is_fatal {
-                        error!(
-                            table = %table,
-                            rows = num_rows,
-                            error = %e,
-                            "Fatal error, batch failed (not sending to DLQ)"
-                        );
-                        return InsertResult::with_failures(0, Vec::new());
-                    }
-
                     let failed: Vec<FailedRow> = (0..num_rows)
                         .map(|i| FailedRow {
                             row_index: i,
@@ -751,36 +834,48 @@ impl Inserter {
         }
 
         // Binary-split salvage (only for data errors)
-        let mut inserted = 0;
-        let mut failed = Vec::new();
+        let mut salvage = Salvage::default();
 
-        self.salvage_batch(&table, &rows, &offsets, 0, 0, &mut inserted, &mut failed)
+        self.salvage_batch(&table, &rows, &offsets, &raw_payloads, 0, 0, &mut salvage)
             .await;
 
         info!(
             table = %table,
-            inserted = inserted,
-            failed = failed.len(),
+            inserted = salvage.inserted,
+            failed = salvage.failed.len(),
             "Batch salvage complete"
         );
 
-        InsertResult::with_failures(inserted, failed)
+        // One row that needs to come back drags the batch's offsets with it:
+        // the offsets are committed as a block, so a partial commit would lose
+        // the rows behind it.
+        match salvage.retry_reason {
+            Some(reason) => InsertResult {
+                inserted: salvage.inserted,
+                failed: Vec::new(),
+                disposition: BatchDisposition::Retry(reason),
+            },
+            None => InsertResult::with_failures(salvage.inserted, salvage.failed),
+        }
     }
 
     /// Recursively salvage a batch using binary split.
     ///
     /// Splits `rows` slice in half, retries each half. Recurses until
     /// single-row failures are isolated for DLQ routing.
+    ///
+    /// `raw_payloads` is sliced in step with `rows` so a salvaged row keeps its
+    /// zero-copy `_json`; dropping it would land the row with an empty `_json`.
     #[allow(clippy::too_many_arguments)]
     fn salvage_batch<'a>(
         &'a self,
         table: &'a str,
         rows: &'a [Map<String, Value>],
         offsets: &'a [KafkaOffset],
+        raw_payloads: &'a [Arc<[u8]>],
         start_index: usize,
         depth: u32,
-        inserted: &'a mut usize,
-        failed: &'a mut Vec<FailedRow>,
+        out: &'a mut Salvage,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
         Box::pin(async move {
             let num_rows = rows.len();
@@ -793,7 +888,7 @@ impl Inserter {
                     "Max salvage depth exceeded, marking all rows as failed"
                 );
                 for i in 0..num_rows {
-                    failed.push(FailedRow {
+                    out.failed.push(FailedRow {
                         row_index: start_index + i,
                         offset: offsets.get(i).cloned(),
                         reason: "Max salvage depth exceeded".to_string(),
@@ -804,24 +899,32 @@ impl Inserter {
 
             // Base case: single row
             if num_rows == 1 {
-                match self.insert_rows(table, rows, &[]).await {
+                match self.insert_rows(table, rows, raw_payloads).await {
                     Ok(_) => {
-                        *inserted += 1;
+                        out.inserted += 1;
                     }
                     Err(e) => {
-                        failed.push(FailedRow {
-                            row_index: start_index,
-                            offset: offsets.first().cloned(),
-                            reason: e.to_string(),
-                        });
+                        if matches!(e, crate::Error::ClickHousePermanent(_)) {
+                            out.failed.push(FailedRow {
+                                row_index: start_index,
+                                offset: offsets.first().cloned(),
+                                reason: e.to_string(),
+                            });
+                        } else {
+                            out.retry_reason.get_or_insert_with(|| e.to_string());
+                        }
                     }
                 }
                 return;
             }
 
-            // Try the whole slice first (might succeed now, e.g., transient error)
-            if let Ok(count) = self.insert_rows(table, rows, &[]).await {
-                *inserted += count;
+            // Try the whole slice first (might succeed now, e.g., transient
+            // error). Skipped at depth 0: the caller has just made that exact
+            // attempt, and repeating it doubles the cost of every rejection.
+            if depth > 0
+                && let Ok(count) = self.insert_rows(table, rows, raw_payloads).await
+            {
+                out.inserted += count;
                 return;
             }
             // Split and recurse
@@ -829,16 +932,8 @@ impl Inserter {
             // Split in half
             let mid = num_rows / 2;
             let (left_rows, right_rows) = rows.split_at(mid);
-            let left_offsets = if offsets.len() >= mid {
-                &offsets[..mid]
-            } else {
-                offsets
-            };
-            let right_offsets = if offsets.len() > mid {
-                &offsets[mid..]
-            } else {
-                &[]
-            };
+            let (left_offsets, right_offsets) = split_parallel(offsets, mid);
+            let (left_raw, right_raw) = split_parallel(raw_payloads, mid);
 
             debug!(
                 table = %table,
@@ -852,10 +947,10 @@ impl Inserter {
                 table,
                 left_rows,
                 left_offsets,
+                left_raw,
                 start_index,
                 depth + 1,
-                inserted,
-                failed,
+                out,
             )
             .await;
 
@@ -863,19 +958,13 @@ impl Inserter {
                 table,
                 right_rows,
                 right_offsets,
+                right_raw,
                 start_index + mid,
                 depth + 1,
-                inserted,
-                failed,
+                out,
             )
             .await;
         })
-    }
-
-    /// Insert a `FlushBatch` — simple version without salvage.
-    pub async fn insert_batch(&self, batch: FlushBatch) -> Result<usize> {
-        self.insert_rows(&batch.table, &batch.rows, &batch.raw_payloads)
-            .await
     }
 
     /// Insert multiple batches concurrently with salvage.
@@ -913,51 +1002,13 @@ impl Inserter {
             match handle.await {
                 Ok((table, result)) => results.push((table, result)),
                 Err(e) => {
+                    // A panicked task proves nothing about the payload, so the
+                    // offsets stay withheld rather than being DLQ'd blind.
                     results.push((
                         "unknown".to_string(),
-                        InsertResult::with_failures(
-                            0,
-                            vec![FailedRow {
-                                row_index: 0,
-                                offset: None,
-                                reason: format!("Insert task panicked: {e}"),
-                            }],
-                        ),
+                        InsertResult::retry(0, format!("Insert task panicked: {e}")),
                     ));
                 }
-            }
-        }
-
-        results
-    }
-
-    /// Insert multiple batches concurrently (simple version).
-    pub async fn insert_batches(&self, batches: Vec<FlushBatch>) -> Vec<Result<usize>> {
-        let mut handles = Vec::with_capacity(batches.len());
-
-        for batch in batches {
-            let semaphore = self.semaphore.clone();
-            let inserter = Self {
-                semaphore: None,
-                ..self.clone()
-            };
-
-            handles.push(tokio::spawn(async move {
-                let _permit = match &semaphore {
-                    Some(sem) => Some(sem.acquire().await.expect("Semaphore closed")),
-                    None => None,
-                };
-                inserter.insert_batch(batch).await
-            }));
-        }
-
-        let mut results = Vec::with_capacity(handles.len());
-        for handle in handles {
-            match handle.await {
-                Ok(result) => results.push(result),
-                Err(e) => results.push(Err(crate::Error::Buffer(format!(
-                    "Insert task panicked: {e}"
-                )))),
             }
         }
 
@@ -1032,6 +1083,37 @@ mod tests {
         assert_eq!(result.failed.len(), 2);
         assert_eq!(result.failed[0].row_index, 5);
         assert_eq!(result.failed[1].row_index, 10);
+        assert!(result.is_settled());
+    }
+
+    #[test]
+    fn a_retry_disposition_carries_no_dlq_rows() {
+        // Withholding is the safe direction: the payload is still in Kafka, so
+        // nothing may be DLQ'd and nothing may be committed.
+        let result = InsertResult::retry(0, "connection reset by peer");
+        assert!(!result.is_settled());
+        assert!(result.failed.is_empty());
+        assert_eq!(
+            result.disposition,
+            BatchDisposition::Retry("connection reset by peer".to_string())
+        );
+    }
+
+    #[test]
+    fn split_parallel_tolerates_a_short_or_empty_companion() {
+        // offsets is empty on the gRPC path and raw_payloads is empty in
+        // extracted_only capture mode.
+        let full = [1, 2, 3, 4];
+        assert_eq!(split_parallel(&full, 2), (&full[..2], &full[2..]));
+
+        let empty: [i32; 0] = [];
+        assert_eq!(split_parallel(&empty, 2), (&empty[..], &empty[..]));
+
+        let short = [1];
+        assert_eq!(split_parallel(&short, 2), (&short[..], &empty[..]));
+
+        // An exact-length split leaves an empty right half, not a panic.
+        assert_eq!(split_parallel(&full, 4), (&full[..], &empty[..]));
     }
 
     #[test]

@@ -819,10 +819,16 @@ Provides a fallback when the source is missing or invalid:
 ```
 
 - `now()` - Current timestamp
-- `uuid()` - Generate UUID
+- `uuid()` - Generate UUID (v7, time-ordered)
 - `null` - Explicit NULL
-- `"literal"` - String literal
+- `"literal"` - String literal (quote it)
 - `0`, `false` - Numeric/boolean literals
+
+This vocabulary is closed. A fallback outside it is a field reference the
+loader cannot resolve, so it is ignored and the column is left absent rather
+than filled with the text of the expression - `@source: first(_source) |
+topic_name` leaves `_source` absent, it does not write the string
+`topic_name`. The loader logs the ignored fallback once per five minutes.
 
 ### List operator (`/`)
 
