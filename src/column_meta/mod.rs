@@ -623,6 +623,62 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_source_against_the_deployed_filebeat_comments() {
+        // Verbatim from system.columns on a deployed dfe.filebeat, so this
+        // pins the parser to what ClickHouse actually stores rather than to
+        // an idealised directive.
+        let deployed = [
+            (
+                "@source: @timestamp - Event timestamp (ECS @timestamp)",
+                "@timestamp",
+            ),
+            (
+                "@source: host.name - Host the event was collected from",
+                "host.name",
+            ),
+            ("@source: agent.type - Shipping agent type", "agent.type"),
+            (
+                "@source: agent.version - Shipping agent version",
+                "agent.version",
+            ),
+            (
+                "@source: event.module - Filebeat module that produced the event",
+                "event.module",
+            ),
+            (
+                "@source: event.dataset - Module dataset (ECS event.dataset)",
+                "event.dataset",
+            ),
+            (
+                "@source: log.file.path - Source file the line was read from",
+                "log.file.path",
+            ),
+            (
+                "@source: source.ip - Source address (ECS source.ip)",
+                "source.ip",
+            ),
+            (
+                "@source: user.name - User associated with the event (ECS user.name)",
+                "user.name",
+            ),
+            (
+                "@source: process.name - Process that emitted the line (ECS process.name)",
+                "process.name",
+            ),
+            (
+                "@source: process.pid - Process ID (ECS process.pid)",
+                "process.pid",
+            ),
+            ("@source: message - Log line content", "message"),
+        ];
+
+        for (comment, expected) in deployed {
+            let d = parse_directives(comment);
+            assert_eq!(d.renamed, vec![expected], "parsing {comment:?}");
+        }
+    }
+
+    #[test]
     fn test_parse_renamed_strips_ddl_description() {
         let d = parse_directives("@renamed: src_ip - Source address");
         assert_eq!(d.renamed, vec!["src_ip"]);
