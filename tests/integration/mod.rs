@@ -17,7 +17,6 @@ mod deployment;
 mod dlq;
 mod errors;
 mod field_mapping;
-mod geoip_download_e2e;
 mod helm_contract;
 mod inserter;
 mod kafka;

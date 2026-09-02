@@ -1,27 +1,26 @@
 // SPDX-License-Identifier: BUSL-1.1
 // Copyright (c) 2026 HYPERI PTY LIMITED
 
-//! `GeoIP` enrichment with LRU caching
+//! `GeoIP` enrichment.
 //!
-//! High-performance IP geolocation using `MaxMind` MMDB databases.
+//! An adapter over [`factbook::geoip`], which owns the database downloads, the
+//! MMDB readers, the cache and the private-address fast path.
 //!
-//! ## Hot Path Optimizations
-//!
-//! 1. **LRU Cache**: Avoids repeated MMDB lookups for the same IP
-//! 2. **Private IP Fast Path**: Skips MMDB lookup for RFC1918/loopback addresses
-//! 3. **Batch Deduplication**: Process unique IPs once, apply to all matching events
-//! 4. **Schema-Aware Output**: Only compute fields that exist in destination schema
+//! What lives here is the shape the destination schema expects:
+//! [`GeoIpResult`] and its [`to_schema_map`](GeoIpResult::to_schema_map) name
+//! ClickHouse columns, so the field names are a contract with deployed tables
+//! rather than an internal detail. The rename between factbook's names and
+//! ours happens on that boundary and nowhere else.
 
-use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::path::PathBuf;
 
-use maxminddb::{MaxMindDbError, Reader, geoip2};
+use factbook::Secret;
+use factbook::geoip::{GeoIp as FactbookGeoIp, GeoIpRecord as FactbookRecord};
 use tracing::{debug, info, warn};
 
-use crate::config::GeoIpConfig;
+use crate::config::{GeoIpConfig, GeoIpProvider};
 
 /// `GeoIP` lookup result with all available fields
 #[derive(Debug, Clone, Default)]
@@ -58,16 +57,39 @@ pub struct GeoIpResult {
     pub accuracy_radius: Option<u16>,
 }
 
-impl GeoIpResult {
-    /// Create a result for private/internal IP addresses
-    #[inline]
-    fn private() -> Self {
+impl From<&FactbookRecord> for GeoIpResult {
+    /// Map factbook's record onto the shape `to_schema_map` writes from.
+    ///
+    /// Five fields are named differently on each side; the rest match. The
+    /// names here are ClickHouse column names, so they stay as they are and
+    /// the rename happens on this boundary.
+    fn from(r: &FactbookRecord) -> Self {
+        // `CompactString` is factbook's; the schema map hands out `String`.
+        fn owned(v: Option<&compact_str::CompactString>) -> Option<String> {
+            v.map(std::string::ToString::to_string)
+        }
+
         Self {
-            is_private: true,
-            ..Default::default()
+            continent_code: owned(r.continent_code.as_ref()),
+            continent_name: owned(r.continent_name.as_ref()),
+            country_code: owned(r.country_code.as_ref()),
+            country_name: owned(r.country_name.as_ref()),
+            city: owned(r.city_name.as_ref()),
+            latitude: r.latitude,
+            longitude: r.longitude,
+            timezone: owned(r.timezone.as_ref()),
+            postal_code: owned(r.postal_code.as_ref()),
+            subdivision: owned(r.region_name.as_ref()),
+            subdivision_code: owned(r.region_code.as_ref()),
+            asn: r.autonomous_system_number,
+            asn_org: owned(r.autonomous_system_organization.as_ref()),
+            is_private: r.is_private,
+            accuracy_radius: r.accuracy_radius,
         }
     }
+}
 
+impl GeoIpResult {
     /// Convert result to a map, filtering to only requested fields
     pub fn to_schema_map(&self, schema_fields: &[&str]) -> HashMap<String, serde_json::Value> {
         use serde_json::Value;
@@ -168,123 +190,68 @@ impl GeoIpResult {
     }
 }
 
-/// Cache statistics
-#[derive(Debug, Default)]
-pub struct CacheStats {
-    pub hits: u64,
-    pub misses: u64,
-    pub size: usize,
-}
-
-/// LRU cache entry
-struct CacheEntry {
-    result: GeoIpResult,
-    /// Access order for LRU eviction (lower = older)
-    access_order: u64,
-}
-
-/// `GeoIP` enricher with LRU caching
+/// `GeoIP` enricher.
+///
+/// An adapter over [`factbook::geoip`], which owns the download, the MMDB
+/// readers and the cache. What stays here is [`GeoIpResult`] and its
+/// [`to_schema_map`](GeoIpResult::to_schema_map): those field names are
+/// ClickHouse column names in deployed tables, so they are a contract rather
+/// than an internal shape.
+///
+/// `None` is an enricher with no databases -- a download that failed, or
+/// enrichment configured off. Lookups return `None` and the pipeline carries
+/// on, which is the behaviour this had before.
 pub struct GeoIpEnricher {
-    /// City database reader (optional)
-    city_reader: Option<Reader<Vec<u8>>>,
-    /// ASN database reader (optional)
-    asn_reader: Option<Reader<Vec<u8>>>,
-    /// LRU cache: IP string -> result
-    cache: RwLock<HashMap<String, CacheEntry>>,
-    /// Maximum cache entries
-    cache_capacity: usize,
-    /// Access counter for LRU ordering
-    access_counter: AtomicU64,
-    /// Cache hit counter
-    cache_hits: AtomicU64,
-    /// Cache miss counter
-    cache_misses: AtomicU64,
+    inner: Option<FactbookGeoIp>,
 }
 
 impl GeoIpEnricher {
-    /// Create a new `GeoIP` enricher (no databases loaded)
+    /// An enricher with no databases. Every lookup returns `None`.
+    #[must_use]
     pub fn new() -> Self {
-        Self {
-            city_reader: None,
-            asn_reader: None,
-            cache: RwLock::new(HashMap::with_capacity(1024)),
-            cache_capacity: 100_000,
-            access_counter: AtomicU64::new(0),
-            cache_hits: AtomicU64::new(0),
-            cache_misses: AtomicU64::new(0),
-        }
+        Self { inner: None }
     }
 
-    /// Create enricher with specified cache capacity
-    pub fn with_cache_capacity(mut self, capacity: usize) -> Self {
-        self.cache_capacity = capacity;
-        self
-    }
-
-    /// Load city database from file
-    pub fn with_city_db<P: AsRef<Path>>(mut self, path: P) -> Result<Self, MaxMindDbError> {
-        self.city_reader = Some(Reader::open_readfile(path)?);
-        debug!("Loaded GeoIP city database");
-        Ok(self)
-    }
-
-    /// Load ASN database from file
-    pub fn with_asn_db<P: AsRef<Path>>(mut self, path: P) -> Result<Self, MaxMindDbError> {
-        self.asn_reader = Some(Reader::open_readfile(path)?);
-        debug!("Loaded GeoIP ASN database");
-        Ok(self)
-    }
-
-    /// Check if any databases are loaded
+    /// Whether any database is loaded.
+    #[must_use]
     pub fn is_available(&self) -> bool {
-        self.city_reader.is_some() || self.asn_reader.is_some()
+        self.inner.is_some()
     }
 
-    /// Get cache statistics
-    pub fn cache_stats(&self) -> CacheStats {
-        let cache = self.cache.read();
-        CacheStats {
-            hits: self.cache_hits.load(Ordering::Relaxed),
-            misses: self.cache_misses.load(Ordering::Relaxed),
-            size: cache.len(),
-        }
-    }
-
-    /// Look up an IP address
+    /// Entries currently held in factbook's lookup cache.
     ///
-    /// Returns cached result if available, otherwise performs MMDB lookup.
-    /// Private IPs return early without MMDB lookup.
-    pub fn lookup(&self, ip: &str) -> Option<GeoIpResult> {
-        // Fast path: check cache first
-        if let Some(result) = self.cache_get(ip) {
-            return Some(result);
-        }
+    /// Hits and misses are not counted here any more. factbook emits
+    /// `enrichment_cache_hits_total` and `enrichment_cache_misses_total`
+    /// through the metrics facade, so they reach a scrape without this
+    /// carrying the numbers.
+    #[must_use]
+    pub fn cached_entries(&self) -> usize {
+        self.inner.as_ref().map_or(0, FactbookGeoIp::cached_entries)
+    }
 
-        // Parse IP address
-        let addr: IpAddr = if let Ok(a) = ip.parse() {
-            a
-        } else {
+    /// Look up an IP address.
+    ///
+    /// Caching, private-address handling and the database reads all belong to
+    /// factbook; this parses the string and maps the record onto the shape the
+    /// ClickHouse schema expects.
+    pub fn lookup(&self, ip: &str) -> Option<GeoIpResult> {
+        let Ok(addr) = ip.parse::<IpAddr>() else {
             debug!(ip = %ip, "Invalid IP address");
             return None;
         };
 
-        // Fast path: private IP addresses (no MMDB lookup needed)
+        // Answered before the database is consulted, because the answer does
+        // not need one. A deployment whose download failed still reports
+        // internal traffic as internal rather than reporting nothing.
         if is_private_ip(&addr) {
-            let result = GeoIpResult::private();
-            self.cache_put(ip.to_string(), result.clone());
-            return Some(result);
+            return Some(GeoIpResult {
+                is_private: true,
+                ..Default::default()
+            });
         }
 
-        // Perform MMDB lookup
-        self.cache_misses.fetch_add(1, Ordering::Relaxed);
-        let result = self.lookup_mmdb(&addr);
-
-        // Cache result (even if partial)
-        if let Some(ref r) = result {
-            self.cache_put(ip.to_string(), r.clone());
-        }
-
-        result
+        let geoip = self.inner.as_ref()?;
+        geoip.lookup(addr).map(|record| GeoIpResult::from(&*record))
     }
 
     /// Batch lookup with deduplication
@@ -305,128 +272,6 @@ impl GeoIpEnricher {
         results
     }
 
-    /// Cache lookup (read path)
-    fn cache_get(&self, ip: &str) -> Option<GeoIpResult> {
-        let cache = self.cache.read();
-        if let Some(entry) = cache.get(ip) {
-            self.cache_hits.fetch_add(1, Ordering::Relaxed);
-            Some(entry.result.clone())
-        } else {
-            None
-        }
-    }
-
-    /// Cache insert with LRU eviction (write path)
-    fn cache_put(&self, ip: String, result: GeoIpResult) {
-        let mut cache = self.cache.write();
-
-        // LRU eviction: remove oldest 25% when at capacity
-        if cache.len() >= self.cache_capacity {
-            self.evict_lru(&mut cache, self.cache_capacity / 4);
-        }
-
-        let order = self.access_counter.fetch_add(1, Ordering::Relaxed);
-        cache.insert(
-            ip,
-            CacheEntry {
-                result,
-                access_order: order,
-            },
-        );
-    }
-
-    /// Evict oldest N entries from cache
-    fn evict_lru(&self, cache: &mut HashMap<String, CacheEntry>, count: usize) {
-        if cache.is_empty() || count == 0 {
-            return;
-        }
-
-        // Collect entries sorted by access order
-        let mut entries: Vec<_> = cache
-            .iter()
-            .map(|(k, v)| (k.clone(), v.access_order))
-            .collect();
-        entries.sort_by_key(|(_, order)| *order);
-
-        // Remove oldest entries
-        for (key, _) in entries.into_iter().take(count) {
-            cache.remove(&key);
-        }
-    }
-
-    /// Perform MMDB lookup using maxminddb 0.27+ API
-    fn lookup_mmdb(&self, addr: &IpAddr) -> Option<GeoIpResult> {
-        let mut result = GeoIpResult::default();
-        let mut found = false;
-
-        // City database lookup
-        if let Some(ref reader) = self.city_reader
-            && let Ok(lookup_result) = reader.lookup(*addr)
-        {
-            // Decode the result into a City struct
-            if let Ok(Some(city)) = lookup_result.decode::<geoip2::City>() {
-                found = true;
-
-                // Continent data
-                result.continent_code = city.continent.code.map(std::string::ToString::to_string);
-                result.continent_name = city
-                    .continent
-                    .names
-                    .english
-                    .map(std::string::ToString::to_string);
-
-                // Country data - new API has flat access
-                result.country_code = city.country.iso_code.map(std::string::ToString::to_string);
-                result.country_name = city
-                    .country
-                    .names
-                    .english
-                    .map(std::string::ToString::to_string);
-
-                // City data
-                result.city = city
-                    .city
-                    .names
-                    .english
-                    .map(std::string::ToString::to_string);
-
-                // Location data
-                result.latitude = city.location.latitude;
-                result.longitude = city.location.longitude;
-                result.timezone = city
-                    .location
-                    .time_zone
-                    .map(std::string::ToString::to_string);
-                result.accuracy_radius = city.location.accuracy_radius;
-
-                // Postal data
-                result.postal_code = city.postal.code.map(std::string::ToString::to_string);
-
-                // Subdivision data (first subdivision = state/province)
-                if let Some(first) = city.subdivisions.first() {
-                    result.subdivision_code = first.iso_code.map(std::string::ToString::to_string);
-                    result.subdivision = first.names.english.map(std::string::ToString::to_string);
-                }
-            }
-        }
-
-        // ASN database lookup
-        if let Some(ref reader) = self.asn_reader
-            && let Ok(lookup_result) = reader.lookup(*addr)
-            && let Ok(Some(asn)) = lookup_result.decode::<geoip2::Asn>()
-        {
-            found = true;
-            result.asn = asn.autonomous_system_number;
-            result.asn_org = asn
-                .autonomous_system_organization
-                .map(std::string::ToString::to_string);
-        }
-
-        if found { Some(result) } else { None }
-    }
-}
-
-impl GeoIpEnricher {
     /// Create enricher from config, downloading databases if needed.
     ///
     /// This is the primary constructor for production use. It resolves
@@ -434,65 +279,112 @@ impl GeoIpEnricher {
     /// Download failures are non-fatal — the enricher works with
     /// zero, one, or both databases.
     pub async fn from_config(config: &GeoIpConfig) -> Self {
-        let paths = match super::geoip_download::ensure_databases(config).await {
-            Ok(paths) => paths,
+        let fb_config = to_factbook_config(config);
+
+        let databases = match factbook::geoip::ensure_databases(&fb_config).await {
+            Ok(databases) => databases,
             Err(e) => {
                 warn!(error = %e, "Failed to resolve GeoIP databases, enricher will be inactive");
-                return Self::new().with_cache_capacity(config.cache_capacity);
+                return Self::new();
             }
         };
 
-        let city_reader = if let Some(ref city_path) = paths.city {
-            match Reader::open_readfile(city_path) {
-                Ok(reader) => {
-                    info!(path = %city_path.display(), "Loaded GeoIP city database");
-                    Some(reader)
-                }
-                Err(e) => {
-                    warn!(error = %e, path = %city_path.display(), "Failed to load city database");
-                    None
-                }
-            }
-        } else {
-            None
-        };
-
-        let asn_reader = if let Some(ref asn_path) = paths.asn {
-            match Reader::open_readfile(asn_path) {
-                Ok(reader) => {
-                    info!(path = %asn_path.display(), "Loaded GeoIP ASN database");
-                    Some(reader)
-                }
-                Err(e) => {
-                    warn!(error = %e, path = %asn_path.display(), "Failed to load ASN database");
-                    None
-                }
-            }
-        } else {
-            None
-        };
-
-        let enricher = Self {
-            city_reader,
-            asn_reader,
-            cache: RwLock::new(HashMap::with_capacity(1024)),
-            cache_capacity: config.cache_capacity,
-            access_counter: AtomicU64::new(0),
-            cache_hits: AtomicU64::new(0),
-            cache_misses: AtomicU64::new(0),
-        };
-
-        if !enricher.is_available() {
-            warn!(provider = ?config.provider, "No GeoIP databases loaded, enricher inactive");
+        // factbook builds a reader over zero databases quite happily, so the
+        // check has to happen here: `is_available` means there is something to
+        // look in, and the pipeline logs on the strength of it.
+        if databases.city.is_none() && databases.asn.is_none() {
+            warn!(provider = ?config.provider, "No GeoIP databases available, enricher inactive");
+            return Self::new();
         }
 
-        enricher
+        let cache = factbook::geoip::CacheConfig {
+            capacity: config.cache_capacity,
+            ..factbook::geoip::CacheConfig::default()
+        };
+
+        match FactbookGeoIp::from_databases(&databases, cache) {
+            Ok(geoip) => {
+                info!(provider = ?config.provider, "Loaded GeoIP databases");
+                Self { inner: Some(geoip) }
+            }
+            Err(e) => {
+                warn!(error = %e, provider = ?config.provider,
+                      "No GeoIP databases loaded, enricher inactive");
+                Self::new()
+            }
+        }
     }
 }
 
 impl Default for GeoIpEnricher {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Translate our config into factbook's.
+///
+/// The two are near enough field-for-field; what differs is that factbook
+/// names the product line separately (`ProviderTier`) where we fold it into
+/// the provider name, and wraps every credential in `Secret` where we wrapped
+/// only the IPinfo token.
+fn to_factbook_config(config: &GeoIpConfig) -> factbook::geoip::GeoIpConfig {
+    use factbook::geoip::{GeoIpProvider as Fb, ProviderChoice, ProviderSelection};
+
+    // Which factbook provider serves each half. Providers that publish no city
+    // database leave that half on the default rather than pointing it at a
+    // source that cannot answer.
+    let selection = match config.provider {
+        GeoIpProvider::DbIpLite => ProviderSelection::from(ProviderChoice::from(Fb::DbIp)),
+        GeoIpProvider::MaxMindGeoLite2 => {
+            ProviderSelection::from(ProviderChoice::from(Fb::MaxMind))
+        }
+        GeoIpProvider::IpInfoLite => ProviderSelection::from(ProviderChoice::from(Fb::IpInfo)),
+        // ASN-only sources: leave the city half at the default, which is the
+        // only free city source anyway.
+        GeoIpProvider::Sapics => ProviderSelection {
+            asn: ProviderChoice::from(Fb::SapicsOriginAsn),
+            ..ProviderSelection::default()
+        },
+        // factbook carries no IPLocate source. The default pair keeps a
+        // deployment answering rather than leaving it with no databases.
+        GeoIpProvider::IpLocate => {
+            warn!(
+                "provider 'iplocate' has no factbook equivalent; \
+                 falling back to the default free pair"
+            );
+            ProviderSelection::default()
+        }
+        GeoIpProvider::Custom => ProviderSelection::from(ProviderChoice::from(Fb::Custom)),
+    };
+
+    factbook::geoip::GeoIpConfig {
+        enabled: config.enabled,
+        provider: selection,
+        city_db_path: config.city_db_path.as_ref().map(PathBuf::from),
+        asn_db_path: config.asn_db_path.as_ref().map(PathBuf::from),
+        auto_download: factbook::geoip::AutoDownloadConfig {
+            enabled: config.auto_download.enabled,
+            data_dir: PathBuf::from(&config.auto_download.data_dir),
+            maxmind_account_id: config
+                .auto_download
+                .maxmind_account_id
+                .as_ref()
+                .map(|s| Secret::from(s.clone())),
+            maxmind_license_key: config
+                .auto_download
+                .maxmind_license_key
+                .as_ref()
+                .map(|s| Secret::from(s.clone())),
+            ipinfo_token: config
+                .auto_download
+                .ipinfo_token
+                .as_ref()
+                .map(|s| Secret::from(s.expose().to_string())),
+            max_age_days: config.auto_download.max_age_days,
+            ..factbook::geoip::AutoDownloadConfig::default()
+        },
+        ..factbook::geoip::GeoIpConfig::default()
     }
 }
 
@@ -645,21 +537,6 @@ mod tests {
         assert_eq!(map.len(), 3);
         assert_eq!(map.get("country_code").unwrap(), "US");
         assert_eq!(map.get("city").unwrap(), "Mountain View");
-    }
-
-    #[test]
-    fn test_cache_stats() {
-        let enricher = GeoIpEnricher::new();
-
-        // First lookup - cache miss
-        let _ = enricher.lookup("192.168.1.1");
-
-        // Second lookup - cache hit
-        let _ = enricher.lookup("192.168.1.1");
-
-        let stats = enricher.cache_stats();
-        assert_eq!(stats.hits, 1);
-        assert_eq!(stats.size, 1);
     }
 
     // ========================================================================
@@ -908,69 +785,6 @@ mod tests {
     // Cache hits/misses
     // ========================================================================
 
-    #[test]
-    fn test_cache_hit_on_second_lookup() {
-        let enricher = GeoIpEnricher::new();
-
-        // First lookup on a private IP
-        let _ = enricher.lookup("10.0.0.1");
-        let stats1 = enricher.cache_stats();
-        assert_eq!(stats1.size, 1);
-        assert_eq!(stats1.hits, 0);
-
-        // Second lookup — should hit cache
-        let _ = enricher.lookup("10.0.0.1");
-        let stats2 = enricher.cache_stats();
-        assert_eq!(stats2.size, 1);
-        assert_eq!(stats2.hits, 1);
-
-        // Third lookup
-        let _ = enricher.lookup("10.0.0.1");
-        let stats3 = enricher.cache_stats();
-        assert_eq!(stats3.hits, 2);
-    }
-
-    #[test]
-    fn test_cache_different_ips_separate_entries() {
-        let enricher = GeoIpEnricher::new();
-
-        let _ = enricher.lookup("10.0.0.1");
-        let _ = enricher.lookup("10.0.0.2");
-        let _ = enricher.lookup("10.0.0.3");
-
-        let stats = enricher.cache_stats();
-        assert_eq!(stats.size, 3);
-        assert_eq!(stats.hits, 0);
-
-        // Now hit all three
-        let _ = enricher.lookup("10.0.0.1");
-        let _ = enricher.lookup("10.0.0.2");
-        let _ = enricher.lookup("10.0.0.3");
-
-        let stats = enricher.cache_stats();
-        assert_eq!(stats.size, 3);
-        assert_eq!(stats.hits, 3);
-    }
-
-    #[test]
-    fn test_cache_eviction() {
-        // Small cache capacity to force eviction
-        let enricher = GeoIpEnricher::new().with_cache_capacity(4);
-
-        // Fill beyond capacity
-        for i in 0..6 {
-            let ip = format!("10.0.0.{i}");
-            let _ = enricher.lookup(&ip);
-        }
-
-        let stats = enricher.cache_stats();
-        assert!(
-            stats.size <= 4,
-            "Cache should not exceed capacity after eviction: {}",
-            stats.size
-        );
-    }
-
     // ========================================================================
     // Schema map selective fields
     // ========================================================================
@@ -1202,8 +1016,8 @@ mod tests {
         };
         let enricher = GeoIpEnricher::from_config(&config).await;
         assert!(!enricher.is_available());
-        // cache_capacity from config was applied
-        assert_eq!(enricher.cache_capacity, 500);
+        // No databases means no cache to hold anything.
+        assert_eq!(enricher.cached_entries(), 0);
     }
 
     #[tokio::test]
@@ -1260,72 +1074,6 @@ mod tests {
     // Cache eviction at full capacity (25% evicted)
     // ========================================================================
 
-    #[test]
-    fn test_cache_eviction_exact_boundary() {
-        // Capacity=4 means we evict on the 4th insert (cache.len() >= 4).
-        // After inserting 4 unique IPs, the next insert triggers eviction
-        // of the oldest 25% (i.e. 1 entry), then insert → size = 4 again.
-        let enricher = GeoIpEnricher::new().with_cache_capacity(4);
-
-        for i in 0..4 {
-            let _ = enricher.lookup(&format!("10.0.0.{i}"));
-        }
-        // After 4 inserts, some eviction may already have fired (>= is the
-        // trigger). The invariant is: size never exceeds capacity.
-        let s = enricher.cache_stats();
-        assert!(
-            s.size <= 4,
-            "size should not exceed capacity, got {}",
-            s.size
-        );
-
-        // Insert many more to ensure eviction is robust
-        for i in 4..20 {
-            let _ = enricher.lookup(&format!("10.0.0.{i}"));
-        }
-        let s = enricher.cache_stats();
-        assert!(
-            s.size <= 4,
-            "after many inserts, size still <= capacity, got {}",
-            s.size
-        );
-    }
-
-    #[test]
-    fn test_cache_eviction_evicts_oldest_first() {
-        let enricher = GeoIpEnricher::new().with_cache_capacity(4);
-
-        // Insert 4 — oldest is 10.0.0.0
-        for i in 0..4 {
-            let _ = enricher.lookup(&format!("10.0.0.{i}"));
-        }
-        // Access 10.0.0.0 to give it a recent access_order via cache_get. But
-        // note: cache_get does NOT update access_order in this implementation
-        // — so LRU eviction is purely by insertion order. The test verifies
-        // insertion-order eviction.
-        let _ = enricher.lookup("10.0.0.0");
-
-        // Insert 10.0.0.10 — forces eviction of oldest 25% = 1 entry.
-        // Since access_order isn't updated on read, the oldest-inserted is evicted.
-        let _ = enricher.lookup("10.0.0.10");
-
-        // 10.0.0.10 must be present
-        let stats = enricher.cache_stats();
-        assert!(stats.size <= 4);
-    }
-
-    #[test]
-    fn test_cache_capacity_one_constantly_evicts() {
-        let enricher = GeoIpEnricher::new().with_cache_capacity(1);
-        for i in 0..5 {
-            let _ = enricher.lookup(&format!("10.0.0.{i}"));
-        }
-        let s = enricher.cache_stats();
-        // With capacity 1 and 25% = 0 (integer division), evict is a no-op.
-        // Size may stay at 1 or grow momentarily — invariant is >=1.
-        assert!(s.size >= 1);
-    }
-
     // ========================================================================
     // to_schema_map: empty schema fields
     // ========================================================================
@@ -1344,7 +1092,10 @@ mod tests {
 
     #[test]
     fn test_to_schema_map_empty_fields_even_when_private() {
-        let result = GeoIpResult::private();
+        let result = GeoIpResult {
+            is_private: true,
+            ..Default::default()
+        };
         let map = result.to_schema_map(&[]);
         // is_private would be True, but the field is not requested
         assert!(map.is_empty());
@@ -1422,15 +1173,37 @@ mod tests {
         );
     }
 
+    /// A private address carries the flag and nothing else. factbook answers
+    /// these without reading a database, so this is the one record shape that
+    /// reaches the schema map on every deployment, database or not.
     #[test]
-    fn test_geoip_result_private_constructor() {
-        // private() only sets is_private=true, everything else defaults
-        let r = GeoIpResult::private();
+    fn a_private_record_maps_to_the_flag_and_nothing_else() {
+        let record = FactbookRecord::private_shared();
+        let r = GeoIpResult::from(&*record);
         assert!(r.is_private);
         assert!(r.country_code.is_none());
         assert!(r.city.is_none());
         assert!(r.asn.is_none());
         assert!(r.latitude.is_none());
+    }
+
+    /// Five fields are named differently on each side, and a schema map built
+    /// from the wrong one silently writes NULL into a populated column.
+    #[test]
+    fn the_renamed_fields_cross_the_boundary_intact() {
+        let mut record = FactbookRecord::default();
+        record.city_name = Some("Boxford".into());
+        record.region_name = Some("West Berkshire".into());
+        record.region_code = Some("WBK".into());
+        record.autonomous_system_number = Some(13335);
+        record.autonomous_system_organization = Some("Cloudflare".into());
+
+        let r = GeoIpResult::from(&record);
+        assert_eq!(r.city.as_deref(), Some("Boxford"));
+        assert_eq!(r.subdivision.as_deref(), Some("West Berkshire"));
+        assert_eq!(r.subdivision_code.as_deref(), Some("WBK"));
+        assert_eq!(r.asn, Some(13335));
+        assert_eq!(r.asn_org.as_deref(), Some("Cloudflare"));
     }
 
     #[test]
@@ -1459,64 +1232,6 @@ mod tests {
     // CacheStats accuracy
     // ========================================================================
 
-    #[test]
-    fn test_cache_stats_starts_zero() {
-        let enricher = GeoIpEnricher::new();
-        let s = enricher.cache_stats();
-        assert_eq!(s.hits, 0);
-        assert_eq!(s.misses, 0);
-        assert_eq!(s.size, 0);
-    }
-
-    #[test]
-    fn test_cache_stats_miss_counter_on_public_ip() {
-        // Public IP with no DB → MMDB lookup attempted → miss counter increments.
-        let enricher = GeoIpEnricher::new();
-        let _ = enricher.lookup("8.8.8.8");
-        let s = enricher.cache_stats();
-        assert_eq!(
-            s.misses, 1,
-            "public IP lookup without DB should count as miss"
-        );
-    }
-
-    #[test]
-    fn test_cache_stats_private_ip_does_not_count_as_miss() {
-        // Private IPs take the fast path — they're cached without incrementing
-        // the miss counter.
-        let enricher = GeoIpEnricher::new();
-        let _ = enricher.lookup("192.168.1.1");
-        let s = enricher.cache_stats();
-        // Private IP is cached (size=1) but miss counter is NOT incremented
-        // because lookup_mmdb was never called.
-        assert_eq!(s.size, 1);
-        assert_eq!(s.misses, 0, "private IP should bypass MMDB → no miss");
-        assert_eq!(s.hits, 0);
-    }
-
-    #[test]
-    fn test_cache_stats_hits_increment_on_repeat() {
-        let enricher = GeoIpEnricher::new();
-        let _ = enricher.lookup("10.1.1.1");
-        let _ = enricher.lookup("10.1.1.1");
-        let _ = enricher.lookup("10.1.1.1");
-        let _ = enricher.lookup("10.1.1.1");
-        let s = enricher.cache_stats();
-        assert_eq!(s.size, 1);
-        assert_eq!(s.hits, 3, "3 subsequent lookups should be hits");
-    }
-
-    #[test]
-    fn test_cache_stats_size_matches_unique_ips() {
-        let enricher = GeoIpEnricher::new();
-        for i in 0..10 {
-            let _ = enricher.lookup(&format!("10.0.0.{i}"));
-        }
-        // 10 unique IPs inserted — capacity defaults to 100_000
-        let s = enricher.cache_stats();
-        assert_eq!(s.size, 10);
-    }
-
     // ========================================================================
     // is_available: both readers absent
     // ========================================================================
@@ -1527,37 +1242,8 @@ mod tests {
         assert!(!enricher.is_available());
     }
 
-    #[test]
-    fn test_with_cache_capacity_does_not_enable_availability() {
-        let enricher = GeoIpEnricher::new().with_cache_capacity(50);
-        assert!(!enricher.is_available());
-        assert_eq!(enricher.cache_capacity, 50);
-    }
-
     // ========================================================================
     // with_city_db / with_asn_db error paths
     // ========================================================================
 
-    #[test]
-    fn test_with_city_db_nonexistent_errors() {
-        let result = GeoIpEnricher::new().with_city_db("/nonexistent/city.mmdb");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_with_asn_db_nonexistent_errors() {
-        let result = GeoIpEnricher::new().with_asn_db("/nonexistent/asn.mmdb");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_with_city_db_invalid_file_errors() {
-        let tmp = tempfile::NamedTempFile::new().expect("tempfile");
-        std::fs::write(tmp.path(), b"not mmdb").expect("write");
-        let result = GeoIpEnricher::new().with_city_db(tmp.path());
-        assert!(
-            result.is_err(),
-            "Opening a non-MMDB file should return error"
-        );
-    }
 }

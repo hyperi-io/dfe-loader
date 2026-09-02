@@ -89,6 +89,16 @@ clickhouse = { version = ">=0.15.2, <0.16", features = ["lz4", "time", "rustls-t
 clickhouse-dfe = { version = ">=0.1, <0.2", features = ["tls", "dynamic", "unified", "ext"] }
 time = ">=0.3, <0.4"
 
+# Reference-data enrichment: GeoIP databases and the generic table the
+# blocklists are read through. Default features cover both -- `table` rides
+# `geoip-download`, and `metrics` reports download outcomes and database age,
+# which is the only signal a deployment has that its downloads stopped.
+#
+# `metrics-lookup` is deliberately NOT taken: factbook measures it at three to
+# four times a cache hit, on the enrichment hot path, and nothing here consumed
+# the old `CacheStats` outside its own tests.
+factbook = ">=0.1, <0.2"
+
 # Utilities
 uuid = { version = ">=1.10, <2", features = ["v4", "v7"] }
 rustc-hash = ">=2.0, <3"  # FxHashMap - faster hashing for internal maps
