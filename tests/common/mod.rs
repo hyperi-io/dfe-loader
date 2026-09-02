@@ -668,6 +668,29 @@ pub fn create_http_test_client() -> Option<dfe_loader::clickhouse::ClickHouseQue
     dfe_loader::clickhouse::ClickHouseQueryClient::new(&ch_config).ok()
 }
 
+/// A query client on the NATIVE transport, carrying no HTTP endpoint at all.
+///
+/// Every read it serves has to go over TCP: there is no port here that could
+/// answer HTTP, so a schema query falling back to one fails loudly rather than
+/// passing for the wrong reason.
+pub fn create_native_test_client() -> Option<dfe_loader::clickhouse::ClickHouseQueryClient> {
+    let ch = ClickHouseTestConfig::from_env();
+    if !ch.is_reachable() {
+        return None;
+    }
+
+    let ch_config = dfe_loader::clickhouse::ClickHouseConfig {
+        hosts: vec![ch.native_addr()],
+        transport: dfe_loader::clickhouse::Transport::Native,
+        database: ch.database,
+        username: ch.user,
+        password: ch.password,
+        tls: ch.tls,
+        ..Default::default()
+    };
+    dfe_loader::clickhouse::ClickHouseQueryClient::new(&ch_config).ok()
+}
+
 /// Create a `UnifiedClient` for integration tests.
 ///
 /// Used by `Inserter` tests that need `DynamicInsert` or `InsertFormatted`.

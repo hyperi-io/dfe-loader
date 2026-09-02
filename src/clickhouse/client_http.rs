@@ -25,7 +25,6 @@ use std::sync::Arc;
 
 use clickhouse_dfe::{TcpClient, UnifiedClient};
 use rustc_hash::FxHashMap;
-use serde::Deserialize;
 
 use super::config::ClickHouseConfig;
 use super::error::ClickHouseError;
@@ -109,39 +108,15 @@ pub(crate) fn build_client(config: &ClickHouseConfig) -> Result<UnifiedClient> {
     Ok(client)
 }
 
-/// Row type for system.columns queries.
-#[derive(Debug, Deserialize, clickhouse::Row)]
-struct SystemColumn {
-    name: String,
-    r#type: String,
-    position: u64,
-    default_kind: String,
-    default_expression: String,
-    comment: String,
-    is_in_primary_key: u8,
-    is_in_sorting_key: u8,
-}
-
-/// Row type for single-string result queries.
-#[derive(Debug, Deserialize, clickhouse::Row)]
-struct SingleString {
-    value: String,
-}
-
-/// Row type for table name queries.
-#[derive(Debug, Deserialize, clickhouse::Row)]
-struct TableName {
-    name: String,
-}
-
-/// Row type for scalar count queries.
-#[derive(Debug, Deserialize, clickhouse::Row)]
-struct CountRow {
-    // Aliased `_dfe_count` (not `count`) so a user table column named `count`
-    // referenced in the WHERE does not collide with the aggregate alias --
-    // ClickHouse otherwise rejects it as "aggregate function in WHERE" (code 184).
-    #[serde(rename = "_dfe_count")]
-    count: u64,
+/// One column out of a `Columns` result, named in the error when it is absent
+/// or the wrong type.
+fn read_column<T: clickhouse_dfe::native::FromColumn>(
+    columns: &clickhouse_dfe::Columns,
+    name: &str,
+) -> Result<Vec<T>> {
+    columns
+        .get::<T>(name)
+        .map_err(|e| ClickHouseError::Schema(format!("column '{name}': {e}")))
 }
 
 impl ClickHouseQueryClient {
@@ -158,20 +133,19 @@ impl ClickHouseQueryClient {
         })
     }
 
-    /// The HTTP client, for the paths that still need upstream's typed row
-    /// deserialiser.
+    /// The HTTP client, for `JSONEachRow` inserts.
     ///
-    /// `fetch_all::<T>()` is HTTP-only, so a native-transport deployment gets a
-    /// named refusal here rather than a connection error from an empty URL.
-    /// The schema reads move to `fetch_columns`, which serves both transports.
+    /// The native protocol accepts Native format alone, so that one path is
+    /// HTTP-only by protocol rather than by omission. Every read goes through
+    /// `fetch_columns`, which serves both transports.
     ///
     /// # Errors
     ///
-    /// [`ClickHouseError::Schema`] when the configured transport is native.
+    /// [`ClickHouseError::Insert`] when the configured transport is native.
     fn http(&self) -> Result<&clickhouse::Client> {
         self.ch_client.as_http().ok_or_else(|| {
-            ClickHouseError::Schema(
-                "typed row reads require the HTTP transport; set transport: http".into(),
+            ClickHouseError::Insert(
+                "JSONEachRow requires the HTTP transport; use insert_format: rowbinary".into(),
             )
         })
     }
@@ -200,9 +174,11 @@ impl ClickHouseQueryClient {
     pub async fn fetch_table_schema(&self, table: &str) -> Result<TableSchema> {
         let (db, tbl) = parse_db_table(table, &self.database);
 
+        // `type` is a reserved word in the result, so it is aliased: `Columns`
+        // reads by the name the block header carries.
         let sql = format!(
-            "SELECT name, type, position, default_kind, default_expression, comment, \
-             is_in_primary_key, is_in_sorting_key \
+            "SELECT name, type AS col_type, position, default_kind, \
+             default_expression, comment, is_in_primary_key, is_in_sorting_key \
              FROM system.columns \
              WHERE database = {} AND table = {} \
              ORDER BY position",
@@ -210,31 +186,44 @@ impl ClickHouseQueryClient {
             escape_string(&tbl)
         );
 
-        let rows: Vec<SystemColumn> =
-            self.http()?.query(&sql).fetch_all().await.map_err(|e| {
-                ClickHouseError::Schema(format!("Failed to fetch schema for {table}: {e}"))
-            })?;
+        let columns = self.ch_client.fetch_columns(&sql).await.map_err(|e| {
+            ClickHouseError::Schema(format!("Failed to fetch schema for {table}: {e}"))
+        })?;
 
         // The query succeeded and system.columns has nothing: the table really is
         // absent. Distinct from Schema above, which a transient outage produces.
-        if rows.is_empty() {
+        if columns.is_empty() {
             return Err(ClickHouseError::TableNotFound(format!("{db}.{tbl}")));
         }
 
-        let columns: Vec<ColumnInfo> = rows
-            .into_iter()
-            .map(|row| ColumnInfo {
-                parsed_type: ParsedType::parse(&row.r#type),
-                name: row.name,
-                type_name: row.r#type,
-                position: row.position,
-                default_kind: row.default_kind,
-                default_expression: row.default_expression,
-                comment: row.comment,
-                is_in_primary_key: row.is_in_primary_key != 0,
-                is_in_sorting_key: row.is_in_sorting_key != 0,
-            })
-            .collect();
+        // `fetch_columns` returns column-wise data; `ColumnInfo` is row-wise.
+        // Reading each column up front means a result missing one of them
+        // fails here, naming the column, rather than part-way through.
+        let mut names = read_column::<String>(&columns, "name")?;
+        let mut types = read_column::<String>(&columns, "col_type")?;
+        let positions = read_column::<u64>(&columns, "position")?;
+        let mut default_kinds = read_column::<String>(&columns, "default_kind")?;
+        let mut default_expressions = read_column::<String>(&columns, "default_expression")?;
+        let mut comments = read_column::<String>(&columns, "comment")?;
+        let in_primary = read_column::<u8>(&columns, "is_in_primary_key")?;
+        let in_sorting = read_column::<u8>(&columns, "is_in_sorting_key")?;
+
+        let mut infos = Vec::with_capacity(names.len());
+        for i in 0..names.len() {
+            let type_name = std::mem::take(&mut types[i]);
+            infos.push(ColumnInfo {
+                parsed_type: ParsedType::parse(&type_name),
+                name: std::mem::take(&mut names[i]),
+                type_name,
+                position: positions[i],
+                default_kind: std::mem::take(&mut default_kinds[i]),
+                default_expression: std::mem::take(&mut default_expressions[i]),
+                comment: std::mem::take(&mut comments[i]),
+                is_in_primary_key: in_primary[i] != 0,
+                is_in_sorting_key: in_sorting[i] != 0,
+            });
+        }
+        let columns = infos;
 
         let comment = self.fetch_table_comment(table).await.unwrap_or_default();
 
@@ -257,12 +246,14 @@ impl ClickHouseQueryClient {
             escape_string(&tbl)
         );
 
-        let rows: Vec<SingleString> =
-            self.http()?.query(&sql).fetch_all().await.map_err(|e| {
-                ClickHouseError::Schema(format!("Failed to fetch table comment: {e}"))
-            })?;
+        let columns = self.ch_client.fetch_columns(&sql).await.map_err(|e| {
+            ClickHouseError::Schema(format!("Failed to fetch table comment: {e}"))
+        })?;
 
-        Ok(rows.into_iter().next().map(|r| r.value).unwrap_or_default())
+        Ok(read_column::<String>(&columns, "value")?
+            .into_iter()
+            .next()
+            .unwrap_or_default())
     }
 
     /// Fetch column comments for a table.
@@ -278,23 +269,13 @@ impl ClickHouseQueryClient {
             escape_string(&tbl)
         );
 
-        // The clickhouse crate requires a Row type for fetch_all.
-        // For two-column results, use a simple struct.
-        #[derive(Deserialize, clickhouse::Row)]
-        struct NameComment {
-            name: String,
-            comment: String,
-        }
-
-        let rows: Vec<NameComment> = self.http()?.query(&sql).fetch_all().await.map_err(|e| {
+        let columns = self.ch_client.fetch_columns(&sql).await.map_err(|e| {
             ClickHouseError::Schema(format!("Failed to fetch column comments: {e}"))
         })?;
 
-        let mut comments = FxHashMap::default();
-        for row in rows {
-            comments.insert(row.name, row.comment);
-        }
-        Ok(comments)
+        let names = read_column::<String>(&columns, "name")?;
+        let values = read_column::<String>(&columns, "comment")?;
+        Ok(names.into_iter().zip(values).collect())
     }
 
     /// Check if a table exists.
@@ -317,14 +298,13 @@ impl ClickHouseQueryClient {
             escape_string(&self.database)
         );
 
-        let rows: Vec<TableName> = self
-            .http()?
-            .query(&sql)
-            .fetch_all()
+        let columns = self
+            .ch_client
+            .fetch_columns(&sql)
             .await
             .map_err(|e| ClickHouseError::Schema(format!("Failed to list tables: {e}")))?;
 
-        Ok(rows.into_iter().map(|r| r.name).collect())
+        read_column::<String>(&columns, "name")
     }
 
     /// Execute a `SELECT COUNT(*)` query and return the count.
@@ -346,6 +326,9 @@ impl ClickHouseQueryClient {
     pub async fn query_count(&self, table: &str, where_clause: Option<&str>) -> Result<usize> {
         let (db, tbl) = parse_db_table(table, &self.database);
         let fq_table = format!("{}.{}", escape_identifier(&db), escape_identifier(&tbl));
+        // Aliased `_dfe_count` rather than `count` so a user table column of
+        // that name referenced in the WHERE does not collide with the aggregate
+        // alias, which ClickHouse rejects as code 184.
         let sql = match where_clause {
             Some(w) => {
                 validate_where_clause(w)?;
@@ -354,14 +337,19 @@ impl ClickHouseQueryClient {
             None => format!("SELECT COUNT(*) AS _dfe_count FROM {fq_table}"),
         };
 
-        let row: CountRow = self
-            .http()?
-            .query(&sql)
-            .fetch_one()
+        let columns = self
+            .ch_client
+            .fetch_columns(&sql)
             .await
             .map_err(|e| ClickHouseError::Query(format!("{e}")))?;
 
-        Ok(row.count as usize)
+        let counts = read_column::<u64>(&columns, "_dfe_count")?;
+        let count = counts
+            .first()
+            .copied()
+            .ok_or_else(|| ClickHouseError::Query("COUNT() returned no row".into()))?;
+        usize::try_from(count)
+            .map_err(|_| ClickHouseError::Query(format!("count {count} exceeds usize")))
     }
 
     /// Health check -- round-trips a ping over the configured transport.

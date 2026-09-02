@@ -10,7 +10,9 @@ use std::time::Duration;
 use dfe_loader::clickhouse::schema::{SchemaCache, SchemaCacheConfig};
 use dfe_loader::clickhouse::{ColumnInfo, ParsedType, TableSchema};
 
-use crate::common::{create_http_test_client, drop_http_test_table, unique_table_name};
+use crate::common::{
+    create_http_test_client, create_native_test_client, drop_http_test_table, unique_table_name,
+};
 use crate::skip_if_no_clickhouse;
 
 // ============================================================================
@@ -249,6 +251,57 @@ async fn test_schema_introspection_from_clickhouse() {
     assert_eq!(name_col.type_name, "String");
 
     eprintln!("✓ Schema introspection: {} columns", schema.columns.len());
+
+    drop_http_test_table(&client, &table_name).await;
+}
+
+/// The same reads over the NATIVE transport, which is the gap that shipped:
+/// a native deployment could not fetch a schema at all, because the fork's
+/// client had no URL and the query died in `Url::parse` before it opened a
+/// socket. Nothing here can reach HTTP, so every read is over TCP or it fails.
+#[tokio::test]
+async fn schema_reads_work_over_the_native_transport() {
+    skip_if_no_clickhouse!();
+
+    let Some(client) = create_native_test_client() else {
+        return;
+    };
+
+    let table_name = unique_table_name("native_schema");
+    let oc = crate::common::on_cluster_clause();
+    let ddl = format!(
+        "CREATE TABLE {table_name}{oc} (
+            id UInt64,
+            name String,
+            score Float64
+        ) ENGINE = MergeTree() ORDER BY tuple() COMMENT 'native path'"
+    );
+    client.execute(&ddl).await.expect("DDL over native");
+
+    let schema = client
+        .fetch_table_schema(&table_name)
+        .await
+        .expect("system.columns over native");
+    assert_eq!(schema.column_names(), ["id", "name", "score"]);
+    assert_eq!(
+        schema
+            .column("score")
+            .expect("declared above")
+            .type_name
+            .as_str(),
+        "Float64"
+    );
+    assert_eq!(schema.comment, "native path");
+
+    assert!(client.list_tables().await.expect("system.tables over native").iter().any(|t| t == table_name.split('.').next_back().unwrap_or(&table_name)));
+    assert_eq!(
+        client
+            .query_count(&table_name, None)
+            .await
+            .expect("count over native"),
+        0
+    );
+    client.health_check().await.expect("ping over native");
 
     drop_http_test_table(&client, &table_name).await;
 }

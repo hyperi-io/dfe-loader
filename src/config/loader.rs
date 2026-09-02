@@ -136,8 +136,8 @@ impl Default for ClickHouseConfig {
             database: "dfe".to_string(),
             username: "default".to_string(),
             password: SensitiveString::default(),
-            // http only: the pinned clickhouse client has no TCP row fetch, so
-            // schema queries against a native port stall silently (#115).
+            // Matches the default host's 8123. Native is a supported choice
+            // now that schema reads go over either transport.
             protocol: "http".to_string(),
             tables: Vec::new(),
             tls: None,
