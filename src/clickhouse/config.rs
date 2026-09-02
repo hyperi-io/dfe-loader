@@ -29,15 +29,18 @@ where
 pub enum Transport {
     /// Native TCP protocol (port 9000).
     ///
-    /// Highest performance, supports all features including streaming inserts
-    /// and native compression. Recommended for production workloads.
-    #[default]
+    /// Columnar `FORMAT Native` on the wire, so the server does no row
+    /// parsing. The faster path, and what a throughput-bound deployment
+    /// should select.
     Native,
 
     /// HTTP protocol (port 8123).
     ///
-    /// Better compatibility with proxies, load balancers, and firewalls.
-    /// Uses `JSONEachRow` format for dynamic schema inserts.
+    /// The default, because it is the port a deployment is most likely to
+    /// already expose: it passes proxies, load balancers and firewalls that
+    /// port 9000 does not. Dynamic-schema inserts go as `FORMAT RowBinary`,
+    /// not JSONEachRow, so the server still skips JSON parsing.
+    #[default]
     Http,
 }
 
@@ -204,8 +207,10 @@ const fn default_compression() -> bool {
 impl Default for ClickHouseConfig {
     fn default() -> Self {
         Self {
-            hosts: vec!["localhost:9000".to_string()],
-            transport: Transport::Native,
+            // Port follows the transport: 8123 is HTTP, 9000 is native. A
+            // default pairing one with the other connects to nothing.
+            hosts: vec!["localhost:8123".to_string()],
+            transport: Transport::Http,
             insert_format: InsertFormat::RowBinary,
             database: "dfe".to_string(),
             username: "default".to_string(),
@@ -367,8 +372,8 @@ mod tests {
     #[test]
     fn test_default_config() {
         let config = ClickHouseConfig::default();
-        assert_eq!(config.hosts, vec!["localhost:9000"]);
-        assert_eq!(config.transport, Transport::Native);
+        assert_eq!(config.hosts, vec!["localhost:8123"]);
+        assert_eq!(config.transport, Transport::Http);
         assert_eq!(config.database, "dfe");
         assert_eq!(config.username, "default");
         assert!(config.password.is_empty());
@@ -376,6 +381,23 @@ mod tests {
         assert_eq!(config.connect_timeout_ms, 5000);
         assert_eq!(config.request_timeout_ms, 30000);
         assert!(config.compression);
+    }
+
+    /// The default port must follow the default transport. `validate` makes
+    /// HTTP-on-9000 a hard error, so a mismatched pair would ship a default
+    /// config that fails its own check.
+    #[test]
+    fn the_default_config_passes_its_own_validation() {
+        let config = ClickHouseConfig::default();
+        let warnings = config
+            .validate()
+            .expect("the default config must validate cleanly");
+        assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
+        assert_eq!(
+            config.hosts[0],
+            format!("localhost:{}", config.default_port()),
+            "the default host port must match the default transport"
+        );
     }
 
     #[test]
@@ -399,9 +421,11 @@ mod tests {
         assert!(config.tls);
     }
 
+    /// Both transports named explicitly: the point is the port each maps to,
+    /// not which one happens to be the default.
     #[test]
     fn test_default_port() {
-        let native = ClickHouseConfig::default();
+        let native = ClickHouseConfig::default().with_transport(Transport::Native);
         assert_eq!(native.default_port(), 9000);
 
         let http = ClickHouseConfig::default().with_transport(Transport::Http);
@@ -410,7 +434,15 @@ mod tests {
 
     #[test]
     fn test_primary_endpoint() {
+        // A bare host takes the default transport's port, which is HTTP's.
         let config = ClickHouseConfig::new("localhost", "db");
+        assert_eq!(
+            config.primary_endpoint(),
+            Some("localhost:8123".to_string())
+        );
+
+        // ... and the native port when that transport is asked for.
+        let config = ClickHouseConfig::new("localhost", "db").with_transport(Transport::Native);
         assert_eq!(
             config.primary_endpoint(),
             Some("localhost:9000".to_string())
@@ -590,6 +622,9 @@ mod tests {
     fn validate_cloud_host_without_tls_warns() {
         let config = ClickHouseConfig {
             hosts: vec!["abc.clickhouse.cloud:9440".to_string()],
+            // 9440 is the native TLS port, named rather than inherited: the
+            // port/transport check rejects it against HTTP.
+            transport: Transport::Native,
             tls: false,
             ..Default::default()
         };
@@ -606,6 +641,7 @@ mod tests {
     fn validate_cloud_host_with_tls_is_clean() {
         let config = ClickHouseConfig {
             hosts: vec!["abc.clickhouse.cloud:9440".to_string()],
+            transport: Transport::Native,
             tls: true,
             ..Default::default()
         };
