@@ -1,7 +1,7 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "description": "Extends the org preset (github>hyperi-io/renovate-config) like every other DFE consumer. Local-only: ignoreDeps (clickhouse pinned to the fork via [patch.crates-io]; reqwest pinned <0.13 to match scalo, cel pinned <0.14 to match scalo because cel::Program crosses that boundary - both come off the list once scalo upgrades) and commitMessageAction lowercase (hyperi-ci commit-lint requires the description to start lowercase; renovate's default 'Update' fails it).",
+  "description": "Extends the org preset (github>hyperi-io/renovate-config) like every other DFE consumer. Local-only: ignoreDeps (reqwest pinned <0.13 to match scalo, cel pinned <0.14 to match scalo because cel::Program crosses that boundary - both come off the list once scalo upgrades) and commitMessageAction lowercase (hyperi-ci commit-lint requires the description to start lowercase; renovate's default 'Update' fails it).",
   "extends": ["github>hyperi-io/renovate-config"],
   "commitMessageAction": "update",
-  "ignoreDeps": ["clickhouse", "reqwest", "cel"]
+  "ignoreDeps": ["reqwest", "cel"]
 }
