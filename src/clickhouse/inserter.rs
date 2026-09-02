@@ -273,6 +273,14 @@ static IMPRECISE_INTEGER_WARNED: std::sync::LazyLock<
     std::sync::Mutex<rustc_hash::FxHashSet<String>>,
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(rustc_hash::FxHashSet::default()));
 
+/// Whether this table has already logged the imprecise-integer warning.
+fn already_warned(table: &str) -> bool {
+    match IMPRECISE_INTEGER_WARNED.lock() {
+        Ok(guard) => guard.contains(table),
+        Err(poisoned) => poisoned.into_inner().contains(table),
+    }
+}
+
 /// Warn when a row carries a whole number too large for an `f64` to hold
 /// exactly.
 ///
@@ -281,6 +289,12 @@ static IMPRECISE_INTEGER_WARNED: std::sync::LazyLock<
 /// Nothing here can fix that -- the fix is for the source to send the field as
 /// a string -- so this makes it visible instead.
 fn warn_on_imprecise_integer(table: &str, rows: &[Map<String, Value>]) {
+    // Once warned, the scan below cannot change the outcome, and it runs on
+    // the insert path for every batch.
+    if already_warned(table) {
+        return;
+    }
+
     let Some((field, value)) = rows.iter().find_map(|row| {
         row.iter().find_map(|(name, value)| match value {
             Value::Number(n) => n
@@ -512,7 +526,22 @@ impl Inserter {
                 Ok(insert) => insert,
                 Err(e) => {
                     last_error = Some(crate::Error::ClickHouse(format!("Schema fetch: {e}")));
-                    continue;
+                    // Backoff, like every other retry in this loop: the usual
+                    // cause is a server that cannot answer yet, and retrying
+                    // without a delay spends the whole budget in microseconds.
+                    if attempt < self.max_retries {
+                        let delay = self.backoff_delay(attempt);
+                        warn!(
+                            table = %table,
+                            attempt,
+                            delay_ms = delay.as_millis(),
+                            error = %e,
+                            "Schema fetch failed, backing off"
+                        );
+                        sleep(delay).await;
+                        continue;
+                    }
+                    break;
                 }
             };
 
