@@ -26,6 +26,8 @@ use dfe_loader::clickhouse::circuit_breaker::{CircuitBreaker, CircuitBreakerConf
 use dfe_loader::clickhouse::config::{ClickHouseConfig, InsertFormat, Transport};
 use dfe_loader::clickhouse::{ClickHouseQueryClient, Inserter, InserterConfig, SchemaCache};
 
+use clickhouse_dfe::UnifiedClient;
+
 use crate::common::containers::TestInfrastructure;
 use crate::common::unique_table_name;
 use crate::test_name;
@@ -45,11 +47,7 @@ use crate::test_name;
 /// processes), so they must not share a name.
 async fn spin_up(
     test: &str,
-) -> (
-    TestInfrastructure,
-    Arc<ClickHouseQueryClient>,
-    clickhouse::Client,
-) {
+) -> (TestInfrastructure, Arc<ClickHouseQueryClient>, UnifiedClient) {
     let infra = TestInfrastructure::new(test, true, false).await;
     let container = infra
         .clickhouse
@@ -80,13 +78,16 @@ async fn spin_up(
         ClickHouseQueryClient::new(&cfg).expect("ClickHouseQueryClient must build for HTTP"),
     );
 
-    // Fork Client (HTTP transport — needed for the JSONEachRow inserter path
-    // and sufficient for RowBinary over HTTP).
+    // The insert path takes a UnifiedClient so it can dispatch per transport.
+    // HTTP is the arm these tests want: it carries the JSONEachRow path and
+    // serves RowBinary just as well.
     let url = format!("http://{host}:{http_port}");
-    let unified = clickhouse::Client::default()
-        .with_url(&url)
-        .with_user("default")
-        .with_database("default");
+    let unified = UnifiedClient::Http(
+        clickhouse::Client::default()
+            .with_url(&url)
+            .with_user("default")
+            .with_database("default"),
+    );
 
     // Wait briefly for the server to be fully responsive (the image reports
     // ready before the default user is fully usable on some builds).
