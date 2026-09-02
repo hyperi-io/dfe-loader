@@ -98,19 +98,29 @@ struct TableBuffer {
 /// Approximate source-document size of one row, for the buffer's size cap
 /// only.
 ///
-/// The raw payload is the document as it arrived. A transformer-path row has
-/// no raw payload but carries the same text under `_json`. Neither is the
-/// row's exact heap cost -- parsed JSON runs several times its text size --
-/// but both track it closely enough to bound a buffer, and both are free to
-/// read. The last arm is a floor for a row that carries neither.
+/// Not the row's exact heap cost -- parsed JSON runs several times its text
+/// size -- but close enough to bound a buffer, and free to read.
+///
+/// The raw slot is empty for `raw_only`, `extracted_only`, `legacy_flatten`
+/// and any `MessagePack` payload, and those modes promote the document into
+/// the row instead: `_json` under `legacy_flatten` full capture, `_raw` under
+/// `raw_only`. Both are checked, because counting keys alone would size a
+/// multi-megabyte payload at a few dozen bytes and the cap would never fire.
 fn approx_row_bytes(data: &Map<String, Value>, raw: Option<&Arc<[u8]>>) -> usize {
     if let Some(bytes) = raw.filter(|r| !r.is_empty()) {
         return bytes.len();
     }
-    match data.get("_json") {
-        Some(Value::String(json)) => json.len(),
-        _ => data.iter().map(|(key, _)| key.len() + 16).sum(),
+    let promoted: usize = ["_json", "_raw"]
+        .iter()
+        .filter_map(|key| match data.get(*key) {
+            Some(Value::String(text)) => Some(text.len()),
+            _ => None,
+        })
+        .sum();
+    if promoted > 0 {
+        return promoted;
     }
+    data.iter().map(|(key, _)| key.len() + 16).sum()
 }
 
 impl TableBuffer {
@@ -804,5 +814,36 @@ mod tests {
         for (i, o) in batches[0].offsets.iter().enumerate() {
             assert_eq!(o.offset, (i as i64) * 10);
         }
+    }
+
+    /// `raw_only` keeps no raw payload and never sets `_json`, so a row's
+    /// weight is only visible under `_raw`. Sizing it by keys would put a
+    /// megabyte at a few dozen bytes and the cap would never fire.
+    #[test]
+    fn a_promoted_payload_is_counted_whichever_key_holds_it() {
+        let big = "x".repeat(1_000_000);
+
+        let raw_only = json!({"severity": "low", "_raw": big})
+            .as_object()
+            .unwrap()
+            .clone();
+        assert!(
+            approx_row_bytes(&raw_only, None) >= 1_000_000,
+            "a payload promoted to _raw must be counted"
+        );
+
+        let legacy_flatten = json!({"severity": "low", "_json": "{}"})
+            .as_object()
+            .unwrap()
+            .clone();
+        assert_eq!(approx_row_bytes(&legacy_flatten, None), 2);
+
+        // The raw slot wins when it has the bytes; nothing is double-counted.
+        let raw: Arc<[u8]> = Arc::from(vec![0u8; 64].as_slice());
+        assert_eq!(approx_row_bytes(&raw_only, Some(&raw)), 64);
+
+        // A row carrying neither still gets a non-zero floor.
+        let bare = json!({"id": 1}).as_object().unwrap().clone();
+        assert!(approx_row_bytes(&bare, None) > 0);
     }
 }
