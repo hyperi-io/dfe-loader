@@ -81,11 +81,14 @@ reqwest = { version = ">=0.12, <0.13", default-features = false, features = ["ru
 flate2 = ">=1.0, <2"
 tar = ">=0.4, <0.5"
 
-# ClickHouse crate (HyperI fork with native TCP + unified client)
-# rustls-tls: HTTPS for HTTP transport
-# native-transport + native-tls-rustls: native TCP with TLS
-# rustls-tls-native-roots: uses system trust store for internal CAs
-clickhouse = { version = ">=0.15.0, <0.16", features = ["lz4", "time", "rustls-tls", "rustls-tls-native-roots", "tcp", "native-tls-rustls", "inserter"] }
+# The published ClickHouse client plus HyperI's extension crate, which holds
+# the native TCP transport, the unified client and the dynamic-schema insert.
+# lz4 compresses HTTP responses, time backs the bench serde, rustls-tls with
+# native roots covers the https:// URL and the internal CA.
+clickhouse = { version = ">=0.15.2, <0.16", features = ["lz4", "time", "rustls-tls", "rustls-tls-native-roots"] }
+# A local path until clickhouse-dfe is published; this must become a version
+# range before the branch merges.
+clickhouse-dfe = { path = "/projects/clickhouse-dfe", features = ["tls", "dynamic", "unified", "ext"] }
 time = ">=0.3, <0.4"
 
 # Utilities
@@ -133,8 +136,9 @@ testcontainers-modules = { version = ">=0.15.0, <0.16", features = ["kafka", "cl
 # Kafka producer for e2e tests (test message injection)
 rdkafka = { version = ">=0.39.0, <0.40", features = ["dynamic-linking"] }
 
-# ClickHouse crate (HyperI fork) — integration tests need all features
-clickhouse = { version = ">=0.15.0, <0.16", features = ["lz4", "time", "rustls-tls", "rustls-tls-native-roots", "tcp", "native-tls-rustls", "inserter"] }
+# Integration tests name both crates directly, so they need their own entries.
+clickhouse = { version = ">=0.15.2, <0.16", features = ["lz4", "time", "rustls-tls", "rustls-tls-native-roots"] }
+clickhouse-dfe = { path = "/projects/clickhouse-dfe", features = ["tls", "dynamic", "unified", "ext"] }
 time = ">=0.3, <0.4"
 
 # Async test utilities
@@ -276,47 +280,6 @@ duration_suboptimal_units = "allow"
 # `.map(|x| ...).unwrap_or(false)` is clearer than `.is_ok_and()` for some
 # readers. Stylistic.
 map_unwrap_or = "allow"
-
-# =============================================================================
-# clickhouse-rs Fork Swap (hyperi-io/clickhouse-rs)
-# =============================================================================
-#
-# dfe-loader is the test harness for the HyperI clickhouse-rs fork.
-# Swap mechanism: uncomment [patch] below to activate the fork.
-# Zero change to [dependencies] — the patch overrides the crates.io version.
-#
-# Fork branch chain (merge order — test each in dfe-loader before merging next):
-#   native-transport → connection-pooling → lc-insert → async-inserter → optimise-1
-#   batching and remediation are independent (mergeable to upstream anytime)
-#
-# Branch structure:
-#   main (upstream v0.14.2)
-#   ├── hyperi/remediation-deps — Drop fxhash + linked-hash-map (RUSTSEC-2025-0057)
-#   │   └── hyperi/remediation-polonius — Drop polonius-the-crab (RUSTSEC-2024-0436)
-#   ├── hyperi/native-transport — Native TCP SELECT + INSERT, full type coverage
-#   │   └── hyperi/connection-pooling — Deadpool pool, cursor drain, health checks
-#   │       └── hyperi/lc-insert — LowCardinality INSERT + LC(Nullable) reader fix
-#   │           └── hyperi/async-inserter — AsyncInserter (HTTP + native), TableBatcher
-#   │               └── hyperi/optimise-1 — DynamicInsert, ParsedType, schema recovery
-#   └── hyperi/batching — HTTP TableBatcher (independent)
-#
-# optimise-1 has remediation-polonius merged in (no code overlap, clean merge)
-# so dfe-loader gets both feature work and dep remediation from one checkout.
-#
-# Design spec: docs/specs/2026-03-18-clickhouse-rs-fork-swap.md
-#
-[patch.crates-io]
-# hyperi/connection-actor stacks on hyperi/schema-cache-strong with the
-# socket-state actor work — every native-transport operation goes through
-# a background actor task with protocol-level Cancel-on-drop, full-duplex
-# INSERT exception detection, and idle keepalive. See the fork's
-# src/worker/ + src/native/connection_actor.rs for design + rationale.
-# Pinned to the hyperi-port/06d-tcp-tls-new branch tip for a reproducible
-# build (a sha, not a floating branch ref).
-clickhouse = { git = "https://github.com/hyperi-io/clickhouse-rs.git", rev = "6f9acd9694acc9c596ff687c908aa215af100887" }
-#
-# To revert: comment out or remove the [patch.crates-io] section above.
-# =============================================================================
 
 [features]
 default = []

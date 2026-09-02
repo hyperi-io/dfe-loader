@@ -63,7 +63,6 @@ async fn test_inserter_basic_insert() {
     );
     client.execute(&ddl).await.expect("Failed to create table");
 
-    // Create inserter
     let inserter = Inserter::new(
         client.clone(),
         create_ch_test_client().unwrap(),
@@ -71,7 +70,6 @@ async fn test_inserter_basic_insert() {
     )
     .with_insert_format(InsertFormat::JsonEachRow);
 
-    // Create rows
     let rows = make_test_rows(3);
 
     // Insert using insert_rows
@@ -441,7 +439,6 @@ async fn test_inserter_batch_salvage() {
     let inserter = Inserter::new(client.clone(), create_ch_test_client().unwrap(), config)
         .with_insert_format(InsertFormat::JsonEachRow);
 
-    // Create rows
     let rows: Vec<Map<String, Value>> = (0..5)
         .map(|i| {
             json!({"id": i as u64, "name": format!("row_{}", i)})
@@ -451,7 +448,6 @@ async fn test_inserter_batch_salvage() {
         })
         .collect();
 
-    // Create FlushBatch
     let flush_batch = FlushBatch {
         table: CompactString::from(&table_name),
         rows,

@@ -58,7 +58,6 @@ mod tests {
 
         assert_eq!(shared.version(), 0);
 
-        // Update config
         let mut new_config = Config::default();
         new_config.kafka.group = "new-group".to_string();
         shared.update(new_config);
@@ -77,7 +76,6 @@ mod tests {
         // Initial value
         assert_eq!(*rx.borrow(), 0);
 
-        // Update config
         let new_config = Config::default();
         shared.update(new_config);
 

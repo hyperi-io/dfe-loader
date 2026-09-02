@@ -11,17 +11,13 @@
 
 //! `ClickHouse` type system - runtime parsed, not compiled.
 //!
-//! `ParsedType` and `ParsedTypeExt` are re-exported from the loader's
-//! `clickhouse_ext` module (the HyperI dynamic-insert layer over the
-//! clickhouse-rs hyperi-port fork). `clickhouse_ext` owns the runtime type
-//! parser; this module re-exports it plus the DFE-specific `ColumnInfo` /
-//! `TableSchema` types.
+//! `ParsedType` comes from `clickhouse_dfe::dynamic`, which owns the runtime
+//! type parser. This module re-exports it alongside the DFE-specific
+//! `ColumnInfo` / `TableSchema` types.
 
-/// Re-export `ParsedType` + `ParsedTypeExt` from `clickhouse_ext`.
-///
-/// `clickhouse_ext::ParsedType` is the canonical runtime type parser.
-/// `ParsedTypeExt::coercer_category()` returns the DFE coercion category.
-pub use crate::clickhouse_ext::{ParsedType, ParsedTypeExt};
+/// The canonical runtime type parser. `ParsedType::category()` returns the DFE
+/// coercion category.
+pub use clickhouse_dfe::dynamic::ParsedType;
 
 /// Column information from `ClickHouse` system.columns.
 #[derive(Debug, Clone)]
@@ -56,7 +52,7 @@ impl ColumnInfo {
     /// Get the coercer category for this column.
     #[must_use]
     pub fn coercer_category(&self) -> &str {
-        self.parsed_type.coercer_category()
+        self.parsed_type.category()
     }
 }
 
@@ -181,11 +177,11 @@ mod tests {
 
         let t = ParsedType::parse("Int64");
         assert_eq!(t.base, "Int64");
-        assert_eq!(t.coercer_category(), "Int");
+        assert_eq!(t.category(), "Int");
 
         let t = ParsedType::parse("Float64");
         assert_eq!(t.base, "Float64");
-        assert_eq!(t.coercer_category(), "Float");
+        assert_eq!(t.category(), "Float");
     }
 
     #[test]
@@ -246,21 +242,20 @@ mod tests {
 
     #[test]
     fn test_coercer_categories() {
-        assert_eq!(ParsedType::parse("String").coercer_category(), "String");
-        assert_eq!(ParsedType::parse("Int64").coercer_category(), "Int");
-        assert_eq!(ParsedType::parse("UInt32").coercer_category(), "UInt");
-        assert_eq!(ParsedType::parse("Float64").coercer_category(), "Float");
-        assert_eq!(ParsedType::parse("Bool").coercer_category(), "Bool");
-        assert_eq!(ParsedType::parse("DateTime").coercer_category(), "DateTime");
-        assert_eq!(ParsedType::parse("UUID").coercer_category(), "UUID");
-        assert_eq!(ParsedType::parse("IPv4").coercer_category(), "IPv4");
-        assert_eq!(ParsedType::parse("JSON").coercer_category(), "JSON");
+        assert_eq!(ParsedType::parse("String").category(), "String");
+        assert_eq!(ParsedType::parse("Int64").category(), "Int");
+        assert_eq!(ParsedType::parse("UInt32").category(), "UInt");
+        assert_eq!(ParsedType::parse("Float64").category(), "Float");
+        assert_eq!(ParsedType::parse("Bool").category(), "Bool");
+        assert_eq!(ParsedType::parse("DateTime").category(), "DateTime");
+        assert_eq!(ParsedType::parse("UUID").category(), "UUID");
+        assert_eq!(ParsedType::parse("IPv4").category(), "IPv4");
+        assert_eq!(ParsedType::parse("JSON").category(), "JSON");
 
-        // Unknown type falls back to String
-        assert_eq!(
-            ParsedType::parse("SomeNewType").coercer_category(),
-            "String"
-        );
+        // Unrecognised is not String: claiming otherwise would let
+        // `is_string()` agree to stringify a Variant. Coercion is unaffected --
+        // both reach `coerce_string` through the fallback arm.
+        assert_eq!(ParsedType::parse("SomeNewType").category(), "Unknown");
     }
 
     #[test]
@@ -505,30 +500,30 @@ mod tests {
         assert!(!is_null_string("nan")); // not in list
     }
 
-    // ---- NEW: coercer_category via ParsedTypeExt for additional types ----
+    // ---- category() for the wider type set ----
 
     #[test]
     fn coercer_category_date_types() {
-        assert_eq!(ParsedType::parse("Date").coercer_category(), "Date");
-        assert_eq!(ParsedType::parse("Date32").coercer_category(), "Date");
+        assert_eq!(ParsedType::parse("Date").category(), "Date");
+        assert_eq!(ParsedType::parse("Date32").category(), "Date");
     }
 
     #[test]
     fn coercer_category_decimal_types() {
         assert_eq!(
-            ParsedType::parse("Decimal(18, 4)").coercer_category(),
+            ParsedType::parse("Decimal(18, 4)").category(),
             "Decimal"
         );
         assert_eq!(
-            ParsedType::parse("Decimal32(2)").coercer_category(),
+            ParsedType::parse("Decimal32(2)").category(),
             "Decimal"
         );
         assert_eq!(
-            ParsedType::parse("Decimal64(4)").coercer_category(),
+            ParsedType::parse("Decimal64(4)").category(),
             "Decimal"
         );
         assert_eq!(
-            ParsedType::parse("Decimal128(8)").coercer_category(),
+            ParsedType::parse("Decimal128(8)").category(),
             "Decimal"
         );
     }
@@ -537,7 +532,7 @@ mod tests {
     fn coercer_category_int_widths() {
         for t in ["Int8", "Int16", "Int32", "Int64", "Int128", "Int256"] {
             assert_eq!(
-                ParsedType::parse(t).coercer_category(),
+                ParsedType::parse(t).category(),
                 "Int",
                 "Failed for {t}"
             );
@@ -548,7 +543,7 @@ mod tests {
     fn coercer_category_uint_widths() {
         for t in ["UInt8", "UInt16", "UInt32", "UInt64", "UInt128", "UInt256"] {
             assert_eq!(
-                ParsedType::parse(t).coercer_category(),
+                ParsedType::parse(t).category(),
                 "UInt",
                 "Failed for {t}"
             );
@@ -559,11 +554,11 @@ mod tests {
     fn coercer_category_nullable_preserves_inner() {
         // Nullable wrapper should not change the category
         assert_eq!(
-            ParsedType::parse("Nullable(Int64)").coercer_category(),
+            ParsedType::parse("Nullable(Int64)").category(),
             "Int"
         );
         assert_eq!(
-            ParsedType::parse("Nullable(UUID)").coercer_category(),
+            ParsedType::parse("Nullable(UUID)").category(),
             "UUID"
         );
     }
@@ -571,7 +566,7 @@ mod tests {
     #[test]
     fn coercer_category_lc_preserves_inner() {
         assert_eq!(
-            ParsedType::parse("LowCardinality(String)").coercer_category(),
+            ParsedType::parse("LowCardinality(String)").category(),
             "String"
         );
     }
@@ -587,7 +582,7 @@ mod tests {
     #[test]
     fn parse_enum_type() {
         let t = ParsedType::parse("Enum8('a' = 1, 'b' = 2)");
-        assert_eq!(t.coercer_category(), "Enum");
+        assert_eq!(t.category(), "Enum");
     }
 
     #[test]
@@ -605,6 +600,6 @@ mod tests {
         let t = ParsedType::parse("FixedString(16)");
         assert_eq!(t.base, "FixedString");
         assert!(t.is_string());
-        assert_eq!(t.coercer_category(), "String");
+        assert_eq!(t.category(), "String");
     }
 }

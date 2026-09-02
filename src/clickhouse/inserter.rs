@@ -241,12 +241,12 @@ fn rejected_row_bytes(
 pub struct Inserter {
     /// HTTP client for DDL and schema queries only (no inserts)
     http_client: Arc<ClickHouseQueryClient>,
-    /// The fork client -- HTTP or native TCP per config. RowBinary inserts
-    /// dispatch by transport; `JSONEachRow` is HTTP-only.
-    ch_client: clickhouse::Client,
+    /// HTTP or native TCP per config. RowBinary inserts dispatch by transport;
+    /// `JSONEachRow` is HTTP-only.
+    ch_client: clickhouse_dfe::UnifiedClient,
     /// Schema cache for the dynamic RowBinary path, shared across
     /// `DynamicInsert` instances and invalidated on schema-mismatch recovery.
-    dynamic_schema_cache: Arc<crate::clickhouse_ext::DynamicSchemaCache>,
+    dynamic_schema_cache: Arc<clickhouse_dfe::dynamic::DynamicSchemaCache>,
     /// Insert format — `RowBinary` (schema-reflected) or `JSONEachRow`
     insert_format: InsertFormat,
     max_retries: u32,
@@ -267,12 +267,12 @@ pub struct Inserter {
 impl Inserter {
     /// Create a new inserter.
     ///
-    /// The `ch_client` handles ALL inserts — `RowBinary` via `DynamicInsert`,
+    /// The `ch_client` handles ALL inserts -- `RowBinary` via `DynamicInsert`,
     /// `JSONEachRow` via `InsertFormatted`. The `http_client` is used only for
     /// DDL and schema queries.
     pub fn new(
         http_client: Arc<ClickHouseQueryClient>,
-        ch_client: clickhouse::Client,
+        ch_client: clickhouse_dfe::UnifiedClient,
         config: InserterConfig,
     ) -> Self {
         let semaphore = if config.max_concurrent_inserts > 0 {
@@ -284,7 +284,7 @@ impl Inserter {
         Self {
             http_client,
             ch_client,
-            dynamic_schema_cache: crate::clickhouse_ext::DynamicSchemaCache::new(
+            dynamic_schema_cache: clickhouse_dfe::dynamic::DynamicSchemaCache::new(
                 std::time::Duration::from_secs(300),
             ),
             insert_format: InsertFormat::default(),
@@ -387,11 +387,18 @@ impl Inserter {
         self.circuit_breaker.as_ref()
     }
 
-    /// Get connection pool stats. Currently always `None`: the hyperi-port
-    /// TCP pool does not expose its status publicly yet (see
-    /// `client_http::PoolStats`).
+    /// Connection pool stats, for the gauges the orchestrator emits.
+    ///
+    /// `None` on the HTTP transport, which pools inside hyper and exposes no
+    /// equivalent status.
     pub fn pool_stats(&self) -> Option<crate::clickhouse::PoolStats> {
-        None
+        let status = self.ch_client.as_tcp()?.pool().status();
+        Some(crate::clickhouse::PoolStats {
+            max_size: status.max_size,
+            size: status.size,
+            available: status.available,
+            waiting: status.waiting,
+        })
     }
 
     /// Insert rows into a table with error-aware retry.
@@ -449,12 +456,20 @@ impl Inserter {
 
         let mut last_error = None;
         for attempt in 0..=self.max_retries {
-            let mut insert = crate::clickhouse_ext::DynamicInsert::new(
-                self.ch_client.clone(),
-                db,
-                tbl,
-                Arc::clone(&self.dynamic_schema_cache),
-            );
+            // The TCP arm resolves the schema here, so this can fail before a
+            // row is written; a cold cache after a restart is the usual cause
+            // and `classify_dynamic_error` treats it as transient.
+            let mut insert = match self
+                .ch_client
+                .dynamic_insert(db, tbl, Arc::clone(&self.dynamic_schema_cache))
+                .await
+            {
+                Ok(insert) => insert,
+                Err(e) => {
+                    last_error = Some(crate::Error::ClickHouse(format!("Schema fetch: {e}")));
+                    continue;
+                }
+            };
 
             let mut write_failed = false;
             for (i, row) in rows.iter().enumerate() {
@@ -468,12 +483,10 @@ impl Inserter {
                 }
                 // Zero-copy _json: pass raw bytes directly to the encoder when
                 // the extractor path provides them. No row cloning, no String
-                // allocation — raw Kafka payload flows straight to RowBinary.
+                // allocation -- raw Kafka payload flows straight to RowBinary.
                 let raw = raw_payloads.get(i).filter(|r| !r.is_empty());
                 let write_result = if let Some(raw_bytes) = raw {
-                    insert
-                        .write_map_with_raw(row, &[("_json", raw_bytes)])
-                        .await
+                    insert.write_map_with_raw(row, ("_json", raw_bytes)).await
                 } else {
                     insert.write_map(row).await
                 };
@@ -481,7 +494,7 @@ impl Inserter {
                     // Schema mismatch — invalidate both fork and loader caches, then retry
                     if matches!(
                         e,
-                        crate::clickhouse_ext::DynamicError::SchemaMismatch { .. }
+                        clickhouse_dfe::dynamic::DynamicError::SchemaMismatch { .. }
                     ) {
                         insert.invalidate_schema();
                         if let Some(cache) = &self.schema_cache {
@@ -509,8 +522,8 @@ impl Inserter {
                     // cached schema and try again with a fresh one.
                     if matches!(
                         e,
-                        crate::clickhouse_ext::DynamicError::SchemaFetch { .. }
-                            | crate::clickhouse_ext::DynamicError::EmptySchema { .. }
+                        clickhouse_dfe::dynamic::DynamicError::SchemaFetch { .. }
+                            | clickhouse_dfe::dynamic::DynamicError::EmptySchema { .. }
                     ) {
                         insert.invalidate_schema();
                         if let Some(cache) = &self.schema_cache {
@@ -565,7 +578,7 @@ impl Inserter {
                     );
                     return Ok(count as usize);
                 }
-                Err(crate::clickhouse_ext::DynamicError::SchemaMismatch { .. }) => {
+                Err(clickhouse_dfe::dynamic::DynamicError::SchemaMismatch { .. }) => {
                     // Invalidate loader's schema cache alongside the fork's
                     if let Some(cache) = &self.schema_cache {
                         cache.invalidate(table);
@@ -686,11 +699,15 @@ impl Inserter {
 
         let mut last_error = None;
         for attempt in 0..=self.max_retries {
-            // JSONEachRow uses the HTTP InsertFormatted path. On a TCP-only
-            // client this surfaces as a transport error at send() time (the
-            // client has no HTTP url); RowBinary is the default and works on
-            // both transports via insert_native_with_columns.
-            let mut insert = self.ch_client.insert_formatted_with(sql.clone());
+            // JSONEachRow is the HTTP InsertFormatted path. The native protocol
+            // accepts Native format alone, so a TCP client is refused here by
+            // name; the config rejects the pairing up front as well.
+            let Some(http) = self.ch_client.as_http() else {
+                return Err(crate::Error::ClickHouse(
+                    "JSONEachRow requires the HTTP transport; use insert_format: rowbinary".into(),
+                ));
+            };
+            let mut insert = http.insert_formatted_with(sql.clone());
 
             // One INSERT carries one verdict, and which call surfaces it is an
             // accident of buffering: the fork queues the body on a channel, so

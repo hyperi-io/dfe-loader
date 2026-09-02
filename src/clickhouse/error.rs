@@ -167,18 +167,18 @@ pub fn classify_insert_end_error(msg: &str) -> ErrorCategory {
 /// - `EmptySchema` -- the table has no columns yet, i.e. it is mid-creation.
 /// - `SchemaMismatch` -- the cached schema is stale; a re-fetch fixes it.
 #[must_use]
-pub fn classify_dynamic_error(err: &crate::clickhouse_ext::DynamicError) -> ErrorCategory {
-    use crate::clickhouse_ext::DynamicError;
+pub fn classify_dynamic_error(err: &clickhouse_dfe::dynamic::DynamicError) -> ErrorCategory {
+    use clickhouse_dfe::dynamic::DynamicError;
 
     if classify_from_message(&err.to_string()) == ErrorCategory::Transient {
         return ErrorCategory::Transient;
     }
     match err {
         DynamicError::EncodingError { .. } => ErrorCategory::Data,
-        DynamicError::SchemaFetch { .. }
-        | DynamicError::UnsupportedType { .. }
-        | DynamicError::EmptySchema { .. }
-        | DynamicError::SchemaMismatch { .. } => ErrorCategory::Transient,
+        // `DynamicError` is `#[non_exhaustive]`, and the reasoning above is the
+        // default: only a payload verdict is permanent, so a variant added
+        // later is transient until it is shown to be otherwise.
+        _ => ErrorCategory::Transient,
     }
 }
 
@@ -242,11 +242,14 @@ pub fn classify_json_insert_error(err: &clickhouse::error::Error) -> ErrorCatego
         return ErrorCategory::Transient;
     }
 
-    if let ChError::ServerException { code, .. } = err {
-        if ChError::is_retriable_code(*code) {
+    // Upstream reports a server error as a formatted string, so the code comes
+    // back from parsing the body rather than from a typed variant. A body that
+    // does not parse falls through to the message classifier below.
+    if let Some(exc) = clickhouse_dfe::ServerException::parse(err) {
+        if exc.is_retriable() {
             return ErrorCategory::Transient;
         }
-        if JSON_PAYLOAD_REJECTION_CODES.contains(code) {
+        if JSON_PAYLOAD_REJECTION_CODES.contains(&exc.code) {
             return ErrorCategory::Data;
         }
     }
@@ -455,7 +458,7 @@ mod tests {
     // without passing through here.
     // ========================================================================
 
-    use crate::clickhouse_ext::DynamicError;
+    use clickhouse_dfe::dynamic::DynamicError;
 
     fn fetch_failure(message: &str) -> DynamicError {
         DynamicError::SchemaFetch {
@@ -559,13 +562,12 @@ mod tests {
     // words it chose, because a parse rejection quotes the row back at us.
     // ========================================================================
 
+    /// Upstream carries a server error as a formatted string, so a test one is
+    /// built in the shape `ServerException::parse` reads.
     fn server_exception(code: i32, message: &str) -> clickhouse::error::Error {
-        clickhouse::error::Error::ServerException {
-            code,
-            name: None,
-            message: message.to_string(),
-            stack_trace: None,
-        }
+        clickhouse::error::Error::BadResponse(format!(
+            "Code: {code}. DB::Exception: {message} (version 26.3.21.7)"
+        ))
     }
 
     #[test]

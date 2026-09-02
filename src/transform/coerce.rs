@@ -16,7 +16,6 @@ use serde_json::Value;
 use tracing::warn;
 
 use crate::Result;
-use crate::clickhouse::types::ParsedTypeExt;
 use crate::clickhouse::{ParsedType, TableSchema};
 use crate::config::{CoercionConfig, NullHandling};
 
@@ -82,7 +81,7 @@ impl Coercer {
                     .type_mappings
                     .contains_key(&col.parsed_type.base)
             {
-                let category = col.parsed_type.coercer_category();
+                let category = col.parsed_type.category();
                 if !matches!(
                     category,
                     "DateTime64" | "DateTime" | "UUID" | "IPv4" | "Bool" | "Array"
@@ -134,7 +133,7 @@ impl Coercer {
             .config
             .type_mappings
             .get(&target.base)
-            .map_or_else(|| target.coercer_category(), std::string::String::as_str);
+            .map_or_else(|| target.category(), std::string::String::as_str);
 
         // Delta mode: pass through all types that JSONEachRow handles server-side.
         // Only dispatch to specific coercers for the 4 delta cases + Bool + Array(DateTime64).
@@ -206,7 +205,7 @@ impl Coercer {
 
     /// Get default value for a type
     fn default_value(&self, target: &ParsedType) -> Value {
-        let category = target.coercer_category();
+        let category = target.category();
         match category {
             "String" => Value::String(String::new()),
             "Int" | "UInt" => Value::Number(0.into()),

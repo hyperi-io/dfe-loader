@@ -11,10 +11,9 @@
 
 //! `ClickHouse` client for DDL, schema queries, and health checks.
 //!
-//! Uses a single `clickhouse::Client` (from the `HyperI` fork) -- HTTP or
-//! native TCP based on config. Data inserts go through `DynamicInsert`
-//! (`RowBinary`, via `clickhouse_ext`) or `InsertFormatted` (`JSONEachRow`)
-//! -- see `Inserter` for insert dispatch.
+//! Uses a single `clickhouse_dfe::UnifiedClient` -- HTTP or native TCP based on
+//! config. Data inserts go through `DynamicInsert` (`RowBinary`) or
+//! `InsertFormatted` (`JSONEachRow`) -- see `Inserter` for insert dispatch.
 //!
 //! This client handles:
 //! - DDL execution (CREATE, ALTER, DROP)
@@ -24,6 +23,7 @@
 
 use std::sync::Arc;
 
+use clickhouse_dfe::{TcpClient, UnifiedClient};
 use rustc_hash::FxHashMap;
 use serde::Deserialize;
 
@@ -36,22 +36,17 @@ pub type Result<T> = std::result::Result<T, ClickHouseError>;
 
 /// `ClickHouse` client for DDL, schema queries, and health checks.
 ///
-/// Wraps a single `clickhouse::Client` (HTTP or TCP per config). Data inserts
-/// are handled by `Inserter` via `DynamicInsert` (RowBinary) or
-/// `InsertFormatted` (JSONEachRow).
+/// Wraps a single `UnifiedClient` (HTTP or TCP per config). Data inserts are
+/// handled by `Inserter` via `DynamicInsert` (RowBinary) or `InsertFormatted`
+/// (JSONEachRow).
 pub struct ClickHouseQueryClient {
-    /// The fork client -- HTTP or native TCP depending on config transport.
-    ch_client: clickhouse::Client,
+    /// HTTP or native TCP depending on config transport.
+    ch_client: UnifiedClient,
     /// Database name.
     database: String,
 }
 
 /// Connection-pool statistics for the native TCP transport.
-///
-/// The hyperi-port chain's deadpool TCP pool does not yet expose its status
-/// publicly (the pool handle is crate-private), so `Inserter::pool_stats`
-/// returns `None` and these gauges stay flat. Follow-up: surface deadpool
-/// `Status` on the fork `Client`, then map it here.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct PoolStats {
     /// Configured maximum pool size.
@@ -64,22 +59,22 @@ pub struct PoolStats {
     pub waiting: usize,
 }
 
-/// Build a `clickhouse::Client` from config, selecting HTTP or native TCP
-/// transport. Shared by the query client and the inserter so both use an
+/// Build a `UnifiedClient` from config, selecting HTTP or native TCP transport.
+/// Shared by the query client and the inserter so both use an
 /// identically-configured client.
 ///
 /// # Errors
 ///
 /// Returns an error if the config has no hosts.
-pub(crate) fn build_client(config: &ClickHouseConfig) -> Result<clickhouse::Client> {
-    use super::config::Transport;
+pub(crate) fn build_client(config: &ClickHouseConfig) -> Result<UnifiedClient> {
+    use super::config::Transport as WireTransport;
 
     let endpoint = config
         .primary_endpoint()
         .ok_or_else(|| ClickHouseError::Connection("No ClickHouse hosts configured".into()))?;
 
     let client = match config.transport {
-        Transport::Http => {
+        WireTransport::Http => {
             let scheme = if config.tls { "https" } else { "http" };
             let mut c = clickhouse::Client::default()
                 .with_url(format!("{scheme}://{endpoint}"))
@@ -88,29 +83,26 @@ pub(crate) fn build_client(config: &ClickHouseConfig) -> Result<clickhouse::Clie
             if !config.password.is_empty() {
                 c = c.with_password(&config.password);
             }
-            c
+            UnifiedClient::Http(c)
         }
-        Transport::Native => {
+        WireTransport::Native => {
             // Strip the port for the TLS SNI server name.
             let host = endpoint.split(':').next().unwrap_or(&endpoint).to_string();
             let mut c = if config.tls {
-                clickhouse::Client::tcp_tls(endpoint.clone(), host)
+                TcpClient::new_tls(endpoint.clone(), host)
             } else {
-                clickhouse::Client::tcp(endpoint.clone())
+                TcpClient::new(endpoint.clone())
             };
-            c = c
-                .with_user(&config.username)
-                .with_database(&config.database)
-                .with_compression(clickhouse::Compression::Lz4);
+            c = c.with_user(&config.username).with_database(&config.database);
             if !config.password.is_empty() {
                 c = c.with_password(&config.password);
             }
             // Multi-host failover: the pool round-robins the endpoint list and
             // skips a refusing endpoint within one acquire pass.
             if config.hosts.len() > 1 {
-                c = c.with_tcp_addrs(config.hosts.iter().cloned());
+                c = c.with_addrs(config.hosts.iter().cloned());
             }
-            c
+            UnifiedClient::Tcp(c)
         }
     };
 
@@ -166,6 +158,24 @@ impl ClickHouseQueryClient {
         })
     }
 
+    /// The HTTP client, for the paths that still need upstream's typed row
+    /// deserialiser.
+    ///
+    /// `fetch_all::<T>()` is HTTP-only, so a native-transport deployment gets a
+    /// named refusal here rather than a connection error from an empty URL.
+    /// The schema reads move to `fetch_columns`, which serves both transports.
+    ///
+    /// # Errors
+    ///
+    /// [`ClickHouseError::Schema`] when the configured transport is native.
+    fn http(&self) -> Result<&clickhouse::Client> {
+        self.ch_client.as_http().ok_or_else(|| {
+            ClickHouseError::Schema(
+                "typed row reads require the HTTP transport; set transport: http".into(),
+            )
+        })
+    }
+
     /// Execute a DDL or DML statement (CREATE, DROP, ALTER, TRUNCATE, etc.).
     ///
     /// # Errors
@@ -173,8 +183,7 @@ impl ClickHouseQueryClient {
     /// Returns an error if the query fails.
     pub async fn execute(&self, sql: &str) -> Result<()> {
         self.ch_client
-            .query(sql)
-            .execute()
+            .execute(sql)
             .await
             .map_err(|e| ClickHouseError::Query(format!("{e}")))?;
         Ok(())
@@ -202,7 +211,7 @@ impl ClickHouseQueryClient {
         );
 
         let rows: Vec<SystemColumn> =
-            self.ch_client.query(&sql).fetch_all().await.map_err(|e| {
+            self.http()?.query(&sql).fetch_all().await.map_err(|e| {
                 ClickHouseError::Schema(format!("Failed to fetch schema for {table}: {e}"))
             })?;
 
@@ -249,7 +258,7 @@ impl ClickHouseQueryClient {
         );
 
         let rows: Vec<SingleString> =
-            self.ch_client.query(&sql).fetch_all().await.map_err(|e| {
+            self.http()?.query(&sql).fetch_all().await.map_err(|e| {
                 ClickHouseError::Schema(format!("Failed to fetch table comment: {e}"))
             })?;
 
@@ -277,7 +286,7 @@ impl ClickHouseQueryClient {
             comment: String,
         }
 
-        let rows: Vec<NameComment> = self.ch_client.query(&sql).fetch_all().await.map_err(|e| {
+        let rows: Vec<NameComment> = self.http()?.query(&sql).fetch_all().await.map_err(|e| {
             ClickHouseError::Schema(format!("Failed to fetch column comments: {e}"))
         })?;
 
@@ -309,7 +318,7 @@ impl ClickHouseQueryClient {
         );
 
         let rows: Vec<TableName> = self
-            .ch_client
+            .http()?
             .query(&sql)
             .fetch_all()
             .await
@@ -346,7 +355,7 @@ impl ClickHouseQueryClient {
         };
 
         let row: CountRow = self
-            .ch_client
+            .http()?
             .query(&sql)
             .fetch_one()
             .await
@@ -355,11 +364,14 @@ impl ClickHouseQueryClient {
         Ok(row.count as usize)
     }
 
-    /// Health check — executes `SELECT 1`.
+    /// Health check -- round-trips a ping over the configured transport.
+    ///
+    /// # Errors
+    ///
+    /// [`ClickHouseError::Connection`] if the server does not answer.
     pub async fn health_check(&self) -> Result<()> {
         self.ch_client
-            .query("SELECT 1")
-            .execute()
+            .ping()
             .await
             .map_err(|e| ClickHouseError::Connection(format!("Health check failed: {e}")))?;
         Ok(())
@@ -402,13 +414,14 @@ impl ClickHouseQueryClient {
             body.push(b'\n');
         }
 
-        // Use InsertFormatted for JSONEachRow via HTTP
+        // JSONEachRow is an HTTP-only format: the native protocol accepts
+        // Native alone, which the config rejects up front.
         let sql = format!(
             "INSERT INTO {}.{} FORMAT JSONEachRow",
             escape_identifier(&db),
             escape_identifier(&tbl)
         );
-        let mut insert = self.ch_client.insert_formatted_with(sql).buffered();
+        let mut insert = self.http()?.insert_formatted_with(sql).buffered();
 
         insert.write_buffered(&body);
 

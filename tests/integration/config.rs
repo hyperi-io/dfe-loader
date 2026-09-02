@@ -38,7 +38,6 @@ fn test_shared_config_update() {
     let initial_version = shared.version();
     assert_eq!(initial_version, 0);
 
-    // Update config
     let mut new_config = Config::default();
     new_config.kafka.brokers = vec!["new-broker:9092".to_string()];
     shared.update(new_config);
@@ -64,7 +63,6 @@ fn test_shared_config_subscribe() {
     // Initial value should be 0
     assert_eq!(*rx.borrow(), 0);
 
-    // Update config
     let mut new_config = Config::default();
     new_config.kafka.group = "new-group".to_string();
     shared.update(new_config);
@@ -91,7 +89,6 @@ async fn test_shared_config_async_subscribe() {
     // Give the task time to start waiting
     tokio::time::sleep(Duration::from_millis(10)).await;
 
-    // Update config
     let mut new_config = Config::default();
     new_config.kafka.client_id = "updated-client".to_string();
     shared.update(new_config);
@@ -454,7 +451,6 @@ async fn test_hot_reload_multiple_subscribers() {
     let mut rx2 = shared.subscribe();
     let mut rx3 = shared.subscribe();
 
-    // Update config
     let mut new_config = Config::default();
     new_config.buffer.flush_rows = 99999;
     shared.update(new_config);

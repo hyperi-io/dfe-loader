@@ -116,7 +116,6 @@ impl TransportAdapter {
         if let Some(ref sasl) = config.sasl
             && sasl.enabled
         {
-            // Set mechanism
             transport_config.sasl_mechanism =
                 sasl.mechanism().as_rdkafka_mechanism().map(String::from);
             transport_config.sasl_username = Some(sasl.username.clone());
