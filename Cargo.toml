@@ -86,9 +86,7 @@ tar = ">=0.4, <0.5"
 # lz4 compresses HTTP responses, time backs the bench serde, rustls-tls with
 # native roots covers the https:// URL and the internal CA.
 clickhouse = { version = ">=0.15.2, <0.16", features = ["lz4", "time", "rustls-tls", "rustls-tls-native-roots"] }
-# A local path until clickhouse-dfe is published; this must become a version
-# range before the branch merges.
-clickhouse-dfe = { path = "/projects/clickhouse-dfe", features = ["tls", "dynamic", "unified", "ext"] }
+clickhouse-dfe = { version = ">=0.1, <0.2", features = ["tls", "dynamic", "unified", "ext"] }
 time = ">=0.3, <0.4"
 
 # Utilities
@@ -138,7 +136,7 @@ rdkafka = { version = ">=0.39.0, <0.40", features = ["dynamic-linking"] }
 
 # Integration tests name both crates directly, so they need their own entries.
 clickhouse = { version = ">=0.15.2, <0.16", features = ["lz4", "time", "rustls-tls", "rustls-tls-native-roots"] }
-clickhouse-dfe = { path = "/projects/clickhouse-dfe", features = ["tls", "dynamic", "unified", "ext"] }
+clickhouse-dfe = { version = ">=0.1, <0.2", features = ["tls", "dynamic", "unified", "ext"] }
 time = ">=0.3, <0.4"
 
 # Async test utilities
