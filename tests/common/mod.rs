@@ -691,6 +691,28 @@ pub fn create_native_test_client() -> Option<dfe_loader::clickhouse::ClickHouseQ
     dfe_loader::clickhouse::ClickHouseQueryClient::new(&ch_config).ok()
 }
 
+/// A `UnifiedClient` on the NATIVE transport, for `Inserter` tests.
+///
+/// Carries no HTTP endpoint, so a RowBinary insert either goes over TCP as
+/// `FORMAT Native` or fails.
+pub fn create_ch_test_client_native() -> Option<clickhouse_dfe::UnifiedClient> {
+    let ch = ClickHouseTestConfig::from_env();
+    if !ch.is_reachable() {
+        return None;
+    }
+
+    let mut client = if ch.tls {
+        clickhouse_dfe::TcpClient::new_tls(ch.native_addr(), ch.host.clone())
+    } else {
+        clickhouse_dfe::TcpClient::new(ch.native_addr())
+    };
+    client = client.with_user(&ch.user).with_database(&ch.database);
+    if !ch.password.is_empty() {
+        client = client.with_password(&ch.password);
+    }
+    Some(clickhouse_dfe::UnifiedClient::Tcp(client))
+}
+
 /// Create a `UnifiedClient` for integration tests.
 ///
 /// Used by `Inserter` tests that need `DynamicInsert` or `InsertFormatted`.

@@ -88,10 +88,8 @@ async fn test_inserter_basic_insert() {
 /// RowBinary body) proves the dynamic encoder + the FORMAT RowBinary insert
 /// path actually land data -- the offline byte tests cannot.
 ///
-/// RowBinary goes over HTTP. The TCP/native dynamic insert would use the
-/// fork's FORMAT Native path, which this server rejects (Native block
-/// mis-frame, even single-row) -- tracked as a fork issue -- so it is not
-/// exercised here.
+/// This one goes over HTTP; `rowbinary_multirow_lands_over_native` is the
+/// same assertion on the TCP path.
 #[tokio::test]
 async fn rowbinary_multirow_lands_over_http() {
     skip_if_no_clickhouse!();
@@ -124,6 +122,55 @@ async fn rowbinary_multirow_lands_over_http() {
         .await
         .expect("multi-row RowBinary insert must be accepted by the server");
     assert_eq!(n, 5, "RowBinary insert must report 5 rows written");
+
+    drop_http_test_table(&client, &table).await;
+}
+
+/// The same batch over the NATIVE transport, which nothing here covered while
+/// the fork mis-framed Native blocks. That defect is fixed, and the config can
+/// select native, so the path a deployment can reach is the path a test has to
+/// exercise.
+///
+/// The inserter's client carries no HTTP endpoint, so the rows go over TCP as
+/// `FORMAT Native` or the test fails. DDL and the drop stay on HTTP because
+/// they are not what is under test.
+#[tokio::test]
+async fn rowbinary_multirow_lands_over_native() {
+    skip_if_no_clickhouse!();
+
+    let client = match create_http_test_client() {
+        Some(c) => Arc::new(c),
+        None => return,
+    };
+    let Some(native) = crate::common::create_ch_test_client_native() else {
+        return;
+    };
+    let oc = crate::common::on_cluster_clause();
+    let db = crate::common::ClickHouseTestConfig::from_env().database;
+
+    let table = format!("{db}.{}", unique_table_name("rb_native"));
+    let ddl = format!(
+        "CREATE TABLE {table}{oc} (id UInt64, name String, value Float64) \
+         ENGINE = MergeTree() ORDER BY tuple()"
+    );
+    client.execute(&ddl).await.expect("create table");
+
+    let inserter = Inserter::new(client.clone(), native, InserterConfig::default())
+        .with_insert_format(InsertFormat::RowBinary);
+
+    let n = inserter
+        .insert_rows(&table, &make_test_rows(5), &[])
+        .await
+        .expect("multi-row insert must be accepted over the native transport");
+    assert_eq!(n, 5, "native insert must report 5 rows written");
+
+    // Read back over HTTP: the rows have to be in the table, not merely
+    // accepted on the wire.
+    let count = client
+        .query_count(&table, None)
+        .await
+        .expect("count the rows just inserted");
+    assert_eq!(count, 5, "5 rows must be readable after a native insert");
 
     drop_http_test_table(&client, &table).await;
 }
