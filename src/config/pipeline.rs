@@ -214,7 +214,10 @@ pub enum GeoIpProvider {
     DbIpLite,
     /// `MaxMind` `GeoLite2` — free account required (`account_id` + `license_key`)
     MaxMindGeoLite2,
-    /// IPLocate.io — free, anonymous, country + ASN only
+    /// IPLocate.io — NO LONGER FETCHED. The enrichment layer runs on factbook,
+    /// which carries no IPLocate source, so selecting this falls back to the
+    /// default free pair and logs a warning. Use `sapics` for a free anonymous
+    /// ASN source.
     IpLocate,
     /// `IPinfo` Lite — free token required, country + ASN only
     IpInfoLite,

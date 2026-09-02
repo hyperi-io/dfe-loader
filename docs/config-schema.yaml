@@ -697,7 +697,11 @@ $defs:
     - description: '`MaxMind` `GeoLite2` — free account required (`account_id` + `license_key`)'
       type: string
       const: max_mind_geo_lite2
-    - description: IPLocate.io — free, anonymous, country + ASN only
+    - description: |-
+        IPLocate.io — NO LONGER FETCHED. The enrichment layer runs on factbook,
+        which carries no IPLocate source, so selecting this falls back to the
+        default free pair and logs a warning. Use `sapics` for a free anonymous
+        ASN source.
       type: string
       const: ip_locate
     - description: '`IPinfo` Lite — free token required, country + ASN only'

@@ -829,7 +829,7 @@
           "const": "max_mind_geo_lite2"
         },
         {
-          "description": "IPLocate.io — free, anonymous, country + ASN only",
+          "description": "IPLocate.io — NO LONGER FETCHED. The enrichment layer runs on factbook,\nwhich carries no IPLocate source, so selecting this falls back to the\ndefault free pair and logs a warning. Use `sapics` for a free anonymous\nASN source.",
           "type": "string",
           "const": "ip_locate"
         },
