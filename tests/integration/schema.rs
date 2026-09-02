@@ -293,7 +293,14 @@ async fn schema_reads_work_over_the_native_transport() {
     );
     assert_eq!(schema.comment, "native path");
 
-    assert!(client.list_tables().await.expect("system.tables over native").iter().any(|t| t == table_name.split('.').next_back().unwrap_or(&table_name)));
+    assert!(
+        client
+            .list_tables()
+            .await
+            .expect("system.tables over native")
+            .iter()
+            .any(|t| t == table_name.split('.').next_back().unwrap_or(&table_name))
+    );
     assert_eq!(
         client
             .query_count(&table_name, None)
