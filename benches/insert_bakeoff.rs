@@ -108,6 +108,7 @@ fn make_json_row(i: usize) -> Map<String, Value> {
 struct BenchEnv {
     host: String,
     http_port: u16,
+    tls: bool,
     user: String,
     password: String,
     database: String,
@@ -126,14 +127,21 @@ impl BenchEnv {
                 .unwrap_or_else(|_| "8123".into())
                 .parse()
                 .unwrap_or(8123),
+            tls: env::var("CLICKHOUSE_TLS")
+                .unwrap_or_default()
+                .eq_ignore_ascii_case("true"),
             user: env::var("CLICKHOUSE_USER").unwrap_or_else(|_| "default".into()),
             password: env::var("CLICKHOUSE_PASSWORD").unwrap_or_default(),
             database: env::var("CLICKHOUSE_DATABASE").unwrap_or_else(|_| "benchmark".into()),
         })
     }
 
+    /// Honours `CLICKHOUSE_TLS`: a plain request to a TLS port is reset by the
+    /// server, which is how this read as a network fault rather than a scheme
+    /// mismatch.
     fn http_url(&self) -> String {
-        format!("http://{}:{}", self.host, self.http_port)
+        let scheme = if self.tls { "https" } else { "http" };
+        format!("{scheme}://{}:{}", self.host, self.http_port)
     }
 
     fn ch_client(&self) -> clickhouse::Client {
@@ -151,6 +159,7 @@ impl BenchEnv {
             database: self.database.clone(),
             username: self.user.clone(),
             password: self.password.clone(),
+            tls: self.tls,
             ..Default::default()
         };
         ClickHouseQueryClient::new(&config).expect("http client")
