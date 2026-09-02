@@ -147,8 +147,8 @@ impl Default for ClickHouseConfig {
 
 impl From<&ClickHouseConfig> for crate::clickhouse::ClickHouseConfig {
     fn from(cfg: &ClickHouseConfig) -> Self {
-        // Fallback arm is Http: an unrecognised protocol must not resurrect the
-        // silent native schema stall (#115); validate() rejects it upstream.
+        // Fallback arm is Http, matching the documented default; `validate`
+        // has already rejected anything that is neither name.
         let transport = match cfg.protocol.to_lowercase().as_str() {
             "native" => crate::clickhouse::Transport::Native,
             _ => crate::clickhouse::Transport::Http,
@@ -432,18 +432,10 @@ impl Config {
             ));
         }
         match self.clickhouse.protocol.to_lowercase().as_str() {
-            "http" => {}
-            "native" => {
-                return Err(crate::Error::Config(
-                    "clickhouse.protocol 'native' cannot serve the schema fetch: the pinned \
-                     clickhouse client has no TCP row fetch, so every message stalls pending \
-                     schema. Use protocol 'http' with the HTTP port (8123-family)."
-                        .into(),
-                ));
-            }
+            "http" | "native" => {}
             other => {
                 return Err(crate::Error::Config(format!(
-                    "unknown clickhouse.protocol '{other}' (expected 'http')"
+                    "unknown clickhouse.protocol '{other}' (expected 'http' or 'native')"
                 )));
             }
         }
@@ -588,11 +580,11 @@ impl Config {
             Capability::sink("clickhouse")
                 .description("ClickHouse loader sink: batches parsed records and inserts into ClickHouse over HTTP.")
                 .maturity("stable")
-                .field(FieldSpec::list("hosts").required().description("ClickHouse host:port list (HTTP port)."))
+                .field(FieldSpec::list("hosts").required().description("ClickHouse host:port list. The port must match `protocol`: 8123 (or 8443 for TLS) for http, 9000 (or 9440 for TLS) for native."))
                 .field(FieldSpec::string("database").default_value("dfe").description("Target database."))
                 .field(FieldSpec::string("username").default_value("default").description("ClickHouse user."))
                 .field(FieldSpec::secret("password").description("ClickHouse password."))
-                .field(FieldSpec::enumeration("protocol", ["native", "http"]).default_value("http").description("Wire protocol. 'native' is rejected at startup: the pinned clickhouse client has no TCP row fetch, so schema queries stall silently.")),
+                .field(FieldSpec::enumeration("protocol", ["native", "http"]).default_value("http").description("Wire protocol. 'http' is the default and uses the 8123-family port; 'native' uses columnar FORMAT Native on the 9000-family port and is the faster path. The host port must match the protocol -- http against 9000 or 9440 is rejected at startup.")),
             Capability::new("transform", "pipeline")
                 .description("Per-record enrichment + shaping pipeline applied before insert.")
                 .maturity("stable")
@@ -1438,13 +1430,37 @@ kafka:
         ));
     }
 
+    /// Native is selectable from config, which is the whole point of the
+    /// transport work: schema reads dispatch per transport now, so the startup
+    /// rejection that stood in for the missing TCP row fetch is gone.
     #[test]
-    fn test_validate_rejects_native_protocol() {
+    fn test_validate_accepts_native_protocol() {
         let mut config = Config::default();
         config.clickhouse.protocol = "native".to_string();
-        let err = config.validate().unwrap_err().to_string();
-        assert!(err.contains("no TCP row fetch"), "{err}");
-        assert!(err.contains("'http'"), "{err}");
+        config.clickhouse.hosts = vec!["ch:9000".to_string()];
+        config
+            .validate()
+            .expect("native is a supported protocol, not a startup error");
+
+        let client_cfg: crate::clickhouse::ClickHouseConfig = (&config.clickhouse).into();
+        assert!(matches!(
+            client_cfg.transport,
+            crate::clickhouse::Transport::Native
+        ));
+    }
+
+    /// The port has to follow the protocol, and picking native does not excuse
+    /// leaving an HTTP port behind.
+    #[test]
+    fn test_validate_rejects_http_protocol_on_a_native_port() {
+        let mut config = Config::default();
+        config.clickhouse.protocol = "http".to_string();
+        config.clickhouse.hosts = vec!["ch:9000".to_string()];
+        let client_cfg: crate::clickhouse::ClickHouseConfig = (&config.clickhouse).into();
+        let err = client_cfg
+            .validate()
+            .expect_err("http on 9000 must not validate");
+        assert!(err.contains("9000"), "{err}");
     }
 
     #[test]
@@ -1453,6 +1469,7 @@ kafka:
         config.clickhouse.protocol = "mystery".to_string();
         let err = config.validate().unwrap_err().to_string();
         assert!(err.contains("unknown clickhouse.protocol"), "{err}");
+        assert!(err.contains("native"), "the message must name both: {err}");
     }
 
     #[test]

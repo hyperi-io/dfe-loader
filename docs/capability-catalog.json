@@ -9,7 +9,7 @@
         "name": "hosts",
         "type": "list",
         "required": true,
-        "description": "ClickHouse host:port list (HTTP port)."
+        "description": "ClickHouse host:port list. The port must match `protocol`: 8123 (or 8443 for TLS) for http, 9000 (or 9440 for TLS) for native."
       },
       {
         "name": "database",
@@ -37,7 +37,7 @@
         "type": "enum",
         "required": false,
         "default": "http",
-        "description": "Wire protocol. 'native' is rejected at startup: the pinned clickhouse client has no TCP row fetch, so schema queries stall silently.",
+        "description": "Wire protocol. 'http' is the default and uses the 8123-family port; 'native' uses columnar FORMAT Native on the 9000-family port and is the faster path. The host port must match the protocol -- http against 9000 or 9440 is rejected at startup.",
         "enum_values": [
           "native",
           "http"
