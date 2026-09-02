@@ -92,7 +92,9 @@ pub(crate) fn build_client(config: &ClickHouseConfig) -> Result<UnifiedClient> {
             } else {
                 TcpClient::new(endpoint.clone())
             };
-            c = c.with_user(&config.username).with_database(&config.database);
+            c = c
+                .with_user(&config.username)
+                .with_database(&config.database);
             if !config.password.is_empty() {
                 c = c.with_password(&config.password);
             }
@@ -246,9 +248,10 @@ impl ClickHouseQueryClient {
             escape_string(&tbl)
         );
 
-        let columns = self.ch_client.fetch_columns(&sql).await.map_err(|e| {
-            ClickHouseError::Schema(format!("Failed to fetch table comment: {e}"))
-        })?;
+        let columns =
+            self.ch_client.fetch_columns(&sql).await.map_err(|e| {
+                ClickHouseError::Schema(format!("Failed to fetch table comment: {e}"))
+            })?;
 
         Ok(read_column::<String>(&columns, "value")?
             .into_iter()

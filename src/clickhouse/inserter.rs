@@ -269,8 +269,9 @@ const EXACT_INTEGER_LIMIT: f64 = 9_007_199_254_740_992.0;
 
 /// Tables already warned about, so a bad source logs once rather than per
 /// batch.
-static IMPRECISE_INTEGER_WARNED: std::sync::LazyLock<std::sync::Mutex<rustc_hash::FxHashSet<String>>> =
-    std::sync::LazyLock::new(|| std::sync::Mutex::new(rustc_hash::FxHashSet::default()));
+static IMPRECISE_INTEGER_WARNED: std::sync::LazyLock<
+    std::sync::Mutex<rustc_hash::FxHashSet<String>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(rustc_hash::FxHashSet::default()));
 
 /// Warn when a row carries a whole number too large for an `f64` to hold
 /// exactly.

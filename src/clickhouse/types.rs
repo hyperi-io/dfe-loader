@@ -510,57 +510,31 @@ mod tests {
 
     #[test]
     fn coercer_category_decimal_types() {
-        assert_eq!(
-            ParsedType::parse("Decimal(18, 4)").category(),
-            "Decimal"
-        );
-        assert_eq!(
-            ParsedType::parse("Decimal32(2)").category(),
-            "Decimal"
-        );
-        assert_eq!(
-            ParsedType::parse("Decimal64(4)").category(),
-            "Decimal"
-        );
-        assert_eq!(
-            ParsedType::parse("Decimal128(8)").category(),
-            "Decimal"
-        );
+        assert_eq!(ParsedType::parse("Decimal(18, 4)").category(), "Decimal");
+        assert_eq!(ParsedType::parse("Decimal32(2)").category(), "Decimal");
+        assert_eq!(ParsedType::parse("Decimal64(4)").category(), "Decimal");
+        assert_eq!(ParsedType::parse("Decimal128(8)").category(), "Decimal");
     }
 
     #[test]
     fn coercer_category_int_widths() {
         for t in ["Int8", "Int16", "Int32", "Int64", "Int128", "Int256"] {
-            assert_eq!(
-                ParsedType::parse(t).category(),
-                "Int",
-                "Failed for {t}"
-            );
+            assert_eq!(ParsedType::parse(t).category(), "Int", "Failed for {t}");
         }
     }
 
     #[test]
     fn coercer_category_uint_widths() {
         for t in ["UInt8", "UInt16", "UInt32", "UInt64", "UInt128", "UInt256"] {
-            assert_eq!(
-                ParsedType::parse(t).category(),
-                "UInt",
-                "Failed for {t}"
-            );
+            assert_eq!(ParsedType::parse(t).category(), "UInt", "Failed for {t}");
         }
     }
 
     #[test]
     fn coercer_category_nullable_preserves_inner() {
         // Nullable wrapper should not change the category
-        assert_eq!(
-            ParsedType::parse("Nullable(Int64)").category(),
-            "Int"
-        );
-        assert_eq!(
-            ParsedType::parse("Nullable(UUID)").category(),
-            "UUID"
-        );
+        assert_eq!(ParsedType::parse("Nullable(Int64)").category(), "Int");
+        assert_eq!(ParsedType::parse("Nullable(UUID)").category(), "UUID");
     }
 
     #[test]

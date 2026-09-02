@@ -47,7 +47,11 @@ use crate::test_name;
 /// processes), so they must not share a name.
 async fn spin_up(
     test: &str,
-) -> (TestInfrastructure, Arc<ClickHouseQueryClient>, UnifiedClient) {
+) -> (
+    TestInfrastructure,
+    Arc<ClickHouseQueryClient>,
+    UnifiedClient,
+) {
     let infra = TestInfrastructure::new(test, true, false).await;
     let container = infra
         .clickhouse
