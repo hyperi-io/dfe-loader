@@ -44,7 +44,7 @@ routing:
     topic_suffix: ".dlq"
 
 buffer:
-  flush_bytes: 524288    # 512KB (smaller for dev)
+  flush_bytes: 67108864  # 64MB cap -- flush_rows is the trigger
   flush_rows: 1000       # Fewer rows for faster flushes
   flush_age_secs: 2      # Faster flushes for dev
 

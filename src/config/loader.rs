@@ -620,7 +620,7 @@ mod tests {
         // The `dfe-` prefix is a broker-ACL contract, not cosmetic.
         assert_eq!(config.kafka.group, "dfe-loader");
         assert_eq!(config.clickhouse.hosts, vec!["localhost:8123"]);
-        assert_eq!(config.buffer.flush_bytes, 1_048_576);
+        assert_eq!(config.buffer.flush_bytes, 64 * 1024 * 1024);
     }
 
     #[test]
@@ -1284,7 +1284,7 @@ kafka:
     #[test]
     fn test_default_buffer_config() {
         let config = Config::default();
-        assert_eq!(config.buffer.flush_bytes, 1_048_576);
+        assert_eq!(config.buffer.flush_bytes, 64 * 1024 * 1024);
         assert_eq!(config.buffer.flush_rows, 20_000);
         assert_eq!(config.buffer.flush_age_secs, 5);
     }
@@ -1516,7 +1516,7 @@ kafka:
         // Overridden field
         assert_eq!(config.buffer.flush_rows, 12345);
         // Untouched fields in the same section keep defaults
-        assert_eq!(config.buffer.flush_bytes, 1_048_576);
+        assert_eq!(config.buffer.flush_bytes, 64 * 1024 * 1024);
         assert_eq!(config.buffer.flush_age_secs, 5);
         // Other sections untouched — all use their Default impl via serde
         assert_eq!(config.kafka.brokers, vec!["localhost:9092"]);

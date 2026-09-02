@@ -264,6 +264,49 @@ pub struct Inserter {
     coercer: Option<Arc<Coercer>>,
 }
 
+/// Largest integer an `f64` represents exactly.
+const EXACT_INTEGER_LIMIT: f64 = 9_007_199_254_740_992.0;
+
+/// Tables already warned about, so a bad source logs once rather than per
+/// batch.
+static IMPRECISE_INTEGER_WARNED: std::sync::LazyLock<std::sync::Mutex<rustc_hash::FxHashSet<String>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(rustc_hash::FxHashSet::default()));
+
+/// Warn when a row carries a whole number too large for an `f64` to hold
+/// exactly.
+///
+/// A `JSON` column stores such a value as a `Float64` and rounds it silently:
+/// roughly seventeen significant digits survive and nothing reports the loss.
+/// Nothing here can fix that -- the fix is for the source to send the field as
+/// a string -- so this makes it visible instead.
+fn warn_on_imprecise_integer(table: &str, rows: &[Map<String, Value>]) {
+    let Some((field, value)) = rows.iter().find_map(|row| {
+        row.iter().find_map(|(name, value)| match value {
+            Value::Number(n) => n
+                .as_f64()
+                .filter(|f| f.fract() == 0.0 && f.abs() > EXACT_INTEGER_LIMIT)
+                .map(|f| (name.as_str(), f)),
+            _ => None,
+        })
+    }) else {
+        return;
+    };
+
+    let mut warned = match IMPRECISE_INTEGER_WARNED.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    if warned.insert(table.to_string()) {
+        warn!(
+            table = %table,
+            field = %field,
+            value = %value,
+            "Integer too large for exact storage; a JSON column keeps ~17 \
+             significant digits and rounds the rest. Send this field as a string."
+        );
+    }
+}
+
 impl Inserter {
     /// Create a new inserter.
     ///
@@ -420,6 +463,7 @@ impl Inserter {
         rows: &[Map<String, Value>],
         raw_payloads: &[Arc<[u8]>],
     ) -> Result<usize> {
+        warn_on_imprecise_integer(table, rows);
         match self.insert_format {
             InsertFormat::RowBinary => self.insert_rows_rowbinary(table, rows, raw_payloads).await,
             InsertFormat::JsonEachRow => self.insert_rows_json(table, rows, raw_payloads).await,

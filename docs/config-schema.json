@@ -222,7 +222,7 @@
       "description": "Buffer flush thresholds. **Hot-reloaded.**",
       "$ref": "#/$defs/BufferConfig",
       "default": {
-        "flush_bytes": 1048576,
+        "flush_bytes": 67108864,
         "flush_rows": 20000,
         "flush_age_secs": 5
       }
@@ -1463,12 +1463,14 @@
       "type": "object",
       "properties": {
         "flush_bytes": {
+          "description": "Size CAP, not a target: set well above what a full row-batch of typical\ndocuments weighs, so it fires only on unusually fat rows.",
           "type": "integer",
           "format": "uint",
           "minimum": 0,
-          "default": 1048576
+          "default": 67108864
         },
         "flush_rows": {
+          "description": "The primary trigger. ClickHouse recommends 10,000-100,000 rows per\ninsert, and a Kafka batch lands in the low end of that band.",
           "type": "integer",
           "format": "uint",
           "minimum": 0,

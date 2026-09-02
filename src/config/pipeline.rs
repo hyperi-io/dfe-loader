@@ -464,7 +464,11 @@ impl DlqConfig {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct BufferConfig {
+    /// Size CAP, not a target: set well above what a full row-batch of typical
+    /// documents weighs, so it fires only on unusually fat rows.
     pub flush_bytes: usize,
+    /// The primary trigger. ClickHouse recommends 10,000-100,000 rows per
+    /// insert, and a Kafka batch lands in the low end of that band.
     pub flush_rows: usize,
     pub flush_age_secs: u64,
 }
@@ -472,7 +476,7 @@ pub struct BufferConfig {
 impl Default for BufferConfig {
     fn default() -> Self {
         Self {
-            flush_bytes: 1_048_576, // 1MB
+            flush_bytes: 64 * 1024 * 1024,
             flush_rows: 20_000,
             flush_age_secs: 5,
         }

@@ -91,6 +91,26 @@ struct TableBuffer {
     created_at: Instant,
     /// Target batch size
     batch_size: usize,
+    /// Approximate source bytes buffered, for the size cap.
+    bytes: usize,
+}
+
+/// Approximate source-document size of one row, for the buffer's size cap
+/// only.
+///
+/// The raw payload is the document as it arrived. A transformer-path row has
+/// no raw payload but carries the same text under `_json`. Neither is the
+/// row's exact heap cost -- parsed JSON runs several times its text size --
+/// but both track it closely enough to bound a buffer, and both are free to
+/// read. The last arm is a floor for a row that carries neither.
+fn approx_row_bytes(data: &Map<String, Value>, raw: Option<&Arc<[u8]>>) -> usize {
+    if let Some(bytes) = raw.filter(|r| !r.is_empty()) {
+        return bytes.len();
+    }
+    match data.get("_json") {
+        Some(Value::String(json)) => json.len(),
+        _ => data.iter().map(|(key, _)| key.len() + 16).sum(),
+    }
 }
 
 impl TableBuffer {
@@ -101,6 +121,7 @@ impl TableBuffer {
             raw_payloads: Vec::with_capacity(batch_size),
             created_at: Instant::now(),
             batch_size,
+            bytes: 0,
         }
     }
 
@@ -110,6 +131,7 @@ impl TableBuffer {
         offset: Option<KafkaOffset>,
         raw: Option<Arc<[u8]>>,
     ) {
+        self.bytes += approx_row_bytes(&data, raw.as_ref());
         self.rows.push(data);
         if let Some(off) = offset {
             self.offsets.push(off);
@@ -119,8 +141,15 @@ impl TableBuffer {
         self.raw_payloads.push(raw.unwrap_or_default());
     }
 
-    fn is_ready(&self, flush_rows: usize, flush_age_secs: u64) -> bool {
-        self.rows.len() >= flush_rows || self.created_at.elapsed().as_secs() >= flush_age_secs
+    /// Rows is the primary trigger and the one tuned to the ingest's natural
+    /// batch size; age bounds latency on a quiet topic. Bytes is a CAP, not a
+    /// third trigger -- it is set well above what a full row-batch of typical
+    /// documents weighs, so it fires only when rows are unusually fat and a
+    /// batch would otherwise grow past what is sensible to hold or to send.
+    fn is_ready(&self, flush_rows: usize, flush_bytes: usize, flush_age_secs: u64) -> bool {
+        self.rows.len() >= flush_rows
+            || self.bytes >= flush_bytes
+            || self.created_at.elapsed().as_secs() >= flush_age_secs
     }
 
     fn build(&mut self) -> Option<BufferBuildResult> {
@@ -134,6 +163,7 @@ impl TableBuffer {
         self.rows = Vec::with_capacity(self.batch_size);
         self.raw_payloads = Vec::with_capacity(self.batch_size);
         self.created_at = Instant::now();
+        self.bytes = 0;
         Some((rows, offsets, raw_payloads))
     }
 
@@ -167,6 +197,8 @@ pub struct BufferManager {
     batch_size: usize,
     /// Flush trigger: row count
     flush_rows: usize,
+    /// Flush cap: approximate buffered source bytes
+    flush_bytes: usize,
     /// Flush trigger: age in seconds
     flush_age_secs: u64,
 }
@@ -178,6 +210,7 @@ impl BufferManager {
             buffers: FxHashMap::default(),
             batch_size: config.flush_rows.max(100),
             flush_rows: config.flush_rows,
+            flush_bytes: config.flush_bytes,
             flush_age_secs: config.flush_age_secs,
         }
     }
@@ -188,6 +221,7 @@ impl BufferManager {
     pub fn update_config(&mut self, config: &BufferConfig) {
         self.batch_size = config.flush_rows.max(100);
         self.flush_rows = config.flush_rows;
+        self.flush_bytes = config.flush_bytes;
         self.flush_age_secs = config.flush_age_secs;
     }
 
@@ -220,7 +254,7 @@ impl BufferManager {
     pub fn should_flush(&self) -> bool {
         self.buffers
             .values()
-            .any(|buf| buf.is_ready(self.flush_rows, self.flush_age_secs))
+            .any(|buf| buf.is_ready(self.flush_rows, self.flush_bytes, self.flush_age_secs))
     }
 
     /// Get batches ready for flush.
@@ -229,24 +263,27 @@ impl BufferManager {
     /// Returns an empty Vec when nothing is ready (caller should check `!batches.is_empty()`).
     pub fn get_ready_for_flush(&mut self) -> Vec<FlushBatch> {
         let flush_rows = self.flush_rows;
+        let flush_bytes = self.flush_bytes;
         let flush_age_secs = self.flush_age_secs;
         let mut flush_batches = Vec::new();
 
         for (table, buffer) in &mut self.buffers {
-            if buffer.is_ready(flush_rows, flush_age_secs) {
+            if buffer.is_ready(flush_rows, flush_bytes, flush_age_secs) {
                 // Determine trigger reason before consuming buffer
                 let trigger = if buffer.len() >= flush_rows {
                     "records"
+                } else if buffer.bytes >= flush_bytes {
+                    "bytes"
                 } else {
                     "age"
                 };
+                let buffered_bytes = buffer.bytes;
                 if let Some((rows, offsets, raw_payloads)) = buffer.build() {
                     let row_count = rows.len();
-                    let byte_estimate = row_count * 200;
                     debug!(
                         table = %table,
                         rows = row_count,
-                        bytes = byte_estimate,
+                        bytes = buffered_bytes,
                         trigger = trigger,
                         "Buffer flush triggered"
                     );
@@ -343,6 +380,7 @@ impl Default for BufferManager {
             buffers: FxHashMap::default(),
             batch_size: 1000,
             flush_rows: 20_000,
+            flush_bytes: 64 * 1024 * 1024,
             flush_age_secs: 5,
         }
     }
