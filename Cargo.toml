@@ -72,15 +72,6 @@ metrics = ">=0.24, <0.25"
 tikv-jemalloc-ctl = { version = ">=0.7.0, <0.8", optional = true }
 tikv-jemallocator = { version = ">=0.7.0, <0.8", optional = true }
 
-# GeoIP enrichment (mmap for long-running apps, simdutf8 for SIMD UTF-8 validation)
-maxminddb = { version = ">=0.28, <0.31", features = ["mmap", "simdutf8"] }
-
-# GeoIP auto-download (HTTP + gzip decompression + tar extraction)
-# Pinned to 0.12 to match scalo (reqwest-middleware/vaultrs don't support 0.13 yet)
-reqwest = { version = ">=0.12, <0.13", default-features = false, features = ["rustls-tls-native-roots", "gzip"] }
-flate2 = ">=1.0, <2"
-tar = ">=0.4, <0.5"
-
 # The published ClickHouse client plus HyperI's extension crate, which holds
 # the native TCP transport, the unified client and the dynamic-schema insert.
 # lz4 compresses HTTP responses, time backs the bench serde, rustls-tls with
