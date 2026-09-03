@@ -818,3 +818,81 @@ async fn test_client_http_unicode_table_name() {
         .await
         .expect("drop unicode table");
 }
+
+// ============================================================================
+// JSON column: a root-level array
+// ============================================================================
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_rowbinary_wraps_a_root_array_for_a_json_column() {
+    let (_infra, client, ch) = spin_up(test_name!()).await;
+    let table = unique_table_name("tc_tags_array");
+
+    // The shape of dfe.default: `_tags` is a JSON column and an ECS event
+    // carries `tags` as an array of strings.
+    // The subcolumn cast lives in the DDL because query_count's WHERE
+    // allow-list admits neither backticks nor parentheses.
+    let ddl = format!(
+        "CREATE TABLE {table} (
+            id UInt64,
+            _tags JSON,
+            tag_count UInt64 ALIAS length(_tags._values.:`Array(Nullable(String))`),
+            has_filebeat UInt8 ALIAS arrayExists(x -> x = 'filebeat', _tags._values.:`Array(Nullable(String))`)
+        ) ENGINE = MergeTree() ORDER BY id"
+    );
+    client.execute(&ddl).await.expect("JSON table create");
+
+    let row = json!({"id": 1u64, "_tags": ["beats", "filebeat"]})
+        .as_object()
+        .unwrap()
+        .clone();
+
+    // The defect, on this server: the column takes only an object at its root.
+    let err = client
+        .insert_json_rows(&table, std::slice::from_ref(&row), &[])
+        .await
+        .expect_err("a bare root array must be rejected by a JSON column");
+    let rejection = err.to_string();
+    eprintln!("bare root array rejection: {rejection}");
+    assert!(
+        rejection.contains("117") || rejection.contains("should start with"),
+        "expected the JSON column's root-object rejection, got: {rejection}"
+    );
+    assert_eq!(
+        client.query_count(&table, None).await.expect("count"),
+        0,
+        "the rejected insert must have landed nothing"
+    );
+
+    // The RowBinary encoder wraps the root array, so the same event now lands.
+    let inserter = Inserter::new(client.clone(), ch, InserterConfig::default())
+        .with_insert_format(InsertFormat::RowBinary);
+    let inserted = inserter
+        .insert_rows(&table, std::slice::from_ref(&row), &[])
+        .await
+        .expect("a wrapped root array must insert");
+    assert_eq!(inserted, 1);
+    assert_eq!(
+        client.query_count(&table, None).await.expect("count"),
+        1,
+        "the wrapped event must be in the table"
+    );
+
+    // It is still an array in ClickHouse, not a stringified blob.
+    assert_eq!(
+        client
+            .query_count(&table, Some("tag_count = 2"))
+            .await
+            .expect("tag_count query"),
+        1,
+        "both tags must survive the wrap as array elements"
+    );
+    assert_eq!(
+        client
+            .query_count(&table, Some("has_filebeat = 1"))
+            .await
+            .expect("has_filebeat query"),
+        1,
+        "the wrapped tags must stay queryable by element"
+    );
+}

@@ -121,6 +121,13 @@ impl ColumnDef {
 /// internal 256-bit-integer module path for the special case to trigger.
 const RAW_PASSTHROUGH_NAME: &str = "clickhouse::types::int256::__dfe_raw_row";
 
+/// The key a root-level JSON array is stored under in a ClickHouse JSON column.
+///
+/// The underscore prefix is this loader's existing marker for a field it
+/// injected itself (`_json`, `_raw`, `_tags`), so a reader can tell the wrapper
+/// apart from a source object that genuinely carried a `values` key.
+pub const JSON_ARRAY_WRAPPER_KEY: &str = "_values";
+
 /// Runtime-dynamic row: a borrowed JSON object plus the resolved column
 /// schema it is encoded against, with optional raw passthrough for one named
 /// JSON column.
@@ -434,12 +441,14 @@ fn encode_typed(
             // Value::String is written verbatim (its content is the JSON);
             // other values are re-serialised to compact JSON text.
             // Missing values and empty strings become {}: the column's JSON
-            // parser rejects the text `null` and empty input (code 117), and
-            // JSON cannot be Nullable.
+            // parser rejects the text `null` and empty input (code 117).
+            // A root-level array is wrapped, because the column parser accepts
+            // only an object at the root -- see `wrap_root_array`.
             let json_bytes = match value {
                 Value::Null => Cow::Borrowed("{}".as_bytes()),
                 Value::String(s) if s.is_empty() => Cow::Borrowed("{}".as_bytes()),
                 Value::String(s) => Cow::Borrowed(s.as_bytes()),
+                Value::Array(_) => Cow::Owned(wrap_root_array(value, col)?),
                 _ => Cow::Owned(value.to_string().into_bytes()),
             };
             write_string(&json_bytes, buf);
@@ -465,6 +474,24 @@ fn encode_typed(
 fn write_string(bytes: &[u8], buf: &mut Vec<u8>) {
     write_varint(bytes.len() as u64, buf);
     buf.extend_from_slice(bytes);
+}
+
+/// Render a root-level array as the JSON text `{"_values": [...]}`.
+///
+/// ClickHouse's JSON type parses only an object at its root and rejects an array
+/// with code 117 (`JSON object should start with '{'`), which makes an
+/// array-valued field such as ECS `tags` otherwise unwritable.
+/// Only the root is reshaped: an array nested inside an object already parses,
+/// and lands as a `Dynamic` holding `Array(...)`.
+fn wrap_root_array(array: &Value, col: &str) -> Result<Vec<u8>, DynamicError> {
+    let mut out = Vec::with_capacity(64);
+    out.extend_from_slice(b"{\"");
+    out.extend_from_slice(JSON_ARRAY_WRAPPER_KEY.as_bytes());
+    out.extend_from_slice(b"\":");
+    serde_json::to_writer(&mut out, array)
+        .map_err(|e| enc_err(col, &format!("JSON array not serialisable: {e}")))?;
+    out.push(b'}');
+    Ok(out)
 }
 
 fn write_varint(mut value: u64, buf: &mut Vec<u8>) {
@@ -1543,6 +1570,67 @@ mod tests {
         let mut expected = vec![0u8];
         write_varint(json_str.len() as u64, &mut expected);
         expected.extend_from_slice(json_str.as_bytes());
+        assert_eq!(bytes, expected);
+    }
+
+    // ---- JSON root-array wrapper ----
+
+    /// Expected bytes for a JSON column holding `json_str`.
+    fn json_col(json_str: &str) -> Vec<u8> {
+        let mut expected = Vec::new();
+        write_varint(json_str.len() as u64, &mut expected);
+        expected.extend_from_slice(json_str.as_bytes());
+        expected
+    }
+
+    #[test]
+    fn json_root_array_is_wrapped() {
+        // ECS `tags` is an array, and the JSON column parser takes only an
+        // object at the root.
+        let bytes = enc(
+            json!({"_tags": ["beats", "filebeat"]}),
+            &[("_tags", "JSON")],
+        );
+        assert_eq!(bytes, json_col(r#"{"_values":["beats","filebeat"]}"#));
+    }
+
+    #[test]
+    fn json_empty_root_array_is_wrapped() {
+        let bytes = enc(json!({"_tags": []}), &[("_tags", "JSON")]);
+        assert_eq!(bytes, json_col(r#"{"_values":[]}"#));
+    }
+
+    #[test]
+    fn json_root_object_is_not_wrapped() {
+        let bytes = enc(json!({"data": {"env": "prod"}}), &[("data", "JSON")]);
+        assert_eq!(bytes, json_col(r#"{"env":"prod"}"#));
+    }
+
+    #[test]
+    fn json_nested_array_is_not_wrapped() {
+        // Only the root is reshaped: an array inside an object already parses,
+        // and lands as a Dynamic holding Array(...).
+        let bytes = enc(
+            json!({"data": {"tags": ["a", "b"], "inner": {"more": [1, 2]}}}),
+            &[("data", "JSON")],
+        );
+        assert_eq!(
+            bytes,
+            json_col(r#"{"tags":["a","b"],"inner":{"more":[1,2]}}"#)
+        );
+    }
+
+    #[test]
+    fn json_root_scalars_are_not_wrapped() {
+        assert_eq!(enc(json!({"d": 42}), &[("d", "JSON")]), json_col("42"));
+        assert_eq!(enc(json!({"d": true}), &[("d", "JSON")]), json_col("true"));
+    }
+
+    #[test]
+    fn nullable_json_root_array_is_wrapped() {
+        let bytes = enc(json!({"t": ["a"]}), &[("t", "Nullable(JSON)")]);
+        let mut expected = vec![0u8];
+        expected.extend_from_slice(&json_col(r#"{"_values":["a"]}"#));
         assert_eq!(bytes, expected);
     }
 

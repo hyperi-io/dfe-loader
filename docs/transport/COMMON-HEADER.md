@@ -402,6 +402,45 @@ tags_output = "_tags"
 drop_tags = false  # Remove source tags after extraction
 ```
 
+#### An array source is wrapped under `_values`
+
+ECS sends `tags` as an array of strings, and a ClickHouse JSON column parses only
+an object at its root -- an array is rejected outright with code 117
+(`JSON object should start with '{'`). The loader therefore wraps a root-level
+array before encoding, so what lands is deliberately not the shape that was sent.
+
+Sent:
+
+```json
+{"tags": ["beats", "filebeat"]}
+```
+
+Stored in `_tags`:
+
+```json
+{"_values": ["beats", "filebeat"]}
+```
+
+Query the wrapped list through the `_values` subcolumn, casting the `Dynamic` to
+the array type it holds:
+
+```sql
+SELECT _tags._values.:`Array(Nullable(String))` AS tags
+FROM dfe.default
+WHERE arrayExists(x -> x = 'filebeat', _tags._values.:`Array(Nullable(String))`)
+```
+
+Notes:
+
+- The wrap applies to any root-level array reaching any JSON column, not to
+  `_tags` alone.
+- Only the root is reshaped. An array nested inside an object is stored as sent,
+  because ClickHouse already parses it.
+- An object source passes through untouched, so `_tags` holding
+  `{"_values": [...]}` cannot be distinguished from a source that genuinely sent
+  that key.
+- The key is `dfe_loader::clickhouse_ext::JSON_ARRAY_WRAPPER_KEY`.
+
 ## Underscore prefix convention
 
 All common header fields use an underscore prefix (`_timestamp`, `_org_id`,
@@ -427,7 +466,7 @@ All common header fields use an underscore prefix (`_timestamp`, `_org_id`,
 // Stored as:
 // _timestamp = 2024-01-15T10:30:00Z (from source timestamp)
 // _uuid = 01234567-... (generated)
-// _tags = ["important", "urgent"] (from source tags)
+// _tags = {"_values": ["important", "urgent"]} (wrapped -- see above)
 // + all original fields preserved in _json
 ```
 
