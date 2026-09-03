@@ -724,10 +724,14 @@ impl Default for MetadataConfig {
 
 /// KEDA autoscaling thresholds (deployment-level config).
 ///
-/// These values are the `SSoT` for the Helm chart's KEDA `ScaledObject`.
-/// The contract sync test validates that chart/values.yaml matches these
-/// defaults. Override at runtime via env vars:
-///   `DFE_LOADER__KEDA__KAFKA_LAG_THRESHOLD=5000`
+/// CHART-GENERATION ONLY. These defaults feed the deployment contract, and the
+/// chart contract test validates chart/values.yaml against them. The loader
+/// process itself reads NO field of this section: KEDA scales the deployment
+/// from the `ScaledObject` the chart renders, so the value that moves a
+/// threshold is the chart's `keda.*` (via `--set` or a values overlay), and a
+/// `keda:` block in the pod's own config file or a `DFE_LOADER__KEDA__*` env var
+/// changes nothing. The runtime scaling signal those thresholds read is
+/// [`ScalingConfig`], which the pod does load.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct KedaConfig {
