@@ -274,6 +274,67 @@ async fn test_rowbinary_parameterised_json_column_lands() {
 }
 
 // ============================================================================
+// Inserter: an IPv6 column takes an IPv4 literal (#127)
+// ============================================================================
+
+/// One `toString(ip)` per row, for reading a `Nullable(IPv6)` back as text.
+#[derive(clickhouse::Row, serde::Deserialize)]
+struct IpText {
+    ip: Option<String>,
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_rowbinary_ipv6_column_takes_an_ipv4_literal() {
+    let (_infra, client, ch) = spin_up(test_name!()).await;
+    let reader = ch.clone();
+    let table = unique_table_name("tc_ipv6");
+
+    let ddl = format!(
+        "CREATE TABLE {table} (
+            id UInt64,
+            source_ip Nullable(IPv6)
+        ) ENGINE = MergeTree() ORDER BY id"
+    );
+    client.execute(&ddl).await.expect("create table");
+
+    let inserter = Inserter::new(client.clone(), ch, fast_fail_config())
+        .with_insert_format(InsertFormat::RowBinary);
+
+    // The three forms a source.ip field arrives in.
+    let rows: Vec<Map<String, Value>> = [
+        json!({"id": 1u64, "source_ip": "172.17.3.4"}),
+        json!({"id": 2u64, "source_ip": "2001:db8::1"}),
+        json!({"id": 3u64, "source_ip": "::ffff:172.17.3.4"}),
+    ]
+    .into_iter()
+    .map(|v| v.as_object().unwrap().clone())
+    .collect();
+
+    let inserted = inserter
+        .insert_rows(&table, &rows, &[])
+        .await
+        .expect("an IPv4 literal must not be rejected by an IPv6 column");
+    assert_eq!(inserted, 3);
+
+    let stored: Vec<String> = reader
+        .query(&format!(
+            "SELECT toString(source_ip) AS ip FROM {table} ORDER BY id"
+        ))
+        .fetch_all::<IpText>()
+        .await
+        .expect("read back")
+        .into_iter()
+        .map(|r| r.ip.unwrap_or_default())
+        .collect();
+
+    assert_eq!(
+        stored,
+        vec!["::ffff:172.17.3.4", "2001:db8::1", "::ffff:172.17.3.4"],
+        "the v4 literal must store the same address ClickHouse's toIPv6 gives it"
+    );
+}
+
+// ============================================================================
 // Inserter: salvage on bad row
 // ============================================================================
 

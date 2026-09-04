@@ -8,7 +8,7 @@
 //! - Type mappings are config-driven for extensibility
 //! - Registry-based coercer lookup by type category
 
-use std::net::{Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr};
 use std::str::FromStr;
 use std::sync::atomic::AtomicU64;
 
@@ -432,9 +432,13 @@ impl Coercer {
     /// Coerce to IPv6
     fn coerce_ipv6(&self, value: &Value) -> Result<Value> {
         match value {
-            Value::String(s) => Ipv6Addr::from_str(s)
-                .map(|_| value.clone())
-                .map_err(|e| crate::Error::Coercion(format!("Invalid IPv6: {e}"))),
+            // An IPv6 column takes an IPv4 literal, mapped: normalise it to the
+            // ::ffff:a.b.c.d form the encoder and the server both accept.
+            Value::String(s) => match IpAddr::from_str(s) {
+                Ok(IpAddr::V6(_)) => Ok(value.clone()),
+                Ok(IpAddr::V4(v4)) => Ok(Value::String(v4.to_ipv6_mapped().to_string())),
+                Err(e) => Err(crate::Error::Coercion(format!("Invalid IPv6: {e}"))),
+            },
             _ => Err(crate::Error::Coercion("Cannot convert to IPv6".to_string())),
         }
     }
@@ -997,6 +1001,14 @@ mod tests {
         let v = serde_json::json!("::1");
         let result = c.coerce_ipv6(&v).unwrap();
         assert_eq!(result.as_str(), Some("::1"));
+    }
+
+    #[test]
+    fn test_coerce_ipv6_maps_an_ipv4_literal() {
+        let c = default_coercer();
+        let v = serde_json::json!("172.17.3.4");
+        let result = c.coerce_ipv6(&v).unwrap();
+        assert_eq!(result.as_str(), Some("::ffff:172.17.3.4"));
     }
 
     // ========================================================================
