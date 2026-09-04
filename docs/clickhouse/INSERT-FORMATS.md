@@ -10,16 +10,20 @@
 
 # Insert formats and transports
 
-dfe-loader has two independent knobs for how rows reach ClickHouse:
-`clickhouse.transport` (how the bytes travel) and `clickhouse.insert_format`
-(how the rows are encoded). They compose. The default `native + row_binary` is
-the fast path; everything else is a deliberate fallback.
+dfe-loader has two knobs for how rows reach ClickHouse: `clickhouse.protocol`
+(how the bytes travel) and `clickhouse.insert_format` (how the rows are
+encoded). The default `http + row_binary` is the fast path; `json_each_row` is
+a deliberate fallback. `protocol: native` is rejected at startup -- the pinned
+client has no TCP row fetch, so the schema query behind every insert stalls
+([#115](https://github.com/hyperi-io/dfe-loader/issues/115)) -- so the native
+column below is what the code supports, not a configuration you can reach
+today.
 
 ```mermaid
 flowchart TB
     ROW["Buffered rows<br/>Map&lt;String,Value&gt; + raw _json"]
     F{"insert_format"}
-    T{"transport"}
+    T{"protocol"}
     RBH["insert_formatted_with<br/>FORMAT RowBinary (HTTP)"]
     RBT["insert_native_with_columns<br/>with_columns_tcp (native)"]
     JE["insert_formatted_with<br/>FORMAT JSONEachRow (HTTP)"]
@@ -36,7 +40,7 @@ flowchart TB
 
 ## The matrix
 
-| `insert_format` | `transport = http` | `transport = native` |
+| `insert_format` | `protocol = http` | `protocol = native` |
 |-----------------|--------------------|----------------------|
 | `row_binary` (default) | `FORMAT RowBinary` via `insert_formatted_with` | `with_columns_tcp` via `insert_native_with_columns` |
 | `json_each_row` | `FORMAT JSONEachRow` via `insert_formatted_with` | rejected at `config-check` |
@@ -45,6 +49,8 @@ The rejection is deliberate and surfaced early: JSONEachRow is an HTTP body
 format, and a native client has no HTTP insert endpoint for it. The guard lives
 in `ClickHouseConfig::validate()` and runs at orchestrator startup, so a bad
 combination fails the boot with a clear message rather than at first insert.
+`Config::validate()` rejects `protocol: native` on its own before that, so the
+whole native column fails the boot regardless of the format.
 
 ## Why RowBinary is the default
 
@@ -109,8 +115,15 @@ A non-drift error (network, auth) is returned as-is. See
 
 | Setting | Values | Default |
 |---------|--------|---------|
-| `clickhouse.transport` | `native`, `http` | `native` |
-| `clickhouse.insert_format` | `row_binary`, `json_each_row` | `row_binary` |
+| `clickhouse.protocol` | `http` (`native` is rejected at startup) | `http` |
+| `clickhouse.insert_format` | `rowbinary` (aliases `row_binary`, `binary`, `native`), `jsoneachrow` (aliases `json_each_row`, `json`) | `rowbinary` |
+
+The canonical spellings are the ones `docs/config-schema.json` carries, and the
+aliases parse identically -- `row_binary` and `json_each_row` are the spellings
+this page used before the key was wired, so both keep working.
+
+Env form: `DFE_LOADER_CLICKHOUSE__INSERT_FORMAT=json_each_row`. The startup log
+line `Insert format configured format=...` reports the value that was applied.
 
 Both are restart-required -- they are baked into the `Client` at build time, so
 a hot-reload of either is logged and deferred to the next start. See

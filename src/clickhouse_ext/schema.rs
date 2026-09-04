@@ -80,7 +80,8 @@ impl DynamicSchema {
         self.columns.is_empty()
     }
 
-    /// Whether any column uses the JSON type (including `Nullable(JSON)`).
+    /// Whether any column uses the JSON type (including `Nullable(JSON)` and
+    /// the parameterised `JSON(max_dynamic_paths=N)` the meta schemas declare).
     ///
     /// When true, RowBinary inserts must set
     /// `input_format_binary_read_json_as_string=1`, because the encoder writes
@@ -271,6 +272,21 @@ mod tests {
             vec![col("id", "UInt64", ""), col("tags", "Nullable(JSON)", "")],
         );
         assert!(nullable_json.has_json_columns());
+    }
+
+    #[test]
+    fn detects_parameterised_json_columns() {
+        // `system.columns` reports the meta schemas' `_json` with its
+        // parameters. Missing it drops `input_format_binary_read_json_as_string`
+        // from the INSERT, and the server rejects the batch with code 117.
+        let meta = DynamicSchema::from_columns(
+            "dfe.filebeat",
+            vec![
+                col("_timestamp", "DateTime64(3)", ""),
+                col("_json", "JSON(max_dynamic_paths=2048)", ""),
+            ],
+        );
+        assert!(meta.has_json_columns());
     }
 
     #[test]

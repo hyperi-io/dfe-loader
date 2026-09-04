@@ -59,7 +59,9 @@ impl std::fmt::Display for Transport {
 ///
 /// `JsonEachRow` is the fallback — simpler, self-describing, but the `ClickHouse`
 /// server pays the cost of parsing every JSON row on ingest.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum InsertFormat {
     /// Schema-reflected `RowBinary` (default).
@@ -68,7 +70,12 @@ pub enum InsertFormat {
     /// `ClickHouse` receives pre-columnarised data — zero server-side parsing.
     /// Total CPU (client + cluster) is significantly lower than `JSONEachRow`.
     #[default]
-    #[serde(alias = "rowbinary", alias = "native", alias = "binary")]
+    #[serde(
+        alias = "rowbinary",
+        alias = "row_binary",
+        alias = "native",
+        alias = "binary"
+    )]
     RowBinary,
 
     /// `JSONEachRow` over HTTP.

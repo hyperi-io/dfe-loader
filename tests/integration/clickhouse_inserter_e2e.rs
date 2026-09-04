@@ -200,6 +200,80 @@ async fn test_inserter_rowbinary_insert() {
 }
 
 // ============================================================================
+// Inserter: the typed meta-schema table over RowBinary (#134)
+// ============================================================================
+
+/// One JSON column read back as text.
+#[derive(clickhouse::Row, serde::Deserialize)]
+struct JsonText {
+    json: String,
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_rowbinary_parameterised_json_column_lands() {
+    let (_infra, client, ch) = spin_up(test_name!()).await;
+    let reader = ch.clone();
+    let table = unique_table_name("tc_metajson");
+
+    // The shipped filebeat meta schema in miniature: typed columns plus the
+    // parameterised `_json` that `system.columns` reports with its parameters.
+    let ddl = format!(
+        "CREATE TABLE {table} (
+            _timestamp DateTime64(3),
+            _timestamp_load DateTime64(3) DEFAULT now64(3),
+            _uuid UUID DEFAULT generateUUIDv7(),
+            _org_id String,
+            _source LowCardinality(String),
+            message String,
+            log_file_path String,
+            _json JSON(max_dynamic_paths=2048)
+        ) ENGINE = MergeTree() ORDER BY (_org_id, _timestamp)"
+    );
+    client.execute(&ddl).await.expect("create table");
+
+    let inserter = Inserter::new(client.clone(), ch, fast_fail_config())
+        .with_insert_format(InsertFormat::RowBinary);
+
+    let rows: Vec<Map<String, Value>> = vec![
+        json!({
+            "_timestamp": "2026-09-03 10:00:00.000",
+            "_org_id": "acme",
+            "_source": "filebeat",
+            "message": "Accepted publickey for derek",
+            "log_file_path": "/var/log/auth.log"
+        })
+        .as_object()
+        .unwrap()
+        .clone(),
+    ];
+    let raw: Vec<Arc<[u8]>> = vec![Arc::from(
+        br#"{"message":"Accepted publickey for derek","source":{"ip":"172.17.3.4"}}"#.as_slice(),
+    )];
+
+    let inserted = inserter
+        .insert_rows(&table, &rows, &raw)
+        .await
+        .expect("a parameterised JSON column must not fail the RowBinary insert");
+    assert_eq!(inserted, 1);
+
+    let stored: Vec<String> = reader
+        .query(&format!("SELECT toString(_json) AS json FROM {table}"))
+        .fetch_all::<JsonText>()
+        .await
+        .expect("read back")
+        .into_iter()
+        .map(|r| r.json)
+        .collect();
+
+    assert_eq!(stored.len(), 1, "the row must land");
+    assert!(
+        stored[0].contains("172.17.3.4") && stored[0].contains("Accepted publickey"),
+        "_json must hold the payload as a JSON value, got: {}",
+        stored[0]
+    );
+}
+
+// ============================================================================
 // Inserter: an IPv6 column takes an IPv4 literal (#127)
 // ============================================================================
 
