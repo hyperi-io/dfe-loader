@@ -50,7 +50,7 @@
 //! dropped.
 
 use std::borrow::Cow;
-use std::net::{Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use serde::ser::{Serialize, Serializer};
 use serde_json::{Map, Value};
@@ -944,7 +944,13 @@ fn encode_ipv4(value: &Value, col: &str, buf: &mut Vec<u8>) -> Result<(), Dynami
 
 fn encode_ipv6(value: &Value, col: &str, buf: &mut Vec<u8>) -> Result<(), DynamicError> {
     let s = value_to_str(value);
-    let addr: Ipv6Addr = s.parse().map_err(|_| enc_err(col, "invalid IPv6"))?;
+    // An IPv6 column accepts an IPv4 literal -- `toIPv6('172.17.3.4')` is
+    // `::ffff:172.17.3.4` -- so both families parse and V4 maps to the same form.
+    let addr: Ipv6Addr = match s.parse::<IpAddr>() {
+        Ok(IpAddr::V6(v6)) => v6,
+        Ok(IpAddr::V4(v4)) => v4.to_ipv6_mapped(),
+        Err(_) => return Err(enc_err(col, "invalid IP address")),
+    };
     // 16 octets in network byte order, written verbatim.
     buf.extend_from_slice(&addr.octets());
     Ok(())
@@ -1342,6 +1348,37 @@ mod tests {
         let bytes = enc(json!({"ip": "::1"}), &[("ip", "IPv6")]);
         let addr: Ipv6Addr = "::1".parse().unwrap();
         assert_eq!(bytes, addr.octets());
+    }
+
+    #[test]
+    fn ipv6_accepts_ipv4_literal() {
+        // The column takes it -- toIPv6('172.17.3.4') is ::ffff:172.17.3.4 --
+        // and rejecting it dropped every filebeat event carrying source.ip.
+        let bytes = enc(json!({"ip": "172.17.3.4"}), &[("ip", "IPv6")]);
+        let mapped: Ipv6Addr = "::ffff:172.17.3.4".parse().unwrap();
+        assert_eq!(bytes, mapped.octets());
+    }
+
+    #[test]
+    fn ipv6_v4_mapped_literal_matches_the_v4_form() {
+        let from_v4 = enc(json!({"ip": "172.17.3.4"}), &[("ip", "IPv6")]);
+        let from_mapped = enc(json!({"ip": "::ffff:172.17.3.4"}), &[("ip", "IPv6")]);
+        assert_eq!(from_v4, from_mapped);
+    }
+
+    #[test]
+    fn ipv6_nullable_accepts_ipv4_literal() {
+        let bytes = enc(json!({"ip": "10.0.0.1"}), &[("ip", "Nullable(IPv6)")]);
+        let mapped: Ipv6Addr = "::ffff:10.0.0.1".parse().unwrap();
+        let mut expected = vec![0u8];
+        expected.extend_from_slice(&mapped.octets());
+        assert_eq!(bytes, expected);
+    }
+
+    #[test]
+    fn ipv6_rejects_a_non_address() {
+        let err = enc_err_of(json!({"ip": "not-an-ip"}), &[("ip", "IPv6")]);
+        assert!(err.to_string().contains("invalid IP address"), "{err}");
     }
 
     // ---- Enum ----
