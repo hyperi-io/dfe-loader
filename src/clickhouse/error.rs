@@ -155,7 +155,9 @@ pub fn classify_insert_end_error(msg: &str) -> ErrorCategory {
 /// naming a network or resource fault is never a verdict on the payload, so
 /// it is tested before the variant is.
 ///
-/// Of the variants, only [`DynamicError::EncodingError`] is a payload verdict
+/// Of the variants, only
+/// [`EncodingError`](crate::clickhouse_ext::DynamicError::EncodingError) is a
+/// payload verdict
 /// -- the encoder held a schema, read the value against it, and could not
 /// represent it, which the next delivery repeats exactly. Every other variant
 /// clears without the payload changing:

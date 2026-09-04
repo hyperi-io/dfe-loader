@@ -191,7 +191,7 @@ pub struct FailedRow {
     /// Error message
     pub reason: String,
     /// The promoted row, serialised, for the DLQ to carry when the batch's
-    /// parallel raw-payload slot is empty. See [`rejected_row_bytes`].
+    /// parallel raw-payload slot is empty. Filled by `rejected_row_bytes`.
     pub row_json: Option<Vec<u8>>,
 }
 
