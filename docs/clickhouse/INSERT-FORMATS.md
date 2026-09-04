@@ -116,11 +116,13 @@ A non-drift error (network, auth) is returned as-is. See
 | Setting | Values | Default |
 |---------|--------|---------|
 | `clickhouse.protocol` | `http` (`native` is rejected at startup) | `http` |
-| `clickhouse.insert_format` | `rowbinary` (aliases `row_binary`, `binary`, `native`), `jsoneachrow` (aliases `json_each_row`, `json`) | `rowbinary` |
+| `clickhouse.insert_format` | `rowbinary` (aliases `row_binary`, `binary`), `jsoneachrow` (aliases `json_each_row`, `json`) | `rowbinary` |
 
 The canonical spellings are the ones `docs/config-schema.json` carries, and the
 aliases parse identically -- `row_binary` and `json_each_row` are the spellings
-this page used before the key was wired, so both keep working.
+this page used before the key was wired, so both keep working. `native` is not
+among them: it names a protocol this config rejects at boot, so accepting it as
+a format spelling would have one word mean two opposite things on one page.
 
 Env form: `DFE_LOADER_CLICKHOUSE__INSERT_FORMAT=json_each_row`. The startup log
 line `Insert format configured format=...` reports the value that was applied.

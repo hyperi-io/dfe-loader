@@ -191,7 +191,7 @@ pub struct FailedRow {
     /// Error message
     pub reason: String,
     /// The promoted row, serialised, for the DLQ to carry when the batch's
-    /// parallel raw-payload slot is empty. See [`rejected_row_bytes`].
+    /// parallel raw-payload slot is empty. Filled by `rejected_row_bytes`.
     pub row_json: Option<Vec<u8>>,
 }
 
@@ -1594,7 +1594,7 @@ mod tests {
         // Aliases from the config — verified via actual YAML/JSON input
         let cases = [
             ("\"rowbinary\"", InsertFormat::RowBinary),
-            ("\"native\"", InsertFormat::RowBinary),
+            ("\"row_binary\"", InsertFormat::RowBinary),
             ("\"binary\"", InsertFormat::RowBinary),
             ("\"jsoneachrow\"", InsertFormat::JsonEachRow),
             ("\"json\"", InsertFormat::JsonEachRow),
@@ -1610,6 +1610,9 @@ mod tests {
     fn test_insert_format_invalid_variant_fails() {
         // Unknown variants must error — prevents silent typos in config
         let result: std::result::Result<InsertFormat, _> = serde_json::from_str("\"arrow\"");
+        assert!(result.is_err());
+        // `native` is a protocol spelling, and the protocol key rejects it too.
+        let result: std::result::Result<InsertFormat, _> = serde_json::from_str("\"native\"");
         assert!(result.is_err());
         let result: std::result::Result<InsertFormat, _> = serde_json::from_str("42");
         assert!(result.is_err());

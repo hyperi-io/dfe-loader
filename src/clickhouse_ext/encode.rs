@@ -1376,8 +1376,35 @@ mod tests {
     }
 
     #[test]
+    fn ipv6_accepts_the_v4_mapped_all_zeroes_literal() {
+        let bytes = enc(json!({"ip": "::ffff:0.0.0.0"}), &[("ip", "IPv6")]);
+        let mapped: Ipv6Addr = "::ffff:0.0.0.0".parse().unwrap();
+        assert_eq!(bytes, mapped.octets());
+    }
+
+    #[test]
     fn ipv6_rejects_a_non_address() {
         let err = enc_err_of(json!({"ip": "not-an-ip"}), &[("ip", "IPv6")]);
+        assert!(err.to_string().contains("invalid IP address"), "{err}");
+    }
+
+    #[test]
+    fn ipv6_rejects_bracketed_and_port_suffixed_forms() {
+        // `[::1]` and `host:port` are URL spellings, not addresses.
+        for literal in ["[::1]", "172.17.3.4:80"] {
+            let err = enc_err_of(json!({"ip": literal}), &[("ip", "IPv6")]);
+            assert!(
+                err.to_string().contains("invalid IP address"),
+                "{literal}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn ipv6_nullable_rejects_an_empty_string() {
+        // Reachable only in Delta mode, where IPv6 is off the coercer's
+        // allow-list; Full mode maps "" to null via the null_strings list.
+        let err = enc_err_of(json!({"ip": ""}), &[("ip", "Nullable(IPv6)")]);
         assert!(err.to_string().contains("invalid IP address"), "{err}");
     }
 
