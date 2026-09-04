@@ -178,6 +178,7 @@ fn ch_config_from_env() -> ClickHouseConfig {
         username: ch.user,
         password: scalo::config::sensitive::SensitiveString::from(ch.password),
         protocol: "http".to_string(),
+        insert_format: dfe_loader::clickhouse::InsertFormat::default(),
         tables: Vec::new(),
         tls: if ch.tls {
             Some(TlsConfig {

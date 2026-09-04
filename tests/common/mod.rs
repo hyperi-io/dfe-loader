@@ -604,6 +604,7 @@ pub fn get_clickhouse_config() -> ClickHouseConfig {
         username: ch.user,
         password: scalo::config::sensitive::SensitiveString::from(ch.password),
         protocol: "native".to_string(),
+        insert_format: dfe_loader::clickhouse::InsertFormat::default(),
         tables: Vec::new(),
         tls: None,
     }

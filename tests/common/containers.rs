@@ -122,6 +122,7 @@ mod testcontainers_impl {
                 username: "default".to_string(),
                 password: scalo::config::sensitive::SensitiveString::default(),
                 protocol: "native".to_string(),
+                insert_format: dfe_loader::clickhouse::InsertFormat::default(),
                 tables: Vec::new(),
                 tls: None,
             })
