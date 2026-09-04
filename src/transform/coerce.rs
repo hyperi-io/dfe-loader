@@ -432,13 +432,12 @@ impl Coercer {
     /// Coerce to IPv6
     fn coerce_ipv6(&self, value: &Value) -> Result<Value> {
         match value {
-            // An IPv6 column takes an IPv4 literal, mapped: normalise it to the
-            // ::ffff:a.b.c.d form the encoder and the server both accept.
-            Value::String(s) => match IpAddr::from_str(s) {
-                Ok(IpAddr::V6(_)) => Ok(value.clone()),
-                Ok(IpAddr::V4(v4)) => Ok(Value::String(v4.to_ipv6_mapped().to_string())),
-                Err(e) => Err(crate::Error::Coercion(format!("Invalid IPv6: {e}"))),
-            },
+            // Validate only. An IPv4 literal is legal in an IPv6 column and
+            // `encode_ipv6` maps it to ::ffff:a.b.c.d without allocating, so
+            // rewriting the string here would be the same mapping done twice.
+            Value::String(s) => IpAddr::from_str(s)
+                .map(|_| value.clone())
+                .map_err(|e| crate::Error::Coercion(format!("Invalid IPv6: {e}"))),
             _ => Err(crate::Error::Coercion("Cannot convert to IPv6".to_string())),
         }
     }
@@ -1004,11 +1003,21 @@ mod tests {
     }
 
     #[test]
-    fn test_coerce_ipv6_maps_an_ipv4_literal() {
+    fn test_coerce_ipv6_passes_an_ipv4_literal_through_unchanged() {
+        // The encoder maps a v4 literal to ::ffff:a.b.c.d, so the coercer
+        // validates and hands back the same string rather than rewriting it.
         let c = default_coercer();
         let v = serde_json::json!("172.17.3.4");
         let result = c.coerce_ipv6(&v).unwrap();
-        assert_eq!(result.as_str(), Some("::ffff:172.17.3.4"));
+        assert_eq!(result, v);
+    }
+
+    #[test]
+    fn test_coerce_ipv6_still_rejects_a_non_address() {
+        let c = default_coercer();
+        assert!(c.coerce_ipv6(&serde_json::json!("172.17.3.4:80")).is_err());
+        assert!(c.coerce_ipv6(&serde_json::json!("[::1]")).is_err());
+        assert!(c.coerce_ipv6(&serde_json::json!("not-an-ip")).is_err());
     }
 
     // ========================================================================

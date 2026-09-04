@@ -379,6 +379,26 @@ impl ParsedType {
         }
     }
 
+    /// Whether this type is JSON, or wraps one at any depth.
+    ///
+    /// `Array(JSON)` and `Map(String, JSON)` carry the same RowBinary
+    /// json-as-string requirement as a bare JSON column.
+    #[must_use]
+    pub fn contains_json(&self) -> bool {
+        if self.tag == TypeTag::JSON {
+            return true;
+        }
+        if let Some(element) = &self.array_element
+            && element.contains_json()
+        {
+            return true;
+        }
+        if let Some((key, value)) = &self.map_types {
+            return key.contains_json() || value.contains_json();
+        }
+        false
+    }
+
     /// Check if this is a numeric type.
     #[must_use]
     pub fn is_numeric(&self) -> bool {

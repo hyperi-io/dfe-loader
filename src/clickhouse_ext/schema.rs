@@ -23,7 +23,6 @@ use clickhouse::Client;
 
 use super::encode::ColumnDef;
 use super::error::DynamicError;
-use super::parsed_type::TypeTag;
 
 /// Resolved schema for a single table -- an ordered list of columns plus a
 /// name index for O(1) lookup during encoding.
@@ -80,8 +79,9 @@ impl DynamicSchema {
         self.columns.is_empty()
     }
 
-    /// Whether any column uses the JSON type (including `Nullable(JSON)` and
-    /// the parameterised `JSON(max_dynamic_paths=N)` the meta schemas declare).
+    /// Whether any column carries a JSON type at any depth -- bare, the
+    /// parameterised `JSON(max_dynamic_paths=N)` the meta schemas declare,
+    /// `Nullable(JSON)`, or nested inside an `Array`/`Map`.
     ///
     /// When true, RowBinary inserts must set
     /// `input_format_binary_read_json_as_string=1`, because the encoder writes
@@ -89,7 +89,7 @@ impl DynamicSchema {
     /// path-value binary ClickHouse expects by default.
     #[must_use]
     pub fn has_json_columns(&self) -> bool {
-        self.columns.iter().any(|c| c.ty.tag == TypeTag::JSON)
+        self.columns.iter().any(|c| c.ty.contains_json())
     }
 }
 
@@ -287,6 +287,34 @@ mod tests {
             ],
         );
         assert!(meta.has_json_columns());
+    }
+
+    #[test]
+    fn detects_json_nested_in_a_container_column() {
+        // A JSON inside an Array or a Map needs the same RowBinary setting as
+        // a top-level one; matching only the outer tag drops it.
+        for ty in [
+            "Array(JSON)",
+            "Map(String, JSON)",
+            "Nullable(Array(JSON))",
+            "Array(JSON(max_dynamic_paths=64))",
+            "Array(Array(JSON))",
+            "Map(String, Array(JSON))",
+        ] {
+            let schema = DynamicSchema::from_columns(
+                "db.t",
+                vec![col("id", "UInt64", ""), col("c", ty, "")],
+            );
+            assert!(schema.has_json_columns(), "missed JSON in {ty}");
+        }
+
+        for ty in ["Array(String)", "Map(String, UInt64)", "Nullable(String)"] {
+            let schema = DynamicSchema::from_columns(
+                "db.t",
+                vec![col("id", "UInt64", ""), col("c", ty, "")],
+            );
+            assert!(!schema.has_json_columns(), "false positive on {ty}");
+        }
     }
 
     #[test]
