@@ -394,10 +394,12 @@ for backwards compatibility and mapped onto `capture_mode`.
 4. `metadata.tags` nested path.
 
 **Shape:** the column is a ClickHouse `JSON`, which only accepts an object at
-the top level. An object source is stored as-is. Anything else -- ECS ships
-`tags` as an array of keywords, and some sources send a bare string -- is
-stored whole under a `list` key, so `["forwarded"]` lands as
-`{"list": ["forwarded"]}` and queries read it as `_tags.list`.
+the top level, and the loader shapes every value it writes into any JSON column
+to match -- whichever rule filled it, the `tags_fields` hoist or an
+`@source`/`@renamed` column comment. An object is stored as-is. An array -- ECS
+ships `tags` as an array of keywords -- is stored whole under a `list` key, so
+`["forwarded"]` lands as `{"list": ["forwarded"]}` and queries read it as
+`_tags.list`. A scalar, such as a bare string, is stored under a `value` key.
 
 **Configuration:**
 

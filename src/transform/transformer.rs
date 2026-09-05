@@ -23,23 +23,6 @@ static TIMESTAMP_OUTPUT_FIELD: &str = "_timestamp";
 static TIMESTAMP_RECEIVED_OUTPUT_FIELD: &str = "_timestamp_received";
 static TIMESTAMP_COLLECTOR_FIELD: &str = "_timestamp_collector";
 
-/// Key a non-object `tags` value is preserved under when it is hoisted into the
-/// `_tags` output field.
-static TAGS_WRAPPER_KEY: &str = "list";
-
-/// Shape a hoisted `tags` value for the `_tags` `ClickHouse` JSON column, which
-/// only accepts an object at the top level: an object passes through, anything
-/// else (ECS ships an array of keywords) is preserved under `TAGS_WRAPPER_KEY`.
-#[inline]
-fn tags_as_json_object(value: Value) -> Value {
-    if value.is_object() {
-        return value;
-    }
-    let mut wrapped = Map::with_capacity(1);
-    wrapped.insert(TAGS_WRAPPER_KEY.to_string(), value);
-    Value::Object(wrapped)
-}
-
 /// Format a `DateTime` for `ClickHouse` DateTime64(3) insertion via `JSONEachRow`.
 /// Uses space separator and no timezone suffix — `ClickHouse`'s `JSONEachRow` parser
 /// doesn't support RFC3339 'Z' or '+00:00' suffixes in datetime strings.
@@ -346,12 +329,13 @@ impl Transformer {
 
     /// Extract tags from the first matching field in `tags_fields`
     ///
-    /// Returns the extracted value as an object (preserves nested structure).
+    /// Returns the extracted value verbatim; shaping a non-object for the JSON
+    /// `_tags` column happens at the write, in `clickhouse_ext::encode`.
     /// Uses dot notation for nested field access.
     fn extract_tags(&self, obj: &Map<String, Value>) -> Option<Value> {
         for field in &self.tags_fields {
             if let Some(value) = self.get_nested_field_from_map(obj, field) {
-                return Some(tags_as_json_object(value.clone()));
+                return Some(value.clone());
             }
         }
         None
@@ -1203,11 +1187,11 @@ mod tests {
     }
 
     // ========================================================================
-    // tags shaping for the JSON _tags column (#139)
+    // tags hoisted into the _tags column (#139)
     // ========================================================================
 
     #[test]
-    fn test_transformer_tags_array_is_wrapped_in_an_object() {
+    fn test_transformer_tags_array_is_carried_verbatim() {
         let transformer = Transformer::default();
         let raw = br#"{"event": "x", "tags": ["preserve_original_event", "forwarded"]}"#;
         let value: Value = serde_json::from_slice(raw).unwrap();
@@ -1216,13 +1200,13 @@ mod tests {
         let tags = result.data.get("_tags").expect("_tags must be populated");
         assert_eq!(
             tags,
-            &serde_json::json!({"list": ["preserve_original_event", "forwarded"]}),
-            "an ECS tags array must reach the JSON column as an object, order and duplicates intact"
+            &serde_json::json!(["preserve_original_event", "forwarded"]),
+            "the hoist carries the value; the JSON column's own encoder shapes it"
         );
     }
 
     #[test]
-    fn test_transformer_tags_scalar_is_wrapped_in_an_object() {
+    fn test_transformer_tags_scalar_is_carried_verbatim() {
         let transformer = Transformer::default();
         let raw = br#"{"event": "x", "tags": "forwarded"}"#;
         let value: Value = serde_json::from_slice(raw).unwrap();
@@ -1231,8 +1215,8 @@ mod tests {
         let tags = result.data.get("_tags").expect("_tags must be populated");
         assert_eq!(
             tags,
-            &serde_json::json!({"list": "forwarded"}),
-            "a scalar tags value must be wrapped the same way, not dropped"
+            &serde_json::json!("forwarded"),
+            "a scalar tags value must be carried, not dropped"
         );
     }
 
