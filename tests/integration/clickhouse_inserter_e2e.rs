@@ -403,6 +403,84 @@ async fn test_rowbinary_ecs_tags_array_lands_in_the_json_tags_column() {
 }
 
 // ============================================================================
+// Inserter: the JSONEachRow path shapes the JSON _tags column too (#139)
+// ============================================================================
+
+/// `insert_format = "json"` is a live config value, and this path serialises
+/// the row map as it stands -- so a hoisted ECS `tags` array reaches the JSON
+/// `_tags` column unshaped unless the inserter shapes it against the schema.
+/// Backing `shape_json_row` out fails this test with `code 117: Cannot insert
+/// data into JSON column`.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_jsoneachrow_ecs_tags_array_lands_in_the_json_tags_column() {
+    use dfe_loader::config::{FieldSanitizationConfig, MetadataConfig, TimestampDqConfig};
+    use dfe_loader::transform::Transformer;
+
+    let (_infra, client, ch) = spin_up(test_name!()).await;
+    let reader = ch.clone();
+    let table = unique_table_name("tc_jsontags");
+
+    // The filebeat-shaped table, with the JSON _tags column the meta schemas
+    // declare.
+    let ddl = format!(
+        "CREATE TABLE {table} (
+            _timestamp DateTime64(3),
+            _org_id String,
+            _source LowCardinality(String),
+            message String,
+            _tags JSON
+        ) ENGINE = MergeTree() ORDER BY (_org_id, _timestamp)"
+    );
+    client.execute(&ddl).await.expect("create table");
+
+    let transformer = Transformer::new(
+        &TimestampDqConfig::default(),
+        &MetadataConfig::default(),
+        &FieldSanitizationConfig::default(),
+    );
+    let event = json!({
+        "timestamp": "2026-09-03 10:00:00.000",
+        "message": "Accepted publickey for derek",
+        "tags": ["preserve_original_event", "forwarded"]
+    });
+    let row = transformer
+        .transform_with_raw(event, Some("acme"), Some("filebeat"))
+        .expect("transform must succeed")
+        .data;
+    assert_eq!(
+        row.get("_tags"),
+        Some(&json!(["preserve_original_event", "forwarded"])),
+        "the hoist carries the array verbatim — the insert path is what shapes it"
+    );
+
+    let inserter = Inserter::new(client.clone(), ch, fast_fail_config())
+        .with_insert_format(InsertFormat::JsonEachRow);
+
+    let inserted = inserter
+        .insert_rows(&table, &[row], &[])
+        .await
+        .expect("an ECS tags array must not be rejected by the JSON _tags column");
+    assert_eq!(inserted, 1, "the row must land, not fail the batch");
+
+    let stored: Vec<String> = reader
+        .query(&format!("SELECT toString(_tags) AS json FROM {table}"))
+        .fetch_all::<JsonText>()
+        .await
+        .expect("read back")
+        .into_iter()
+        .map(|r| r.json)
+        .collect();
+
+    assert_eq!(stored.len(), 1, "the row must be readable back");
+    let tags: Value = serde_json::from_str(&stored[0]).expect("_tags must read back as JSON");
+    assert_eq!(
+        tags,
+        json!({"list": ["preserve_original_event", "forwarded"]}),
+        "JSONEachRow must store the shape RowBinary stores"
+    );
+}
+
+// ============================================================================
 // Inserter: the `@source` column comment fills _tags on the wire (#139)
 // ============================================================================
 

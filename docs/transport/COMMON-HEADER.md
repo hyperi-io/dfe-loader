@@ -395,11 +395,14 @@ for backwards compatibility and mapped onto `capture_mode`.
 
 **Shape:** the column is a ClickHouse `JSON`, which only accepts an object at
 the top level, and the loader shapes every value it writes into any JSON column
-to match -- whichever rule filled it, the `tags_fields` hoist or an
-`@source`/`@renamed` column comment. An object is stored as-is. An array -- ECS
-ships `tags` as an array of keywords -- is stored whole under a `list` key, so
-`["forwarded"]` lands as `{"list": ["forwarded"]}` and queries read it as
-`_tags.list`. A scalar, such as a bare string, is stored under a `value` key.
+to match -- whichever rule filled it (the `tags_fields` hoist or an
+`@source`/`@renamed` column comment) and on both insert formats, `RowBinary`
+and `JSONEachRow`. An object is stored as-is. An array -- ECS ships `tags` as an
+array of keywords -- is stored whole under a `list` key, so `["forwarded"]`
+lands as `{"list": ["forwarded"]}` and queries read it as `_tags.list`. A
+scalar, such as a bare string, is stored under a `value` key. A string carrying
+JSON text is stored as what that text holds, and text that does not parse is
+stored as the string it is, under `value`.
 
 **Configuration:**
 
