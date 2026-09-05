@@ -458,28 +458,151 @@ const JSON_LIST_KEY: &str = "list";
 /// Key a scalar landing in a JSON column is stored under.
 const JSON_SCALAR_KEY: &str = "value";
 
-/// Render a value as the JSON text a `ClickHouse` JSON column accepts: only an
-/// object at the top level, anything else is code 117.
+/// What a value must become for a `ClickHouse` JSON column to accept it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum JsonShape {
+    /// An object already -- store it as it stands.
+    AsIs,
+    /// Missing or empty -- becomes `{}`, since JSON cannot be Nullable.
+    Empty,
+    /// A JSON container carried as text -- wrap what that text holds.
+    WrapText(&'static str),
+    /// Not an object -- wrap the value itself.
+    WrapValue(&'static str),
+}
+
+/// The single shaping rule for a value landing in a JSON column, which only
+/// accepts an object at the top level -- anything else is code 117.
 ///
-/// Wrapping at the write rather than in one producer covers every rule that
-/// fills a JSON column. A `Value::String` carries JSON TEXT here, so object text
-/// is written verbatim (the zero-copy `_json` case) and array text is wrapped
-/// without a re-parse. Missing and empty values become `{}` -- JSON cannot be
-/// Nullable.
-fn json_column_text(value: &Value) -> Cow<'_, [u8]> {
+/// Both insert paths decide here: `json_column_text` renders the decision as
+/// RowBinary wire text, `shape_json_value` applies it to the row map the
+/// JSONEachRow body is serialised from.
+///
+/// A `Value::String` in a JSON column carries JSON TEXT, so the text decides
+/// rather than the Rust type -- but only once it parses. Text that does not
+/// parse is stored as the string it is, because `{not json` reaching the column
+/// verbatim is the same code 117 this rule exists to stop.
+fn json_shape(value: &Value) -> JsonShape {
     match value {
-        Value::Null => Cow::Borrowed("{}".as_bytes()),
-        Value::Object(_) => Cow::Owned(value.to_string().into_bytes()),
+        Value::Null => JsonShape::Empty,
+        Value::Object(_) => JsonShape::AsIs,
+        Value::Array(_) => JsonShape::WrapValue(JSON_LIST_KEY),
+        Value::Bool(_) | Value::Number(_) => JsonShape::WrapValue(JSON_SCALAR_KEY),
         Value::String(s) => match s.trim_start().as_bytes().first() {
-            None => Cow::Borrowed("{}".as_bytes()),
-            Some(b'{') => Cow::Borrowed(s.as_bytes()),
-            Some(b'[') => Cow::Owned(wrap_json_text(JSON_LIST_KEY, s)),
-            _ => Cow::Owned(wrap_json_text(JSON_SCALAR_KEY, &value.to_string())),
+            None => JsonShape::Empty,
+            Some(b'{') if is_whole_json(s) => JsonShape::AsIs,
+            Some(b'[') if is_whole_json(s) => JsonShape::WrapText(JSON_LIST_KEY),
+            _ => JsonShape::WrapValue(JSON_SCALAR_KEY),
         },
-        Value::Array(_) => Cow::Owned(wrap_json_text(JSON_LIST_KEY, &value.to_string())),
-        Value::Bool(_) | Value::Number(_) => {
-            Cow::Owned(wrap_json_text(JSON_SCALAR_KEY, &value.to_string()))
+    }
+}
+
+/// Whether the text is one complete JSON value and nothing after it.
+/// `IgnoredAny` validates the syntax without building a document.
+fn is_whole_json(text: &str) -> bool {
+    sonic_rs::from_str::<serde::de::IgnoredAny>(text).is_ok()
+}
+
+/// Render a value as the JSON text a `ClickHouse` JSON column accepts.
+///
+/// Shaping at the write rather than in one producer covers every rule that
+/// fills a JSON column. Object text is written verbatim (the zero-copy `_json`
+/// case) and array text is wrapped without a re-parse.
+fn json_column_text(value: &Value) -> Cow<'_, [u8]> {
+    match (json_shape(value), value) {
+        (JsonShape::Empty, _) => Cow::Borrowed("{}".as_bytes()),
+        (JsonShape::AsIs, Value::String(s)) => Cow::Borrowed(s.as_bytes()),
+        (JsonShape::AsIs, _) => Cow::Owned(value.to_string().into_bytes()),
+        (JsonShape::WrapText(key), Value::String(s)) => Cow::Owned(wrap_json_text(key, s)),
+        (JsonShape::WrapText(key) | JsonShape::WrapValue(key), _) => {
+            Cow::Owned(wrap_json_text(key, &value.to_string()))
         }
+    }
+}
+
+/// Apply the JSON-column shaping rule to a value in place -- the JSONEachRow
+/// counterpart of `json_column_text`, for the path that serialises the row map
+/// itself rather than encoding it column by column.
+///
+/// The value path stores structure, not text: the JSONEachRow body has no
+/// read-json-as-string setting, so JSON text is parsed back before it is stored
+/// or wrapped, and both paths end with the same value in the column.
+pub fn shape_json_value(value: &mut Value) {
+    let shape = json_shape(value);
+    let shaped = match (shape, value.take()) {
+        (JsonShape::AsIs, Value::String(s)) => json_text_to_value(s),
+        (JsonShape::AsIs, taken) => taken,
+        (JsonShape::Empty, _) => Value::Object(Map::new()),
+        (JsonShape::WrapText(key), Value::String(s)) => wrap_value(key, json_text_to_value(s)),
+        (JsonShape::WrapText(key) | JsonShape::WrapValue(key), taken) => wrap_value(key, taken),
+    };
+    *value = shaped;
+}
+
+/// Parse JSON text that [`json_shape`] has already validated; the fallback
+/// keeps a string that parses here but not there rather than dropping it.
+fn json_text_to_value(text: String) -> Value {
+    sonic_rs::from_str(&text).unwrap_or(Value::String(text))
+}
+
+/// Build `{"<key>": <value>}`.
+fn wrap_value(key: &str, inner: Value) -> Value {
+    let mut wrapped = Map::with_capacity(1);
+    wrapped.insert(key.to_string(), inner);
+    Value::Object(wrapped)
+}
+
+/// Shape every JSON position inside a value, at the same depths the RowBinary
+/// encoder writes JSON text: a JSON column, and a JSON nested in an `Array` or
+/// a `Map` value, which `ParsedType::contains_json` reports.
+pub fn shape_json_for_type(value: &mut Value, ty: &ParsedType) {
+    if ty.nullable && value.is_null() {
+        return;
+    }
+    match ty.tag {
+        TypeTag::JSON => shape_json_value(value),
+        TypeTag::Array => {
+            if let (Some(element), Value::Array(items)) = (ty.array_element.as_ref(), &mut *value) {
+                for item in items {
+                    shape_json_for_type(item, element);
+                }
+            }
+        }
+        TypeTag::Map => {
+            if let (Some((_, value_type)), Value::Object(entries)) =
+                (ty.map_types.as_ref(), &mut *value)
+            {
+                for (_, entry) in entries {
+                    shape_json_for_type(entry, value_type);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Whether [`shape_json_for_type`] would change this value -- the check that
+/// keeps the JSONEachRow path from cloning a row it does not need to touch.
+#[must_use]
+pub fn json_shaping_changes(value: &Value, ty: &ParsedType) -> bool {
+    if ty.nullable && value.is_null() {
+        return false;
+    }
+    match ty.tag {
+        TypeTag::JSON => !value.is_object(),
+        TypeTag::Array => match (ty.array_element.as_ref(), value) {
+            (Some(element), Value::Array(items)) => {
+                items.iter().any(|item| json_shaping_changes(item, element))
+            }
+            _ => false,
+        },
+        TypeTag::Map => match (ty.map_types.as_ref(), value) {
+            (Some((_, value_type)), Value::Object(entries)) => entries
+                .iter()
+                .any(|(_, entry)| json_shaping_changes(entry, value_type)),
+            _ => false,
+        },
+        _ => false,
     }
 }
 
@@ -1679,6 +1802,127 @@ mod tests {
     #[test]
     fn json_object_is_not_wrapped() {
         assert_json_text(json!({"env": "prod"}), r#"{"env":"prod"}"#);
+    }
+
+    #[test]
+    fn json_broken_object_text_is_wrapped_under_value() {
+        // Text that opens like an object but does not parse is stored as the
+        // string it is; written verbatim it is the code 117 this rule stops.
+        assert_json_text(json!("{not json"), r#"{"value":"{not json"}"#);
+    }
+
+    #[test]
+    fn json_broken_array_text_is_wrapped_under_value() {
+        assert_json_text(json!("[not json"), r#"{"value":"[not json"}"#);
+    }
+
+    #[test]
+    fn json_object_text_with_trailing_content_is_wrapped_under_value() {
+        assert_json_text(json!(r#"{"a":1} tail"#), r#"{"value":"{\"a\":1} tail"}"#);
+    }
+
+    // ------------------------------------------------------------------
+    // The same rule at value level, for the JSONEachRow path
+    // ------------------------------------------------------------------
+
+    /// Assert what shaping leaves in the row map for one value.
+    fn assert_shaped(value: Value, expected: Value) {
+        let described = value.to_string();
+        let mut shaped = value;
+        shape_json_value(&mut shaped);
+        assert_eq!(shaped, expected, "shaping {described} must give {expected}");
+    }
+
+    #[test]
+    fn shaped_array_is_wrapped_under_list() {
+        assert_shaped(
+            json!(["preserve_original_event", "forwarded"]),
+            json!({"list": ["preserve_original_event", "forwarded"]}),
+        );
+    }
+
+    #[test]
+    fn shaped_scalars_are_wrapped_under_value() {
+        assert_shaped(json!("forwarded"), json!({"value": "forwarded"}));
+        assert_shaped(json!(42), json!({"value": 42}));
+        assert_shaped(json!(true), json!({"value": true}));
+    }
+
+    #[test]
+    fn shaped_object_is_left_alone() {
+        assert_shaped(json!({"env": "prod"}), json!({"env": "prod"}));
+    }
+
+    #[test]
+    fn shaped_null_becomes_an_empty_object() {
+        assert_shaped(Value::Null, json!({}));
+        assert_shaped(json!(""), json!({}));
+    }
+
+    #[test]
+    fn shaped_json_text_is_parsed_back() {
+        // The JSONEachRow body carries structure, not text: a string would
+        // reach the column as a string.
+        assert_shaped(json!(r#"{"env":"prod"}"#), json!({"env": "prod"}));
+        assert_shaped(json!(r#"["forwarded"]"#), json!({"list": ["forwarded"]}));
+    }
+
+    #[test]
+    fn shaped_broken_object_text_is_wrapped_under_value() {
+        assert_shaped(json!("{not json"), json!({"value": "{not json"}));
+    }
+
+    #[test]
+    fn shaped_json_column_shapes_nested_json() {
+        // Array(JSON) carries a JSON per element, so each element is shaped --
+        // wrapping the array itself would bury every element under one key.
+        let ty = ParsedType::parse("Array(JSON)");
+        let mut value = json!([["forwarded"], {"env": "prod"}, 42]);
+        assert!(json_shaping_changes(&value, &ty));
+        shape_json_for_type(&mut value, &ty);
+        assert_eq!(
+            value,
+            json!([{"list": ["forwarded"]}, {"env": "prod"}, {"value": 42}])
+        );
+    }
+
+    #[test]
+    fn shaped_map_of_json_shapes_each_value() {
+        let ty = ParsedType::parse("Map(String, JSON)");
+        let mut value = json!({"a": ["forwarded"], "b": {"env": "prod"}});
+        assert!(json_shaping_changes(&value, &ty));
+        shape_json_for_type(&mut value, &ty);
+        assert_eq!(
+            value,
+            json!({"a": {"list": ["forwarded"]}, "b": {"env": "prod"}})
+        );
+    }
+
+    #[test]
+    fn shaping_a_parameterised_json_column_wraps_an_array() {
+        let ty = ParsedType::parse("JSON(max_dynamic_paths=2048)");
+        let mut value = json!(["forwarded"]);
+        assert!(json_shaping_changes(&value, &ty));
+        shape_json_for_type(&mut value, &ty);
+        assert_eq!(value, json!({"list": ["forwarded"]}));
+    }
+
+    #[test]
+    fn shaping_does_not_change_an_object_or_a_nullable_null() {
+        let json = ParsedType::parse("JSON");
+        assert!(!json_shaping_changes(&json!({"env": "prod"}), &json));
+
+        // Nullable(JSON) keeps its null -- the encoder writes the null marker
+        // and never reaches the JSON text.
+        let nullable = ParsedType::parse("Nullable(JSON)");
+        assert!(!json_shaping_changes(&Value::Null, &nullable));
+        let mut value = Value::Null;
+        shape_json_for_type(&mut value, &nullable);
+        assert_eq!(value, Value::Null);
+
+        // A plain String column is never shaped.
+        let string = ParsedType::parse("String");
+        assert!(!json_shaping_changes(&json!("[forwarded]"), &string));
     }
 
     #[test]
