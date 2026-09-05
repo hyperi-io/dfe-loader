@@ -430,19 +430,7 @@ fn encode_typed(
             encode_map(value, kt, vt, col, buf)?;
         }
         TypeTag::JSON => {
-            // JSON wire form is a length-prefixed String of the JSON text. A
-            // Value::String is written verbatim (its content is the JSON);
-            // other values are re-serialised to compact JSON text.
-            // Missing values and empty strings become {}: the column's JSON
-            // parser rejects the text `null` and empty input (code 117), and
-            // JSON cannot be Nullable.
-            let json_bytes = match value {
-                Value::Null => Cow::Borrowed("{}".as_bytes()),
-                Value::String(s) if s.is_empty() => Cow::Borrowed("{}".as_bytes()),
-                Value::String(s) => Cow::Borrowed(s.as_bytes()),
-                _ => Cow::Owned(value.to_string().into_bytes()),
-            };
-            write_string(&json_bytes, buf);
+            write_string(&json_column_text(value), buf);
         }
         // Geo Point and any type the parser left as Unknown are not part of
         // the supported dynamic-insert surface. Tuple/Variant/Dynamic/Nested
@@ -456,6 +444,54 @@ fn encode_typed(
         }
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// JSON column shaping
+// ---------------------------------------------------------------------------
+
+/// Key an array landing in a JSON column is stored under. `list` is the key the
+/// deployed dfe-docker VRL workaround already wraps ECS `tags` with, so stored
+/// data keeps one shape once that workaround is removed.
+const JSON_LIST_KEY: &str = "list";
+
+/// Key a scalar landing in a JSON column is stored under.
+const JSON_SCALAR_KEY: &str = "value";
+
+/// Render a value as the JSON text a `ClickHouse` JSON column accepts: only an
+/// object at the top level, anything else is code 117.
+///
+/// Wrapping at the write rather than in one producer covers every rule that
+/// fills a JSON column. A `Value::String` carries JSON TEXT here, so object text
+/// is written verbatim (the zero-copy `_json` case) and array text is wrapped
+/// without a re-parse. Missing and empty values become `{}` -- JSON cannot be
+/// Nullable.
+fn json_column_text(value: &Value) -> Cow<'_, [u8]> {
+    match value {
+        Value::Null => Cow::Borrowed("{}".as_bytes()),
+        Value::Object(_) => Cow::Owned(value.to_string().into_bytes()),
+        Value::String(s) => match s.trim_start().as_bytes().first() {
+            None => Cow::Borrowed("{}".as_bytes()),
+            Some(b'{') => Cow::Borrowed(s.as_bytes()),
+            Some(b'[') => Cow::Owned(wrap_json_text(JSON_LIST_KEY, s)),
+            _ => Cow::Owned(wrap_json_text(JSON_SCALAR_KEY, &value.to_string())),
+        },
+        Value::Array(_) => Cow::Owned(wrap_json_text(JSON_LIST_KEY, &value.to_string())),
+        Value::Bool(_) | Value::Number(_) => {
+            Cow::Owned(wrap_json_text(JSON_SCALAR_KEY, &value.to_string()))
+        }
+    }
+}
+
+/// Build `{"<key>": <json>}` from JSON text, without parsing it back.
+fn wrap_json_text(key: &str, json: &str) -> Vec<u8> {
+    let mut out = Vec::with_capacity(json.len() + key.len() + 6);
+    out.extend_from_slice(b"{\"");
+    out.extend_from_slice(key.as_bytes());
+    out.extend_from_slice(b"\":");
+    out.extend_from_slice(json.as_bytes());
+    out.push(b'}');
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -1597,6 +1633,52 @@ mod tests {
             enc(json!({"data": ""}), &[("data", "JSON")]),
             vec![2, b'{', b'}']
         );
+    }
+
+    /// Assert the wire text a JSON column gets for one value.
+    fn assert_json_text(value: Value, expected: &str) {
+        let described = value.to_string();
+        let bytes = enc(json!({ "data": value }), &[("data", "JSON")]);
+        let mut want = Vec::new();
+        write_varint(expected.len() as u64, &mut want);
+        want.extend_from_slice(expected.as_bytes());
+        assert_eq!(
+            bytes, want,
+            "JSON column text for {described} must be {expected}"
+        );
+    }
+
+    #[test]
+    fn json_array_is_wrapped_under_list() {
+        assert_json_text(
+            json!(["preserve_original_event", "forwarded"]),
+            r#"{"list":["preserve_original_event","forwarded"]}"#,
+        );
+    }
+
+    #[test]
+    fn json_array_text_is_wrapped_under_list() {
+        assert_json_text(json!(r#"["forwarded"]"#), r#"{"list":["forwarded"]}"#);
+    }
+
+    #[test]
+    fn json_bare_string_is_wrapped_under_value() {
+        assert_json_text(json!("forwarded"), r#"{"value":"forwarded"}"#);
+    }
+
+    #[test]
+    fn json_number_is_wrapped_under_value() {
+        assert_json_text(json!(42), r#"{"value":42}"#);
+    }
+
+    #[test]
+    fn json_bool_is_wrapped_under_value() {
+        assert_json_text(json!(true), r#"{"value":true}"#);
+    }
+
+    #[test]
+    fn json_object_is_not_wrapped() {
+        assert_json_text(json!({"env": "prod"}), r#"{"env":"prod"}"#);
     }
 
     #[test]

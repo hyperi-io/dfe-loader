@@ -359,7 +359,7 @@ async fn test_rowbinary_ecs_tags_array_lands_in_the_json_tags_column() {
     client.execute(&ddl).await.expect("create table");
 
     // The shape the bundled filebeat pipeline emits: ECS `tags` is an array of
-    // keywords, and the transformer hoists it into the JSON `_tags` column.
+    // keywords, and the `tags_fields` hoist puts it in the JSON `_tags` column.
     let transformer = Transformer::new(
         &TimestampDqConfig::default(),
         &MetadataConfig::default(),
@@ -400,6 +400,141 @@ async fn test_rowbinary_ecs_tags_array_lands_in_the_json_tags_column() {
         json!({"list": ["preserve_original_event", "forwarded"]}),
         "every tag must survive the hoist, in order"
     );
+}
+
+// ============================================================================
+// Inserter: the `@source` column comment fills _tags on the wire (#139)
+// ============================================================================
+
+/// The path the deployed filebeat table actually uses: `_tags` is filled from
+/// the column's own `@source` comment, which the loader compiles into a
+/// `FieldMapping` rule and the extractor reads directly. Both copy the source
+/// value verbatim, so an ECS `tags` array only survives if the JSON column's
+/// encoder shapes it. #140 shaped `Transformer::extract_tags` instead, which
+/// this path never calls, and the array still failed with code 117.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_rowbinary_tags_source_comment_lands_in_the_json_tags_column() {
+    use dfe_loader::column_meta::{ColumnDirectivesConfig, ColumnMetaCache, parse_directives};
+    use dfe_loader::config::{FieldMappingConfig, MetadataConfig, RoutingConfig};
+    use dfe_loader::transform::field_mapping::RuleOrigin;
+    use dfe_loader::transform::{HeaderExtractor, MappingBuilder};
+    use rustc_hash::FxHashMap;
+
+    let (_infra, client, ch) = spin_up(test_name!()).await;
+    let reader = ch.clone();
+    let table = unique_table_name("tc_tagsrc");
+
+    // The filebeat meta schema in miniature: `_tags` carries the `@source`
+    // comment dfe-schemas emits, verbatim.
+    let ddl = format!(
+        "CREATE TABLE {table} (
+            _timestamp DateTime64(3),
+            _org_id LowCardinality(String),
+            _source LowCardinality(String),
+            message String,
+            _tags JSON COMMENT '@source: first(tags/_tags/meta/metadata.tags)'
+        ) ENGINE = MergeTree() ORDER BY (_org_id, _timestamp)"
+    );
+    client.execute(&ddl).await.expect("create table");
+
+    // Read the schema and the column comments back out of ClickHouse, exactly
+    // as the background schema resolver does.
+    let schema = client
+        .fetch_table_schema(&table)
+        .await
+        .expect("fetch schema");
+    let comments = client
+        .fetch_column_comments(&table)
+        .await
+        .expect("fetch column comments");
+    assert!(
+        comments
+            .iter()
+            .any(|(col, c)| col == "_tags" && c.contains("@source")),
+        "ClickHouse must return the _tags @source comment, got {comments:?}"
+    );
+
+    // The directive cache is keyed by `db.table`, the form the pipeline routes
+    // to; the bare name is what the DDL and the inserter use here.
+    let qualified = format!("{}.{}", schema.database, schema.table);
+    let col_meta = ColumnMetaCache::new(ColumnDirectivesConfig::default());
+    let directives: FxHashMap<String, _> = comments
+        .into_iter()
+        .map(|(col, comment)| (col, parse_directives(&comment)))
+        .collect();
+    col_meta.apply_ddl(&qualified, directives);
+
+    // The comment compiles into a FieldMapping rule over the four sources.
+    let mapping = MappingBuilder::from_config(&FieldMappingConfig::default())
+        .expect("mapping builder must build")
+        .build_for_table(&schema, &col_meta);
+    let tags_rule = mapping
+        .rules()
+        .iter()
+        .find(|r| r.destination == "_tags")
+        .expect("the @source comment must compile into a _tags rule");
+    assert_eq!(tags_rule.origin, RuleOrigin::ColumnComment);
+    assert_eq!(
+        tags_rule.source_fields,
+        vec!["tags", "_tags", "meta", "metadata.tags"]
+    );
+
+    let event = br#"{"timestamp":"2026-09-03 10:00:00.000","org_id":"acme","source":"filebeat","message":"Accepted publickey for derek","tags":["preserve_original_event","forwarded"]}"#;
+
+    // Row 1: the json_primary extractor, which resolves @source itself.
+    let extractor = HeaderExtractor::new(&MetadataConfig::default(), &RoutingConfig::default());
+    let extracted = extractor.extract(event, &qualified, &schema, &col_meta);
+    assert_eq!(
+        extracted.get("_tags"),
+        Some(&json!(["preserve_original_event", "forwarded"])),
+        "the extractor copies the array verbatim — nothing shapes it before the write"
+    );
+
+    // Row 2: the FieldMapping rule, applied to a row that still carries `tags`.
+    let mut mapped: Map<String, Value> = json!({
+        "_timestamp": "2026-09-03 10:00:00.000",
+        "_org_id": "acme",
+        "_source": "filebeat",
+        "message": "Accepted publickey for derek",
+        "tags": ["preserve_original_event", "forwarded"]
+    })
+    .as_object()
+    .unwrap()
+    .clone();
+    mapping.apply(&mut mapped);
+    assert_eq!(
+        mapped.get("_tags"),
+        Some(&json!(["preserve_original_event", "forwarded"])),
+        "FieldMapping::apply copies the array verbatim too"
+    );
+
+    let inserter = Inserter::new(client.clone(), ch, fast_fail_config())
+        .with_insert_format(InsertFormat::RowBinary);
+
+    let inserted = inserter
+        .insert_rows(&table, &[extracted, mapped], &[])
+        .await
+        .expect("an ECS tags array must not be rejected by the JSON _tags column");
+    assert_eq!(inserted, 2, "both rows must land, not fail the batch");
+
+    let stored: Vec<String> = reader
+        .query(&format!("SELECT toString(_tags) AS json FROM {table}"))
+        .fetch_all::<JsonText>()
+        .await
+        .expect("read back")
+        .into_iter()
+        .map(|r| r.json)
+        .collect();
+
+    assert_eq!(stored.len(), 2, "both rows must be readable back");
+    for text in &stored {
+        let tags: Value = serde_json::from_str(text).expect("_tags must read back as JSON");
+        assert_eq!(
+            tags,
+            json!({"list": ["preserve_original_event", "forwarded"]}),
+            "every tag must survive, in order"
+        );
+    }
 }
 
 // ============================================================================
