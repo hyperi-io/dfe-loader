@@ -335,6 +335,74 @@ async fn test_rowbinary_ipv6_column_takes_an_ipv4_literal() {
 }
 
 // ============================================================================
+// Inserter: an ECS tags array lands in the JSON _tags column (#139)
+// ============================================================================
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_rowbinary_ecs_tags_array_lands_in_the_json_tags_column() {
+    use dfe_loader::config::{FieldSanitizationConfig, MetadataConfig, TimestampDqConfig};
+    use dfe_loader::transform::Transformer;
+
+    let (_infra, client, ch) = spin_up(test_name!()).await;
+    let reader = ch.clone();
+    let table = unique_table_name("tc_ecstags");
+
+    let ddl = format!(
+        "CREATE TABLE {table} (
+            _timestamp DateTime64(3),
+            _org_id String,
+            _source LowCardinality(String),
+            message String,
+            _tags JSON
+        ) ENGINE = MergeTree() ORDER BY (_org_id, _timestamp)"
+    );
+    client.execute(&ddl).await.expect("create table");
+
+    // The shape the bundled filebeat pipeline emits: ECS `tags` is an array of
+    // keywords, and the transformer hoists it into the JSON `_tags` column.
+    let transformer = Transformer::new(
+        &TimestampDqConfig::default(),
+        &MetadataConfig::default(),
+        &FieldSanitizationConfig::default(),
+    );
+    let event = json!({
+        "timestamp": "2026-09-03 10:00:00.000",
+        "message": "Accepted publickey for derek",
+        "tags": ["preserve_original_event", "forwarded"]
+    });
+    let row = transformer
+        .transform_with_raw(event, Some("acme"), Some("filebeat"))
+        .expect("transform must succeed")
+        .data;
+
+    let inserter = Inserter::new(client.clone(), ch, fast_fail_config())
+        .with_insert_format(InsertFormat::RowBinary);
+
+    let inserted = inserter
+        .insert_rows(&table, &[row], &[])
+        .await
+        .expect("an ECS tags array must not be rejected by the JSON _tags column");
+    assert_eq!(inserted, 1, "the row must land, not fail the batch");
+
+    let stored: Vec<String> = reader
+        .query(&format!("SELECT toString(_tags) AS json FROM {table}"))
+        .fetch_all::<JsonText>()
+        .await
+        .expect("read back")
+        .into_iter()
+        .map(|r| r.json)
+        .collect();
+
+    assert_eq!(stored.len(), 1, "the row must be readable back");
+    let tags: Value = serde_json::from_str(&stored[0]).expect("_tags must read back as JSON");
+    assert_eq!(
+        tags,
+        json!({"list": ["preserve_original_event", "forwarded"]}),
+        "every tag must survive the hoist, in order"
+    );
+}
+
+// ============================================================================
 // Inserter: salvage on bad row
 // ============================================================================
 

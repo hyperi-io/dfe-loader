@@ -393,6 +393,12 @@ for backwards compatibility and mapped onto `capture_mode`.
 3. `meta` field.
 4. `metadata.tags` nested path.
 
+**Shape:** the column is a ClickHouse `JSON`, which only accepts an object at
+the top level. An object source is stored as-is. Anything else -- ECS ships
+`tags` as an array of keywords, and some sources send a bare string -- is
+stored whole under a `list` key, so `["forwarded"]` lands as
+`{"list": ["forwarded"]}` and queries read it as `_tags.list`.
+
 **Configuration:**
 
 ```toml
@@ -427,7 +433,7 @@ All common header fields use an underscore prefix (`_timestamp`, `_org_id`,
 // Stored as:
 // _timestamp = 2024-01-15T10:30:00Z (from source timestamp)
 // _uuid = 01234567-... (generated)
-// _tags = ["important", "urgent"] (from source tags)
+// _tags = {"list": ["important", "urgent"]} (from source tags, wrapped for the JSON column)
 // + all original fields preserved in _json
 ```
 
