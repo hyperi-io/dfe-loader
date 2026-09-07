@@ -27,6 +27,7 @@
 //! | `_uuid`, `_timestamp_load` | Skipped — ClickHouse DEFAULT generates these |
 //! | `_json` | Skipped — zero-copy splice at serialisation time |
 //! | `_timestamp_received` | Always set to current UTC time |
+//! | `DateTime`/`DateTime64` | RFC3339 normalised to ClickHouse's text form |
 //! | `@skip` directive | Excluded from insert |
 //! | `@source:host.name` | Dotted path descends the parsed payload |
 //! | `@renamed:first(a/b/c)` | First-match source field lookup |
@@ -35,7 +36,7 @@
 
 use chrono::Utc;
 use serde_json::{Map, Value};
-use tracing::debug;
+use tracing::{debug, error};
 
 use crate::transform::transformer::fmt_ts;
 
@@ -94,10 +95,17 @@ impl HeaderExtractor {
         // Take ownership of the parsed map so we can move Values out (zero-clone).
         // Each lookup_move/lookup_first_move call removes the value from `parsed`
         // and moves it into the output map — no Value::clone() on the hot path.
+        // A payload the header pass cannot read used to return an empty map at
+        // debug level, and the row landed with every column at its type default.
+        // Say so at ERROR and let the caller reject it (#144).
         let mut parsed = match sonic_rs::from_slice::<Value>(raw) {
             Ok(Value::Object(map)) => map,
-            Ok(_) => return map,
+            Ok(_) => {
+                log_header_pass_skipped(table, "payload is not a JSON object");
+                return map;
+            }
             Err(e) => {
+                log_header_pass_skipped(table, "payload did not parse");
                 debug!(table = %table, error = %e, "Payload parse failed, skipping extraction");
                 return map;
             }
@@ -125,7 +133,9 @@ impl HeaderExtractor {
             if name == "_timestamp" {
                 let found = lookup_move(&mut parsed, "timestamp", name, &mut map)
                     || lookup_move(&mut parsed, name, name, &mut map);
-                if !found {
+                if found {
+                    normalise_datetime(&mut map, name);
+                } else {
                     map.insert(name.clone(), Value::String(fmt_ts(&now)));
                 }
                 continue;
@@ -158,11 +168,60 @@ impl HeaderExtractor {
             // Apply column default when all source fields were absent.
             if !found && let Some(ref default) = directives.default {
                 map.insert(name.clone(), resolve_default(default, &now));
+            } else if found && is_datetime(col) {
+                normalise_datetime(&mut map, name);
             }
         }
 
         debug!(table = %table, fields = map.len(), "Extracted promoted fields");
         map
+    }
+}
+
+/// Report a header pass that promoted nothing, at most once a minute.
+///
+/// The table name goes in the log, never in a metric label: it comes from a
+/// payload field with no allowlist, so labelling it would let untrusted input
+/// grow the label set without bound.
+pub(crate) fn log_header_pass_skipped(table: &str, reason: &str) {
+    metrics::counter!("dfe_loader_header_pass_skipped_total").increment(1);
+    static SKIPPED_TS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    if scalo::logger::log_debounced(&SKIPPED_TS, 60_000) {
+        error!(
+            table = %table,
+            reason = reason,
+            "Header pass promoted no columns, rejecting the message (max 1 per 60s)"
+        );
+    }
+}
+
+/// Whether a column takes a `ClickHouse` date-time text value.
+#[inline]
+fn is_datetime(col: &crate::clickhouse::types::ColumnInfo) -> bool {
+    use crate::clickhouse_ext::parsed_type::ParsedTypeExt;
+    matches!(
+        col.parsed_type.coercer_category(),
+        "DateTime" | "DateTime64"
+    )
+}
+
+/// Rewrite an RFC3339 date-time into the text form `ClickHouse` parses.
+///
+/// Both transforms and the receiver emit `2026-09-07T05:53:53.385Z`, and
+/// `JSONEachRow`'s `DateTime64` reader stops at the zone suffix and rejects the
+/// whole batch (code 27), so every row in it is lost. Anything that is not
+/// RFC3339 is left alone: the space-separated form and epoch numbers already
+/// parse, and a value this cannot read is the coercer's to judge, not ours.
+#[inline]
+fn normalise_datetime(map: &mut Map<String, Value>, name: &str) {
+    let Some(value) = map.get_mut(name) else {
+        return;
+    };
+    let Some(text) = value.as_str() else {
+        return;
+    };
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(text) {
+        *value = Value::String(fmt_ts(&dt.with_timezone(&Utc)));
     }
 }
 
@@ -745,5 +804,124 @@ mod tests {
             map.get("_timestamp"),
             Some(&Value::String("2026-03-15 10:30:00.123".into()))
         );
+    }
+
+    // ========================================================================
+    // RFC3339 timestamps are normalised for the wire (#144)
+    // ========================================================================
+
+    /// A schema whose named columns carry a `DateTime64(3)` type.
+    fn make_datetime_schema(columns: &[&str]) -> TableSchema {
+        let mut schema = make_schema(columns);
+        for col in &mut schema.columns {
+            col.type_name = "DateTime64(3)".to_string();
+            col.parsed_type = ParsedType::parse("DateTime64(3)");
+        }
+        schema
+    }
+
+    #[test]
+    fn test_timestamp_rfc3339_z_is_normalised() {
+        // The form both transforms and the receiver emit. Left verbatim it
+        // fails the whole JSONEachRow batch with code 27.
+        let extractor = default_extractor();
+        let raw = br#"{"timestamp": "2026-09-07T05:53:53.385Z"}"#;
+        let schema = make_datetime_schema(&["_timestamp"]);
+        let col_meta = empty_col_meta();
+
+        let map = extractor.extract(raw, "dfe.events", &schema, &col_meta);
+        assert_eq!(
+            map.get("_timestamp"),
+            Some(&Value::String("2026-09-07 05:53:53.385".into())),
+            "a Z suffix must be normalised away, not carried to ClickHouse"
+        );
+    }
+
+    #[test]
+    fn test_timestamp_rfc3339_offset_is_converted_to_utc() {
+        let extractor = default_extractor();
+        let raw = br#"{"timestamp": "2026-09-07T15:53:53.385+10:00"}"#;
+        let schema = make_datetime_schema(&["_timestamp"]);
+        let col_meta = empty_col_meta();
+
+        let map = extractor.extract(raw, "dfe.events", &schema, &col_meta);
+        assert_eq!(
+            map.get("_timestamp"),
+            Some(&Value::String("2026-09-07 05:53:53.385".into())),
+            "an offset must be applied, not truncated"
+        );
+    }
+
+    #[test]
+    fn test_datetime_column_rfc3339_is_normalised() {
+        // Not only the common header: any DateTime column fed by @source hits
+        // the same reader.
+        let extractor = default_extractor();
+        let raw = br#"{"seen_at": "2026-09-07T05:53:53.385Z"}"#;
+        let schema = make_datetime_schema(&["seen_at"]);
+        let col_meta = empty_col_meta();
+
+        let map = extractor.extract(raw, "dfe.events", &schema, &col_meta);
+        assert_eq!(
+            map.get("seen_at"),
+            Some(&Value::String("2026-09-07 05:53:53.385".into()))
+        );
+    }
+
+    #[test]
+    fn test_non_rfc3339_timestamp_is_left_alone() {
+        let extractor = default_extractor();
+        let raw = br#"{"timestamp": 1788760433385}"#;
+        let schema = make_datetime_schema(&["_timestamp"]);
+        let col_meta = empty_col_meta();
+
+        let map = extractor.extract(raw, "dfe.events", &schema, &col_meta);
+        assert_eq!(
+            map.get("_timestamp"),
+            Some(&Value::Number(1_788_760_433_385_i64.into())),
+            "epoch millis already parse — normalisation must not touch them"
+        );
+    }
+
+    #[test]
+    fn test_string_column_holding_a_timestamp_is_untouched() {
+        let extractor = default_extractor();
+        let raw = br#"{"observed": "2026-09-07T05:53:53.385Z"}"#;
+        let schema = make_schema(&["observed"]);
+        let col_meta = empty_col_meta();
+
+        let map = extractor.extract(raw, "dfe.events", &schema, &col_meta);
+        assert_eq!(
+            map.get("observed"),
+            Some(&Value::String("2026-09-07T05:53:53.385Z".into())),
+            "a String column keeps the text it was given"
+        );
+    }
+
+    // ========================================================================
+    // A header pass that promotes nothing (#144)
+    // ========================================================================
+
+    #[test]
+    fn test_non_object_payload_promotes_nothing() {
+        let extractor = default_extractor();
+        let schema = make_schema(&["message"]);
+        let col_meta = empty_col_meta();
+
+        let map = extractor.extract(b"[1,2,3]", "dfe.events", &schema, &col_meta);
+        assert!(
+            map.is_empty(),
+            "a non-object payload has no columns to promote"
+        );
+    }
+
+    #[test]
+    fn test_unparseable_payload_promotes_nothing() {
+        let extractor = default_extractor();
+        let schema = make_schema(&["message"]);
+        let col_meta = empty_col_meta();
+
+        let map = extractor.extract(b"{not json", "dfe.events", &schema, &col_meta);
+        assert!(map.is_empty(), "an unparseable payload promotes nothing");
     }
 }
