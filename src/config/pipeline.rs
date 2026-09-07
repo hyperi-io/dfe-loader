@@ -112,7 +112,7 @@ pub struct RoutingConfig {
     pub default_db: String,
 
     /// Default table if no `table_field` matches
-    /// Default: "default"
+    /// Default: "main"
     pub default_table: String,
 
     /// Field to extract for _`org_id` column (stored in data for RLS)
@@ -154,7 +154,7 @@ impl Default for RoutingConfig {
             db_fields: vec![],
             table_fields: vec!["_source".to_string()],
             default_db: "dfe".to_string(),
-            default_table: "default".to_string(),
+            default_table: "main".to_string(),
             // Extract org_id for _org_id column (RLS)
             org_id_field: Some("org_id".to_string()),
             // No per-org routing by default (shared schema)

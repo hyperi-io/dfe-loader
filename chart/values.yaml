@@ -187,7 +187,7 @@ config:
     table_fields:
     - _source
     default_db: dfe
-    default_table: default
+    default_table: main
     org_id_field: org_id
     org_routes: []
     source_to_table: {}

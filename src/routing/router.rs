@@ -1179,7 +1179,7 @@ mod tests {
         let value2 = serde_json::json!({"message": "normal log"});
         assert_eq!(
             router.route_value(&value2),
-            RouteResult::Table("dfe.default".to_string())
+            RouteResult::Table("dfe.main".to_string())
         );
     }
 
@@ -1204,7 +1204,7 @@ mod tests {
         let value2 = serde_json::json!({"status": "closed"});
         assert_eq!(
             router.route_value(&value2),
-            RouteResult::Table("dfe.default".to_string())
+            RouteResult::Table("dfe.main".to_string())
         );
     }
 
@@ -1231,7 +1231,7 @@ mod tests {
         let value2 = serde_json::json!({"severity": "critical", "action": "logout"});
         assert_eq!(
             router.route_value(&value2),
-            RouteResult::Table("dfe.default".to_string())
+            RouteResult::Table("dfe.main".to_string())
         );
     }
 
@@ -1278,7 +1278,7 @@ mod tests {
         let value = serde_json::json!({"message": "hello"});
         assert_eq!(
             router.route_value(&value),
-            RouteResult::Table("dfe.default".to_string())
+            RouteResult::Table("dfe.main".to_string())
         );
     }
 
@@ -1303,7 +1303,7 @@ mod tests {
         let value2 = serde_json::json!({"amount": 500});
         assert_eq!(
             router.route_value(&value2),
-            RouteResult::Table("dfe.default".to_string())
+            RouteResult::Table("dfe.main".to_string())
         );
     }
 }
