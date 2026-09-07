@@ -36,13 +36,24 @@
 
 use chrono::Utc;
 use serde_json::{Map, Value};
-use tracing::{debug, error};
+use tracing::debug;
 
 use crate::transform::transformer::fmt_ts;
 
 use crate::clickhouse::TableSchema;
 use crate::column_meta::ColumnMetaCache;
 use crate::config::{MetadataConfig, RoutingConfig};
+
+/// The outcome of one header pass.
+///
+/// `empty_reason` is `Some` exactly when `fields` is empty, so the caller that
+/// rejects the message logs why without re-deriving it.
+pub struct HeaderExtraction {
+    /// Promoted columns, keyed by destination column name.
+    pub fields: Map<String, Value>,
+    /// Why nothing was promoted.
+    pub empty_reason: Option<&'static str>,
+}
 
 /// Schema-guided SIMD field extractor.
 ///
@@ -80,13 +91,16 @@ impl HeaderExtractor {
     ///
     /// Column directives are read from `col_meta` with full config cascade:
     /// per-table config > global config > DDL `@directive` annotations.
+    ///
+    /// A pass that promotes nothing carries the reason back to the caller; the
+    /// caller owns the rejection, so it owns the log and the counter (#145).
     pub fn extract(
         &self,
         raw: &[u8],
         table: &str,
         schema: &TableSchema,
         col_meta: &ColumnMetaCache,
-    ) -> Map<String, Value> {
+    ) -> HeaderExtraction {
         let now = Utc::now();
         let mut map = Map::with_capacity(schema.columns.len());
 
@@ -97,17 +111,21 @@ impl HeaderExtractor {
         // and moves it into the output map — no Value::clone() on the hot path.
         // A payload the header pass cannot read used to return an empty map at
         // debug level, and the row landed with every column at its type default.
-        // Say so at ERROR and let the caller reject it (#144).
+        // Name the reason and let the caller reject it (#144).
         let mut parsed = match sonic_rs::from_slice::<Value>(raw) {
             Ok(Value::Object(map)) => map,
             Ok(_) => {
-                log_header_pass_skipped(table, "payload is not a JSON object");
-                return map;
+                return HeaderExtraction {
+                    fields: map,
+                    empty_reason: Some("payload is not a JSON object"),
+                };
             }
             Err(e) => {
-                log_header_pass_skipped(table, "payload did not parse");
                 debug!(table = %table, error = %e, "Payload parse failed, skipping extraction");
-                return map;
+                return HeaderExtraction {
+                    fields: map,
+                    empty_reason: Some("payload did not parse"),
+                };
             }
         };
 
@@ -174,35 +192,26 @@ impl HeaderExtractor {
         }
 
         debug!(table = %table, fields = map.len(), "Extracted promoted fields");
-        map
-    }
-}
-
-/// Report a header pass that promoted nothing, at most once a minute.
-///
-/// The table name goes in the log, never in a metric label: it comes from a
-/// payload field with no allowlist, so labelling it would let untrusted input
-/// grow the label set without bound.
-pub(crate) fn log_header_pass_skipped(table: &str, reason: &str) {
-    metrics::counter!("dfe_loader_header_pass_skipped_total").increment(1);
-    static SKIPPED_TS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    if scalo::logger::log_debounced(&SKIPPED_TS, 60_000) {
-        error!(
-            table = %table,
-            reason = reason,
-            "Header pass promoted no columns, rejecting the message (max 1 per 60s)"
-        );
+        // A valid object whose fields match no column promotes nothing too, and
+        // used to reach the caller indistinguishable from a full pass.
+        let empty_reason = map
+            .is_empty()
+            .then_some("no schema column matched the payload");
+        HeaderExtraction {
+            fields: map,
+            empty_reason,
+        }
     }
 }
 
 /// Whether a column takes a `ClickHouse` date-time text value.
+///
+/// `TypeTag` is resolved once when the schema is parsed, so this is a
+/// discriminant compare rather than the two `&str` compares a category costs.
 #[inline]
 fn is_datetime(col: &crate::clickhouse::types::ColumnInfo) -> bool {
-    use crate::clickhouse_ext::parsed_type::ParsedTypeExt;
-    matches!(
-        col.parsed_type.coercer_category(),
-        "DateTime" | "DateTime64"
-    )
+    use crate::clickhouse_ext::parsed_type::TypeTag;
+    matches!(col.parsed_type.tag, TypeTag::DateTime | TypeTag::DateTime64)
 }
 
 /// Rewrite an RFC3339 date-time into the text form `ClickHouse` parses.
@@ -220,9 +229,36 @@ fn normalise_datetime(map: &mut Map<String, Value>, name: &str) {
     let Some(text) = value.as_str() else {
         return;
     };
+    if !looks_rfc3339(text) {
+        return;
+    }
     if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(text) {
         *value = Value::String(fmt_ts(&dt.with_timezone(&Utc)));
     }
+}
+
+/// Whether a value can be RFC3339, cheaply enough to run on every row.
+///
+/// The common case is already `ClickHouse`'s text form -- a space at byte 10 and
+/// no zone -- so it costs one byte compare and a look at the last six, and never
+/// the parse or the `String` the rewrite allocates. RFC3339 needs a `T`/`t`
+/// separator there, or, for the space-separated form chrono also accepts, a
+/// trailing `Z` or a `+HH:MM` / `-HH:MM` offset.
+#[inline]
+fn looks_rfc3339(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    if bytes.len() < 11 {
+        return false;
+    }
+    if bytes[10] == b'T' || bytes[10] == b't' {
+        return true;
+    }
+    if matches!(bytes[bytes.len() - 1], b'Z' | b'z') {
+        return true;
+    }
+    bytes[bytes.len() - 6..]
+        .iter()
+        .any(|b| matches!(b, b'+' | b'-'))
 }
 
 /// Resolve a parsed `@default` / `@source` fallback against this extraction's clock.
@@ -356,7 +392,9 @@ mod tests {
         let schema = make_schema(&["severity", "src_ip"]);
         let col_meta = empty_col_meta();
 
-        let map = extractor.extract(raw, "dfe.events", &schema, &col_meta);
+        let map = extractor
+            .extract(raw, "dfe.events", &schema, &col_meta)
+            .fields;
 
         assert_eq!(map.get("severity"), Some(&Value::String("high".into())));
         assert_eq!(map.get("src_ip"), Some(&Value::String("1.2.3.4".into())));
@@ -373,7 +411,9 @@ mod tests {
         let schema = make_schema(&["_uuid", "_timestamp_load"]);
         let col_meta = empty_col_meta();
 
-        let map = extractor.extract(raw, "dfe.events", &schema, &col_meta);
+        let map = extractor
+            .extract(raw, "dfe.events", &schema, &col_meta)
+            .fields;
         assert!(
             map.is_empty(),
             "_uuid and _timestamp_load must never be injected"
@@ -387,7 +427,9 @@ mod tests {
         let schema = make_schema(&["_json"]);
         let col_meta = empty_col_meta();
 
-        let map = extractor.extract(raw, "dfe.events", &schema, &col_meta);
+        let map = extractor
+            .extract(raw, "dfe.events", &schema, &col_meta)
+            .fields;
         assert!(
             map.is_empty(),
             "_json must not be injected (zero-copy splice path)"
@@ -401,7 +443,9 @@ mod tests {
         let schema = make_schema(&["_timestamp_received"]);
         let col_meta = empty_col_meta();
 
-        let map = extractor.extract(raw, "dfe.events", &schema, &col_meta);
+        let map = extractor
+            .extract(raw, "dfe.events", &schema, &col_meta)
+            .fields;
         assert!(
             map.contains_key("_timestamp_received"),
             "_timestamp_received must always be injected"
@@ -419,7 +463,9 @@ mod tests {
         let schema = make_schema(&["_org_id"]);
         let col_meta = empty_col_meta();
 
-        let map = extractor.extract(raw, "dfe.events", &schema, &col_meta);
+        let map = extractor
+            .extract(raw, "dfe.events", &schema, &col_meta)
+            .fields;
         assert_eq!(map.get("_org_id"), Some(&Value::String("acme".into())));
     }
 
@@ -443,7 +489,9 @@ mod tests {
         );
         col_meta.apply_ddl("dfe.events", ddl);
 
-        let map = extractor.extract(raw, "dfe.events", &schema, &col_meta);
+        let map = extractor
+            .extract(raw, "dfe.events", &schema, &col_meta)
+            .fields;
         assert!(
             !map.contains_key("debug_info"),
             "skipped column must not be promoted"
@@ -473,7 +521,9 @@ mod tests {
         config.tables.insert("dfe.events".to_string(), table_cols);
         let col_meta = ColumnMetaCache::new(config);
 
-        let map = extractor.extract(raw, "dfe.events", &schema, &col_meta);
+        let map = extractor
+            .extract(raw, "dfe.events", &schema, &col_meta)
+            .fields;
         assert_eq!(
             map.get("source.ip"),
             Some(&Value::String("10.0.0.1".into()))
@@ -500,7 +550,9 @@ mod tests {
         );
         col_meta.apply_ddl("dfe.events", ddl);
 
-        let map = extractor.extract(raw, "dfe.events", &schema, &col_meta);
+        let map = extractor
+            .extract(raw, "dfe.events", &schema, &col_meta)
+            .fields;
         assert_eq!(map.get("severity"), Some(&Value::String("unknown".into())));
     }
 
@@ -511,7 +563,9 @@ mod tests {
         let schema = make_schema(&["count", "is_active", "ratio"]);
         let col_meta = empty_col_meta();
 
-        let map = extractor.extract(raw, "dfe.events", &schema, &col_meta);
+        let map = extractor
+            .extract(raw, "dfe.events", &schema, &col_meta)
+            .fields;
         assert_eq!(map.get("count"), Some(&serde_json::json!(42)));
         assert_eq!(map.get("is_active"), Some(&serde_json::json!(true)));
         assert_eq!(map.get("ratio"), Some(&serde_json::json!(0.75)));
@@ -532,7 +586,9 @@ mod tests {
         let extractor2 = HeaderExtractor::new(&metadata, &RoutingConfig::default());
         let col_meta = empty_col_meta();
 
-        let map = extractor2.extract(raw, "dfe.events", &schema, &col_meta);
+        let map = extractor2
+            .extract(raw, "dfe.events", &schema, &col_meta)
+            .fields;
         assert_eq!(map.get("_source"), Some(&Value::String("auth".into())));
     }
 
@@ -545,7 +601,9 @@ mod tests {
         let schema = make_schema(&["_timestamp", "severity"]);
         let col_meta = empty_col_meta();
 
-        let map = extractor.extract(raw, "dfe.events", &schema, &col_meta);
+        let map = extractor
+            .extract(raw, "dfe.events", &schema, &col_meta)
+            .fields;
 
         // _timestamp must be present (not omitted)
         assert!(
@@ -635,7 +693,9 @@ mod tests {
         ]);
         let col_meta = filebeat_col_meta();
 
-        let map = extractor.extract(FILEBEAT_PAYLOAD, "dfe.filebeat", &schema, &col_meta);
+        let map = extractor
+            .extract(FILEBEAT_PAYLOAD, "dfe.filebeat", &schema, &col_meta)
+            .fields;
 
         assert_eq!(
             map.get("host_name"),
@@ -670,7 +730,9 @@ mod tests {
         let schema = make_schema(&["process_pid", "source_ip"]);
         let col_meta = filebeat_col_meta();
 
-        let map = extractor.extract(FILEBEAT_PAYLOAD, "dfe.filebeat", &schema, &col_meta);
+        let map = extractor
+            .extract(FILEBEAT_PAYLOAD, "dfe.filebeat", &schema, &col_meta)
+            .fields;
         assert_eq!(map.get("process_pid"), Some(&serde_json::json!(4242)));
         assert_eq!(
             map.get("source_ip"),
@@ -686,7 +748,9 @@ mod tests {
         let schema = make_schema(&["host_name", "agent_type"]);
         let col_meta = filebeat_col_meta();
 
-        let map = extractor.extract(raw, "dfe.filebeat", &schema, &col_meta);
+        let map = extractor
+            .extract(raw, "dfe.filebeat", &schema, &col_meta)
+            .fields;
         assert!(!map.contains_key("host_name"));
         assert!(!map.contains_key("agent_type"));
     }
@@ -700,7 +764,9 @@ mod tests {
         let schema = make_schema(&["host_name"]);
         let col_meta = filebeat_col_meta();
 
-        let map = extractor.extract(raw, "dfe.filebeat", &schema, &col_meta);
+        let map = extractor
+            .extract(raw, "dfe.filebeat", &schema, &col_meta)
+            .fields;
         assert_eq!(map.get("host_name"), Some(&Value::String("web-02".into())));
     }
 
@@ -721,7 +787,9 @@ mod tests {
         );
         col_meta.apply_ddl("dfe.events", ddl);
 
-        let map = extractor.extract(raw, "dfe.events", &schema, &col_meta);
+        let map = extractor
+            .extract(raw, "dfe.events", &schema, &col_meta)
+            .fields;
         let Some(Value::String(ts)) = map.get("event_time") else {
             panic!("event_time must be a string timestamp");
         };
@@ -752,7 +820,9 @@ mod tests {
         );
         col_meta.apply_ddl("dfe.filebeat", ddl);
 
-        let map = extractor.extract(raw, "dfe.filebeat", &schema, &col_meta);
+        let map = extractor
+            .extract(raw, "dfe.filebeat", &schema, &col_meta)
+            .fields;
         assert!(
             !map.contains_key("_source"),
             "an unresolvable fallback must not become a literal: {:?}",
@@ -777,7 +847,9 @@ mod tests {
         );
         col_meta.apply_ddl("dfe.events", ddl);
 
-        let map = extractor.extract(raw, "dfe.events", &schema, &col_meta);
+        let map = extractor
+            .extract(raw, "dfe.events", &schema, &col_meta)
+            .fields;
         let Some(Value::String(id)) = map.get("trace_id") else {
             panic!("trace_id must be a string uuid");
         };
@@ -799,7 +871,9 @@ mod tests {
         let schema = make_schema(&["_timestamp", "severity"]);
         let col_meta = empty_col_meta();
 
-        let map = extractor.extract(raw, "dfe.events", &schema, &col_meta);
+        let map = extractor
+            .extract(raw, "dfe.events", &schema, &col_meta)
+            .fields;
         assert_eq!(
             map.get("_timestamp"),
             Some(&Value::String("2026-03-15 10:30:00.123".into()))
@@ -829,7 +903,9 @@ mod tests {
         let schema = make_datetime_schema(&["_timestamp"]);
         let col_meta = empty_col_meta();
 
-        let map = extractor.extract(raw, "dfe.events", &schema, &col_meta);
+        let map = extractor
+            .extract(raw, "dfe.events", &schema, &col_meta)
+            .fields;
         assert_eq!(
             map.get("_timestamp"),
             Some(&Value::String("2026-09-07 05:53:53.385".into())),
@@ -844,7 +920,9 @@ mod tests {
         let schema = make_datetime_schema(&["_timestamp"]);
         let col_meta = empty_col_meta();
 
-        let map = extractor.extract(raw, "dfe.events", &schema, &col_meta);
+        let map = extractor
+            .extract(raw, "dfe.events", &schema, &col_meta)
+            .fields;
         assert_eq!(
             map.get("_timestamp"),
             Some(&Value::String("2026-09-07 05:53:53.385".into())),
@@ -861,7 +939,9 @@ mod tests {
         let schema = make_datetime_schema(&["seen_at"]);
         let col_meta = empty_col_meta();
 
-        let map = extractor.extract(raw, "dfe.events", &schema, &col_meta);
+        let map = extractor
+            .extract(raw, "dfe.events", &schema, &col_meta)
+            .fields;
         assert_eq!(
             map.get("seen_at"),
             Some(&Value::String("2026-09-07 05:53:53.385".into()))
@@ -875,7 +955,9 @@ mod tests {
         let schema = make_datetime_schema(&["_timestamp"]);
         let col_meta = empty_col_meta();
 
-        let map = extractor.extract(raw, "dfe.events", &schema, &col_meta);
+        let map = extractor
+            .extract(raw, "dfe.events", &schema, &col_meta)
+            .fields;
         assert_eq!(
             map.get("_timestamp"),
             Some(&Value::Number(1_788_760_433_385_i64.into())),
@@ -890,7 +972,9 @@ mod tests {
         let schema = make_schema(&["observed"]);
         let col_meta = empty_col_meta();
 
-        let map = extractor.extract(raw, "dfe.events", &schema, &col_meta);
+        let map = extractor
+            .extract(raw, "dfe.events", &schema, &col_meta)
+            .fields;
         assert_eq!(
             map.get("observed"),
             Some(&Value::String("2026-09-07T05:53:53.385Z".into())),
@@ -908,11 +992,12 @@ mod tests {
         let schema = make_schema(&["message"]);
         let col_meta = empty_col_meta();
 
-        let map = extractor.extract(b"[1,2,3]", "dfe.events", &schema, &col_meta);
+        let out = extractor.extract(b"[1,2,3]", "dfe.events", &schema, &col_meta);
         assert!(
-            map.is_empty(),
+            out.fields.is_empty(),
             "a non-object payload has no columns to promote"
         );
+        assert_eq!(out.empty_reason, Some("payload is not a JSON object"));
     }
 
     #[test]
@@ -921,7 +1006,90 @@ mod tests {
         let schema = make_schema(&["message"]);
         let col_meta = empty_col_meta();
 
-        let map = extractor.extract(b"{not json", "dfe.events", &schema, &col_meta);
-        assert!(map.is_empty(), "an unparseable payload promotes nothing");
+        let out = extractor.extract(b"{not json", "dfe.events", &schema, &col_meta);
+        assert!(
+            out.fields.is_empty(),
+            "an unparseable payload promotes nothing"
+        );
+        assert_eq!(out.empty_reason, Some("payload did not parse"));
+    }
+
+    #[test]
+    fn test_valid_object_matching_no_column_reports_a_reason() {
+        // The silent case: this parses, it is an object, and not one field is a
+        // column. It used to reach the caller looking like any other empty pass.
+        let extractor = default_extractor();
+        let schema = make_schema(&["message"]);
+        let col_meta = empty_col_meta();
+
+        let out = extractor.extract(br#"{"other":1}"#, "dfe.events", &schema, &col_meta);
+        assert!(out.fields.is_empty());
+        assert_eq!(
+            out.empty_reason,
+            Some("no schema column matched the payload"),
+            "a valid object promoting nothing must still say why"
+        );
+    }
+
+    #[test]
+    fn test_a_full_pass_reports_no_reason() {
+        let extractor = default_extractor();
+        let schema = make_schema(&["message"]);
+        let col_meta = empty_col_meta();
+
+        let out = extractor.extract(br#"{"message":"hi"}"#, "dfe.events", &schema, &col_meta);
+        assert_eq!(out.empty_reason, None);
+    }
+
+    // ========================================================================
+    // The already-normal date-time value costs no parse and no alloc
+    // ========================================================================
+
+    #[test]
+    fn test_clickhouse_space_form_is_not_reallocated() {
+        let mut map = Map::new();
+        map.insert(
+            "_timestamp".to_string(),
+            Value::String("2026-09-07 05:53:53.385".to_string()),
+        );
+        let before = map["_timestamp"].as_str().expect("string").as_ptr();
+
+        normalise_datetime(&mut map, "_timestamp");
+
+        let after = map["_timestamp"].as_str().expect("string");
+        assert_eq!(after, "2026-09-07 05:53:53.385");
+        assert_eq!(
+            after.as_ptr(),
+            before,
+            "the guard path must leave the value where it was, not rebuild it"
+        );
+    }
+
+    #[test]
+    fn test_rfc3339_guard_admits_only_what_can_parse() {
+        assert!(looks_rfc3339("2026-09-07T05:53:53.385Z"));
+        assert!(looks_rfc3339("2026-09-07t05:53:53Z"));
+        assert!(looks_rfc3339("2026-09-07 05:53:53.385+10:00"));
+        assert!(!looks_rfc3339("2026-09-07 05:53:53.385"));
+        assert!(!looks_rfc3339("2026-09-07 05:53:53"));
+        assert!(!looks_rfc3339("2026-09-07"));
+        assert!(!looks_rfc3339(""));
+    }
+
+    #[test]
+    fn test_space_form_survives_a_datetime_column() {
+        let extractor = default_extractor();
+        let raw = br#"{"seen_at": "2026-09-07 05:53:53.385"}"#;
+        let schema = make_datetime_schema(&["seen_at"]);
+        let col_meta = empty_col_meta();
+
+        let map = extractor
+            .extract(raw, "dfe.events", &schema, &col_meta)
+            .fields;
+        assert_eq!(
+            map.get("seen_at"),
+            Some(&Value::String("2026-09-07 05:53:53.385".into())),
+            "ClickHouse's own text form must pass through untouched"
+        );
     }
 }

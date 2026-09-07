@@ -740,13 +740,14 @@ Using the DDL Expression Language (see [../clickhouse/DDL-DIRECTIVES.md](../clic
 
 ### When the header pass promotes nothing
 
-A payload the header pass cannot read -- not JSON, or not a JSON object -- once
-returned an empty field map and the row landed anyway, every column at its type
-default: no `_source`, no `_tags`, `_timestamp` at epoch zero. A row like that
-reads as data while carrying none, and cannot say where it came from.
+A payload the header pass cannot read -- not JSON, not a JSON object, or a valid
+object matching no column in the table -- once returned an empty field map and
+the row landed anyway, every column at its type default: no `_source`, no
+`_tags`, `_timestamp` at epoch zero. A row like that reads as data while
+carrying none, and cannot say where it came from.
 
-The message is now rejected to the DLQ instead. The loader logs an ERROR naming
-the table, at most once a minute, and counts
+The message is now rejected to the DLQ instead. Every one of those rejections
+logs an ERROR naming the table and the reason, at most once a minute, and counts
 `dfe_loader_header_pass_skipped_total`. The table name stays out of the metric's
 labels: it comes from a payload field with no allowlist, so labelling it would
 let untrusted input grow the label set without bound.
