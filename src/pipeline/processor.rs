@@ -174,6 +174,15 @@ impl MessageProcessor<'_> {
                 self.extractor
                     .extract(&msg.payload, &table, &schema, self.col_meta_cache);
 
+            // A header pass that promoted nothing would land a row of type
+            // defaults — no _source, no _tags, _timestamp at epoch zero (#144).
+            // The extractor has already logged why.
+            if promoted.is_empty() && !schema.columns.is_empty() {
+                return Err(crate::Error::Transform(format!(
+                    "header pass promoted no columns for {table}"
+                )));
+            }
+
             // raw_payload carries Kafka bytes for zero-copy _json splice (full mode only).
             // raw_only: _raw set below from payload bytes, no _json splice needed.
             // extracted_only: neither — no raw payload passed to inserter.
@@ -1776,5 +1785,55 @@ mod tests {
             payload.as_slice(),
             "_raw must be the full original ingest payload as UTF-8 text"
         );
+    }
+
+    /// Regression for #144: a header pass that promotes nothing must reject the
+    /// message. It used to fall through and land a row of type defaults — no
+    /// `_source`, no `_tags`, `_timestamp` at epoch zero — which reads as data
+    /// while carrying none.
+    #[test]
+    fn json_primary_rejects_a_message_whose_header_pass_promoted_nothing_144() {
+        use crate::clickhouse::{ColumnInfo, ParsedType, TableSchema};
+
+        let harness = TestHarness::new();
+        // Parses as JSON, routes, and is not an object — the extractor has no
+        // columns to promote from it.
+        let msg = harness.make_msg(br"[1,2,3]");
+
+        let table = match harness.processor_json_primary().process(&msg) {
+            Err(crate::Error::SchemaPending { table }) => table,
+            Ok(_) => panic!("expected SchemaPending before schema cached, got Ok"),
+            Err(e) => panic!("expected SchemaPending, got Err({e:?})"),
+        };
+
+        let (db, tbl) = table.split_once('.').expect("db.table");
+        harness.schema_cache.insert(
+            table.clone(),
+            TableSchema {
+                database: db.to_string(),
+                table: tbl.to_string(),
+                columns: vec![ColumnInfo {
+                    name: "message".to_string(),
+                    type_name: "String".to_string(),
+                    parsed_type: ParsedType::parse("String"),
+                    position: 1,
+                    default_kind: String::new(),
+                    default_expression: String::new(),
+                    comment: String::new(),
+                    is_in_primary_key: false,
+                    is_in_sorting_key: false,
+                }],
+                comment: String::new(),
+            },
+        );
+
+        match harness.processor_json_primary().process(&msg) {
+            Err(crate::Error::Transform(reason)) => assert!(
+                reason.contains("promoted no columns"),
+                "the rejection must name the cause, got: {reason}"
+            ),
+            Ok(_) => panic!("a header-less row must not be handed on for insert"),
+            Err(e) => panic!("expected a Transform rejection, got Err({e:?})"),
+        }
     }
 }

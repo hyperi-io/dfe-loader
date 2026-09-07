@@ -1234,3 +1234,143 @@ async fn test_client_http_unicode_table_name() {
         .await
         .expect("drop unicode table");
 }
+
+// ============================================================================
+// Inserter: the whole common header survives an RFC3339 event timestamp (#144)
+// ============================================================================
+
+/// The common header read back as text.
+#[derive(clickhouse::Row, serde::Deserialize)]
+struct CommonHeader {
+    timestamp: String,
+    source: String,
+    raw: String,
+    json: String,
+    tags: String,
+    message: String,
+}
+
+/// The per-source table dfe-engine builds: the timeseries header profile
+/// verbatim (types, `@source` / `@captured` comments and all) plus two columns
+/// off the filebeat meta schema. Hyphenated, because a source name is DNS-1123
+/// and the table takes it verbatim.
+async fn create_per_source_table(client: &ClickHouseQueryClient, table: &str) {
+    let ddl = format!(
+        "CREATE TABLE `{table}` (
+            `_timestamp_load` DateTime64(3, 'UTC') DEFAULT now64(3) COMMENT '@generated: now64(3) - Insertion timestamp (ms precision)',
+            `_timestamp` DateTime64(3, 'UTC') COMMENT '@source: timestamp | now() - Event timestamp from source data',
+            `_timestamp_received` DateTime64(3, 'UTC') COMMENT '@source: first(timestamp_received/received_at) - When the event was first received',
+            `_uuid` Nullable(UUID) DEFAULT generateUUIDv7() COMMENT '@generated: generateUUIDv7() - Time-ordered unique event identifier',
+            `_org_id` LowCardinality(String) COMMENT '@source: org_id - Tenant/organisation identifier',
+            `_source` LowCardinality(Nullable(String)) COMMENT '@source: first(_source) | topic_name - Data source label',
+            `_raw` Nullable(String) COMMENT '@captured: raw_payload - Original event payload as text',
+            `_json` JSON(max_dynamic_paths = 2048) COMMENT '@captured: raw_payload as JSON - Original event payload as structured JSON',
+            `_tags` JSON COMMENT '@source: first(tags/_tags/meta/metadata.tags) - Event metadata tags',
+            `message` String COMMENT '@source: message - Log line content',
+            `source_ip` Nullable(IPv6) COMMENT '@source: source.ip - Source address (ECS source.ip)'
+        ) ENGINE = MergeTree() ORDER BY (_timestamp_load, _timestamp, _org_id)"
+    );
+    client
+        .execute(&ddl)
+        .await
+        .expect("per-source table create must succeed");
+}
+
+/// Drive the real header pass over #144's event and assert every common-header
+/// column lands. The event's `timestamp` is RFC3339 with a `Z`, which is what
+/// both transforms and the receiver emit.
+async fn common_header_survives(test: &str, format: InsertFormat) {
+    use dfe_loader::column_meta::{ColumnDirectivesConfig, ColumnMetaCache, parse_directives};
+    use dfe_loader::config::{MetadataConfig, RoutingConfig};
+    use dfe_loader::transform::HeaderExtractor;
+    use rustc_hash::FxHashMap;
+
+    let (_infra, client, ch) = spin_up(test).await;
+    let reader = ch.clone();
+    let table = "filebeat-vector";
+    create_per_source_table(&client, table).await;
+
+    // Read the schema and comments back out of ClickHouse, as the background
+    // schema resolver does.
+    let schema = client
+        .fetch_table_schema(table)
+        .await
+        .expect("fetch schema");
+    let comments = client
+        .fetch_column_comments(table)
+        .await
+        .expect("fetch column comments");
+    let qualified = format!("{}.{}", schema.database, schema.table);
+    let col_meta = ColumnMetaCache::new(ColumnDirectivesConfig::default());
+    let directives: FxHashMap<String, _> = comments
+        .into_iter()
+        .map(|(col, comment)| (col, parse_directives(&comment)))
+        .collect();
+    col_meta.apply_ddl(&qualified, directives);
+
+    // #144's event, verbatim off the topic.
+    let payload = br#"{"_source":"filebeat-vector","_timestamp_receiver":1788760433385,"message":"ws21 probe: a line no filebeat module claims","tags":["filebeat_unmatched"],"timestamp":"2026-09-07T05:53:53.385Z","topic":"filebeat-vector_land"}"#;
+
+    let extractor = HeaderExtractor::new(&MetadataConfig::default(), &RoutingConfig::default());
+    let mut row = extractor.extract(payload, &qualified, &schema, &col_meta);
+    // The processor's capture step, which the extractor does not do.
+    row.insert(
+        "_raw".to_string(),
+        Value::String(String::from_utf8(payload.to_vec()).expect("utf-8 payload")),
+    );
+
+    let inserter = Inserter::new(client.clone(), ch, fast_fail_config()).with_insert_format(format);
+    let raw: Arc<[u8]> = Arc::from(payload.as_slice());
+    let inserted = inserter
+        .insert_rows(&qualified, &[row], &[raw])
+        .await
+        .expect("an RFC3339 event timestamp must not reject the batch");
+    assert_eq!(inserted, 1, "the row must land, not fail the batch");
+
+    let stored = reader
+        .query(&format!(
+            "SELECT toString(_timestamp) AS timestamp, \
+             ifNull(toString(_source), '') AS source, ifNull(toString(_raw), '') AS raw, \
+             toString(_json) AS json, toString(_tags) AS tags, message FROM `{table}`"
+        ))
+        .fetch_all::<CommonHeader>()
+        .await
+        .expect("read back");
+
+    assert_eq!(stored.len(), 1, "the row must be readable back");
+    let got = &stored[0];
+    assert_eq!(
+        got.timestamp, "2026-09-07 05:53:53.385",
+        "_timestamp must carry the event's own time, not epoch zero"
+    );
+    assert_eq!(
+        got.source, "filebeat-vector",
+        "_source must say where it came from"
+    );
+    assert_eq!(
+        serde_json::from_str::<Value>(&got.tags).expect("_tags is JSON"),
+        json!({"list": ["filebeat_unmatched"]}),
+        "_tags must carry the ECS tags list"
+    );
+    assert_eq!(
+        got.raw.as_bytes(),
+        payload.as_slice(),
+        "_raw must be the payload"
+    );
+    assert_eq!(
+        serde_json::from_str::<Value>(&got.json).expect("_json is JSON"),
+        serde_json::from_slice::<Value>(payload).expect("payload is JSON"),
+        "_json must be the payload as structured JSON"
+    );
+    assert_eq!(got.message, "ws21 probe: a line no filebeat module claims");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_common_header_survives_rfc3339_timestamp_rowbinary_144() {
+    common_header_survives(test_name!(), InsertFormat::RowBinary).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_common_header_survives_rfc3339_timestamp_jsoneachrow_144() {
+    common_header_survives(test_name!(), InsertFormat::JsonEachRow).await;
+}

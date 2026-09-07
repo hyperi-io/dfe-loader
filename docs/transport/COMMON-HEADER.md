@@ -159,6 +159,16 @@ SETTINGS index_granularity = 8192
 - Millisecond precision preserved.
 - Auto-detection of epoch seconds/millis/micros/nanos.
 
+**Wire format:**
+
+An RFC3339 value -- `2026-09-07T05:53:53.385Z`, which is what the receiver and
+both transforms emit -- is normalised to ClickHouse's own text form
+(`2026-09-07 05:53:53.385`, UTC) before the insert, and an offset is applied
+rather than truncated. Carried verbatim it stops the `JSONEachRow` `DateTime64`
+reader at the zone suffix, which rejects the whole batch with code 27 and loses
+every row in it. The same normalisation applies to any `DateTime`/`DateTime64`
+column the header pass fills, not only this one.
+
 ### `_timestamp_received`
 
 | Property | Value |
@@ -727,6 +737,19 @@ Using the DDL Expression Language (see [../clickhouse/DDL-DIRECTIVES.md](../clic
 | `_raw` | `@captured: raw_payload` | Pre-transform capture |
 | `_json` | `@captured: raw_payload as JSON` | Pre-transform as JSON |
 | `_tags` | `@source: first(tags/_tags/meta/metadata.tags)` | First match wins |
+
+### When the header pass promotes nothing
+
+A payload the header pass cannot read -- not JSON, or not a JSON object -- once
+returned an empty field map and the row landed anyway, every column at its type
+default: no `_source`, no `_tags`, `_timestamp` at epoch zero. A row like that
+reads as data while carrying none, and cannot say where it came from.
+
+The message is now rejected to the DLQ instead. The loader logs an ERROR naming
+the table, at most once a minute, and counts
+`dfe_loader_header_pass_skipped_total`. The table name stays out of the metric's
+labels: it comes from a payload field with no allowlist, so labelling it would
+let untrusted input grow the label set without bound.
 
 ## Configuration reference
 
