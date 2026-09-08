@@ -1140,7 +1140,7 @@ clickhouse:
             let config = Config::load(None).unwrap();
             assert_eq!(config.kafka.brokers, vec!["localhost:9092"]);
             assert_eq!(config.routing.default_db, "dfe");
-            assert_eq!(config.routing.default_table, "default");
+            assert_eq!(config.routing.default_table, "main");
         }
     }
 
@@ -1287,7 +1287,7 @@ kafka:
     fn test_default_routing_config() {
         let config = Config::default();
         assert_eq!(config.routing.default_db, "dfe");
-        assert_eq!(config.routing.default_table, "default");
+        assert_eq!(config.routing.default_table, "main");
         assert_eq!(config.routing.org_id_field, Some("org_id".to_string()));
         assert_eq!(
             config.routing.topic_suffixes,

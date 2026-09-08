@@ -198,7 +198,7 @@
           "_source"
         ],
         "default_db": "dfe",
-        "default_table": "default",
+        "default_table": "main",
         "org_id_field": "org_id",
         "org_routes": [],
         "source_to_table": {},
@@ -1329,9 +1329,9 @@
           "default": "dfe"
         },
         "default_table": {
-          "description": "Default table if no `table_field` matches\nDefault: \"default\"",
+          "description": "Default table if no `table_field` matches\nDefault: \"main\"",
           "type": "string",
-          "default": "default"
+          "default": "main"
         },
         "org_id_field": {
           "description": "Field to extract for _`org_id` column (stored in data for RLS)\nExample: \"`org_id`\" or \"tenant.id\"\nThis field is extracted and stored as _`org_id`, regardless of routing behaviour",
