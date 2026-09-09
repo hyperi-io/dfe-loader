@@ -16,7 +16,7 @@
 //! Configuration via environment variables:
 //! - `PGO_DRIVER_DURATION_SECS` (default 300) — total runtime
 //! - `PGO_DRIVER_BROKERS` (default `127.0.0.1:19092`)
-//! - `PGO_DRIVER_TOPIC` (default `default_land`) — target topic
+//! - `PGO_DRIVER_TOPIC` (default `main_land`) — target topic
 //! - `PGO_DRIVER_RPS` (default 5000) — messages per second
 //! - `PGO_DRIVER_BATCH_LINGER_MS` (default 10) — librdkafka batching
 //!
@@ -140,7 +140,7 @@ impl Config {
         Self {
             duration_secs: env_u64("PGO_DRIVER_DURATION_SECS", 300),
             brokers: env_str("PGO_DRIVER_BROKERS", "127.0.0.1:19092"),
-            topic: env_str("PGO_DRIVER_TOPIC", "default_land"),
+            topic: env_str("PGO_DRIVER_TOPIC", "main_land"),
             rps: env_u32("PGO_DRIVER_RPS", 5000),
             batch_linger_ms: env_u32("PGO_DRIVER_BATCH_LINGER_MS", 10),
         }

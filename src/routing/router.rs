@@ -522,23 +522,9 @@ fn build_db_table_string(db: &str, table: &str) -> String {
 }
 
 impl Default for Router {
+    /// Built from the default configs, so the landing table is authored once.
     fn default() -> Self {
-        Self {
-            compiled_rules: vec![],
-            // Default: db_fields empty = shared schema (all to dfe.*)
-            db_fields: vec![],
-            table_fields: vec!["_source".to_string()],
-            default_db: "dfe".to_string(),
-            default_table: "default".to_string(),
-            // Extract org_id for _org_id column (RLS)
-            org_id_field: Some("org_id".to_string()),
-            // No per-org routing by default (shared schema)
-            org_routes: FxHashMap::default(),
-            source_to_table: FxHashMap::default(),
-            dlq_enabled: true,
-            source_fields: vec!["_source".to_string()],
-            topic_suffixes: vec!["_land".to_string(), "_load".to_string()],
-        }
+        Self::new(&RoutingConfig::default())
     }
 }
 
@@ -559,7 +545,7 @@ mod tests {
                 "tags.event_category".to_string(),
             ],
             default_db: "dfe".to_string(),
-            default_table: "default".to_string(),
+            default_table: "main".to_string(),
             org_id_field: Some("org_id".to_string()),
             // Explicitly list orgs used in tests for per-org routing.
             org_routes: vec![
@@ -649,7 +635,7 @@ mod tests {
 
         assert_eq!(
             router.route(payload),
-            RouteResult::Table("acme.default".to_string())
+            RouteResult::Table("acme.main".to_string())
         );
     }
 
@@ -661,7 +647,7 @@ mod tests {
 
         assert_eq!(
             router.route(payload),
-            RouteResult::Table("dfe.default".to_string())
+            RouteResult::Table("dfe.main".to_string())
         );
     }
 
@@ -693,11 +679,11 @@ mod tests {
 
         // No match → default table
         let p2 = br#"{"user_id": 123}"#;
-        assert_eq!(router.extract_table(p2), "default".to_string());
+        assert_eq!(router.extract_table(p2), "main".to_string());
 
         // event_category not matched by default (need compat mode)
         let p3 = br#"{"event_category": "api"}"#;
-        assert_eq!(router.extract_table(p3), "default".to_string());
+        assert_eq!(router.extract_table(p3), "main".to_string());
     }
 
     #[test]
@@ -814,7 +800,7 @@ mod tests {
 
         assert_eq!(
             router.route_value(&value),
-            RouteResult::Table("dfe.default".to_string())
+            RouteResult::Table("dfe.main".to_string())
         );
     }
 

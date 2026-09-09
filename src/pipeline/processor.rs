@@ -657,7 +657,7 @@ mod tests {
         let mut config = Config::default();
         config.routing.table_fields = vec!["event_category".to_string()];
         config.routing.default_db = "dfe".to_string();
-        config.routing.default_table = "default".to_string();
+        config.routing.default_table = "main".to_string();
 
         let harness = TestHarness::with_config(config);
         let proc = harness.processor();
@@ -695,7 +695,7 @@ mod tests {
         let mut config = Config::default();
         config.routing.table_fields = vec!["_source".to_string()];
         config.routing.default_db = "dfe".to_string();
-        config.routing.default_table = "default".to_string();
+        config.routing.default_table = "main".to_string();
 
         let mut harness = TestHarness::with_config(config);
         harness
@@ -708,7 +708,7 @@ mod tests {
 
         let processed = proc.process(&msg).expect("should succeed");
         assert_eq!(
-            processed.table, "dfe.default",
+            processed.table, "dfe.main",
             "an unknown source must land in the default table, not the DLQ"
         );
         assert_eq!(
@@ -725,7 +725,7 @@ mod tests {
         let mut config = Config::default();
         config.routing.table_fields = vec!["_source".to_string()];
         config.routing.default_db = "dfe".to_string();
-        config.routing.default_table = "default".to_string();
+        config.routing.default_table = "main".to_string();
 
         let harness = TestHarness::with_config(config);
         let proc = harness.processor();
@@ -745,7 +745,7 @@ mod tests {
             "event_category".to_string(),
         ];
         config.routing.default_db = "dfe".to_string();
-        config.routing.default_table = "default".to_string();
+        config.routing.default_table = "main".to_string();
 
         let harness = TestHarness::with_config(config);
         let proc = harness.processor();
@@ -905,7 +905,7 @@ mod tests {
             computed_column_cache: &computed_column_cache,
             capture_overrides: &capture_overrides,
             absent_tables: &absent_tables,
-            default_table: "dfe.default",
+            default_table: "dfe.main",
         };
 
         let value = json!({"event_category": "test"});
@@ -1138,7 +1138,7 @@ mod tests {
         // What we care about: no panic, deterministic behaviour.
         match result {
             Ok(processed) => {
-                // Routes to default: dfe.default
+                // Routes to default: dfe.main
                 assert!(processed.table.contains('.'));
             }
             Err(e) => {
