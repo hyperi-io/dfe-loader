@@ -59,7 +59,7 @@ properties:
       recv_timeout_ms: 100
       max_message_size: 16777216
       compression: false
-      default_topic: default_land
+      default_topic: main_land
   clickhouse:
     description: '`ClickHouse` connection config. **Restart required.**'
     $ref: '#/$defs/ClickHouseConfig'
@@ -527,7 +527,7 @@ $defs:
           Default topic name for messages without a topic in gRPC metadata.
           Used as the routing key when the sender doesn't set a topic.
         type: string
-        default: default_land
+        default: main_land
   ClickHouseConfig:
     type: object
     properties:

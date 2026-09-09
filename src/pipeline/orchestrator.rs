@@ -2151,15 +2151,9 @@ mod tests {
             .collect();
         let failed = rejected_rows(rows, "server error code 117");
 
-        let delivery = route_rejected_rows_to_dlq(
-            Some(&dlq),
-            &None,
-            "dfe.default",
-            &payloads,
-            &failed,
-            in_30s(),
-        )
-        .await;
+        let delivery =
+            route_rejected_rows_to_dlq(Some(&dlq), &None, "dfe.main", &payloads, &failed, in_30s())
+                .await;
         dlq.flush().await.expect("durability barrier");
 
         assert_eq!(delivery.delivered, rows as u64);
@@ -2174,7 +2168,7 @@ mod tests {
             "every rejected row must be durably written before the offsets commit"
         );
         assert!(spooled[0].contains("clickhouse_permanent_reject"));
-        assert!(spooled[0].contains("dfe.default"));
+        assert!(spooled[0].contains("dfe.main"));
         assert!(spooled[0].contains("code 117"));
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2190,15 +2184,9 @@ mod tests {
         let payloads: Vec<Arc<[u8]>> = (0..10).map(|_| Arc::from(&b"{}"[..])).collect();
         let failed = rejected_rows(10, "code 117");
 
-        let delivery = route_rejected_rows_to_dlq(
-            Some(&dlq),
-            &None,
-            "dfe.default",
-            &payloads,
-            &failed,
-            in_30s(),
-        )
-        .await;
+        let delivery =
+            route_rejected_rows_to_dlq(Some(&dlq), &None, "dfe.main", &payloads, &failed, in_30s())
+                .await;
 
         assert!(!delivery.complete, "a partial delivery must not commit");
         assert!(delivery.delivered < 10);
@@ -2217,7 +2205,7 @@ mod tests {
         let delivery = route_rejected_rows_to_dlq(
             Some(&dlq),
             &None,
-            "dfe.default",
+            "dfe.main",
             &payloads,
             &rejected_rows(1, "code 117"),
             tokio::time::Instant::now(),
@@ -2236,8 +2224,7 @@ mod tests {
         let failed = rejected_rows(1, "code 117");
 
         let delivery =
-            route_rejected_rows_to_dlq(None, &None, "dfe.default", &payloads, &failed, in_30s())
-                .await;
+            route_rejected_rows_to_dlq(None, &None, "dfe.main", &payloads, &failed, in_30s()).await;
 
         assert_eq!(delivery, DlqDelivery::default());
         assert!(!delivery.complete);
@@ -2281,7 +2268,7 @@ mod tests {
         let delivery = route_rejected_rows_to_dlq(
             Some(&degraded),
             &None,
-            "dfe.default",
+            "dfe.main",
             &payloads,
             &rejected_rows(1, "code 117"),
             in_30s(),
@@ -2316,15 +2303,9 @@ mod tests {
             row_json: None,
         }];
 
-        let delivery = route_rejected_rows_to_dlq(
-            Some(&dlq),
-            &None,
-            "dfe.default",
-            &payloads,
-            &failed,
-            in_30s(),
-        )
-        .await;
+        let delivery =
+            route_rejected_rows_to_dlq(Some(&dlq), &None, "dfe.main", &payloads, &failed, in_30s())
+                .await;
         dlq.flush().await.expect("durability barrier");
 
         assert_eq!(delivery.delivered, 1);
@@ -2352,15 +2333,9 @@ mod tests {
             row_json: Some(br#"{"_raw":"{\"user\":\"kaz\"}"}"#.to_vec()),
         }];
 
-        let delivery = route_rejected_rows_to_dlq(
-            Some(&dlq),
-            &None,
-            "dfe.default",
-            &payloads,
-            &failed,
-            in_30s(),
-        )
-        .await;
+        let delivery =
+            route_rejected_rows_to_dlq(Some(&dlq), &None, "dfe.main", &payloads, &failed, in_30s())
+                .await;
         dlq.flush().await.expect("durability barrier");
 
         assert_eq!(delivery.delivered, 1);
@@ -2420,7 +2395,7 @@ mod tests {
         let delivery = route_rejected_rows_to_dlq(
             Some(&dlq),
             &None,
-            "dfe.default",
+            "dfe.main",
             &payloads,
             &rejected_rows(1, "boom"),
             in_30s(),
@@ -2435,7 +2410,7 @@ mod tests {
     #[tokio::test]
     async fn a_batch_with_nothing_rejected_is_committable() {
         let delivery =
-            route_rejected_rows_to_dlq(None, &None, "dfe.default", &[], &[], in_30s()).await;
+            route_rejected_rows_to_dlq(None, &None, "dfe.main", &[], &[], in_30s()).await;
         assert!(delivery.complete);
         assert_eq!(delivery.delivered, 0);
     }

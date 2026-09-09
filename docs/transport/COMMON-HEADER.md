@@ -31,15 +31,15 @@ Every event table shares a common header that provides:
 The common header is the **base** of every table's schema -- not the complete
 schema itself. The loader injects these system fields into every event.
 
-- **Default table** (`dfe.default`): schema IS just the common header. This is the
+- **Landing table** (`dfe.main`): schema IS just the common header. This is the
   catch-all for unrouted events and the only table auto-created by the loader.
-- **Non-default tables** (e.g., `dfe.auth`, `dfe.metrics`): schema = common header
+- **Other tables** (e.g., `dfe.auth`, `dfe.metrics`): schema = common header
   + data-specific columns. These tables are created externally (by DBAs or IaC)
   with their own columns alongside the common header.
 
 ```text
 +----------------------------------+
-|   default table (dfe.default)    |   <- schema = common header ONLY
+|    landing table (dfe.main)      |   <- schema = common header ONLY
 |  +----------------------------+  |
 |  |      common header         |  |
 |  |  (_timestamp, _org_id, ...) |  |
