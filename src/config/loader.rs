@@ -109,8 +109,28 @@ pub struct Config {
     pub enrichment: EnrichmentConfig,
 }
 
+/// `transport` value selecting the bus: a broker holds records between stages.
+pub const TRANSPORT_KAFKA: &str = "kafka";
+
+/// `transport` value selecting the direct form: the scalo Push listener.
+pub const TRANSPORT_GRPC: &str = "grpc";
+
 fn default_transport() -> String {
-    "kafka".to_string()
+    TRANSPORT_KAFKA.to_string()
+}
+
+impl Config {
+    /// Whether records arrive on the Push listener rather than a broker.
+    ///
+    /// The loader declares no idle predicate on top of this. On `grpc` the
+    /// listener always has work, and on `kafka` an empty topic list is
+    /// auto-discovery rather than emptiness: a topic appearing on the broker
+    /// gives the loader work with no config change, and the scalo idle gate
+    /// only wakes on a config change.
+    #[must_use]
+    pub fn is_direct(&self) -> bool {
+        self.transport == TRANSPORT_GRPC
+    }
 }
 
 // ============================================================================
@@ -421,8 +441,9 @@ impl Config {
 
     /// Validate the configuration
     pub fn validate(&self) -> Result<()> {
-        // Kafka validation
-        if self.kafka.brokers.is_empty() {
+        // Only on the bus: a grpc loader dials no broker, so a required
+        // address there refuses a config that is correct.
+        if self.transport != TRANSPORT_GRPC && self.kafka.brokers.is_empty() {
             return Err(crate::Error::Config(
                 "At least one Kafka broker must be configured".into(),
             ));
@@ -632,6 +653,20 @@ mod tests {
         let mut config = Config::default();
         config.kafka.brokers = vec![];
         assert!(config.validate().is_err());
+    }
+
+    /// A brokerless profile gives the loader no broker address, and it dials
+    /// none: requiring one there refuses a config that is correct.
+    #[test]
+    fn test_grpc_transport_needs_no_broker() {
+        let mut config = Config::default();
+        config.transport = TRANSPORT_GRPC.to_string();
+        config.kafka.brokers = vec![];
+        config.grpc.listen = Some("0.0.0.0:6000".to_string());
+        assert!(config.is_direct());
+        config
+            .validate()
+            .expect("the direct transport reaches no broker");
     }
 
     #[test]
