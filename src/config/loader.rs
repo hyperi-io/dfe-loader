@@ -6,7 +6,8 @@
 //! Configuration cascade (highest to lowest priority):
 //!   1. CLI args (--config, --log-level, etc.)
 //!   2. Explicit flat env overrides (`DFE_LOADER_KAFKA_BROKERS`, etc.)
-//!   3. Figment env vars with __ nesting (`DFE_LOADER_KAFKA__BROKERS`, etc.)
+//!   3. Figment env vars, `__` nesting, either separator after the prefix
+//!      (`DFE_LOADER__KAFKA__BROKERS` or `DFE_LOADER_KAFKA__BROKERS`)
 //!   4. .env file (via dotenvy)
 //!   5. Config file specified by --config or `DFE_LOADER_CONFIG`
 //!   6. Hard-coded defaults
@@ -109,8 +110,28 @@ pub struct Config {
     pub enrichment: EnrichmentConfig,
 }
 
+/// `transport` value selecting the bus: a broker holds records between stages.
+pub const TRANSPORT_KAFKA: &str = "kafka";
+
+/// `transport` value selecting the direct form: the scalo Push listener.
+pub const TRANSPORT_GRPC: &str = "grpc";
+
 fn default_transport() -> String {
-    "kafka".to_string()
+    TRANSPORT_KAFKA.to_string()
+}
+
+impl Config {
+    /// Whether records arrive on the Push listener rather than a broker.
+    ///
+    /// The loader declares no idle predicate on top of this. On `grpc` the
+    /// listener always has work, and on `kafka` an empty topic list is
+    /// auto-discovery rather than emptiness: a topic appearing on the broker
+    /// gives the loader work with no config change, and the scalo idle gate
+    /// only wakes on a config change.
+    #[must_use]
+    pub fn is_direct(&self) -> bool {
+        self.transport == TRANSPORT_GRPC
+    }
 }
 
 // ============================================================================
@@ -313,14 +334,14 @@ impl ApplyFlatEnv for Config {
 }
 
 impl Normalize for Config {
-    /// Side-effects: credentials present → enable auth, protocol → enable TLS.
+    /// Side-effect: Kafka SASL credentials present → enable auth. (The
+    /// security-protocol → TLS side-effect lives in `apply_flat_env`.)
     fn normalize(&mut self) {
-        // SASL credentials present → auto-enable
-        if let Some(ref sasl) = self.kafka.sasl
-            && (!sasl.username.is_empty()
-                || !sasl.password.expose().is_empty()
-                || !sasl.mechanism.is_empty())
-            && let Some(ref mut sasl) = self.kafka.sasl
+        // CREDENTIALS only. `mechanism` carries a non-empty serde default, so
+        // testing it here makes the condition constant-true and overrides an
+        // explicit `enabled: false`.
+        if let Some(ref mut sasl) = self.kafka.sasl
+            && (!sasl.username.is_empty() || !sasl.password.expose().is_empty())
         {
             sasl.enabled = true;
         }
@@ -329,7 +350,11 @@ impl Normalize for Config {
 
 /// Apply figment env vars with __ (double underscore) nesting.
 ///
-/// Supports arbitrary nesting: `DFE_LOADER_KAFKA__SASL__USERNAME` → kafka.sasl.username
+/// Trimming the separator figment's `prefixed` leaves behind is what makes the
+/// chart/contract form `DFE_LOADER__KAFKA__SASL__USERNAME` reach the same key as
+/// `DFE_LOADER_KAFKA__SASL__USERNAME`; without it the former lands on
+/// `_kafka.sasl.…`, which serde drops in silence. No section starts with `_`.
+///
 /// Lists require bracket syntax: `DFE_LOADER_KAFKA__BROKERS`=[a, b, c]
 fn apply_figment_env(config: &mut Config) -> Result<()> {
     use figment::Figment;
@@ -337,8 +362,11 @@ fn apply_figment_env(config: &mut Config) -> Result<()> {
     use scalo::expose_during;
 
     let extracted = expose_during(|| {
+        let env = Env::prefixed(&format!("{ENV_PREFIX}_"))
+            .map(|key| key.as_str().trim_start_matches('_').into())
+            .split("__");
         Figment::from(Serialized::defaults(&*config))
-            .merge(Env::prefixed(&format!("{ENV_PREFIX}_")).split("__"))
+            .merge(env)
             .extract::<Config>()
             .map_err(|e| crate::Error::Config(e.to_string()))
     });
@@ -352,7 +380,8 @@ impl Config {
     ///
     /// 1. CLI args (applied separately by caller)
     /// 2. Explicit flat env overrides (`DFE_LOADER_KAFKA_BROKERS`, etc.)
-    /// 3. Figment env vars with `__` nesting (`DFE_LOADER_KAFKA__SASL__USERNAME`, etc.)
+    /// 3. Figment env vars with `__` nesting — `DFE_LOADER__KAFKA__SASL__USERNAME`
+    ///    (chart / deployment-contract form) or `DFE_LOADER_KAFKA__SASL__USERNAME`
     /// 4. `.env` file (via dotenvy)
     /// 5. Config file (YAML, specified by `--config` or auto-detected)
     /// 6. Hard-coded defaults
@@ -363,7 +392,9 @@ impl Config {
         // 1. Start with hard-coded defaults
         let mut config = Config::default();
 
-        // 2. Load YAML config file (overrides defaults)
+        // 2. Load YAML config file (overrides defaults).
+        let resolved = Self::resolve_config_path(config_path);
+        let config_path = resolved.as_deref();
         if let Some(path) = config_path {
             if Path::new(path).exists() {
                 let content = std::fs::read_to_string(path)
@@ -401,6 +432,19 @@ impl Config {
         Ok(config)
     }
 
+    /// Resolve the config file: `--config`, else `DFE_LOADER_CONFIG`.
+    ///
+    /// The env var is step 5 of this module's cascade and nothing read it —
+    /// scalo's `--config` arg carries no `env =`. The watcher resolves here too.
+    #[must_use]
+    pub fn resolve_config_path(cli_path: Option<&str>) -> Option<String> {
+        cli_path.map(String::from).or_else(|| {
+            std::env::var(format!("{ENV_PREFIX}_CONFIG"))
+                .ok()
+                .filter(|p| !p.is_empty())
+        })
+    }
+
     /// Register all config sections in the global config registry.
     ///
     /// Enables `/config` endpoint dump (with redaction) and change notifications.
@@ -420,20 +464,49 @@ impl Config {
     }
 
     /// Validate the configuration
+    ///
+    /// Only caller of [`SaslConfig::validate`], and only reader of the
+    /// `clickhouse.tls` fields no client honours.
     pub fn validate(&self) -> Result<()> {
-        // Kafka validation
-        if self.kafka.brokers.is_empty() {
+        // Only on the bus: a grpc loader dials no broker, so a required
+        // address there refuses a config that is correct.
+        if self.transport != TRANSPORT_GRPC && self.kafka.brokers.is_empty() {
             return Err(crate::Error::Config(
                 "At least one Kafka broker must be configured".into(),
             ));
         }
         // Empty topics list is valid: triggers auto-discovery of *_load/*_land topics.
+        if let Some(ref sasl) = self.kafka.sasl {
+            sasl.validate()
+                .map_err(|e| crate::Error::Config(format!("kafka.sasl: {e}")))?;
+        }
 
         // ClickHouse validation
         if self.clickhouse.hosts.is_empty() {
             return Err(crate::Error::Config(
                 "At least one ClickHouse host must be configured".into(),
             ));
+        }
+        // Of the borrowed Kafka TlsConfig shape only `enabled` reaches a client.
+        if let Some(ref tls) = self.clickhouse.tls {
+            let ignored: Vec<&str> = [
+                ("ca_cert_file", tls.ca_cert_file.is_some()),
+                ("cert_file", tls.cert_file.is_some()),
+                ("key_file", tls.key_file.is_some()),
+                ("skip_verify", tls.skip_verify),
+            ]
+            .into_iter()
+            .filter_map(|(name, set)| set.then_some(name))
+            .collect();
+            if !ignored.is_empty() {
+                return Err(crate::Error::Config(format!(
+                    "clickhouse.tls.{} reaches no ClickHouse client — only \
+                     clickhouse.tls.enabled is honoured (it selects the https scheme, \
+                     verified against the system trust store). Mount a private CA into \
+                     the container's trust store instead.",
+                    ignored.join(", clickhouse.tls.")
+                )));
+            }
         }
         match self.clickhouse.protocol.to_lowercase().as_str() {
             "http" => {}
@@ -480,8 +553,8 @@ impl Config {
     /// (Dockerfile, Helm chart, Compose fragment).
     pub fn deployment_contract() -> scalo::deployment::DeploymentContract {
         use scalo::deployment::{
-            DeploymentContract, HealthContract, ImageProfile, KedaContract, NativeDepsContract,
-            OciLabels, SecretEnvContract, SecretGroupContract, base_image_from_cascade,
+            DeploymentContract, HealthContract, ImageProfile, NativeDepsContract, OciLabels,
+            SecretEnvContract, SecretGroupContract, base_image_from_cascade,
             image_registry_from_cascade,
         };
 
@@ -546,7 +619,8 @@ impl Config {
                     .expect("Config::default() must serialize to JSON"),
             ),
             depends_on: vec!["kafka".into(), "clickhouse".into()],
-            keda: Some(KedaContract::default()),
+            // THIS crate's KedaConfig, not KedaContract::default() (scalo's own).
+            keda: Some(Self::keda_contract()),
             native_deps: NativeDepsContract::for_scalo_features(
                 &[
                     "transport-kafka",
@@ -580,6 +654,22 @@ impl Config {
             // pipeline transform stages.
             config_schema: Some(scalo::deployment::config_schema_json::<crate::config::Config>()),
             capabilities: Self::capabilities(),
+        }
+    }
+
+    /// KEDA half of the contract, from this crate's own [`KedaConfig`] defaults
+    /// so the chart contract test compares against the documented numbers.
+    fn keda_contract() -> scalo::deployment::KedaContract {
+        let keda = KedaConfig::default();
+        scalo::deployment::KedaContract {
+            min_replicas: keda.min_replicas,
+            max_replicas: keda.max_replicas,
+            polling_interval: keda.polling_interval,
+            cooldown_period: keda.cooldown_period,
+            kafka_lag_threshold: keda.kafka_lag_threshold,
+            activation_lag_threshold: keda.activation_lag_threshold,
+            cpu_enabled: keda.cpu_enabled,
+            cpu_threshold: keda.cpu_threshold,
         }
     }
 
@@ -632,6 +722,20 @@ mod tests {
         let mut config = Config::default();
         config.kafka.brokers = vec![];
         assert!(config.validate().is_err());
+    }
+
+    /// A brokerless profile gives the loader no broker address, and it dials
+    /// none: requiring one there refuses a config that is correct.
+    #[test]
+    fn test_grpc_transport_needs_no_broker() {
+        let mut config = Config::default();
+        config.transport = TRANSPORT_GRPC.to_string();
+        config.kafka.brokers = vec![];
+        config.grpc.listen = Some("0.0.0.0:6000".to_string());
+        assert!(config.is_direct());
+        config
+            .validate()
+            .expect("the direct transport reaches no broker");
     }
 
     #[test]
@@ -857,7 +961,9 @@ mod tests {
     }
 
     #[test]
-    fn test_sasl_config_oauth_requires_endpoint() {
+    fn test_sasl_config_oauth_partial_is_rejected() {
+        // Whether the block is half-filled or complete, the answer is the same
+        // rejection -- there is no arrangement of these keys that connects.
         let config = SaslConfig {
             enabled: true,
             mechanism: "oauthbearer".to_string(),
@@ -865,27 +971,17 @@ mod tests {
             oauth_client_id: Some("client".to_string()),
             ..Default::default()
         };
-        let result = config.validate();
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("oauth_token_endpoint"));
+        let err = config.validate().unwrap_err();
+        assert!(err.contains("not supported by this build"), "{err}");
+        assert!(err.contains("oauth_client_id"), "{err}");
     }
 
     #[test]
-    fn test_sasl_config_oauth_requires_client_id() {
-        let config = SaslConfig {
-            enabled: true,
-            mechanism: "oauthbearer".to_string(),
-            oauth_token_endpoint: Some("https://auth.example.com/token".to_string()),
-            oauth_client_id: None,
-            ..Default::default()
-        };
-        let result = config.validate();
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("oauth_client_id"));
-    }
-
-    #[test]
-    fn test_sasl_config_oauth_valid() {
+    fn test_sasl_config_oauth_complete_is_still_rejected() {
+        // Complete on paper and unreachable in fact: the transport hands scalo
+        // only mechanism + username + password, so not one of these five keys
+        // reaches librdkafka. Accepting it produced an OAUTHBEARER connection
+        // with an empty username.
         let config = SaslConfig {
             enabled: true,
             mechanism: "oauthbearer".to_string(),
@@ -895,36 +991,41 @@ mod tests {
             oauth_scope: Some("kafka".to_string()),
             ..Default::default()
         };
-        assert!(config.validate().is_ok());
+        let err = config.validate().unwrap_err();
+        assert!(err.contains("not supported by this build"), "{err}");
+        assert!(err.contains("oauth_token_endpoint"), "{err}");
     }
 
     #[test]
-    fn test_sasl_config_aws_iam_requires_region() {
+    fn test_sasl_config_aws_iam_without_region_is_rejected() {
         let config = SaslConfig {
             enabled: true,
             mechanism: "aws_msk_iam".to_string(),
             aws_region: None,
             ..Default::default()
         };
-        let result = config.validate();
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("aws_region"));
+        let err = config.validate().unwrap_err();
+        assert!(err.contains("not supported by this build"), "{err}");
+        assert!(err.contains("aws_region"), "{err}");
     }
 
     #[test]
-    fn test_sasl_config_aws_iam_valid_with_region_only() {
-        // AWS IAM can use instance profile/environment for credentials
+    fn test_sasl_config_aws_iam_with_region_is_rejected() {
+        // No SigV4 token provider is attached to the client, so the region
+        // never leaves the config struct.
         let config = SaslConfig {
             enabled: true,
             mechanism: "aws_msk_iam".to_string(),
             aws_region: Some("ap-southeast-2".to_string()),
             ..Default::default()
         };
-        assert!(config.validate().is_ok());
+        let err = config.validate().unwrap_err();
+        assert!(err.contains("not supported by this build"), "{err}");
+        assert!(err.contains("aws_region"), "{err}");
     }
 
     #[test]
-    fn test_sasl_config_aws_iam_valid_with_explicit_creds() {
+    fn test_sasl_config_aws_iam_with_explicit_creds_is_rejected() {
         let config = SaslConfig {
             enabled: true,
             mechanism: "aws_msk_iam".to_string(),
@@ -935,7 +1036,26 @@ mod tests {
             )),
             ..Default::default()
         };
-        assert!(config.validate().is_ok());
+        let err = config.validate().unwrap_err();
+        assert!(err.contains("not supported by this build"), "{err}");
+    }
+
+    #[test]
+    fn test_sasl_config_unknown_mechanism_is_rejected() {
+        // 'gssapi' used to parse to SCRAM-SHA-512 and connect as that.
+        let config = SaslConfig {
+            enabled: true,
+            mechanism: "gssapi".to_string(),
+            username: "u".to_string(),
+            password: SensitiveString::from("pw"),
+            ..Default::default()
+        };
+        let err = config.validate().unwrap_err();
+        assert!(
+            err.contains("unknown kafka.sasl.mechanism 'gssapi'"),
+            "{err}"
+        );
+        assert!(config.parse_mechanism().is_none());
     }
 
     // ========================================================================
@@ -1774,7 +1894,11 @@ kafka:
     }
 
     #[test]
-    fn test_normalize_enables_sasl_with_mechanism_only() {
+    fn test_normalize_leaves_sasl_disabled_with_mechanism_only() {
+        // A mechanism is not a credential. It also carries a non-empty serde
+        // default, so treating it as one made the auto-enable condition
+        // constant-true and flipped `enabled: false` on for every config that
+        // carried a `sasl:` block at all.
         let mut config = Config::default();
         config.kafka.sasl = Some(SaslConfig {
             enabled: false,
@@ -1786,7 +1910,7 @@ kafka:
 
         config.normalize();
 
-        assert!(config.kafka.sasl.as_ref().unwrap().enabled);
+        assert!(!config.kafka.sasl.as_ref().unwrap().enabled);
     }
 
     #[test]

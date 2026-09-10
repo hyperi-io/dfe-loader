@@ -31,15 +31,15 @@ Every event table shares a common header that provides:
 The common header is the **base** of every table's schema -- not the complete
 schema itself. The loader injects these system fields into every event.
 
-- **Default table** (`dfe.default`): schema IS just the common header. This is the
+- **Landing table** (`dfe.main`): schema IS just the common header. This is the
   catch-all for unrouted events and the only table auto-created by the loader.
-- **Non-default tables** (e.g., `dfe.auth`, `dfe.metrics`): schema = common header
+- **Other tables** (e.g., `dfe.auth`, `dfe.metrics`): schema = common header
   + data-specific columns. These tables are created externally (by DBAs or IaC)
   with their own columns alongside the common header.
 
 ```text
 +----------------------------------+
-|   default table (dfe.default)    |   <- schema = common header ONLY
+|    landing table (dfe.main)      |   <- schema = common header ONLY
 |  +----------------------------+  |
 |  |      common header         |  |
 |  |  (_timestamp, _org_id, ...) |  |
@@ -422,6 +422,17 @@ tags_fields = ["tags", "_tags", "meta", "metadata.tags"]
 tags_output = "_tags"
 drop_tags = false  # Remove source tags after extraction
 ```
+
+#### Reading the wrapped list back
+
+```sql
+SELECT _tags.list.:`Array(Nullable(String))` AS tags
+FROM dfe.default
+WHERE arrayExists(x -> x = 'filebeat', _tags.list.:`Array(Nullable(String))`)
+```
+
+An object source passes through untouched, so `_tags` holding `{"list": [...]}`
+cannot be told apart from a source that genuinely sent that key.
 
 ## Underscore prefix convention
 

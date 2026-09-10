@@ -39,6 +39,41 @@ fn smoke_config_loads_example_yaml() {
     config.validate().expect("example config should validate");
 }
 
+/// EVERY committed root config*.yaml loads AND validates.
+///
+/// Only config.example.yaml was covered, so when `clickhouse.protocol: native`
+/// became a startup rejection the other shipped files kept their `native` and
+/// nobody found out until they were run. A committed config carrying a `# Usage:`
+/// line has to start the binary it names.
+#[test]
+fn smoke_every_committed_config_file_loads_and_validates() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut checked = Vec::new();
+    for entry in std::fs::read_dir(root).expect("read crate root") {
+        let path = entry.expect("dir entry").path();
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default();
+        let is_yaml = path
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("yaml"));
+        if !(name.starts_with("config.") && is_yaml) {
+            continue;
+        }
+        let full = path.to_str().expect("utf-8 path");
+        let config = Config::load(Some(full)).unwrap_or_else(|e| panic!("{name} should load: {e}"));
+        config
+            .validate()
+            .unwrap_or_else(|e| panic!("{name} should validate: {e}"));
+        checked.push(name.to_string());
+    }
+    assert!(
+        checked.len() >= 2,
+        "expected at least config.example.yaml + config.dev.yaml, found {checked:?}"
+    );
+}
+
 /// Metrics struct creates all counters/gauges/histograms without panicking.
 /// Assertion: the constructor returns without panic (implicit).
 /// Recording a metric also works without panic.

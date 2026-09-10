@@ -660,7 +660,9 @@ impl Orchestrator {
                     // Check for buffers ready to flush
                     let batches = buffer_manager.get_ready_for_flush();
                     if !batches.is_empty() {
-                        self.flush_batches_transport(&inserter, &transport, dlq.as_ref(), batches).await;
+                        // Read after the take, so it names only what stayed behind.
+                        let still_buffered = buffer_manager.lowest_pending_offsets();
+                        self.flush_batches_transport(&inserter, &transport, dlq.as_ref(), batches, still_buffered).await;
                     }
                 }
 
@@ -1127,7 +1129,9 @@ impl Orchestrator {
                             // nothing is ready — no separate should_flush() guard needed
                             let batches = buffer_manager.get_ready_for_flush();
                             if !batches.is_empty() {
-                                self.flush_batches_transport(&inserter, &transport, dlq.as_ref(), batches).await;
+                                // Read after the take, so it names only what stayed behind.
+                                let still_buffered = buffer_manager.lowest_pending_offsets();
+                                self.flush_batches_transport(&inserter, &transport, dlq.as_ref(), batches, still_buffered).await;
                             }
                         }
                         Ok(_) => {
@@ -1148,12 +1152,19 @@ impl Orchestrator {
             }
         }
 
-        // Final flush
+        // Final flush: `flush_all` empties every buffer, so nothing is left
+        // behind to hold the watermark down.
         let final_batches = buffer_manager.flush_all();
         if !final_batches.is_empty() {
             info!(batches = final_batches.len(), "Flushing remaining buffers");
-            self.flush_batches_transport(&inserter, &transport, dlq.as_ref(), final_batches)
-                .await;
+            self.flush_batches_transport(
+                &inserter,
+                &transport,
+                dlq.as_ref(),
+                final_batches,
+                Vec::new(),
+            )
+            .await;
         }
 
         // Stop schema cache background refresh task.
@@ -1185,12 +1196,17 @@ impl Orchestrator {
     /// by batch therefore buries whatever another table withheld on the same
     /// partition -- see [`committable_offsets`], which is where that decision
     /// now lives.
+    ///
+    /// `still_buffered` is the caller's post-take residual from
+    /// `BufferManager::lowest_pending_offsets`: rows held in a buffer that was
+    /// not ready this cycle, and therefore not yet written anywhere durable.
     async fn flush_batches_transport(
         &mut self,
         inserter: &Inserter,
         transport: &TransportBackend,
         dlq: Option<&Arc<Dlq>>,
         batches: Vec<FlushBatch>,
+        still_buffered: Vec<KafkaOffset>,
     ) {
         use std::time::Instant;
 
@@ -1253,7 +1269,9 @@ impl Orchestrator {
         // Offsets are sorted into three piles across the WHOLE cycle and
         // resolved once at the end. Nothing commits inside the loop.
         let mut committable: Vec<KafkaOffset> = Vec::new();
-        let mut withheld: Vec<KafkaOffset> = Vec::new();
+        // Seeded with the rows still sitting in a buffer: a commit-after-process
+        // watermark may not pass an offset whose only copy is in memory.
+        let mut withheld: Vec<KafkaOffset> = still_buffered;
         // Rows the DLQ has ACCEPTED but not yet proven durable. They join
         // `committable` only once the flush barrier below returns.
         let mut dlq_pending: Vec<KafkaOffset> = Vec::new();
@@ -1741,6 +1759,12 @@ const DLQ_CHANNEL_CAPACITY: usize = 1_000;
 /// batch committing after a high one used to rewind the watermark. One commit
 /// per cycle cannot rewind.
 ///
+/// `withheld` carries two kinds of offset: rows this cycle could not place
+/// (insert failed, or the DLQ would not take them) and rows still held in a
+/// buffer that was not ready to flush.
+/// Both bound the watermark, because a row whose only copy is in memory is lost
+/// to a crash just as surely as one Kafka must re-deliver.
+///
 /// `withheld` may name partitions absent from `committable` and vice versa;
 /// both are handled.
 fn committable_offsets(
@@ -2151,15 +2175,9 @@ mod tests {
             .collect();
         let failed = rejected_rows(rows, "server error code 117");
 
-        let delivery = route_rejected_rows_to_dlq(
-            Some(&dlq),
-            &None,
-            "dfe.default",
-            &payloads,
-            &failed,
-            in_30s(),
-        )
-        .await;
+        let delivery =
+            route_rejected_rows_to_dlq(Some(&dlq), &None, "dfe.main", &payloads, &failed, in_30s())
+                .await;
         dlq.flush().await.expect("durability barrier");
 
         assert_eq!(delivery.delivered, rows as u64);
@@ -2174,7 +2192,7 @@ mod tests {
             "every rejected row must be durably written before the offsets commit"
         );
         assert!(spooled[0].contains("clickhouse_permanent_reject"));
-        assert!(spooled[0].contains("dfe.default"));
+        assert!(spooled[0].contains("dfe.main"));
         assert!(spooled[0].contains("code 117"));
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2190,15 +2208,9 @@ mod tests {
         let payloads: Vec<Arc<[u8]>> = (0..10).map(|_| Arc::from(&b"{}"[..])).collect();
         let failed = rejected_rows(10, "code 117");
 
-        let delivery = route_rejected_rows_to_dlq(
-            Some(&dlq),
-            &None,
-            "dfe.default",
-            &payloads,
-            &failed,
-            in_30s(),
-        )
-        .await;
+        let delivery =
+            route_rejected_rows_to_dlq(Some(&dlq), &None, "dfe.main", &payloads, &failed, in_30s())
+                .await;
 
         assert!(!delivery.complete, "a partial delivery must not commit");
         assert!(delivery.delivered < 10);
@@ -2217,7 +2229,7 @@ mod tests {
         let delivery = route_rejected_rows_to_dlq(
             Some(&dlq),
             &None,
-            "dfe.default",
+            "dfe.main",
             &payloads,
             &rejected_rows(1, "code 117"),
             tokio::time::Instant::now(),
@@ -2236,8 +2248,7 @@ mod tests {
         let failed = rejected_rows(1, "code 117");
 
         let delivery =
-            route_rejected_rows_to_dlq(None, &None, "dfe.default", &payloads, &failed, in_30s())
-                .await;
+            route_rejected_rows_to_dlq(None, &None, "dfe.main", &payloads, &failed, in_30s()).await;
 
         assert_eq!(delivery, DlqDelivery::default());
         assert!(!delivery.complete);
@@ -2281,7 +2292,7 @@ mod tests {
         let delivery = route_rejected_rows_to_dlq(
             Some(&degraded),
             &None,
-            "dfe.default",
+            "dfe.main",
             &payloads,
             &rejected_rows(1, "code 117"),
             in_30s(),
@@ -2316,15 +2327,9 @@ mod tests {
             row_json: None,
         }];
 
-        let delivery = route_rejected_rows_to_dlq(
-            Some(&dlq),
-            &None,
-            "dfe.default",
-            &payloads,
-            &failed,
-            in_30s(),
-        )
-        .await;
+        let delivery =
+            route_rejected_rows_to_dlq(Some(&dlq), &None, "dfe.main", &payloads, &failed, in_30s())
+                .await;
         dlq.flush().await.expect("durability barrier");
 
         assert_eq!(delivery.delivered, 1);
@@ -2352,15 +2357,9 @@ mod tests {
             row_json: Some(br#"{"_raw":"{\"user\":\"kaz\"}"}"#.to_vec()),
         }];
 
-        let delivery = route_rejected_rows_to_dlq(
-            Some(&dlq),
-            &None,
-            "dfe.default",
-            &payloads,
-            &failed,
-            in_30s(),
-        )
-        .await;
+        let delivery =
+            route_rejected_rows_to_dlq(Some(&dlq), &None, "dfe.main", &payloads, &failed, in_30s())
+                .await;
         dlq.flush().await.expect("durability barrier");
 
         assert_eq!(delivery.delivered, 1);
@@ -2420,7 +2419,7 @@ mod tests {
         let delivery = route_rejected_rows_to_dlq(
             Some(&dlq),
             &None,
-            "dfe.default",
+            "dfe.main",
             &payloads,
             &rejected_rows(1, "boom"),
             in_30s(),
@@ -2435,7 +2434,7 @@ mod tests {
     #[tokio::test]
     async fn a_batch_with_nothing_rejected_is_committable() {
         let delivery =
-            route_rejected_rows_to_dlq(None, &None, "dfe.default", &[], &[], in_30s()).await;
+            route_rejected_rows_to_dlq(None, &None, "dfe.main", &[], &[], in_30s()).await;
         assert!(delivery.complete);
         assert_eq!(delivery.delivered, 0);
     }
@@ -2523,6 +2522,96 @@ mod tests {
         );
         assert_eq!(to_commit.len(), 1);
         assert_eq!(to_commit[0].offset, 10);
+    }
+
+    // ========================================================================
+    // Offsets still held in a buffer
+    // ========================================================================
+
+    /// Buffer manager whose thresholds only a 5-row table can trip, so a
+    /// sibling table is left buffered exactly as it is in the running pipeline.
+    fn staged_buffers() -> BufferManager {
+        let mut buffer = Config::default().buffer;
+        buffer.flush_rows = 5;
+        buffer.flush_age_secs = 3600;
+        BufferManager::new(&buffer)
+    }
+
+    fn buffered_row(m: &mut BufferManager, table: &str, partition: i32, off: i64) {
+        m.push(
+            table,
+            serde_json::json!({"id": off}).as_object().unwrap().clone(),
+            Some(offset("dfe-events", partition, off)),
+            None,
+        );
+    }
+
+    #[test]
+    fn a_buffered_offset_holds_the_watermark_below_it() {
+        // Partition 0 feeds dfe.foo at 100 and 102 and dfe.bar at 101.
+        // Only dfe.foo trips the row threshold, so 101 exists nowhere but
+        // memory and a crash would lose it.
+        let mut buffers = staged_buffers();
+        buffered_row(&mut buffers, "dfe.foo", 0, 100);
+        buffered_row(&mut buffers, "dfe.bar", 0, 101);
+        buffered_row(&mut buffers, "dfe.foo", 0, 102);
+        for off in 103..106 {
+            buffered_row(&mut buffers, "dfe.foo", 0, off);
+        }
+
+        let flushed = buffers.get_ready_for_flush();
+        assert_eq!(flushed.len(), 1, "only dfe.foo reached 5 rows");
+        let committable: Vec<KafkaOffset> = flushed.into_iter().flat_map(|b| b.offsets).collect();
+
+        let to_commit = committable_offsets(committable, &buffers.lowest_pending_offsets());
+
+        assert_eq!(
+            to_commit.iter().map(|o| o.offset).max(),
+            Some(100),
+            "the watermark must stop below the offset still in the bar buffer"
+        );
+    }
+
+    #[test]
+    fn an_empty_buffer_leaves_the_watermark_where_it_was() {
+        // Nothing buffered means nothing to hold back: the flushed batch
+        // commits in full, exactly as before this floor existed.
+        let mut buffers = staged_buffers();
+        for off in 100..105 {
+            buffered_row(&mut buffers, "dfe.foo", 0, off);
+        }
+
+        let flushed = buffers.get_ready_for_flush();
+        let committable: Vec<KafkaOffset> = flushed.into_iter().flat_map(|b| b.offsets).collect();
+        assert_eq!(committable.len(), 5);
+
+        let still_buffered = buffers.lowest_pending_offsets();
+        assert!(still_buffered.is_empty());
+
+        let to_commit = committable_offsets(committable, &still_buffered);
+        assert_eq!(to_commit.iter().map(|o| o.offset).max(), Some(104));
+    }
+
+    #[test]
+    fn two_tables_buffering_different_partitions_hold_only_their_own() {
+        // dfe.bar holds partition 1 only, so partition 0 must still advance.
+        let mut buffers = staged_buffers();
+        for off in 200..205 {
+            buffered_row(&mut buffers, "dfe.foo", 0, off);
+        }
+        buffered_row(&mut buffers, "dfe.bar", 1, 7);
+
+        let flushed = buffers.get_ready_for_flush();
+        let committable: Vec<KafkaOffset> = flushed.into_iter().flat_map(|b| b.offsets).collect();
+
+        let to_commit = committable_offsets(committable, &buffers.lowest_pending_offsets());
+        let mut got: Vec<(i32, i64)> = to_commit.iter().map(|o| (o.partition, o.offset)).collect();
+        got.sort_unstable();
+        assert_eq!(
+            got,
+            vec![(0, 200), (0, 201), (0, 202), (0, 203), (0, 204)],
+            "partition 0 commits in full; partition 1 never entered the batch"
+        );
     }
 
     #[test]

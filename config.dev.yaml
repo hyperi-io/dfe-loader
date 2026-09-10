@@ -14,11 +14,13 @@ kafka:
 
 clickhouse:
   hosts:
-    - localhost:9000
+    - localhost:8123
   database: default
   username: default
   password: ""
-  protocol: native
+  # http + the 8123-family port: 'native' is rejected at startup, so this file
+  # would not load with it.
+  protocol: http
   tables:
     - auth_events
     - api_events

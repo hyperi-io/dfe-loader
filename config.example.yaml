@@ -36,13 +36,14 @@ kafka:
   librdkafka_overrides:
     statistics.interval.ms: "5000"
 
-  # SASL authentication (optional)
+  # SASL authentication (optional). A username or password implies enabled:true.
+  # oauthbearer, aws_msk_iam and any unrecognised mechanism are startup errors.
   # sasl:
   #   enabled: true
-  #   mechanism: PLAIN  # PLAIN, SCRAM-SHA-256, SCRAM-SHA-512
+  #   mechanism: SCRAM-SHA-512  # PLAIN, SCRAM-SHA-256, SCRAM-SHA-512
   #   username: user
   #   password: pass
-  # TLS configuration (optional)
+  # TLS configuration (optional). Every key below IS honoured here.
   # tls:
   #   enabled: true
   #   ca_cert_file: /certs/ca.pem
@@ -68,11 +69,11 @@ clickhouse:
     - api_events
     - admin_events
     - error_events
-  # TLS configuration (optional for self-hosted, required for ClickHouse Cloud)
+  # TLS (required for ClickHouse Cloud). `enabled` is the ONLY honoured key --
+  # it selects https against the system trust store. ca_cert_file / cert_file /
+  # key_file / skip_verify are startup errors: mount a private CA instead.
   # tls:
   #   enabled: true
-  #   ca_cert_file: /certs/ca.pem        # Optional: custom CA cert
-  #   skip_verify: false
 
 # Example using env vars (uncomment to use):
 # clickhouse:
