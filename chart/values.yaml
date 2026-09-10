@@ -104,6 +104,7 @@ config:
     username: default
     password: ''
     protocol: http
+    insert_format: rowbinary
     tables: []
     tls: null
   payload:
