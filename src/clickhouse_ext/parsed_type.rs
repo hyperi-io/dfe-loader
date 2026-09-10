@@ -257,6 +257,16 @@ impl ParsedType {
             return result;
         }
 
+        // Parameterised JSON is the same wire form as bare JSON; leaving the
+        // parameters on the base drops the RowBinary json-as-string setting.
+        if let Some((head, _)) = type_str.split_once('(')
+            && matches!(head, "JSON" | "Object")
+        {
+            result.base = head.to_string();
+            result.tag = TypeTag::JSON;
+            return result;
+        }
+
         // Check for Enum8/Enum16
         if type_str.starts_with("Enum8") || type_str.starts_with("Enum16") {
             if type_str.starts_with("Enum8") {
@@ -367,6 +377,26 @@ impl ParsedType {
             }
             _ => "String",
         }
+    }
+
+    /// Whether this type is JSON, or wraps one at any depth.
+    ///
+    /// `Array(JSON)` and `Map(String, JSON)` carry the same RowBinary
+    /// json-as-string requirement as a bare JSON column.
+    #[must_use]
+    pub fn contains_json(&self) -> bool {
+        if self.tag == TypeTag::JSON {
+            return true;
+        }
+        if let Some(element) = &self.array_element
+            && element.contains_json()
+        {
+            return true;
+        }
+        if let Some((key, value)) = &self.map_types {
+            return key.contains_json() || value.contains_json();
+        }
+        false
     }
 
     /// Check if this is a numeric type.
@@ -527,6 +557,27 @@ mod tests {
         let t = ParsedType::parse("Decimal64(4)");
         assert_eq!(t.base, "Decimal64");
         assert_eq!(t.scale, Some(4));
+    }
+
+    #[test]
+    fn test_parse_parameterised_json() {
+        // The shipped meta schemas declare `_json JSON(max_dynamic_paths=2048)`.
+        let t = ParsedType::parse("JSON(max_dynamic_paths=2048)");
+        assert_eq!(t.base, "JSON");
+        assert_eq!(t.tag, TypeTag::JSON);
+        assert_eq!(t.category(), "JSON");
+        assert_eq!(t.raw, "JSON(max_dynamic_paths=2048)");
+
+        let t = ParsedType::parse("JSON(max_dynamic_paths=1024, SKIP a.b)");
+        assert_eq!(t.tag, TypeTag::JSON);
+
+        let t = ParsedType::parse("Object('json')");
+        assert_eq!(t.base, "Object");
+        assert_eq!(t.tag, TypeTag::JSON);
+
+        let t = ParsedType::parse("Nullable(JSON(max_dynamic_paths=8))");
+        assert_eq!(t.tag, TypeTag::JSON);
+        assert!(t.nullable);
     }
 
     #[test]

@@ -14,7 +14,7 @@
 use std::sync::Arc;
 
 use serde_json::Value;
-use tracing::{debug, trace};
+use tracing::{debug, error, trace};
 
 use crate::buffer::KafkaOffset;
 use crate::clickhouse::SharedSchemaCache;
@@ -52,6 +52,23 @@ pub(crate) struct MessageProcessor<'a> {
     pub absent_tables: &'a super::types::AbsentTables,
     /// Pre-built `db.table` for the routing default.
     pub default_table: &'a str,
+}
+
+/// Report a header pass that promoted nothing, at most once a minute.
+///
+/// The table name goes in the log, never in a metric label: it comes from a
+/// payload field with no allowlist, so labelling it would let untrusted input
+/// grow the label set without bound.
+fn log_header_pass_skipped(table: &str, reason: &str) {
+    metrics::counter!("dfe_loader_header_pass_skipped_total").increment(1);
+    static SKIPPED_TS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    if scalo::logger::log_debounced(&SKIPPED_TS, 60_000) {
+        error!(
+            table = %table,
+            reason = reason,
+            "Header pass promoted no columns, rejecting the message (max 1 per 60s)"
+        );
+    }
 }
 
 impl MessageProcessor<'_> {
@@ -173,6 +190,20 @@ impl MessageProcessor<'_> {
             let promoted =
                 self.extractor
                     .extract(&msg.payload, &table, &schema, self.col_meta_cache);
+
+            // A header pass that promoted nothing would land a row of type
+            // defaults — no _source, no _tags, _timestamp at epoch zero (#144).
+            // Every rejection is logged and counted here, the one site that sees
+            // them all; the extractor supplies the reason (#145).
+            if let Some(reason) = promoted.empty_reason
+                && !schema.columns.is_empty()
+            {
+                log_header_pass_skipped(&table, reason);
+                return Err(crate::Error::Transform(format!(
+                    "header pass promoted no columns for {table}"
+                )));
+            }
+            let promoted = promoted.fields;
 
             // raw_payload carries Kafka bytes for zero-copy _json splice (full mode only).
             // raw_only: _raw set below from payload bytes, no _json splice needed.
@@ -626,7 +657,7 @@ mod tests {
         let mut config = Config::default();
         config.routing.table_fields = vec!["event_category".to_string()];
         config.routing.default_db = "dfe".to_string();
-        config.routing.default_table = "default".to_string();
+        config.routing.default_table = "main".to_string();
 
         let harness = TestHarness::with_config(config);
         let proc = harness.processor();
@@ -664,7 +695,7 @@ mod tests {
         let mut config = Config::default();
         config.routing.table_fields = vec!["_source".to_string()];
         config.routing.default_db = "dfe".to_string();
-        config.routing.default_table = "default".to_string();
+        config.routing.default_table = "main".to_string();
 
         let mut harness = TestHarness::with_config(config);
         harness
@@ -677,7 +708,7 @@ mod tests {
 
         let processed = proc.process(&msg).expect("should succeed");
         assert_eq!(
-            processed.table, "dfe.default",
+            processed.table, "dfe.main",
             "an unknown source must land in the default table, not the DLQ"
         );
         assert_eq!(
@@ -694,7 +725,7 @@ mod tests {
         let mut config = Config::default();
         config.routing.table_fields = vec!["_source".to_string()];
         config.routing.default_db = "dfe".to_string();
-        config.routing.default_table = "default".to_string();
+        config.routing.default_table = "main".to_string();
 
         let harness = TestHarness::with_config(config);
         let proc = harness.processor();
@@ -714,7 +745,7 @@ mod tests {
             "event_category".to_string(),
         ];
         config.routing.default_db = "dfe".to_string();
-        config.routing.default_table = "default".to_string();
+        config.routing.default_table = "main".to_string();
 
         let harness = TestHarness::with_config(config);
         let proc = harness.processor();
@@ -874,7 +905,7 @@ mod tests {
             computed_column_cache: &computed_column_cache,
             capture_overrides: &capture_overrides,
             absent_tables: &absent_tables,
-            default_table: "dfe.default",
+            default_table: "dfe.main",
         };
 
         let value = json!({"event_category": "test"});
@@ -1107,7 +1138,7 @@ mod tests {
         // What we care about: no panic, deterministic behaviour.
         match result {
             Ok(processed) => {
-                // Routes to default: dfe.default
+                // Routes to default: dfe.main
                 assert!(processed.table.contains('.'));
             }
             Err(e) => {
@@ -1776,5 +1807,103 @@ mod tests {
             payload.as_slice(),
             "_raw must be the full original ingest payload as UTF-8 text"
         );
+    }
+
+    /// Regression for #144: a header pass that promotes nothing must reject the
+    /// message. It used to fall through and land a row of type defaults — no
+    /// `_source`, no `_tags`, `_timestamp` at epoch zero — which reads as data
+    /// while carrying none.
+    #[test]
+    fn json_primary_rejects_a_message_whose_header_pass_promoted_nothing_144() {
+        use crate::clickhouse::{ColumnInfo, ParsedType, TableSchema};
+
+        let harness = TestHarness::new();
+        // Parses as JSON, routes, and is not an object — the extractor has no
+        // columns to promote from it.
+        let msg = harness.make_msg(br"[1,2,3]");
+
+        let table = match harness.processor_json_primary().process(&msg) {
+            Err(crate::Error::SchemaPending { table }) => table,
+            Ok(_) => panic!("expected SchemaPending before schema cached, got Ok"),
+            Err(e) => panic!("expected SchemaPending, got Err({e:?})"),
+        };
+
+        let (db, tbl) = table.split_once('.').expect("db.table");
+        harness.schema_cache.insert(
+            table.clone(),
+            TableSchema {
+                database: db.to_string(),
+                table: tbl.to_string(),
+                columns: vec![ColumnInfo {
+                    name: "message".to_string(),
+                    type_name: "String".to_string(),
+                    parsed_type: ParsedType::parse("String"),
+                    position: 1,
+                    default_kind: String::new(),
+                    default_expression: String::new(),
+                    comment: String::new(),
+                    is_in_primary_key: false,
+                    is_in_sorting_key: false,
+                }],
+                comment: String::new(),
+            },
+        );
+
+        match harness.processor_json_primary().process(&msg) {
+            Err(crate::Error::Transform(reason)) => assert!(
+                reason.contains("promoted no columns"),
+                "the rejection must name the cause, got: {reason}"
+            ),
+            Ok(_) => panic!("a header-less row must not be handed on for insert"),
+            Err(e) => panic!("expected a Transform rejection, got Err({e:?})"),
+        }
+    }
+
+    /// The silent half of #144: a payload that parses, IS an object, and simply
+    /// matches no column. The extractor never spoke about this one, so the DLQ
+    /// rejection carried no log and no counter.
+    #[test]
+    fn json_primary_rejects_a_valid_object_that_matches_no_column() {
+        use crate::clickhouse::{ColumnInfo, ParsedType, TableSchema};
+
+        let harness = TestHarness::new();
+        let msg = harness.make_msg(br#"{"event_category":"security","other":1}"#);
+
+        let table = match harness.processor_json_primary().process(&msg) {
+            Err(crate::Error::SchemaPending { table }) => table,
+            Ok(_) => panic!("expected SchemaPending before schema cached, got Ok"),
+            Err(e) => panic!("expected SchemaPending, got Err({e:?})"),
+        };
+
+        // Only `message`, which the payload does not carry.
+        let (db, tbl) = table.split_once('.').expect("db.table");
+        harness.schema_cache.insert(
+            table.clone(),
+            TableSchema {
+                database: db.to_string(),
+                table: tbl.to_string(),
+                columns: vec![ColumnInfo {
+                    name: "message".to_string(),
+                    type_name: "String".to_string(),
+                    parsed_type: ParsedType::parse("String"),
+                    position: 1,
+                    default_kind: String::new(),
+                    default_expression: String::new(),
+                    comment: String::new(),
+                    is_in_primary_key: false,
+                    is_in_sorting_key: false,
+                }],
+                comment: String::new(),
+            },
+        );
+
+        match harness.processor_json_primary().process(&msg) {
+            Err(crate::Error::Transform(reason)) => assert!(
+                reason.contains("promoted no columns"),
+                "the rejection must name the cause, got: {reason}"
+            ),
+            Ok(_) => panic!("a row of type defaults must not be handed on for insert"),
+            Err(e) => panic!("expected a Transform rejection, got Err({e:?})"),
+        }
     }
 }

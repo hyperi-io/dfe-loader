@@ -109,8 +109,28 @@ pub struct Config {
     pub enrichment: EnrichmentConfig,
 }
 
+/// `transport` value selecting the bus: a broker holds records between stages.
+pub const TRANSPORT_KAFKA: &str = "kafka";
+
+/// `transport` value selecting the direct form: the scalo Push listener.
+pub const TRANSPORT_GRPC: &str = "grpc";
+
 fn default_transport() -> String {
-    "kafka".to_string()
+    TRANSPORT_KAFKA.to_string()
+}
+
+impl Config {
+    /// Whether records arrive on the Push listener rather than a broker.
+    ///
+    /// The loader declares no idle predicate on top of this. On `grpc` the
+    /// listener always has work, and on `kafka` an empty topic list is
+    /// auto-discovery rather than emptiness: a topic appearing on the broker
+    /// gives the loader work with no config change, and the scalo idle gate
+    /// only wakes on a config change.
+    #[must_use]
+    pub fn is_direct(&self) -> bool {
+        self.transport == TRANSPORT_GRPC
+    }
 }
 
 // ============================================================================
@@ -125,6 +145,9 @@ pub struct ClickHouseConfig {
     pub username: String,
     pub password: SensitiveString,
     pub protocol: String,
+    /// Row encoding for INSERT: `rowbinary` (default) or `jsoneachrow`. The
+    /// documented spellings `row_binary` and `json_each_row` parse as aliases.
+    pub insert_format: crate::clickhouse::InsertFormat,
     pub tables: Vec<String>,
     pub tls: Option<TlsConfig>,
 }
@@ -139,6 +162,7 @@ impl Default for ClickHouseConfig {
             // http only: the pinned clickhouse client has no TCP row fetch, so
             // schema queries against a native port stall silently (#115).
             protocol: "http".to_string(),
+            insert_format: crate::clickhouse::InsertFormat::default(),
             tables: Vec::new(),
             tls: None,
         }
@@ -167,7 +191,7 @@ impl From<&ClickHouseConfig> for crate::clickhouse::ClickHouseConfig {
         crate::clickhouse::ClickHouseConfig {
             hosts: cfg.hosts.clone(),
             transport,
-            insert_format: crate::clickhouse::InsertFormat::default(),
+            insert_format: cfg.insert_format,
             database: cfg.database.clone(),
             username: cfg.username.clone(),
             password: cfg.password.expose().to_string(),
@@ -417,8 +441,9 @@ impl Config {
 
     /// Validate the configuration
     pub fn validate(&self) -> Result<()> {
-        // Kafka validation
-        if self.kafka.brokers.is_empty() {
+        // Only on the bus: a grpc loader dials no broker, so a required
+        // address there refuses a config that is correct.
+        if self.transport != TRANSPORT_GRPC && self.kafka.brokers.is_empty() {
             return Err(crate::Error::Config(
                 "At least one Kafka broker must be configured".into(),
             ));
@@ -628,6 +653,20 @@ mod tests {
         let mut config = Config::default();
         config.kafka.brokers = vec![];
         assert!(config.validate().is_err());
+    }
+
+    /// A brokerless profile gives the loader no broker address, and it dials
+    /// none: requiring one there refuses a config that is correct.
+    #[test]
+    fn test_grpc_transport_needs_no_broker() {
+        let mut config = Config::default();
+        config.transport = TRANSPORT_GRPC.to_string();
+        config.kafka.brokers = vec![];
+        config.grpc.listen = Some("0.0.0.0:6000".to_string());
+        assert!(config.is_direct());
+        config
+            .validate()
+            .expect("the direct transport reaches no broker");
     }
 
     #[test]
@@ -1026,6 +1065,18 @@ mod tests {
         }
 
         {
+            // Nested figment path. This var was accepted and discarded until
+            // the key existed on the file-facing config.
+            unsafe { std::env::set_var("DFE_LOADER_CLICKHOUSE__INSERT_FORMAT", "json_each_row") };
+            let config = Config::load(None).unwrap();
+            assert_eq!(
+                config.clickhouse.insert_format,
+                crate::clickhouse::InsertFormat::JsonEachRow
+            );
+            unsafe { std::env::remove_var("DFE_LOADER_CLICKHOUSE__INSERT_FORMAT") };
+        }
+
+        {
             unsafe { std::env::set_var("DFE_LOADER_BUFFER_FLUSH_ROWS", "50000") };
             let config = Config::load(None).unwrap();
             assert_eq!(config.buffer.flush_rows, 50000);
@@ -1124,7 +1175,7 @@ clickhouse:
             let config = Config::load(None).unwrap();
             assert_eq!(config.kafka.brokers, vec!["localhost:9092"]);
             assert_eq!(config.routing.default_db, "dfe");
-            assert_eq!(config.routing.default_table, "default");
+            assert_eq!(config.routing.default_table, "main");
         }
     }
 
@@ -1271,7 +1322,7 @@ kafka:
     fn test_default_routing_config() {
         let config = Config::default();
         assert_eq!(config.routing.default_db, "dfe");
-        assert_eq!(config.routing.default_table, "default");
+        assert_eq!(config.routing.default_table, "main");
         assert_eq!(config.routing.org_id_field, Some("org_id".to_string()));
         assert_eq!(
             config.routing.topic_suffixes,
@@ -1336,6 +1387,7 @@ kafka:
             username: "user".to_string(),
             password: SensitiveString::from("pwd"),
             protocol: "native".to_string(),
+            insert_format: crate::clickhouse::InsertFormat::default(),
             tables: vec!["events".to_string()],
             tls: None,
         };
@@ -1359,6 +1411,7 @@ kafka:
             username: "default".to_string(),
             password: SensitiveString::default(),
             protocol: "http".to_string(),
+            insert_format: crate::clickhouse::InsertFormat::default(),
             tables: vec![],
             tls: None,
         };
@@ -1367,6 +1420,52 @@ kafka:
             client_cfg.transport,
             crate::clickhouse::Transport::Http
         ));
+    }
+
+    #[test]
+    fn test_clickhouse_insert_format_reaches_the_client_config() {
+        // The From impl hard-coded the default, so every value of this key was
+        // accepted and discarded -- the log line said rowbinary regardless.
+        let cfg = ClickHouseConfig {
+            insert_format: crate::clickhouse::InsertFormat::JsonEachRow,
+            ..ClickHouseConfig::default()
+        };
+        let client_cfg: crate::clickhouse::ClickHouseConfig = (&cfg).into();
+        assert_eq!(
+            client_cfg.insert_format,
+            crate::clickhouse::InsertFormat::JsonEachRow
+        );
+    }
+
+    #[test]
+    fn test_clickhouse_insert_format_from_yaml() {
+        let yaml = "kafka:\n  brokers: [\"x:9092\"]\nclickhouse:\n  insert_format: json_each_row\n";
+        let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        assert_eq!(
+            config.clickhouse.insert_format,
+            crate::clickhouse::InsertFormat::JsonEachRow
+        );
+
+        // The spelling documented in docs/clickhouse/INSERT-FORMATS.md.
+        let yaml = "clickhouse:\n  insert_format: row_binary\n";
+        let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        assert_eq!(
+            config.clickhouse.insert_format,
+            crate::clickhouse::InsertFormat::RowBinary
+        );
+    }
+
+    #[test]
+    fn test_clickhouse_insert_format_defaults_to_row_binary() {
+        assert_eq!(
+            Config::default().clickhouse.insert_format,
+            crate::clickhouse::InsertFormat::RowBinary
+        );
+        let config: Config = serde_yaml_ng::from_str("clickhouse:\n  database: dfe\n").unwrap();
+        assert_eq!(
+            config.clickhouse.insert_format,
+            crate::clickhouse::InsertFormat::RowBinary
+        );
     }
 
     #[test]

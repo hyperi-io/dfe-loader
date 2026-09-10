@@ -31,15 +31,15 @@ Every event table shares a common header that provides:
 The common header is the **base** of every table's schema -- not the complete
 schema itself. The loader injects these system fields into every event.
 
-- **Default table** (`dfe.default`): schema IS just the common header. This is the
+- **Landing table** (`dfe.main`): schema IS just the common header. This is the
   catch-all for unrouted events and the only table auto-created by the loader.
-- **Non-default tables** (e.g., `dfe.auth`, `dfe.metrics`): schema = common header
+- **Other tables** (e.g., `dfe.auth`, `dfe.metrics`): schema = common header
   + data-specific columns. These tables are created externally (by DBAs or IaC)
   with their own columns alongside the common header.
 
 ```text
 +----------------------------------+
-|   default table (dfe.default)    |   <- schema = common header ONLY
+|    landing table (dfe.main)      |   <- schema = common header ONLY
 |  +----------------------------+  |
 |  |      common header         |  |
 |  |  (_timestamp, _org_id, ...) |  |
@@ -158,6 +158,16 @@ SETTINGS index_granularity = 8192
 - Must be within reasonable bounds (not before 1970, not far in future).
 - Millisecond precision preserved.
 - Auto-detection of epoch seconds/millis/micros/nanos.
+
+**Wire format:**
+
+An RFC3339 value -- `2026-09-07T05:53:53.385Z`, which is what the receiver and
+both transforms emit -- is normalised to ClickHouse's own text form
+(`2026-09-07 05:53:53.385`, UTC) before the insert, and an offset is applied
+rather than truncated. Carried verbatim it stops the `JSONEachRow` `DateTime64`
+reader at the zone suffix, which rejects the whole batch with code 27 and loses
+every row in it. The same normalisation applies to any `DateTime`/`DateTime64`
+column the header pass fills, not only this one.
 
 ### `_timestamp_received`
 
@@ -393,6 +403,17 @@ for backwards compatibility and mapped onto `capture_mode`.
 3. `meta` field.
 4. `metadata.tags` nested path.
 
+**Shape:** the column is a ClickHouse `JSON`, which only accepts an object at
+the top level, and the loader shapes every value it writes into any JSON column
+to match -- whichever rule filled it (the `tags_fields` hoist or an
+`@source`/`@renamed` column comment) and on both insert formats, `RowBinary`
+and `JSONEachRow`. An object is stored as-is. An array -- ECS ships `tags` as an
+array of keywords -- is stored whole under a `list` key, so `["forwarded"]`
+lands as `{"list": ["forwarded"]}` and queries read it as `_tags.list`. A
+scalar, such as a bare string, is stored under a `value` key. A string carrying
+JSON text is stored as what that text holds, and text that does not parse is
+stored as the string it is, under `value`.
+
 **Configuration:**
 
 ```toml
@@ -427,7 +448,7 @@ All common header fields use an underscore prefix (`_timestamp`, `_org_id`,
 // Stored as:
 // _timestamp = 2024-01-15T10:30:00Z (from source timestamp)
 // _uuid = 01234567-... (generated)
-// _tags = ["important", "urgent"] (from source tags)
+// _tags = {"list": ["important", "urgent"]} (from source tags, wrapped for the JSON column)
 // + all original fields preserved in _json
 ```
 
@@ -716,6 +737,20 @@ Using the DDL Expression Language (see [../clickhouse/DDL-DIRECTIVES.md](../clic
 | `_raw` | `@captured: raw_payload` | Pre-transform capture |
 | `_json` | `@captured: raw_payload as JSON` | Pre-transform as JSON |
 | `_tags` | `@source: first(tags/_tags/meta/metadata.tags)` | First match wins |
+
+### When the header pass promotes nothing
+
+A payload the header pass cannot read -- not JSON, not a JSON object, or a valid
+object matching no column in the table -- once returned an empty field map and
+the row landed anyway, every column at its type default: no `_source`, no
+`_tags`, `_timestamp` at epoch zero. A row like that reads as data while
+carrying none, and cannot say where it came from.
+
+The message is now rejected to the DLQ instead. Every one of those rejections
+logs an ERROR naming the table and the reason, at most once a minute, and counts
+`dfe_loader_header_pass_skipped_total`. The table name stays out of the metric's
+labels: it comes from a payload field with no allowlist, so labelling it would
+let untrusted input grow the label set without bound.
 
 ## Configuration reference
 

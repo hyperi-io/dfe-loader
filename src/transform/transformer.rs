@@ -329,7 +329,8 @@ impl Transformer {
 
     /// Extract tags from the first matching field in `tags_fields`
     ///
-    /// Returns the extracted value (preserves nested structure).
+    /// Returns the extracted value verbatim; shaping a non-object for the JSON
+    /// `_tags` column happens at the write, in `clickhouse_ext::encode`.
     /// Uses dot notation for nested field access.
     fn extract_tags(&self, obj: &Map<String, Value>) -> Option<Value> {
         for field in &self.tags_fields {
@@ -1183,6 +1184,68 @@ mod tests {
         let result = transformer.transform_with_raw(value, None, None).unwrap();
         // _tags should not be in the output
         assert!(!result.data.contains_key("_tags"));
+    }
+
+    // ========================================================================
+    // tags hoisted into the _tags column (#139)
+    // ========================================================================
+
+    #[test]
+    fn test_transformer_tags_array_is_carried_verbatim() {
+        let transformer = Transformer::default();
+        let raw = br#"{"event": "x", "tags": ["preserve_original_event", "forwarded"]}"#;
+        let value: Value = serde_json::from_slice(raw).unwrap();
+        let result = transformer.transform_with_raw(value, None, None).unwrap();
+
+        let tags = result.data.get("_tags").expect("_tags must be populated");
+        assert_eq!(
+            tags,
+            &serde_json::json!(["preserve_original_event", "forwarded"]),
+            "the hoist carries the value; the JSON column's own encoder shapes it"
+        );
+    }
+
+    #[test]
+    fn test_transformer_tags_scalar_is_carried_verbatim() {
+        let transformer = Transformer::default();
+        let raw = br#"{"event": "x", "tags": "forwarded"}"#;
+        let value: Value = serde_json::from_slice(raw).unwrap();
+        let result = transformer.transform_with_raw(value, None, None).unwrap();
+
+        let tags = result.data.get("_tags").expect("_tags must be populated");
+        assert_eq!(
+            tags,
+            &serde_json::json!("forwarded"),
+            "a scalar tags value must be carried, not dropped"
+        );
+    }
+
+    #[test]
+    fn test_transformer_tags_object_passes_through_unchanged() {
+        let transformer = Transformer::default();
+        let raw = br#"{"event": "x", "tags": {"collector": {"host": "beat-1"}, "env": "prod"}}"#;
+        let value: Value = serde_json::from_slice(raw).unwrap();
+        let result = transformer.transform_with_raw(value, None, None).unwrap();
+
+        let tags = result.data.get("_tags").expect("_tags must be populated");
+        assert_eq!(
+            tags,
+            &serde_json::json!({"collector": {"host": "beat-1"}, "env": "prod"}),
+            "an object tags value must not gain a wrapper key"
+        );
+    }
+
+    #[test]
+    fn test_transformer_tags_absent_leaves_the_column_unset() {
+        let transformer = Transformer::default();
+        let raw = br#"{"event": "x", "message": "no tags here"}"#;
+        let value: Value = serde_json::from_slice(raw).unwrap();
+        let result = transformer.transform_with_raw(value, None, None).unwrap();
+
+        assert!(
+            !result.data.contains_key("_tags"),
+            "no tags source must leave _tags absent rather than writing an empty object"
+        );
     }
 
     // ========================================================================

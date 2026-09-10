@@ -549,7 +549,7 @@ impl TransportBackend {
         config: &crate::config::Config,
         governor: Option<&SelfRegulationGovernor>,
     ) -> Result<Self> {
-        if config.transport == "grpc" {
+        if config.is_direct() {
             let adapter = GrpcTransportAdapter::new(&config.grpc).await?;
             Ok(Self::Grpc(adapter))
         } else {

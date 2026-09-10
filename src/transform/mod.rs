@@ -16,7 +16,7 @@ pub mod transformer;
 
 pub use coerce::{Coercer, CoercionMode};
 pub use computed::{ComputedColumnCache, parse_computed_directive};
-pub use extractor::HeaderExtractor;
+pub use extractor::{HeaderExtraction, HeaderExtractor};
 pub use field_mapping::{
     FieldMappingRule, MappingAction, RuleOrigin, TableFieldMapping, parse_renamed_directive,
 };

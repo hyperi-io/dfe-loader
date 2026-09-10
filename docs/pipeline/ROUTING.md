@@ -43,7 +43,7 @@ flowchart TB
 | `routing.db_fields` | fields whose value selects the database; empty means everything shares `default_db` |
 | `routing.table_fields` | fields whose value selects the table; dot-notation reaches nested fields (`event.category`) |
 | `routing.default_db` | database used when no `db_fields` value matches -- default `dfe` |
-| `routing.default_table` | table used when no `table_fields` value matches -- default `default`, so an unrouted message lands in `dfe.default` |
+| `routing.default_table` | table used when no `table_fields` value matches -- default `main`, so an unrouted message lands in `dfe.main` |
 | `routing.route_all_by_org` / `routed_orgs` | route by organisation into a per-org database |
 
 ## How a field is resolved
