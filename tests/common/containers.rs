@@ -31,13 +31,24 @@ mod testcontainers_impl {
     // renovate: datasource=docker depName=apache/kafka
     const KAFKA_TAG: &str = "4.3.1";
 
-    /// ClickHouse to test against -- the version we actually deploy
-    /// (`docker-compose.dev.yaml`, and dfe-infra `versions.yaml`), not the
-    /// module default of 23.3.8.21-alpine, which is from March 2023. Testing
-    /// three years behind the deployed server is how a query that works in CI
-    /// meets a changed default in production.
+    /// ClickHouse to test against -- the server dfe-infra `versions.yaml`
+    /// deploys and `docker-compose.dev.yaml` runs, pinned to the patch and its
+    /// digest rather than the 26.3 minor, so a rebuild of that tag cannot
+    /// change what a green run tested against. Not the module default of
+    /// 23.3.8.21-alpine, which is from March 2023: testing three years behind
+    /// the deployed server is how a query that works in CI meets a changed
+    /// default in production.
+    ///
+    /// Tag and digest are separate consts because the org Renovate regex reads
+    /// a bare tag on the line below the annotation and stops at a colon, so a
+    /// `tag@sha256:...` value would take the pin out of review.
     // renovate: datasource=docker depName=clickhouse/clickhouse-server
-    const CLICKHOUSE_TAG: &str = "26.3";
+    const CLICKHOUSE_TAG: &str = "26.3.17.56";
+
+    /// Digest of `CLICKHOUSE_TAG`. Docker resolves the reference by digest, so
+    /// a tag moved without this one still pulls the old server.
+    const CLICKHOUSE_DIGEST: &str =
+        "sha256:422be85ae7344058369cdd366ac0efea9daa8428b55c9cf50258e83a7d12fcb3";
 
     use dfe_loader::config::{ClickHouseConfig, KafkaConfig};
 
@@ -152,7 +163,7 @@ mod testcontainers_impl {
         let name = crate::common::container_name(Some(test), "clickhouse");
         crate::common::reap_stale(&name);
         ClickHouseImage::default()
-            .with_tag(CLICKHOUSE_TAG)
+            .with_tag(format!("{CLICKHOUSE_TAG}@{CLICKHOUSE_DIGEST}"))
             // From 25.x the entrypoint refuses to leave `default` passwordless
             // unless told to, and rejects every connection with "Authentication
             // failed" instead. The module's own config predates that. Tests
