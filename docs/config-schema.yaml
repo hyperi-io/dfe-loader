@@ -383,7 +383,11 @@ $defs:
         type: boolean
         default: false
       mechanism:
-        description: SASL mechanism (none, plain, `scram_sha_256`, `scram_sha_512`, oauthbearer, `aws_msk_iam`)
+        description: |-
+          SASL mechanism. Connectable values: none, plain, `scram_sha_256`,
+          `scram_sha_512`. `oauthbearer` and `aws_msk_iam` parse but are rejected
+          at startup — see the `oauth_*` / `aws_*` fields below. An unrecognised
+          string is a startup error, not a silent fall back to the default.
         type: string
         default: scram_sha_512
       username:
@@ -395,19 +399,19 @@ $defs:
         writeOnly: true
         default: '***REDACTED***'
       oauth_token_endpoint:
-        description: OAuth token endpoint URL
+        description: OAuth token endpoint URL. Not wired — see the OAUTHBEARER note above.
         type:
         - string
         - 'null'
         default: null
       oauth_client_id:
-        description: OAuth client ID
+        description: OAuth client ID. Not wired.
         type:
         - string
         - 'null'
         default: null
       oauth_client_secret:
-        description: OAuth client secret
+        description: OAuth client secret. Not wired.
         type:
         - string
         - 'null'
@@ -415,31 +419,31 @@ $defs:
         writeOnly: true
         default: null
       oauth_scope:
-        description: OAuth scope (space-separated)
+        description: OAuth scope (space-separated). Not wired.
         type:
         - string
         - 'null'
         default: null
       oauth_extensions:
-        description: OAuth extensions (key=value pairs)
+        description: OAuth extensions (key=value pairs). Not wired.
         type:
         - string
         - 'null'
         default: null
       aws_region:
-        description: AWS region for MSK IAM
+        description: AWS region for MSK IAM. Not wired — see the AWS MSK IAM note above.
         type:
         - string
         - 'null'
         default: null
       aws_access_key_id:
-        description: AWS access key ID (optional - can use instance profile/environment)
+        description: AWS access key ID. Not wired.
         type:
         - string
         - 'null'
         default: null
       aws_secret_access_key:
-        description: AWS secret access key
+        description: AWS secret access key. Not wired.
         type:
         - string
         - 'null'
@@ -447,7 +451,7 @@ $defs:
         writeOnly: true
         default: null
       aws_session_token:
-        description: AWS session token (for temporary credentials)
+        description: AWS session token. Not wired.
         type:
         - string
         - 'null'
@@ -455,7 +459,7 @@ $defs:
         writeOnly: true
         default: null
       aws_profile:
-        description: AWS profile name (alternative to explicit credentials)
+        description: AWS profile name. Not wired.
         type:
         - string
         - 'null'
@@ -892,10 +896,14 @@ $defs:
     description: |-
       KEDA autoscaling thresholds (deployment-level config).
 
-      These values are the `SSoT` for the Helm chart's KEDA `ScaledObject`.
-      The contract sync test validates that chart/values.yaml matches these
-      defaults. Override at runtime via env vars:
-        `DFE_LOADER__KEDA__KAFKA_LAG_THRESHOLD=5000`
+      CHART-GENERATION ONLY. These defaults feed the deployment contract, and the
+      chart contract test validates chart/values.yaml against them. The loader
+      process itself reads NO field of this section: KEDA scales the deployment
+      from the `ScaledObject` the chart renders, so the value that moves a
+      threshold is the chart's `keda.*` (via `--set` or a values overlay), and a
+      `keda:` block in the pod's own config file or a `DFE_LOADER__KEDA__*` env var
+      changes nothing. The runtime scaling signal those thresholds read is
+      [`ScalingConfig`], which the pod does load.
     type: object
     properties:
       enabled:

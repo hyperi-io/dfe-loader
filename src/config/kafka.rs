@@ -187,7 +187,10 @@ impl std::fmt::Display for SaslMechanism {
 pub struct SaslConfig {
     /// Enable SASL authentication
     pub enabled: bool,
-    /// SASL mechanism (none, plain, `scram_sha_256`, `scram_sha_512`, oauthbearer, `aws_msk_iam`)
+    /// SASL mechanism. Connectable values: none, plain, `scram_sha_256`,
+    /// `scram_sha_512`. `oauthbearer` and `aws_msk_iam` parse but are rejected
+    /// at startup — see the `oauth_*` / `aws_*` fields below. An unrecognised
+    /// string is a startup error, not a silent fall back to the default.
     #[serde(default = "default_mechanism_string")]
     pub mechanism: String,
 
@@ -196,27 +199,31 @@ pub struct SaslConfig {
     pub password: SensitiveString,
 
     // --- OAuth 2.0 / OIDC auth (OAUTHBEARER) ---
-    /// OAuth token endpoint URL
+    // NOT WIRED: the client is handed mechanism + username + password only, so
+    // `validate()` rejects `mechanism: oauthbearer` at startup.
+    /// OAuth token endpoint URL. Not wired — see the OAUTHBEARER note above.
     pub oauth_token_endpoint: Option<String>,
-    /// OAuth client ID
+    /// OAuth client ID. Not wired.
     pub oauth_client_id: Option<String>,
-    /// OAuth client secret
+    /// OAuth client secret. Not wired.
     pub oauth_client_secret: Option<SensitiveString>,
-    /// OAuth scope (space-separated)
+    /// OAuth scope (space-separated). Not wired.
     pub oauth_scope: Option<String>,
-    /// OAuth extensions (key=value pairs)
+    /// OAuth extensions (key=value pairs). Not wired.
     pub oauth_extensions: Option<String>,
 
     // --- AWS MSK IAM auth ---
-    /// AWS region for MSK IAM
+    // NOT WIRED: no SigV4 token provider is attached to the client, so
+    // `validate()` rejects `mechanism: aws_msk_iam` at startup.
+    /// AWS region for MSK IAM. Not wired — see the AWS MSK IAM note above.
     pub aws_region: Option<String>,
-    /// AWS access key ID (optional - can use instance profile/environment)
+    /// AWS access key ID. Not wired.
     pub aws_access_key_id: Option<String>,
-    /// AWS secret access key
+    /// AWS secret access key. Not wired.
     pub aws_secret_access_key: Option<SensitiveString>,
-    /// AWS session token (for temporary credentials)
+    /// AWS session token. Not wired.
     pub aws_session_token: Option<SensitiveString>,
-    /// AWS profile name (alternative to explicit credentials)
+    /// AWS profile name. Not wired.
     pub aws_profile: Option<String>,
 }
 
@@ -246,26 +253,49 @@ impl Default for SaslConfig {
 }
 
 impl SaslConfig {
-    /// Parse the mechanism string into a `SaslMechanism` enum
-    pub fn mechanism(&self) -> SaslMechanism {
+    /// Parse the mechanism string into a `SaslMechanism`, or `None` when the
+    /// string names no mechanism this build understands.
+    ///
+    /// [`validate`](Self::validate) turns the `None` arm into a startup error,
+    /// so a typo cannot reach the broker as some other mechanism.
+    pub fn parse_mechanism(&self) -> Option<SaslMechanism> {
         match self.mechanism.to_lowercase().replace('-', "_").as_str() {
-            "none" => SaslMechanism::None,
-            "plain" => SaslMechanism::Plain,
-            "scram_sha_256" | "scram_sha256" => SaslMechanism::ScramSha256,
-            "scram_sha_512" | "scram_sha512" => SaslMechanism::ScramSha512,
-            "oauthbearer" | "oauth" => SaslMechanism::OAuthBearer,
-            "aws_msk_iam" | "awsmskiam" => SaslMechanism::AwsMskIam,
-            _ => SaslMechanism::ScramSha512, // Default
+            "none" => Some(SaslMechanism::None),
+            "plain" => Some(SaslMechanism::Plain),
+            "scram_sha_256" | "scram_sha256" => Some(SaslMechanism::ScramSha256),
+            "scram_sha_512" | "scram_sha512" => Some(SaslMechanism::ScramSha512),
+            "oauthbearer" | "oauth" => Some(SaslMechanism::OAuthBearer),
+            "aws_msk_iam" | "awsmskiam" => Some(SaslMechanism::AwsMskIam),
+            _ => None,
         }
     }
 
-    /// Validate the SASL configuration based on mechanism
+    /// Parse the mechanism string into a `SaslMechanism` enum.
+    ///
+    /// Falls back to the default mechanism for a string this build does not
+    /// know. Callers on the connect path can rely on that only because
+    /// [`validate`](Self::validate) has already rejected such a string at
+    /// startup.
+    pub fn mechanism(&self) -> SaslMechanism {
+        self.parse_mechanism().unwrap_or_default()
+    }
+
+    /// Validate the SASL configuration based on mechanism.
+    ///
+    /// Reached from `Config::validate()` at startup, so every arm below is a
+    /// hard startup failure rather than a claim.
     pub fn validate(&self) -> std::result::Result<(), String> {
         if !self.enabled {
             return Ok(());
         }
 
-        let mech = self.mechanism();
+        let Some(mech) = self.parse_mechanism() else {
+            return Err(format!(
+                "unknown kafka.sasl.mechanism '{}' (expected one of: none, plain, \
+                 scram_sha_256, scram_sha_512, oauthbearer, aws_msk_iam)",
+                self.mechanism
+            ));
+        };
         match mech {
             SaslMechanism::None => {
                 // No validation needed - this is explicitly insecure
@@ -278,19 +308,27 @@ impl SaslConfig {
                     return Err(format!("{mech} requires password"));
                 }
             }
+            // Refused here because their config reaches no client: without
+            // this, both connect as OAUTHBEARER with an empty username.
             SaslMechanism::OAuthBearer => {
-                if self.oauth_token_endpoint.is_none() {
-                    return Err("OAUTHBEARER requires oauth_token_endpoint".to_string());
-                }
-                if self.oauth_client_id.is_none() {
-                    return Err("OAUTHBEARER requires oauth_client_id".to_string());
-                }
+                return Err(
+                    "kafka.sasl.mechanism 'oauthbearer' is not supported by this \
+                            build: no OAuth token source is wired to the Kafka client, so \
+                            oauth_token_endpoint / oauth_client_id / oauth_client_secret / \
+                            oauth_scope / oauth_extensions never reach it. Use \
+                            scram_sha_512 (or scram_sha_256 / plain) over TLS."
+                        .to_string(),
+                );
             }
             SaslMechanism::AwsMskIam => {
-                // AWS region is required; credentials can come from environment/instance profile
-                if self.aws_region.is_none() {
-                    return Err("AWS_MSK_IAM requires aws_region".to_string());
-                }
+                return Err(
+                    "kafka.sasl.mechanism 'aws_msk_iam' is not supported by this \
+                            build: no AWS SigV4 token provider is wired to the Kafka \
+                            client, so aws_region / aws_access_key_id / \
+                            aws_secret_access_key / aws_session_token / aws_profile never \
+                            reach it. Use MSK's SCRAM-SHA-512 secret-manager auth."
+                        .to_string(),
+                );
             }
         }
 

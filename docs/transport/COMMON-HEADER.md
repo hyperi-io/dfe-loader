@@ -423,6 +423,17 @@ tags_output = "_tags"
 drop_tags = false  # Remove source tags after extraction
 ```
 
+#### Reading the wrapped list back
+
+```sql
+SELECT _tags.list.:`Array(Nullable(String))` AS tags
+FROM dfe.default
+WHERE arrayExists(x -> x = 'filebeat', _tags.list.:`Array(Nullable(String))`)
+```
+
+An object source passes through untouched, so `_tags` holding `{"list": [...]}`
+cannot be told apart from a source that genuinely sent that key.
+
 ## Underscore prefix convention
 
 All common header fields use an underscore prefix (`_timestamp`, `_org_id`,

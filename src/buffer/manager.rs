@@ -311,6 +311,32 @@ impl BufferManager {
             .collect()
     }
 
+    /// Lowest still-buffered offset on each `(topic, partition)`.
+    ///
+    /// A Kafka commit is a per-partition watermark while a buffer is per table,
+    /// so one partition's offsets sit across buffers that age independently and
+    /// a watermark committed past a row still only in memory loses it to a
+    /// crash.
+    ///
+    /// Scans the residual buffers once per flush cycle rather than tracking a
+    /// minimum on `push`, keeping the per-message path free of the bookkeeping.
+    pub fn lowest_pending_offsets(&self) -> Vec<KafkaOffset> {
+        let mut lowest: FxHashMap<(&str, i32), &KafkaOffset> = FxHashMap::default();
+        for buffer in self.buffers.values() {
+            for off in &buffer.offsets {
+                lowest
+                    .entry((&*off.topic, off.partition))
+                    .and_modify(|held| {
+                        if off.offset < held.offset {
+                            *held = off;
+                        }
+                    })
+                    .or_insert(off);
+            }
+        }
+        lowest.into_values().cloned().collect()
+    }
+
     /// Get total pending row count
     pub fn pending_rows(&self) -> usize {
         self.buffers.values().map(TableBuffer::len).sum()
@@ -742,6 +768,143 @@ mod tests {
         // Buffer exists but empty
         let pending_tables = m.tables_with_pending();
         assert!(pending_tables.is_empty());
+    }
+
+    // ========================================================================
+    // lowest_pending_offsets — the floor a Kafka commit must not pass
+    // ========================================================================
+
+    #[test]
+    fn lowest_pending_offsets_is_empty_with_nothing_buffered() {
+        let m = BufferManager::new(&test_config());
+        assert!(m.lowest_pending_offsets().is_empty());
+    }
+
+    #[test]
+    fn lowest_pending_offsets_reports_the_minimum_per_partition() {
+        let mut m = BufferManager::new(&test_config());
+        let topic: Arc<str> = Arc::from("t");
+        for off in [40i64, 12, 77] {
+            m.push(
+                "db.a",
+                json!({"id": off}).as_object().unwrap().clone(),
+                Some(KafkaOffset::with_shared_topic(topic.clone(), 3, off)),
+                None,
+            );
+        }
+
+        let floor = m.lowest_pending_offsets();
+        assert_eq!(floor.len(), 1);
+        assert_eq!(floor[0].partition, 3);
+        assert_eq!(floor[0].offset, 12);
+    }
+
+    #[test]
+    fn lowest_pending_offsets_spans_tables_that_buffer_independently() {
+        // Two tables fed by the same partition: the floor is the lower of the
+        // two, whichever buffer happens to hold it.
+        let mut m = BufferManager::new(&test_config());
+        let topic: Arc<str> = Arc::from("t");
+        m.push(
+            "db.foo",
+            json!({"id": 1}).as_object().unwrap().clone(),
+            Some(KafkaOffset::with_shared_topic(topic.clone(), 0, 102)),
+            None,
+        );
+        m.push(
+            "db.bar",
+            json!({"id": 2}).as_object().unwrap().clone(),
+            Some(KafkaOffset::with_shared_topic(topic.clone(), 0, 101)),
+            None,
+        );
+        m.push(
+            "db.bar",
+            json!({"id": 3}).as_object().unwrap().clone(),
+            Some(KafkaOffset::with_shared_topic(topic, 1, 7)),
+            None,
+        );
+
+        let mut floor: Vec<(i32, i64)> = m
+            .lowest_pending_offsets()
+            .into_iter()
+            .map(|o| (o.partition, o.offset))
+            .collect();
+        floor.sort_unstable();
+        assert_eq!(floor, vec![(0, 101), (1, 7)]);
+    }
+
+    #[test]
+    fn lowest_pending_offsets_keeps_topics_apart() {
+        let mut m = BufferManager::new(&test_config());
+        m.push(
+            "db.a",
+            json!({"id": 1}).as_object().unwrap().clone(),
+            Some(KafkaOffset::new("alpha", 0, 500)),
+            None,
+        );
+        m.push(
+            "db.a",
+            json!({"id": 2}).as_object().unwrap().clone(),
+            Some(KafkaOffset::new("beta", 0, 9)),
+            None,
+        );
+
+        let mut floor: Vec<(String, i64)> = m
+            .lowest_pending_offsets()
+            .into_iter()
+            .map(|o| (o.topic.to_string(), o.offset))
+            .collect();
+        floor.sort_unstable();
+        assert_eq!(
+            floor,
+            vec![("alpha".to_string(), 500), ("beta".to_string(), 9)]
+        );
+    }
+
+    #[test]
+    fn lowest_pending_offsets_ignores_what_a_flush_already_took() {
+        // The caller reads the floor after the take, so a flushed buffer must
+        // no longer hold the watermark down.
+        let mut m = BufferManager::new(&test_config());
+        let topic: Arc<str> = Arc::from("t");
+        for off in 0..6i64 {
+            m.push(
+                "db.ready",
+                json!({"id": off}).as_object().unwrap().clone(),
+                Some(KafkaOffset::with_shared_topic(topic.clone(), 0, off)),
+                None,
+            );
+        }
+        m.push(
+            "db.waiting",
+            json!({"id": 99}).as_object().unwrap().clone(),
+            Some(KafkaOffset::with_shared_topic(topic, 0, 99)),
+            None,
+        );
+
+        let batches = m.get_ready_for_flush();
+        assert_eq!(batches.len(), 1, "only db.ready crossed the row threshold");
+
+        let floor = m.lowest_pending_offsets();
+        assert_eq!(floor.len(), 1);
+        assert_eq!(
+            floor[0].offset, 99,
+            "the taken batch's offsets are no longer buffered"
+        );
+    }
+
+    #[test]
+    fn lowest_pending_offsets_ignores_rows_pushed_without_an_offset() {
+        // `push` accepts a row with no offset, and such a row names nothing a
+        // watermark could be held below.
+        let mut m = BufferManager::new(&test_config());
+        m.push(
+            "db.a",
+            json!({"id": 1}).as_object().unwrap().clone(),
+            None,
+            None,
+        );
+        assert!(m.lowest_pending_offsets().is_empty());
     }
 
     #[test]
