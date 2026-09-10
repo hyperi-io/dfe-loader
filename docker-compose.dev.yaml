@@ -11,7 +11,10 @@
 services:
   # ClickHouse for testing inserts
   clickhouse:
-    image: clickhouse/clickhouse-server:26.3@sha256:2ef11bbe2e44ab7022f37ff3019b3f2125ed09e919ea6194660be6130b7ca4b7
+    # Matches CLICKHOUSE_TAG in tests/common/containers.rs and dfe-infra's
+    # services.clickhouse-version. The 26.3 minor was a moving tag: every
+    # rebuild of it changed the server without changing the pin.
+    image: clickhouse/clickhouse-server:26.3.17.56@sha256:422be85ae7344058369cdd366ac0efea9daa8428b55c9cf50258e83a7d12fcb3
     container_name: clickhouse-dev
     ports:
       - "9000:9000"   # Native protocol
