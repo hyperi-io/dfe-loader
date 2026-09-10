@@ -96,7 +96,7 @@ config:
     recv_timeout_ms: 100
     max_message_size: 16777216
     compression: false
-    default_topic: default_land
+    default_topic: main_land
   clickhouse:
     hosts:
     - localhost:8123
@@ -187,7 +187,7 @@ config:
     table_fields:
     - _source
     default_db: dfe
-    default_table: default
+    default_table: main
     org_id_field: org_id
     org_routes: []
     source_to_table: {}

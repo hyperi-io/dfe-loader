@@ -218,14 +218,14 @@ for attempt in $(seq 1 60); do
     sleep 2
 done
 
-# The loader CONSUMES default_land. Redpanda auto-creates on produce but not
+# The loader CONSUMES main_land. Redpanda auto-creates on produce but not
 # on subscribe, so without this the consumer sits on UnknownTopicOrPartition
 # and never reaches ready -- Apache Kafka's auto-create-on-subscribe was
 # hiding that. --network host so the client reaches the advertised
 # localhost:19092.
 docker run --rm --network host "$KAFKA_IMAGE" \
-    topic create default_land -p 3 -X brokers=localhost:19092 >/dev/null 2>&1 || true
-echo "pgo-workload: created topic 'default_land'"
+    topic create main_land -p 3 -X brokers=localhost:19092 >/dev/null 2>&1 || true
+echo "pgo-workload: created topic 'main_land'"
 
 # ----------------------------------------------------------------------------
 # Write ephemeral loader config
@@ -240,7 +240,7 @@ kafka:
     - "localhost:19092"
   group: "pgo-workload"
   topics:
-    - "default_land"
+    - "main_land"
   client_id: "pgo-workload"
   librdkafka_overrides:
     statistics.interval.ms: "0"
@@ -331,7 +331,7 @@ echo "pgo-workload: driving load for ${DURATION}s via $PGO_DRIVER_PATH"
 
 PGO_DRIVER_DURATION_SECS="$DURATION" \
 PGO_DRIVER_BROKERS="127.0.0.1:19092" \
-PGO_DRIVER_TOPIC="default_land" \
+PGO_DRIVER_TOPIC="main_land" \
 PGO_DRIVER_RPS="${PGO_DRIVER_RPS:-5000}" \
     "$PGO_DRIVER_PATH"
 

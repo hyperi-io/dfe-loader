@@ -17,8 +17,8 @@ mod testcontainers_impl {
     // The `apache` module, NOT the crate's default (`confluentinc/cp-kafka`).
     // cp-kafka is amd64-only, so on arm64 it runs a JVM under QEMU: ~30s to
     // become ready instead of ~1s, and concurrent brokers then trade
-    // BrokerTransportFailure and produce timeouts. `apache/kafka-native` is
-    // multi-arch and a GraalVM native build.
+    // BrokerTransportFailure and produce timeouts. Both `apache/kafka` images
+    // are multi-arch, so neither pays that cost.
     use testcontainers_modules::kafka::apache::{KAFKA_PORT, Kafka as KafkaImage};
 
     /// Kafka to test against. Pinned rather than left to the module default,
@@ -28,7 +28,7 @@ mod testcontainers_impl {
     /// invisible to dependency review: Renovate reads Cargo.toml, reports the
     /// crate current, and never sees the image. The annotation is what puts it
     /// back under review.
-    // renovate: datasource=docker depName=apache/kafka-native
+    // renovate: datasource=docker depName=apache/kafka
     const KAFKA_TAG: &str = "4.3.1";
 
     /// ClickHouse to test against -- the version we actually deploy
@@ -122,6 +122,7 @@ mod testcontainers_impl {
                 username: "default".to_string(),
                 password: scalo::config::sensitive::SensitiveString::default(),
                 protocol: "native".to_string(),
+                insert_format: dfe_loader::clickhouse::InsertFormat::default(),
                 tables: Vec::new(),
                 tls: None,
             })
@@ -172,10 +173,17 @@ mod testcontainers_impl {
     async fn start_kafka(test: &str) -> ContainerAsync<KafkaImage> {
         let name = crate::common::container_name(Some(test), "kafka");
         crate::common::reap_stale(&name);
+        // The module's default `apache/kafka-native` segfaults in `getpwuid`
+        // during its GraalVM `setup` binary, so use the JVM image.
         KafkaImage::default()
+            .with_jvm_image()
             .with_tag(KAFKA_TAG)
             .with_container_name(&name)
             .with_labels(crate::common::test_labels("kafka"))
+            // A JVM broker takes tens of seconds to print "Kafka Server
+            // started", which the 60s testcontainers default cuts too close
+            // under CI container contention.
+            .with_startup_timeout(Duration::from_secs(180))
             .start()
             .await
             .expect("Failed to start Kafka container")

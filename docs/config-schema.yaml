@@ -59,7 +59,7 @@ properties:
       recv_timeout_ms: 100
       max_message_size: 16777216
       compression: false
-      default_topic: default_land
+      default_topic: main_land
   clickhouse:
     description: '`ClickHouse` connection config. **Restart required.**'
     $ref: '#/$defs/ClickHouseConfig'
@@ -70,6 +70,7 @@ properties:
       username: default
       password: '***REDACTED***'
       protocol: http
+      insert_format: rowbinary
       tables: []
       tls: null
   payload:
@@ -189,7 +190,7 @@ properties:
       table_fields:
       - _source
       default_db: dfe
-      default_table: default
+      default_table: main
       org_id_field: org_id
       org_routes: []
       source_to_table: {}
@@ -530,7 +531,7 @@ $defs:
           Default topic name for messages without a topic in gRPC metadata.
           Used as the routing key when the sender doesn't set a topic.
         type: string
-        default: default_land
+        default: main_land
   ClickHouseConfig:
     type: object
     properties:
@@ -554,6 +555,12 @@ $defs:
       protocol:
         type: string
         default: http
+      insert_format:
+        description: |-
+          Row encoding for INSERT: `rowbinary` (default) or `jsoneachrow`. The
+          documented spellings `row_binary` and `json_each_row` parse as aliases.
+        $ref: '#/$defs/InsertFormat'
+        default: rowbinary
       tables:
         type: array
         items:
@@ -564,6 +571,33 @@ $defs:
         - $ref: '#/$defs/TlsConfig'
         - type: 'null'
         default: null
+  InsertFormat:
+    description: |-
+      Insert format for data writes.
+
+      Controls how rows are encoded and sent to `ClickHouse`. `RowBinary` is the
+      default — it uses schema reflection to encode `Map<String, Value>` directly
+      to binary, so `ClickHouse` skips JSON parsing entirely. This significantly
+      reduces CPU load on the `ClickHouse` cluster at scale.
+
+      `JsonEachRow` is the fallback — simpler, self-describing, but the `ClickHouse`
+      server pays the cost of parsing every JSON row on ingest.
+    oneOf:
+    - description: |-
+        Schema-reflected `RowBinary` (default).
+
+        Fetches schema from `system.columns`, encodes values to binary client-side.
+        `ClickHouse` receives pre-columnarised data — zero server-side parsing.
+        Total CPU (client + cluster) is significantly lower than `JSONEachRow`.
+      type: string
+      const: rowbinary
+    - description: |-
+        `JSONEachRow` over HTTP.
+
+        Self-describing format — `ClickHouse` coerces types server-side.
+        Simpler but the cluster pays the JSON parsing cost on every row.
+      type: string
+      const: jsoneachrow
   PayloadConfig:
     type: object
     properties:
@@ -1140,9 +1174,9 @@ $defs:
       default_table:
         description: |-
           Default table if no `table_field` matches
-          Default: "default"
+          Default: "main"
         type: string
-        default: default
+        default: main
       org_id_field:
         description: |-
           Field to extract for _`org_id` column (stored in data for RLS)

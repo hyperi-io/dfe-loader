@@ -109,7 +109,7 @@ impl Default for GrpcConfig {
             recv_timeout_ms: 100,
             max_message_size: 16 * 1024 * 1024,
             compression: false,
-            default_topic: "default_land".to_string(),
+            default_topic: "main_land".to_string(),
         }
     }
 }

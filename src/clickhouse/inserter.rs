@@ -50,6 +50,7 @@ use crate::clickhouse::error::{
     is_schema_drift_error,
 };
 use crate::clickhouse::{ClickHouseQueryClient, SchemaCache};
+use crate::clickhouse_ext::{ColumnDef, json_shaping_changes, shape_json_for_type};
 use crate::transform::Coercer;
 
 /// Split "db.table" into (db, table). Panics if no dot — callers always
@@ -191,7 +192,7 @@ pub struct FailedRow {
     /// Error message
     pub reason: String,
     /// The promoted row, serialised, for the DLQ to carry when the batch's
-    /// parallel raw-payload slot is empty. See [`rejected_row_bytes`].
+    /// parallel raw-payload slot is empty. Filled by `rejected_row_bytes`.
     pub row_json: Option<Vec<u8>>,
 }
 
@@ -369,6 +370,39 @@ impl Inserter {
                 warn!(table = %table, error = %e, "Row coercion failed, row sent as-is");
             }
         }
+    }
+
+    /// The table's columns that carry a JSON type at any depth, read through
+    /// the same schema cache the RowBinary path fills.
+    ///
+    /// A schema that cannot be fetched returns none and the rows go unshaped,
+    /// which is where this path stood before shaping existed.
+    async fn json_columns(&self, table: &str) -> Vec<ColumnDef> {
+        let (db, tbl) = parse_db_table(table);
+        let schema = match self.dynamic_schema_cache.get(table) {
+            Some(schema) => schema,
+            None => {
+                match crate::clickhouse_ext::fetch_dynamic_schema(&self.ch_client, db, tbl).await {
+                    Ok(fetched) => {
+                        self.dynamic_schema_cache.insert(table, fetched.clone());
+                        fetched
+                    }
+                    Err(e) => {
+                        warn!(table = %table, error = %e, "Schema fetch failed, JSON columns not shaped");
+                        return Vec::new();
+                    }
+                }
+            }
+        };
+        if !schema.has_json_columns() {
+            return Vec::new();
+        }
+        schema
+            .columns
+            .iter()
+            .filter(|c| c.ty.contains_json())
+            .cloned()
+            .collect()
     }
 
     /// Calculate backoff delay for a given attempt.
@@ -651,26 +685,26 @@ impl Inserter {
 
         let (db, tbl) = parse_db_table(table);
 
+        // This path serialises the row map as it stands, so a value bound for a
+        // JSON column is shaped here — the encoder does it for RowBinary, and a
+        // hoisted `tags` array reaching the column unshaped is code 117.
+        let json_columns = self.json_columns(table).await;
+
         // Serialise rows as NDJSON — sonic_rs for SIMD-accelerated encoding.
         let estimated_size = rows.len() * 256;
         let mut body = Vec::with_capacity(estimated_size);
-        if raw_payloads.is_empty() {
-            for row in rows {
-                sonic_rs::to_writer(&mut body, row).map_err(|e| {
-                    crate::Error::ClickHousePermanent(format!("JSON serialisation error: {e}"))
-                })?;
-                body.push(b'\n');
-            }
-        } else {
-            for (row, raw) in rows.iter().zip(raw_payloads.iter()) {
-                if raw.is_empty() {
-                    // Transformer-path row: _json already in the map (or absent).
+        for (idx, row) in rows.iter().enumerate() {
+            let shaped = shape_json_row(row, &json_columns);
+            let row = shaped.as_ref().unwrap_or(row);
+            match raw_payloads.get(idx) {
+                // Zero-copy `_json` splice; an empty entry (or none at all) is
+                // a transformer-path row carrying its own `_json`, or no `_json`.
+                Some(raw) if !raw.is_empty() => write_row_with_json(&mut body, row, raw)?,
+                _ => {
                     sonic_rs::to_writer(&mut body, row).map_err(|e| {
                         crate::Error::ClickHousePermanent(format!("JSON serialisation error: {e}"))
                     })?;
                     body.push(b'\n');
-                } else {
-                    write_row_with_json(&mut body, row, raw)?;
                 }
             }
         }
@@ -1051,6 +1085,28 @@ impl Inserter {
     }
 }
 
+/// Shape a row's JSON-column values for the JSONEachRow body, cloning the row
+/// only when a value must change.
+fn shape_json_row(
+    row: &Map<String, Value>,
+    json_columns: &[ColumnDef],
+) -> Option<Map<String, Value>> {
+    let changes = json_columns.iter().any(|col| {
+        row.get(&col.name)
+            .is_some_and(|value| json_shaping_changes(value, &col.ty))
+    });
+    if !changes {
+        return None;
+    }
+    let mut shaped = row.clone();
+    for col in json_columns {
+        if let Some(value) = shaped.get_mut(&col.name) {
+            shape_json_for_type(value, &col.ty);
+        }
+    }
+    Some(shaped)
+}
+
 /// Serialise one promoted-column row extended with a `_json` field.
 ///
 /// Splices the raw payload bytes directly as the `_json` value — zero-copy for
@@ -1194,6 +1250,63 @@ mod tests {
 
         assert_eq!(config.backoff_delay(10), Duration::from_millis(1000));
         assert_eq!(config.backoff_delay(20), Duration::from_millis(1000));
+    }
+
+    // ========================================================================
+    // JSONEachRow rows are shaped for their JSON columns (#139)
+    // ========================================================================
+
+    fn tags_json_column() -> Vec<ColumnDef> {
+        vec![ColumnDef::new("_tags", "JSON")]
+    }
+
+    fn row_map(value: Value) -> Map<String, Value> {
+        value
+            .as_object()
+            .expect("test row must be an object")
+            .clone()
+    }
+
+    #[test]
+    fn test_shape_json_row_wraps_an_ecs_tags_array() {
+        let row = row_map(
+            serde_json::json!({"message": "x", "_tags": ["preserve_original_event", "forwarded"]}),
+        );
+
+        let shaped = shape_json_row(&row, &tags_json_column()).expect("the array must be shaped");
+
+        assert_eq!(
+            shaped.get("_tags").unwrap(),
+            &serde_json::json!({"list": ["preserve_original_event", "forwarded"]})
+        );
+        assert_eq!(shaped.get("message").unwrap(), "x", "the rest is untouched");
+    }
+
+    #[test]
+    fn test_shape_json_row_does_not_clone_a_row_it_would_not_change() {
+        let row = row_map(serde_json::json!({"message": "x", "_tags": {"env": "prod"}}));
+
+        assert!(
+            shape_json_row(&row, &tags_json_column()).is_none(),
+            "an object needs no shaping, so the row must not be cloned"
+        );
+        assert!(
+            shape_json_row(&row, &[]).is_none(),
+            "a table with no JSON column must not be cloned either"
+        );
+    }
+
+    #[test]
+    fn test_shape_json_row_wraps_broken_object_text() {
+        let row = row_map(serde_json::json!({"_tags": "{not json"}));
+
+        let shaped = shape_json_row(&row, &tags_json_column()).expect("broken text must be shaped");
+
+        assert_eq!(
+            shaped.get("_tags").unwrap(),
+            &serde_json::json!({"value": "{not json"}),
+            "text that does not parse is stored as the string it is"
+        );
     }
 
     #[test]
@@ -1594,7 +1707,7 @@ mod tests {
         // Aliases from the config — verified via actual YAML/JSON input
         let cases = [
             ("\"rowbinary\"", InsertFormat::RowBinary),
-            ("\"native\"", InsertFormat::RowBinary),
+            ("\"row_binary\"", InsertFormat::RowBinary),
             ("\"binary\"", InsertFormat::RowBinary),
             ("\"jsoneachrow\"", InsertFormat::JsonEachRow),
             ("\"json\"", InsertFormat::JsonEachRow),
@@ -1610,6 +1723,9 @@ mod tests {
     fn test_insert_format_invalid_variant_fails() {
         // Unknown variants must error — prevents silent typos in config
         let result: std::result::Result<InsertFormat, _> = serde_json::from_str("\"arrow\"");
+        assert!(result.is_err());
+        // `native` is a protocol spelling, and the protocol key rejects it too.
+        let result: std::result::Result<InsertFormat, _> = serde_json::from_str("\"native\"");
         assert!(result.is_err());
         let result: std::result::Result<InsertFormat, _> = serde_json::from_str("42");
         assert!(result.is_err());
