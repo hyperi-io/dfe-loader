@@ -137,14 +137,14 @@ impl ServiceApp for App {
                 .unwrap_or_else(|| Arc::new(config.scaling.build_pressure()));
 
             // The engine KEDA reads takes its gates from scalo's cascade, which
-            // reads env but never the `--config` file, so a gate set only in
-            // that file is reported here and ignored there (#160).
+            // reads neither the `--config` file nor the `DFE_LOADER__` env form,
+            // so a gate set either way is reported here and ignored there (#160).
             if scaling.is_enabled() != config.scaling.enabled {
                 warn!(
                     configured = config.scaling.enabled,
                     effective = scaling.is_enabled(),
-                    "scaling.enabled in the config file does not reach the scaling engine, \
-                     set DFE_LOADER_SCALING__ENABLED instead"
+                    "scaling.enabled did not reach the scaling engine, set \
+                     DFE_LOADER_SCALING__ENABLED (one underscore after the prefix)"
                 );
             }
 
