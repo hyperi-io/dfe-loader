@@ -80,6 +80,19 @@ pub struct Metrics {
     ch_rows_last_update: Arc<parking_lot::Mutex<Instant>>,
     ch_rows_last_count: Arc<AtomicU64>,
 
+    // Schema-resolution metrics. Registered through the manager rather than
+    // emitted straight from the macro, so the manifest carries them (#158).
+    /// Messages DLQ'd because a pending-schema buffer hit a cap.
+    pub pending_schema_overflow: Counter,
+    /// Pending-schema messages DLQ'd by the expire sweep.
+    pub pending_schema_expired: Counter,
+    /// Messages currently held awaiting schema resolution.
+    pub pending_schema_messages: Gauge,
+    /// Pre-warm retry rounds beyond the first.
+    pub schema_prewarm_retries: Counter,
+    /// Tables still failing pre-warm after the retry budget.
+    pub schema_prewarm_failed_tables: Gauge,
+
     // Legacy loader_* metrics (dual-emit — remove after dashboard migration)
     pub messages_received: Counter,
     pub messages_processed: Counter,
@@ -102,6 +115,13 @@ impl Metrics {
     /// (via `MetricsManager::new` or `MetricsManager::with_config`).
     pub fn new(manager: &MetricsManager) -> Self {
         let dfe = Arc::new(ServiceMetrics::register(manager));
+
+        // Emitted from the processor, which holds no Metrics handle; registered
+        // here so the catalogue names it (#158).
+        let _ = manager.counter(
+            "dfe_loader_header_pass_skipped_total",
+            "Messages rejected because the header pass promoted no columns",
+        );
 
         Self {
             dfe,
@@ -199,6 +219,28 @@ impl Metrics {
             ch_rows_counter: Arc::new(AtomicU64::new(0)),
             ch_rows_last_update: Arc::new(parking_lot::Mutex::new(Instant::now())),
             ch_rows_last_count: Arc::new(AtomicU64::new(0)),
+
+            // Schema resolution (#36 buffer, #158 catalogue)
+            pending_schema_overflow: manager.counter(
+                "dfe_loader_pending_schema_overflow_total",
+                "Messages DLQ'd because a pending-schema buffer hit its cap",
+            ),
+            pending_schema_expired: manager.counter(
+                "dfe_loader_pending_schema_expired_total",
+                "Pending-schema messages DLQ'd by the expire sweep",
+            ),
+            pending_schema_messages: manager.gauge(
+                "dfe_loader_pending_schema_messages",
+                "Messages held awaiting schema resolution",
+            ),
+            schema_prewarm_retries: manager.counter(
+                "dfe_loader_schema_prewarm_retries_total",
+                "Schema pre-warm retry rounds beyond the first",
+            ),
+            schema_prewarm_failed_tables: manager.gauge(
+                "dfe_loader_schema_prewarm_failed_tables",
+                "Tables still failing schema pre-warm after the retry budget",
+            ),
         }
     }
 
@@ -292,13 +334,13 @@ impl Metrics {
     /// Record a message DLQ'd because its pending-schema buffer hit a per-table
     /// or global cap (#36).
     pub fn record_pending_schema_overflow(&self) {
-        metrics::counter!("dfe_loader_pending_schema_overflow_total").increment(1);
+        self.pending_schema_overflow.increment(1);
     }
 
     /// Record a pending-schema message DLQ'd by the expire sweep (aged out,
     /// globally evicted, or drained on shutdown) (#36).
     pub fn record_pending_schema_expired(&self) {
-        metrics::counter!("dfe_loader_pending_schema_expired_total").increment(1);
+        self.pending_schema_expired.increment(1);
     }
 
     /// Record a row DLQ'd because ClickHouse rejected it deterministically and
@@ -330,17 +372,17 @@ impl Metrics {
 
     /// Update the gauge of messages currently held in the pending-schema buffer.
     pub fn update_pending_schema_messages(&self, n: usize) {
-        metrics::gauge!("dfe_loader_pending_schema_messages").set(n as f64);
+        self.pending_schema_messages.set(n as f64);
     }
 
     /// Record a pre-warm retry round (counted once per round beyond the first).
     pub fn record_schema_prewarm_retry(&self) {
-        metrics::counter!("dfe_loader_schema_prewarm_retries_total").increment(1);
+        self.schema_prewarm_retries.increment(1);
     }
 
     /// Set the gauge of tables still failing pre-warm after the retry budget.
     pub fn update_schema_prewarm_failed_tables(&self, n: usize) {
-        metrics::gauge!("dfe_loader_schema_prewarm_failed_tables").set(n as f64);
+        self.schema_prewarm_failed_tables.set(n as f64);
     }
 
     /// Update aggregate buffer stats.
@@ -509,6 +551,45 @@ mod tests {
             ScalingPressureConfig::default(),
             vec![],
         ))
+    }
+
+    // ---- metric catalogue (what `metrics-manifest` prints) ----
+
+    #[test]
+    fn building_the_metrics_fills_the_manifest_catalogue() {
+        // Same manager config the metrics-manifest subcommand builds, and the
+        // registry is per-manager, so this reads only what this test registered.
+        let manager = MetricsManager::with_config(scalo::metrics::MetricsConfig::offline(""));
+        let manifest_before = manager.registry().manifest();
+        assert!(
+            manifest_before.metrics.is_empty(),
+            "a fresh manager starts with no catalogue"
+        );
+
+        let _metrics = Metrics::new(&manager);
+        let names: Vec<String> = manager
+            .registry()
+            .manifest()
+            .metrics
+            .into_iter()
+            .map(|d| d.name)
+            .collect();
+
+        for expected in [
+            "kafka_offsets_committed_total",
+            "consumer_partitions_assigned",
+            "dfe_loader_pending_schema_overflow_total",
+            "dfe_loader_pending_schema_expired_total",
+            "dfe_loader_pending_schema_messages",
+            "dfe_loader_schema_prewarm_retries_total",
+            "dfe_loader_schema_prewarm_failed_tables",
+            "dfe_loader_header_pass_skipped_total",
+        ] {
+            assert!(
+                names.iter().any(|n| n == expected),
+                "{expected} is missing from the catalogue: {names:?}"
+            );
+        }
     }
 
     // ---- pending-schema / pre-warm metrics ----

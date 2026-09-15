@@ -1808,9 +1808,13 @@ async fn commit_offsets(
     }
     match transport.commit(offsets).await {
         Ok(()) => {
-            debug!(offsets = offsets.len(), "Kafka offsets committed");
-            if let Some(m) = metrics {
-                m.record_offsets_committed(offsets.len());
+            // gRPC has no broker-side offsets, so its no-op commit must not tick
+            // a kafka-named counter on a broker-less deployment (#125).
+            if transport.commits_offsets() {
+                debug!(offsets = offsets.len(), "Kafka offsets committed");
+                if let Some(m) = metrics {
+                    m.record_offsets_committed(offsets.len());
+                }
             }
         }
         Err(e) => error!(error = %e, "Failed to commit Kafka offsets"),

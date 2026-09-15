@@ -610,6 +610,48 @@ impl TransportBackend {
             Self::Grpc(_) => None,
         }
     }
+
+    /// Whether a successful `commit` reached a broker.
+    ///
+    /// The gRPC arm's commit is a no-op -- the Push RPC response is the ack --
+    /// so a kafka-named counter must stay flat on a broker-less deployment
+    /// (#125).
+    #[must_use]
+    pub const fn commits_offsets(&self) -> bool {
+        matches!(self, Self::Kafka(_))
+    }
+}
+
+#[cfg(test)]
+mod backend_tests {
+    use super::*;
+
+    /// gRPC listens on an ephemeral loopback port, so the bind is real and the
+    /// test needs no fixed port.
+    async fn grpc_backend() -> TransportBackend {
+        let config = crate::config::Config {
+            transport: "grpc".to_string(),
+            grpc: crate::config::GrpcConfig {
+                listen: Some("127.0.0.1:0".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        TransportBackend::from_config(&config, None)
+            .await
+            .expect("gRPC backend binds on an ephemeral port")
+    }
+
+    #[tokio::test]
+    async fn grpc_backend_does_not_commit_offsets() {
+        let backend = grpc_backend().await;
+        assert_eq!(backend.name(), "grpc");
+        assert!(
+            !backend.commits_offsets(),
+            "gRPC commit is a no-op, so the kafka offset counters must not move"
+        );
+        backend.close().await.expect("close the gRPC server");
+    }
 }
 
 #[cfg(all(test, feature = "transport-memory"))]

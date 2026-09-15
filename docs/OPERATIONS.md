@@ -24,6 +24,7 @@ scalo). The default subcommand is `run`.
 | `config-check` | resolve the full config cascade and validate it, then exit -- no connections opened |
 | `version` | print version and build metadata |
 | `top` | live TUI dashboard polling the running loader's `/metrics` |
+| `metrics-manifest` | print the metric catalogue as JSON without starting the loader |
 
 Environment variables use generic names (`LOG_LEVEL`, not a loader-specific
 prefix); the config cascade derives the prefixed forms. See
@@ -46,7 +47,12 @@ See [clickhouse/INSERT-FORMATS.md](clickhouse/INSERT-FORMATS.md).
 
 - **Metrics** -- Prometheus text on `/metrics`. The loader emits the DFE metric
   groups (dual-emit: legacy `loader_*` names alongside the standard group
-  names), plus rdkafka consumer stats and config-reload counters.
+  names), plus rdkafka consumer stats and config-reload counters. On the direct
+  gRPC transport there are no broker offsets, so `kafka_offsets_committed_total`
+  and the consumer offset counters stay flat while the transport counters move.
+- **Catalogue** -- `dfe-loader metrics-manifest` prints every metric the loader
+  registers, so a dashboard or scaling rule can be written against the
+  catalogue rather than a running pod.
 - **`top`** -- `dfe-loader top` renders those metrics as a TUI. `--once`,
   `--json`, and `--filter` make it scriptable; the JSON/TSV output pipes into
   shell tooling.
