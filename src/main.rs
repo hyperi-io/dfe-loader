@@ -228,6 +228,13 @@ impl ServiceApp for App {
         }
     }
 
+    fn register_metrics(&self, manager: &scalo::metrics::MetricsManager) {
+        // `metrics-manifest` and `generate-artefacts` read the registry without
+        // starting the service, so the catalogue is empty until the loader's own
+        // metrics are built against their manager (#158).
+        let _ = Metrics::new(manager);
+    }
+
     fn scaling_components(&self, config: &Self::Config) -> Vec<scalo::ScalingComponent> {
         // Register the loader's weighted KEDA components on the runtime's single
         // ScalingPressure -- the engine `/scaling/pressure` serves. The
