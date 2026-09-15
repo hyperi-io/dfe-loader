@@ -14,14 +14,14 @@
 use std::sync::Arc;
 
 use serde_json::Value;
-use tracing::{debug, error, trace};
+use tracing::{debug, error, trace, warn};
 
 use crate::buffer::KafkaOffset;
 use crate::clickhouse::SharedSchemaCache;
 use crate::column_meta::ColumnMetaCache;
 use crate::config::{CaptureMode, Config};
 use crate::payload::{FormatDetector, PayloadFormat};
-use crate::routing::{RouteResult, Router};
+use crate::routing::{RouteResult, Router, TableChoice};
 use crate::transform::{ComputedColumnCache, FieldMappingCache, HeaderExtractor, Transformer};
 
 use super::capture::CaptureOverrides;
@@ -67,6 +67,31 @@ fn log_header_pass_skipped(table: &str, reason: &str) {
             table = %table,
             reason = reason,
             "Header pass promoted no columns, rejecting the message (max 1 per 60s)"
+        );
+    }
+}
+
+/// Report a record that named no table on a source's own topic, at most once a
+/// minute per topic.
+///
+/// The topic stays out of the metric labels for the same reason the table does
+/// above: on the gRPC transport it arrives in request metadata.
+fn log_routing_field_absent(topic: &str, table: &str) {
+    metrics::counter!("dfe_loader_routing_field_absent_total").increment(1);
+
+    // Keyed by topic so a second broken source is not hidden by the first; the
+    // subscribed topic set bounds the map.
+    static WARN_TS: std::sync::LazyLock<
+        parking_lot::Mutex<rustc_hash::FxHashMap<String, Arc<std::sync::atomic::AtomicU64>>>,
+    > = std::sync::LazyLock::new(|| parking_lot::Mutex::new(rustc_hash::FxHashMap::default()));
+
+    let slot = Arc::clone(WARN_TS.lock().entry(topic.to_string()).or_default());
+    if scalo::logger::log_debounced(&slot, 60_000) {
+        warn!(
+            topic = %topic,
+            table = %table,
+            reason = "no_routing_field",
+            "No routing field on a source topic, falling back to the default table (max 1 per 60s per topic)"
         );
     }
 }
@@ -139,7 +164,8 @@ impl MessageProcessor<'_> {
         };
 
         // Step 3: Route to table (db.table)
-        let routed = match self.router.route_value(&value) {
+        let (result, choice) = self.router.route_value_traced(&value);
+        let routed = match result {
             RouteResult::Table(t) => {
                 if tracing::enabled!(tracing::Level::TRACE) {
                     trace!(table = %t, "Message routed");
@@ -152,6 +178,12 @@ impl MessageProcessor<'_> {
                 return Err(crate::Error::Json(format!("DLQ: {reason}")));
             }
         };
+
+        // A source's own topic carrying records that name no table is a producer
+        // defect, and the fallback to the default table is otherwise silent.
+        if choice == TableChoice::DefaultFallback && self.router.is_source_topic(&msg.topic) {
+            log_routing_field_absent(&msg.topic, &routed);
+        }
 
         // An unknown source names a table that does not exist, so it lands in the
         // default table rather than the DLQ. The emptiness check keeps the common
@@ -452,15 +484,100 @@ mod tests {
         }
 
         fn make_msg(&self, payload: &[u8]) -> KafkaMessage {
+            self.make_msg_on("test-events", payload)
+        }
+
+        fn make_msg_on(&self, topic: &str, payload: &[u8]) -> KafkaMessage {
             KafkaMessage {
                 payload: payload.to_vec(),
-                topic: Arc::from("test-events"),
+                topic: Arc::from(topic),
                 partition: 0,
                 offset: 1,
                 key: None,
                 timestamp_ms: Some(1700000000000),
             }
         }
+    }
+
+    /// Counts one named counter, so a test asserts the value the processor
+    /// emitted rather than that a recorder was installed.
+    struct CountingRecorder {
+        name: &'static str,
+        hits: Arc<std::sync::atomic::AtomicU64>,
+    }
+
+    struct CountingHandle(Arc<std::sync::atomic::AtomicU64>);
+
+    impl metrics::CounterFn for CountingHandle {
+        fn increment(&self, value: u64) {
+            self.0
+                .fetch_add(value, std::sync::atomic::Ordering::Relaxed);
+        }
+
+        fn absolute(&self, value: u64) {
+            self.0.store(value, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    impl metrics::Recorder for CountingRecorder {
+        fn describe_counter(
+            &self,
+            _: metrics::KeyName,
+            _: Option<metrics::Unit>,
+            _: metrics::SharedString,
+        ) {
+        }
+
+        fn describe_gauge(
+            &self,
+            _: metrics::KeyName,
+            _: Option<metrics::Unit>,
+            _: metrics::SharedString,
+        ) {
+        }
+
+        fn describe_histogram(
+            &self,
+            _: metrics::KeyName,
+            _: Option<metrics::Unit>,
+            _: metrics::SharedString,
+        ) {
+        }
+
+        fn register_counter(
+            &self,
+            key: &metrics::Key,
+            _: &metrics::Metadata<'_>,
+        ) -> metrics::Counter {
+            if key.name() == self.name {
+                metrics::Counter::from_arc(Arc::new(CountingHandle(Arc::clone(&self.hits))))
+            } else {
+                metrics::Counter::noop()
+            }
+        }
+
+        fn register_gauge(&self, _: &metrics::Key, _: &metrics::Metadata<'_>) -> metrics::Gauge {
+            metrics::Gauge::noop()
+        }
+
+        fn register_histogram(
+            &self,
+            _: &metrics::Key,
+            _: &metrics::Metadata<'_>,
+        ) -> metrics::Histogram {
+            metrics::Histogram::noop()
+        }
+    }
+
+    /// Run `f` with a thread-local recorder counting `name`.
+    fn counted(name: &'static str, f: impl FnOnce()) -> u64 {
+        let hits = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let recorder = CountingRecorder {
+            name,
+            hits: Arc::clone(&hits),
+        };
+        metrics::with_local_recorder(&recorder, f);
+        hits.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     // ========================================================================
@@ -735,6 +852,54 @@ mod tests {
 
         let processed = proc.process(&msg).expect("should succeed");
         assert_eq!(processed.table, "dfe.acme_widgets");
+    }
+
+    #[test]
+    fn a_record_with_no_routing_field_on_a_source_topic_is_counted() {
+        let mut config = Config::default();
+        config.routing.table_fields = vec!["_source".to_string()];
+        config.routing.default_db = "dfe".to_string();
+        config.routing.default_table = "main".to_string();
+
+        let harness = TestHarness::with_config(config);
+        let proc = harness.processor();
+        let payload = serde_json::to_vec(&json!({"message": "no source here"})).expect("serialize");
+
+        // The elastic case: the transform stopped emitting _source on a topic
+        // the loader was told is a source's own.
+        let hits = counted("dfe_loader_routing_field_absent_total", || {
+            let processed = proc
+                .process(&harness.make_msg_on("elastic_load", &payload))
+                .expect("should succeed");
+            assert_eq!(
+                processed.table, "dfe.main",
+                "the fallback itself is unchanged, only the signal is new"
+            );
+        });
+        assert_eq!(hits, 1, "one record, one count");
+    }
+
+    #[test]
+    fn the_landing_topic_and_a_named_record_are_not_counted() {
+        let mut config = Config::default();
+        config.routing.table_fields = vec!["_source".to_string()];
+        config.routing.default_db = "dfe".to_string();
+        config.routing.default_table = "main".to_string();
+
+        let harness = TestHarness::with_config(config);
+        let proc = harness.processor();
+        let unnamed = serde_json::to_vec(&json!({"message": "no source here"})).expect("serialize");
+        let named = serde_json::to_vec(&json!({"_source": "main"})).expect("serialize");
+
+        let hits = counted("dfe_loader_routing_field_absent_total", || {
+            // Ordinary landing traffic names no source and is not a defect.
+            proc.process(&harness.make_msg_on("main_land", &unnamed))
+                .expect("should succeed");
+            // A source topic whose record names its table is not one either.
+            proc.process(&harness.make_msg_on("elastic_load", &named))
+                .expect("should succeed");
+        });
+        assert_eq!(hits, 0, "neither case is a producer defect");
     }
 
     #[test]

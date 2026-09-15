@@ -58,6 +58,11 @@ A message that cannot be resolved to a real `db.table` -- or that resolves to a
 table the loader cannot reflect -- goes to the DLQ; it never wedges the
 consumer.
 
+A record that names no table on a SOURCE topic (one whose stripped name is not
+`default_table`) is a producer defect rather than landing traffic, so the
+fallback increments `dfe_loader_routing_field_absent_total` and warns once a
+minute per topic instead of reading as an ordinary insert.
+
 ## The setting drives the action
 
 Routing is config-cascade behaviour, so it is tested by outcome, not by parse:

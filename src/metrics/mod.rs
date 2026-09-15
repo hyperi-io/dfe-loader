@@ -122,6 +122,10 @@ impl Metrics {
             "dfe_loader_header_pass_skipped_total",
             "Messages rejected because the header pass promoted no columns",
         );
+        let _ = manager.counter(
+            "dfe_loader_routing_field_absent_total",
+            "Records on a source topic that named no table and fell back to the default",
+        );
 
         Self {
             dfe,
@@ -584,6 +588,7 @@ mod tests {
             "dfe_loader_schema_prewarm_retries_total",
             "dfe_loader_schema_prewarm_failed_tables",
             "dfe_loader_header_pass_skipped_total",
+            "dfe_loader_routing_field_absent_total",
         ] {
             assert!(
                 names.iter().any(|n| n == expected),

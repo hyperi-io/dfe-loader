@@ -42,6 +42,15 @@ pub enum RouteResult {
     Dlq(String),
 }
 
+/// How the destination table was chosen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TableChoice {
+    /// A CEL rule or a routing field named the table.
+    Named,
+    /// No routing field carried a value, so `default_table` was used.
+    DefaultFallback,
+}
+
 /// Routes messages to db.table based on event data fields
 ///
 /// Extracts database and table names from configured field priority lists.
@@ -306,16 +315,55 @@ impl Router {
     /// Returns "db.table" string for buffer routing.
     #[inline]
     pub fn route_value(&self, value: &Value) -> RouteResult {
+        self.route_value_traced(value).0
+    }
+
+    /// Route an already-parsed JSON Value and report how the table was chosen.
+    ///
+    /// The default-table fallback is otherwise silent, so a source whose records
+    /// stopped carrying the routing field reads as landing traffic (#159).
+    #[inline]
+    pub fn route_value_traced(&self, value: &Value) -> (RouteResult, TableChoice) {
         // Try CEL rules first (top-to-bottom, first match wins)
         if let Some(result) = self.try_cel_rules(value) {
-            return result;
+            return (result, TableChoice::Named);
         }
 
         // Fall through to field-extraction routing
         let db = self.extract_db_from_value(value);
-        let table = self.extract_table_from_value(value);
+        let named = self.extract_first_match_from_value(value, &self.table_fields);
+        let choice = if named.is_some() {
+            TableChoice::Named
+        } else {
+            TableChoice::DefaultFallback
+        };
 
-        self.build_route_result(&db, &table)
+        // The legacy source_to_table mapping applies to the default too.
+        let table = named.unwrap_or(&self.default_table);
+        let table = self
+            .source_to_table
+            .get(table)
+            .map_or(table, String::as_str);
+
+        (self.build_route_result(&db, table), choice)
+    }
+
+    /// Whether the topic is a source's own topic rather than the landing topic.
+    ///
+    /// A source topic names a table of its own, so a record from one landing in
+    /// `default_table` is a producer defect rather than ordinary traffic.
+    #[inline]
+    pub fn is_source_topic(&self, topic: &str) -> bool {
+        let source = self
+            .topic_suffixes
+            .iter()
+            .find_map(|suffix| topic.strip_suffix(suffix.as_str()))
+            .unwrap_or(topic);
+        let table = self
+            .source_to_table
+            .get(source)
+            .map_or(source, String::as_str);
+        table != self.default_table
     }
 
     /// Evaluate CEL routing rules against the message.
@@ -389,23 +437,6 @@ impl Router {
 
         // Fall back to default database
         Cow::Borrowed(&self.default_db)
-    }
-
-    /// Extract table from an already-parsed Value (avoids re-parsing)
-    ///
-    /// Returns borrowed reference when possible, owned when mapped.
-    #[inline]
-    fn extract_table_from_value<'a>(&'a self, value: &'a Value) -> Cow<'a, str> {
-        let table = self
-            .extract_first_match_from_value(value, &self.table_fields)
-            .unwrap_or(&self.default_table);
-
-        // Check legacy source_to_table mapping
-        if let Some(mapped) = self.source_to_table.get(table) {
-            Cow::Borrowed(mapped.as_str())
-        } else {
-            Cow::Borrowed(table)
-        }
     }
 
     /// Extract a field value from parsed JSON Value using dot notation
@@ -1291,5 +1322,87 @@ mod tests {
             router.route_value(&value2),
             RouteResult::Table("dfe.main".to_string())
         );
+    }
+
+    // ---- default-table fallback signal (#159) ----
+
+    #[test]
+    fn traced_route_reports_the_default_fallback() {
+        let router = Router::new(&test_config());
+
+        let named = serde_json::json!({"org_id": "acme", "event_category": "login"});
+        assert_eq!(
+            router.route_value_traced(&named),
+            (
+                RouteResult::Table("acme.login".to_string()),
+                TableChoice::Named
+            )
+        );
+
+        // The elastic case: the transform emitted no routing field at all.
+        let unnamed = serde_json::json!({"org_id": "acme", "message": "no source here"});
+        assert_eq!(
+            router.route_value_traced(&unnamed),
+            (
+                RouteResult::Table("acme.main".to_string()),
+                TableChoice::DefaultFallback
+            )
+        );
+    }
+
+    #[test]
+    fn a_cel_routed_record_is_named_not_a_fallback() {
+        let config = RoutingConfig {
+            rules: vec![crate::config::RoutingRule {
+                when: "amount > 10000".to_string(),
+                target: "main".to_string(),
+                db: None,
+            }],
+            ..Default::default()
+        };
+        let router = Router::new(&config);
+
+        // A rule that targets the default table by name is still a decision.
+        let value = serde_json::json!({"amount": 15000});
+        assert_eq!(router.route_value_traced(&value).1, TableChoice::Named);
+    }
+
+    #[test]
+    fn traced_route_matches_route_value() {
+        let router = Router::new(&test_config());
+        for payload in [
+            serde_json::json!({"org_id": "acme", "event_category": "auth"}),
+            serde_json::json!({"tags": {"event_category": "login"}}),
+            serde_json::json!({"message": "nothing routable"}),
+        ] {
+            assert_eq!(
+                router.route_value_traced(&payload).0,
+                router.route_value(&payload)
+            );
+        }
+    }
+
+    #[test]
+    fn only_a_source_topic_counts_as_one() {
+        let router = Router::new(&test_config());
+
+        // Suffix stripped, name is not the default table.
+        assert!(router.is_source_topic("elastic_load"));
+        assert!(router.is_source_topic("auth_land"));
+        // The landing topic derives the default table itself.
+        assert!(!router.is_source_topic("main_land"));
+        // No suffix to strip, and the whole name is the default table.
+        assert!(!router.is_source_topic("main"));
+    }
+
+    #[test]
+    fn a_topic_mapped_onto_the_default_table_is_not_a_source_topic() {
+        let mut config = test_config();
+        config
+            .source_to_table
+            .insert("legacy".to_string(), "main".to_string());
+        let router = Router::new(&config);
+
+        assert!(!router.is_source_topic("legacy_load"));
     }
 }
