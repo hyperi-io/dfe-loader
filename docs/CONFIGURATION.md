@@ -28,6 +28,12 @@ flowchart TB
 
 ENV names are auto-derived: `clickhouse.transport` -> `LOADER_CLICKHOUSE_TRANSPORT`.
 
+The scaling gate (`scaling.enabled`, `scaling.memory_gate_threshold`) is read by
+scalo's own cascade, which discovers `defaults.yaml` / `settings.yaml` but never
+the file named by `--config`, so set it with `DFE_LOADER_SCALING__ENABLED` and
+`DFE_LOADER_SCALING__MEMORY_GATE_THRESHOLD`. A value for it in the `--config`
+file drives the loader's own weights and is reported as a mismatch at startup.
+
 > A config value is only useful if the ACTION matches it. The integration tests
 > assert the observable outcome (the row written, the transport used), not just
 > that the value parsed -- see [the test note](#verifying-config-drives-behaviour).

@@ -97,6 +97,11 @@ The loader runs under a cgroup-aware memory guard: it checks pressure before
 each Kafka poll and pauses the consumer when memory is tight, rather than
 risking an OOM kill mid-batch.
 
+The figure it checks is jemalloc's live heap, registered at startup under the
+`jemalloc` feature (the channel hyperi-ci builds). A build without that feature
+leaves the guard on the batch engine's own reservations, so `memory_used_bytes`
+reads well under the process heap and the brake fires late.
+
 ## Source of truth
 
 | Data | Source |

@@ -7,4 +7,4 @@ pub mod mapping;
 pub mod router;
 
 pub use mapping::SourceMapping;
-pub use router::{RouteResult, Router};
+pub use router::{RouteResult, Router, TableChoice};

@@ -72,6 +72,15 @@ impl ServiceApp for App {
     }
 
     fn load_config(&self, path: Option<&str>) -> Result<Self::Config, CliError> {
+        // Seed scalo's cascade first: while it is unset every `from_cascade()`
+        // reader -- scaling.*, worker_pool.*, batch_processing.*,
+        // self_regulation.*, version_check.* -- resolves to its hard-coded
+        // default and no env var moves it (#160).
+        if let Err(e) = scalo::config::setup(self.common.to_config_options(self.env_prefix())) {
+            // The cascade is a OnceLock; a second load keeps the first seed.
+            debug!(error = %e, "scalo config cascade already seeded");
+        }
+
         let config = Config::load(path).map_err(|e| CliError::Config(e.to_string()))?;
         config
             .validate()
@@ -126,6 +135,18 @@ impl ServiceApp for App {
                 .scaling
                 .clone()
                 .unwrap_or_else(|| Arc::new(config.scaling.build_pressure()));
+
+            // The engine KEDA reads takes its gates from scalo's cascade, which
+            // reads env but never the `--config` file, so a gate set only in
+            // that file is reported here and ignored there (#160).
+            if scaling.is_enabled() != config.scaling.enabled {
+                warn!(
+                    configured = config.scaling.enabled,
+                    effective = scaling.is_enabled(),
+                    "scaling.enabled in the config file does not reach the scaling engine, \
+                     set DFE_LOADER_SCALING__ENABLED instead"
+                );
+            }
 
             // Register loader-specific metrics using runtime's MetricsManager
             let metrics = Metrics::new(&runtime.metrics);
@@ -256,8 +277,23 @@ impl ServiceApp for App {
     }
 }
 
+/// Live heap bytes from jemalloc, for scalo's memory guard.
+///
+/// jemalloc caches its statistics, so the epoch advance is what refreshes them.
+#[cfg(feature = "jemalloc")]
+fn heap_allocated_bytes() -> usize {
+    let _ = tikv_jemalloc_ctl::epoch::advance();
+    tikv_jemalloc_ctl::stats::allocated::read().unwrap_or(0)
+}
+
 #[tokio::main]
 async fn main() {
+    // Until a heap source is registered the memory guard sees only the bytes
+    // the batch engine reserved, so `memory_used_bytes` and the inbound brake
+    // it feeds both read near zero (#162).
+    #[cfg(feature = "jemalloc")]
+    let _ = scalo::memory::set_heap_source(heap_allocated_bytes);
+
     let app = App::parse();
 
     if let Some(output) = &app.emit_helm {
@@ -284,5 +320,57 @@ async fn main() {
     if let Err(e) = run_app(app).await {
         eprintln!("fatal: {e}");
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The scalo cascade is a `OnceLock` and the env is process-global, so the
+    /// seed is exercised once, in one test.
+    #[test]
+    fn the_scaling_gate_reaches_the_cascade_through_the_env() {
+        // SAFETY: test-only env manipulation, set before the seed below and
+        // removed after it.
+        unsafe {
+            std::env::set_var("DFE_LOADER_SCALING__ENABLED", "false");
+            std::env::set_var("DFE_LOADER_SCALING__MEMORY_GATE_THRESHOLD", "0.55");
+        }
+
+        let app = App::parse_from(["dfe-loader"]);
+        app.load_config(None).expect("default config loads");
+
+        // Both values differ from the library defaults the reader falls back to.
+        let gate = scalo::ScalingPressureConfig::from_cascade();
+        assert!(
+            !gate.enabled,
+            "scaling.enabled must reach the engine KEDA reads"
+        );
+        assert!(
+            (gate.memory_gate_threshold - 0.55).abs() < f64::EPSILON,
+            "memory_gate_threshold reads {}",
+            gate.memory_gate_threshold
+        );
+
+        unsafe {
+            std::env::remove_var("DFE_LOADER_SCALING__ENABLED");
+            std::env::remove_var("DFE_LOADER_SCALING__MEMORY_GATE_THRESHOLD");
+        }
+    }
+
+    /// The registered heap source must move with the process heap, not with the
+    /// batch engine's reservations.
+    #[cfg(feature = "jemalloc")]
+    #[test]
+    fn the_heap_source_tracks_a_live_allocation() {
+        let before = heap_allocated_bytes();
+        let ballast: Vec<u8> = vec![7; 64 * 1024 * 1024];
+        let after = heap_allocated_bytes();
+        assert!(
+            after >= before + 32 * 1024 * 1024,
+            "heap source read {before} then {after} across a 64 MiB allocation"
+        );
+        drop(ballast);
     }
 }
