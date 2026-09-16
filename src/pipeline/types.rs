@@ -121,7 +121,9 @@ impl AbsentTables {
             .collect();
         // A table whose re-resolution never answers stays here, so the recheck
         // memory is dropped wholesale at the cap the entries are bounded by.
-        if self.rechecking.len() >= self.capacity {
+        // Only on a sweep that adds to it, or a full set would clear every tick
+        // and the warning it suppresses would come back.
+        if !due.is_empty() && self.rechecking.len() >= self.capacity {
             self.rechecking.clear();
         }
         for t in &due {
