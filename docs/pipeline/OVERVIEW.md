@@ -19,6 +19,7 @@ time. The tail batches per table and inserts.
 ```mermaid
 flowchart LR
     M["bytes (Kafka/gRPC/Memory)"]
+    S["split batched arrays"]
     P["parse + format detect"]
     R["route -> db.table"]
     X["extract header + schema columns"]
@@ -26,11 +27,25 @@ flowchart LR
     E["enrich"]
     B["per-table buffer"]
     I["insert + commit offsets"]
-    M --> P --> R --> X --> C --> E --> B --> I
+    M --> S --> P --> R --> X --> C --> E --> B --> I
 ```
 
 The stages, in order, all in `src/pipeline/` (`MessageProcessor::process` is the
 per-message entry point):
+
+## 0. Split batched arrays
+
+Every stage below this takes one message to be one record, so a message whose
+body is a non-empty JSON array of objects is split into one message per element
+before anything else runs. Each element keeps its source message's topic,
+partition and offset, so a batch still commits as one unit, and
+`dfe_loader_batched_array_messages_total` /
+`dfe_loader_batched_array_records_total` count what was split. A scalar array,
+an empty one, and a body that does not parse are not batches of records: they go
+through untouched so the format check and the DLQ see exactly what arrived.
+
+dfe-receiver splits its own batched POSTs, but any producer can put an array on
+a loader topic, so the split is here too.
 
 ## 1. Parse and detect format
 

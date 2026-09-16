@@ -706,6 +706,9 @@ impl Orchestrator {
                             // fall back to the default table rather than ageing
                             // out to the DLQ.
                             let marked = absent_tables.insert(table, std::time::Instant::now());
+                            // Only the move into absence is news: the entry is
+                            // re-resolved every TTL, so warning on the state
+                            // costs a line a minute per dead source name (#129).
                             match marked {
                                 super::types::AbsentOutcome::Recorded => warn!(
                                     table = %table,
@@ -848,7 +851,18 @@ impl Orchestrator {
                     // re-counted. take_ready only runs on a transport Ok, so
                     // resolved messages are never dropped on a transport error.
                     let combined: crate::Result<Vec<crate::kafka::KafkaMessage>> = match messages {
-                        Ok(mut fresh) => {
+                        Ok(fresh) => {
+                            // Every stage below takes one message to be one
+                            // record, so a batched array is split first (#128).
+                            // Splitting ahead of the guard keeps the bytes
+                            // admitted equal to the bytes later released.
+                            let fan = fan_out_batched_arrays(fresh);
+                            if fan.arrays > 0
+                                && let Some(ref m) = self.metrics
+                            {
+                                m.record_batched_array_fanout(fan.arrays, fan.records);
+                            }
+                            let mut fresh = fan.messages;
                             for msg in &fresh {
                                 self.memory_guard.add_bytes(msg.payload.len() as u64);
                             }
@@ -2010,6 +2024,75 @@ fn rejected_payload(payloads: &[Arc<[u8]>], row: &FailedRow) -> Option<Vec<u8>> 
     row.row_json.clone().filter(|b| !b.is_empty())
 }
 
+/// What [`fan_out_batched_arrays`] made of a received batch.
+struct FanOut {
+    messages: Vec<crate::kafka::KafkaMessage>,
+    /// Received messages that carried a batch of records as a JSON array.
+    arrays: u64,
+    /// Records those arrays expanded into.
+    records: u64,
+}
+
+/// Expand every message carrying a batch of records as a top-level JSON array
+/// into one message per element.
+///
+/// Any producer can put a batch array on a loader topic, so the split belongs
+/// here and not in dfe-receiver alone (#128). Each element inherits its source
+/// message's topic, partition and offset, so a batch still commits as one unit
+/// and the memory guard counts the elements it will later release.
+fn fan_out_batched_arrays(batch: Vec<crate::kafka::KafkaMessage>) -> FanOut {
+    if !batch
+        .iter()
+        .any(|m| crate::payload::opens_json_array(&m.payload))
+    {
+        return FanOut {
+            messages: batch,
+            arrays: 0,
+            records: 0,
+        };
+    }
+
+    let mut messages = Vec::with_capacity(batch.len());
+    let mut arrays = 0u64;
+    let mut records = 0u64;
+    for msg in batch {
+        let Some(elements) = crate::payload::split_json_array(&msg.payload) else {
+            messages.push(msg);
+            continue;
+        };
+
+        arrays += 1;
+        records += elements.len() as u64;
+        static FANNED_TS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        if scalo::logger::log_debounced(&FANNED_TS, 60_000) {
+            info!(
+                topic = %msg.topic,
+                records = elements.len(),
+                "Split a batched JSON array into one record per element (max 1 per 60s)"
+            );
+        }
+
+        messages.extend(
+            elements
+                .into_iter()
+                .map(|payload| crate::kafka::KafkaMessage {
+                    payload,
+                    topic: Arc::clone(&msg.topic),
+                    partition: msg.partition,
+                    offset: msg.offset,
+                    key: msg.key.clone(),
+                    timestamp_ms: msg.timestamp_ms,
+                }),
+        );
+    }
+
+    FanOut {
+        messages,
+        arrays,
+        records,
+    }
+}
+
 /// Route a pending-schema message to the DLQ (with a security event) and
 /// release its tracked memory. Used by the per-tick expire sweep and the
 /// shutdown drain — these messages never received a schema, so the loss is
@@ -2055,6 +2138,86 @@ mod tests {
         let config = Config::default();
         let orchestrator = Orchestrator::new(config);
         assert_eq!(orchestrator.stats().messages_received, 0);
+    }
+
+    // ---- batched-array fan-out (#128) ----
+
+    fn msg_at(offset: i64, payload: &[u8]) -> crate::kafka::KafkaMessage {
+        crate::kafka::KafkaMessage {
+            payload: payload.to_vec(),
+            topic: Arc::from("dfe.events"),
+            partition: 3,
+            offset,
+            key: Some(b"k".to_vec()),
+            timestamp_ms: Some(1_700_000_000_000),
+        }
+    }
+
+    #[test]
+    fn a_batched_array_becomes_one_message_per_record() {
+        let fan = fan_out_batched_arrays(vec![msg_at(
+            7,
+            br#"[{"_source": "syslog", "n": 1}, {"_source": "syslog", "n": 2}]"#,
+        )]);
+
+        assert_eq!(fan.arrays, 1);
+        assert_eq!(fan.records, 2);
+        assert_eq!(fan.messages.len(), 2);
+        assert_eq!(fan.messages[0].payload, br#"{"_source": "syslog", "n": 1}"#);
+        assert_eq!(fan.messages[1].payload, br#"{"_source": "syslog", "n": 2}"#);
+        for m in &fan.messages {
+            assert_eq!(&*m.topic, "dfe.events");
+            assert_eq!(m.partition, 3);
+            assert_eq!(m.offset, 7, "a batch commits as one unit");
+            assert_eq!(m.key.as_deref(), Some(b"k".as_slice()));
+            assert_eq!(m.timestamp_ms, Some(1_700_000_000_000));
+        }
+    }
+
+    #[test]
+    fn an_unbatched_batch_is_returned_untouched() {
+        let batch = vec![msg_at(1, br#"{"a": 1}"#), msg_at(2, br#"{"b": 2}"#)];
+        let fan = fan_out_batched_arrays(batch);
+
+        assert_eq!(fan.arrays, 0);
+        assert_eq!(fan.records, 0);
+        assert_eq!(fan.messages.len(), 2);
+        assert_eq!(fan.messages[0].payload, br#"{"a": 1}"#);
+        assert_eq!(fan.messages[1].payload, br#"{"b": 2}"#);
+    }
+
+    #[test]
+    fn a_mixed_batch_splits_only_the_arrays_and_keeps_order() {
+        let batch = vec![
+            msg_at(1, br#"{"a": 1}"#),
+            msg_at(2, br#"[{"b": 2}, {"c": 3}]"#),
+            msg_at(3, br"[1, 2, 3]"),
+        ];
+        let fan = fan_out_batched_arrays(batch);
+
+        assert_eq!(fan.arrays, 1);
+        assert_eq!(fan.records, 2);
+        let payloads: Vec<&[u8]> = fan.messages.iter().map(|m| m.payload.as_slice()).collect();
+        assert_eq!(
+            payloads,
+            vec![
+                br#"{"a": 1}"#.as_slice(),
+                br#"{"b": 2}"#.as_slice(),
+                br#"{"c": 3}"#.as_slice(),
+                br"[1, 2, 3]".as_slice(),
+            ],
+            "a scalar array is not a batch and keeps its place"
+        );
+        assert_eq!(fan.messages[3].offset, 3);
+    }
+
+    #[test]
+    fn the_split_bytes_equal_what_the_memory_guard_will_release() {
+        // The guard is fed after the split, so the two must agree or the
+        // accounting drifts every batch.
+        let fan = fan_out_batched_arrays(vec![msg_at(9, br#"[{"a": 1}, {"b": 2}]"#)]);
+        let admitted: usize = fan.messages.iter().map(|m| m.payload.len()).sum();
+        assert_eq!(admitted, br#"{"a": 1}"#.len() + br#"{"b": 2}"#.len());
     }
 
     // CaptureOverrides tests moved to capture.rs

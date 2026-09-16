@@ -63,6 +63,12 @@ A record that names no table on a SOURCE topic (one whose stripped name is not
 fallback increments `dfe_loader_routing_field_absent_total` and warns once a
 minute per topic instead of reading as an ordinary insert.
 
+A table ClickHouse confirms does not exist is held for 60 seconds, then
+re-resolved, so a table created later starts receiving its own data without a
+pod restart. The warning names the move into absence and not the state: the
+re-resolved answer is the one already held, so a dead source name is announced
+once rather than once a minute for the life of the deployment.
+
 ## The setting drives the action
 
 Routing is config-cascade behaviour, so it is tested by outcome, not by parse:
