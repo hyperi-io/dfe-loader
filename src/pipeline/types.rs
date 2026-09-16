@@ -6,7 +6,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use serde_json::Value;
 
 use crate::buffer::KafkaOffset;
@@ -39,6 +39,10 @@ pub struct ProcessedMessage {
 /// start receiving its own data without a pod restart.
 pub(crate) struct AbsentTables {
     entries: FxHashMap<String, Instant>,
+    /// Tables whose entry aged out and are being re-resolved. The same "does
+    /// not exist" coming back is the answer already held, not news, so without
+    /// this memory a dead source re-announces itself once a TTL forever (#129).
+    rechecking: FxHashSet<String>,
     ttl: Duration,
     /// Upper bound on distinct entries. The routed table name comes from a
     /// payload field with no allowlist, so untrusted input would otherwise
@@ -50,9 +54,10 @@ pub(crate) struct AbsentTables {
 /// What [`AbsentTables::insert`] did with a table.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum AbsentOutcome {
-    /// First time this table has been marked absent.
+    /// The table has moved into absence -- the transition an operator is told
+    /// about.
     Recorded,
-    /// Already tracked; its expiry was refreshed.
+    /// Already known absent, whether still tracked or just re-resolved.
     Refreshed,
     /// The cap is full. The table is untracked, so its messages keep buffering
     /// until the pending-schema age cap routes them to the DLQ.
@@ -63,6 +68,7 @@ impl AbsentTables {
     pub fn new(ttl: Duration, capacity: usize) -> Self {
         Self {
             entries: FxHashMap::default(),
+            rechecking: FxHashSet::default(),
             ttl,
             capacity,
         }
@@ -80,7 +86,7 @@ impl AbsentTables {
         self.entries.contains_key(table)
     }
 
-    /// Mark a table absent, or refresh an entry already held.
+    /// Mark a table absent, or refresh an answer already held.
     pub fn insert(&mut self, table: &str, now: Instant) -> AbsentOutcome {
         if let Some(slot) = self.entries.get_mut(table) {
             *slot = now;
@@ -90,16 +96,21 @@ impl AbsentTables {
             return AbsentOutcome::Rejected;
         }
         self.entries.insert(table.to_string(), now);
-        AbsentOutcome::Recorded
+        if self.rechecking.remove(table) {
+            AbsentOutcome::Refreshed
+        } else {
+            AbsentOutcome::Recorded
+        }
     }
 
     /// Forget a table -- `ClickHouse` has since resolved its schema.
     pub fn remove(&mut self, table: &str) {
         self.entries.remove(table);
+        self.rechecking.remove(table);
     }
 
-    /// Remove and return the entries whose TTL has passed. The caller
-    /// re-requests resolution for each.
+    /// Remove and return the entries whose TTL has passed, remembering each as
+    /// being re-resolved. The caller re-requests resolution for each.
     pub fn expired(&mut self, now: Instant) -> Vec<String> {
         let ttl = self.ttl;
         let due: Vec<String> = self
@@ -108,8 +119,16 @@ impl AbsentTables {
             .filter(|&(_, &marked)| now.saturating_duration_since(marked) >= ttl)
             .map(|(t, _)| t.clone())
             .collect();
+        // A table whose re-resolution never answers stays here, so the recheck
+        // memory is dropped wholesale at the cap the entries are bounded by.
+        // Only on a sweep that adds to it, or a full set would clear every tick
+        // and the warning it suppresses would come back.
+        if !due.is_empty() && self.rechecking.len() >= self.capacity {
+            self.rechecking.clear();
+        }
         for t in &due {
             self.entries.remove(t);
+            self.rechecking.insert(t.clone());
         }
         due
     }
@@ -199,6 +218,80 @@ mod tests {
         assert!(
             absent.expired(t0 + Duration::from_secs(80)).is_empty(),
             "the refresh must move the expiry"
+        );
+    }
+
+    #[test]
+    fn the_same_answer_after_a_re_resolve_is_not_news() {
+        // The entry is dropped every TTL and re-recorded, so an outcome that
+        // reads the state instead of the transition warns once a minute per
+        // dead source name forever (#129).
+        let mut absent = AbsentTables::new(Duration::from_secs(60), 8);
+        let t0 = Instant::now();
+
+        assert_eq!(absent.insert("dfe.harness01", t0), AbsentOutcome::Recorded);
+        let due = absent.expired(t0 + Duration::from_secs(60));
+        assert_eq!(due, vec!["dfe.harness01".to_string()]);
+
+        assert_eq!(
+            absent.insert("dfe.harness01", t0 + Duration::from_secs(60)),
+            AbsentOutcome::Refreshed,
+            "the re-resolved answer is the one already held"
+        );
+        assert!(absent.contains("dfe.harness01"), "diversion resumes");
+
+        // And it stays quiet for every round after that.
+        let due = absent.expired(t0 + Duration::from_secs(120));
+        assert_eq!(due, vec!["dfe.harness01".to_string()]);
+        assert_eq!(
+            absent.insert("dfe.harness01", t0 + Duration::from_secs(120)),
+            AbsentOutcome::Refreshed
+        );
+    }
+
+    #[test]
+    fn a_table_that_appears_and_goes_again_is_news_twice() {
+        let mut absent = AbsentTables::new(Duration::from_secs(60), 8);
+        let t0 = Instant::now();
+
+        assert_eq!(absent.insert("dfe.acme", t0), AbsentOutcome::Recorded);
+        absent.expired(t0 + Duration::from_secs(60));
+        // The table was created, so the re-resolve resolved it.
+        absent.remove("dfe.acme");
+
+        assert_eq!(
+            absent.insert("dfe.acme", t0 + Duration::from_secs(600)),
+            AbsentOutcome::Recorded,
+            "a table that was dropped again is a new transition"
+        );
+    }
+
+    #[test]
+    fn the_recheck_memory_is_bounded_like_the_entries() {
+        // A re-resolution that never answers leaves its table here, so the set
+        // must not grow past the cap on untrusted table names.
+        let mut absent = AbsentTables::new(Duration::from_secs(60), 2);
+        let t0 = Instant::now();
+
+        absent.insert("dfe.a", t0);
+        absent.insert("dfe.b", t0);
+        absent.expired(t0 + Duration::from_secs(60));
+
+        // Two fresh names fill the entries, and their expiry sweep finds the
+        // recheck memory already at the cap.
+        absent.insert("dfe.c", t0 + Duration::from_secs(60));
+        absent.insert("dfe.d", t0 + Duration::from_secs(60));
+        absent.expired(t0 + Duration::from_secs(120));
+
+        assert_eq!(
+            absent.insert("dfe.c", t0 + Duration::from_secs(120)),
+            AbsentOutcome::Refreshed,
+            "the tables just swept are still remembered"
+        );
+        assert_eq!(
+            absent.insert("dfe.a", t0 + Duration::from_secs(120)),
+            AbsentOutcome::Recorded,
+            "the older half was dropped at the cap and re-announces once"
         );
     }
 

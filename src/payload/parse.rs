@@ -213,6 +213,51 @@ pub fn extract_nested_field_json_cow<'a>(
     }
 }
 
+/// True when the first non-whitespace byte opens a JSON array.
+///
+/// One byte on the hot path, so a message that is not batched pays nothing.
+#[inline]
+pub fn opens_json_array(payload: &[u8]) -> bool {
+    payload
+        .iter()
+        .find(|b| !b.is_ascii_whitespace())
+        .is_some_and(|b| *b == b'[')
+}
+
+/// Split a batch of records carried as a top-level JSON array into the raw
+/// bytes of each element.
+///
+/// Every stage below this takes one message to be one record, so an array
+/// reaching the encoder is handed whole to a per-row JSON column (#128). Only
+/// a non-empty array of objects is a batch of records: a scalar array, an
+/// empty one, or a body that does not parse is left untouched, so the format
+/// check and the DLQ still see exactly what arrived.
+pub fn split_json_array(payload: &[u8]) -> Option<Vec<Vec<u8>>> {
+    if !opens_json_array(payload) {
+        return None;
+    }
+    // The element iterator stops at the closing bracket without reading the
+    // tail, so trailing bytes are rejected here rather than fanned out.
+    if payload.iter().rfind(|b| !b.is_ascii_whitespace()) != Some(&b']') {
+        return None;
+    }
+
+    let mut elements: Vec<Vec<u8>> = Vec::new();
+    for item in sonic_rs::to_array_iter(payload) {
+        let raw = item.ok()?;
+        let bytes = raw.as_raw_str().as_bytes();
+        if bytes.first() != Some(&b'{') {
+            return None;
+        }
+        elements.push(bytes.to_vec());
+    }
+
+    if elements.is_empty() {
+        return None;
+    }
+    Some(elements)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -457,5 +502,63 @@ mod tests {
         let value = parse_payload(payload).unwrap();
         assert!(value.is_array());
         assert_eq!(value.as_array().unwrap().len(), 3);
+    }
+
+    // ---- batched-array split (#128) ----
+
+    #[test]
+    fn a_batch_array_splits_into_one_payload_per_element() {
+        let payload = br#"[{"a": 1}, {"b": [2, 3]}, {"c": {"d": "e"}}]"#;
+        let elements = split_json_array(payload).expect("an array of objects is a batch");
+
+        assert_eq!(elements.len(), 3);
+        assert_eq!(elements[0], br#"{"a": 1}"#.to_vec());
+        assert_eq!(elements[1], br#"{"b": [2, 3]}"#.to_vec());
+        assert_eq!(elements[2], br#"{"c": {"d": "e"}}"#.to_vec());
+        for element in &elements {
+            let value = parse_payload(element).expect("each element parses on its own");
+            assert!(value.is_object(), "each element is a record, not an array");
+        }
+    }
+
+    #[test]
+    fn leading_whitespace_and_one_element_still_split() {
+        let payload = b"  \n\t[{\"a\": 1}]  \n";
+        let elements = split_json_array(payload).expect("whitespace does not hide the array");
+        assert_eq!(elements, vec![br#"{"a": 1}"#.to_vec()]);
+    }
+
+    #[test]
+    fn an_object_payload_is_not_a_batch() {
+        assert!(split_json_array(br#"{"a": 1}"#).is_none());
+        assert!(!opens_json_array(br#"{"a": 1}"#));
+    }
+
+    #[test]
+    fn a_scalar_array_is_left_for_the_existing_path() {
+        // Not a batch of records: splitting it would turn one DLQ entry into
+        // three, so it goes through untouched.
+        assert!(split_json_array(br"[1, 2, 3]").is_none());
+        assert!(split_json_array(br#"["a", "b"]"#).is_none());
+        assert!(split_json_array(br#"[{"a": 1}, 2]"#).is_none());
+    }
+
+    #[test]
+    fn an_empty_array_is_left_for_the_existing_path() {
+        // Splitting it to nothing would drop the message with no DLQ entry.
+        assert!(split_json_array(br"[]").is_none());
+        assert!(split_json_array(br"  [ ]  ").is_none());
+    }
+
+    #[test]
+    fn a_truncated_or_trailing_body_is_left_untouched() {
+        assert!(
+            split_json_array(br#"[{"a": 1}, {"b":"#).is_none(),
+            "a truncated array must still reach the format check and the DLQ"
+        );
+        assert!(
+            split_json_array(br#"[{"a": 1}] junk"#).is_none(),
+            "the element iterator stops at the bracket, so the tail is checked"
+        );
     }
 }

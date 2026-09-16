@@ -93,6 +93,11 @@ pub struct Metrics {
     /// Tables still failing pre-warm after the retry budget.
     pub schema_prewarm_failed_tables: Gauge,
 
+    /// Received messages carrying a batch of records as a JSON array.
+    pub batched_array_messages: Counter,
+    /// Records those batched arrays were split into.
+    pub batched_array_records: Counter,
+
     // Legacy loader_* metrics (dual-emit — remove after dashboard migration)
     pub messages_received: Counter,
     pub messages_processed: Counter,
@@ -245,7 +250,23 @@ impl Metrics {
                 "dfe_loader_schema_prewarm_failed_tables",
                 "Tables still failing schema pre-warm after the retry budget",
             ),
+
+            // Batched-array fan-out (#128)
+            batched_array_messages: manager.counter(
+                "dfe_loader_batched_array_messages_total",
+                "Received messages carrying a batch of records as a JSON array",
+            ),
+            batched_array_records: manager.counter(
+                "dfe_loader_batched_array_records_total",
+                "Records split out of batched-array messages",
+            ),
         }
+    }
+
+    /// Record batched arrays split into one record per element.
+    pub fn record_batched_array_fanout(&self, arrays: u64, records: u64) {
+        self.batched_array_messages.increment(arrays);
+        self.batched_array_records.increment(records);
     }
 
     /// Record a message received.
@@ -589,6 +610,8 @@ mod tests {
             "dfe_loader_schema_prewarm_failed_tables",
             "dfe_loader_header_pass_skipped_total",
             "dfe_loader_routing_field_absent_total",
+            "dfe_loader_batched_array_messages_total",
+            "dfe_loader_batched_array_records_total",
         ] {
             assert!(
                 names.iter().any(|n| n == expected),
@@ -607,6 +630,12 @@ mod tests {
         m.update_pending_schema_messages(42);
         m.record_schema_prewarm_retry();
         m.update_schema_prewarm_failed_tables(3);
+    }
+
+    #[test]
+    fn batched_array_fanout_metrics_do_not_panic() {
+        let m = test_metrics();
+        m.record_batched_array_fanout(2, 25);
     }
 
     // ---- ServerState tests ----
