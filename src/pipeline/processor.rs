@@ -163,6 +163,20 @@ impl MessageProcessor<'_> {
             }
         };
 
+        // An array the fan-out left alone is not a batch of records, and the
+        // capture would hand it to a per-row JSON column, so it is named here
+        // rather than coming back as an encode error on an empty column (#128).
+        if value.is_array() {
+            scalo::logger::security::input_validation_failure(
+                "payload_shape",
+                "top-level JSON array, expected one record object",
+                None,
+            );
+            return Err(crate::Error::Json(
+                "payload is a JSON array, not a record object".into(),
+            ));
+        }
+
         // Step 3: Route to table (db.table)
         let (result, choice) = self.router.route_value_traced(&value);
         let routed = match result {
@@ -1290,35 +1304,20 @@ mod tests {
     }
 
     #[test]
-    fn process_non_object_json_payload_still_processes() {
-        // JSON can be a top-level array or scalar. sonic-rs parses these.
-        // Router may then route to default table or DLQ depending on config.
+    fn a_top_level_array_is_named_rather_than_encoded() {
+        // The reported failure was a ClickHouse encode error naming an empty
+        // column and quoting the whole array back (#128). An array the fan-out
+        // left alone is not a batch of records, so it is refused by shape.
         let harness = TestHarness::new();
         let proc = harness.processor();
 
-        // Top-level array — parseable JSON but no extractable routing fields
-        let msg = harness.make_msg(b"[1, 2, 3]");
-        let result = proc.process(&msg);
-        // Either Ok (routes to default) or Err (DLQ). Both are valid outcomes.
-        // What we care about: no panic, deterministic behaviour.
-        match result {
-            Ok(processed) => {
-                // Routes to default: dfe.main
-                assert!(processed.table.contains('.'));
-            }
-            Err(e) => {
-                let msg = format!("{e}");
-                // Expected failures for top-level non-object JSON:
-                // - "Expected JSON object" (transform requires Object)
-                // - "DLQ"/"route"/"parse" (alternative failure paths)
-                assert!(
-                    msg.contains("DLQ")
-                        || msg.contains("route")
-                        || msg.contains("parse")
-                        || msg.contains("Expected JSON object")
-                        || msg.contains("object"),
-                    "Error should be routing/transform-related: {msg}"
-                );
+        for payload in [b"[1, 2, 3]".as_slice(), br#"[{"a": 1}]"#.as_slice()] {
+            match proc.process(&harness.make_msg(payload)) {
+                Err(e) => assert!(
+                    format!("{e}").contains("JSON array, not a record object"),
+                    "the error must name the shape: {e}"
+                ),
+                Ok(_) => panic!("an array is not a record and must not be buffered"),
             }
         }
     }
@@ -1983,9 +1982,9 @@ mod tests {
         use crate::clickhouse::{ColumnInfo, ParsedType, TableSchema};
 
         let harness = TestHarness::new();
-        // Parses as JSON, routes, and is not an object — the extractor has no
-        // columns to promote from it.
-        let msg = harness.make_msg(br"[1,2,3]");
+        // Parses as JSON, carries no routing field, and matches no column, so
+        // the extractor has nothing to promote from it.
+        let msg = harness.make_msg(br#"{"a":1,"b":2}"#);
 
         let table = match harness.processor_json_primary().process(&msg) {
             Err(crate::Error::SchemaPending { table }) => table,

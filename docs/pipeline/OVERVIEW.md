@@ -45,7 +45,9 @@ an empty one, and a body that does not parse are not batches of records: they go
 through untouched so the format check and the DLQ see exactly what arrived.
 
 dfe-receiver splits its own batched POSTs, but any producer can put an array on
-a loader topic, so the split is here too.
+a loader topic, so the split is here too. An array that reaches the next stage
+unsplit is refused by shape and named as such, rather than being carried into
+the capture and coming back as a ClickHouse encode error on an empty column.
 
 ## 1. Parse and detect format
 
