@@ -243,7 +243,8 @@ impl Orchestrator {
 
         // DLQ (unified scalo module — cascade: Kafka primary, file fallback)
         let dlq_config = self.config.routing.dlq.to_scalo_config();
-        let transport_kafka_config = TransportAdapter::convert_config(&self.config.kafka);
+        let transport_kafka_config =
+            TransportAdapter::convert_config(&self.config.kafka, &self.config.routing.dlq);
         let dlq: Option<Arc<Dlq>> = if dlq_config.enabled {
             match Dlq::spawn(
                 &dlq_config,
@@ -944,13 +945,10 @@ impl Orchestrator {
                                             ));
                                         if dlq_tx.try_send(entry).is_ok() {
                                             self.stats.messages_dlq += 1;
-                                            scalo::logger::security::record_dlq(
+                                            super::coordinator::record_dlq_routed(
                                                 "pre_route",
                                                 reason,
-                                                Some(&format!(
-                                                    "topic: {}, partition: {}, offset: {}",
-                                                    msg.topic, msg.partition, msg.offset
-                                                )),
+                                                &msg.location(),
                                             );
                                         }
                                     }
@@ -1923,7 +1921,11 @@ async fn route_rejected_rows_to_dlq(
         "clickhouse_permanent_reject table={table}: {}",
         failed[0].reason
     );
-    scalo::logger::security::record_dlq("clickhouse_permanent_reject", &summary, Some(table));
+    super::coordinator::record_dlq_routed(
+        "clickhouse_permanent_reject",
+        &summary,
+        &format!("table={table}"),
+    );
 
     let Some(dlq) = dlq.filter(|d| d.is_enabled()) else {
         error!(
@@ -2112,7 +2114,11 @@ fn route_pending_to_dlq(
         );
         let _ = dlq_tx.try_send(entry);
     }
-    scalo::logger::security::record_dlq(pending_reason_label(reason), &reason_str, None);
+    super::coordinator::record_dlq_routed(
+        pending_reason_label(reason),
+        &reason_str,
+        &msg.location(),
+    );
     // Surface in Prometheus too — both the generic DLQ counter and the
     // pending-schema-specific counter — so dashboards see this loss class (#36).
     if let Some(m) = metrics {

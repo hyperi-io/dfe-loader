@@ -37,7 +37,7 @@ use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::producer::{FutureProducer, FutureRecord};
 
 use dfe_loader::buffer::KafkaOffset;
-use dfe_loader::config::{Config, KafkaConfig};
+use dfe_loader::config::{Config, DlqConfig, KafkaConfig};
 use dfe_loader::kafka::{TransportAdapter, TransportBackend};
 
 use crate::common::containers::TestInfrastructure;
@@ -213,7 +213,7 @@ async fn test_kafka_transport_construction() {
     let (_infra, _bootstrap, config) =
         spin_up_kafka("construction-group", vec!["construction-topic".to_string()]).await;
 
-    let adapter = TransportAdapter::new(&config, None)
+    let adapter = TransportAdapter::new(&config, &DlqConfig::default(), None)
         .await
         .expect("TransportAdapter should build against a live broker");
 
@@ -242,7 +242,7 @@ async fn test_kafka_transport_recv_empty() {
     // Pre-create the topic so the subscription has something to attach to.
     ensure_topic(&bootstrap, topic).await;
 
-    let adapter = TransportAdapter::new(&config, None)
+    let adapter = TransportAdapter::new(&config, &DlqConfig::default(), None)
         .await
         .expect("adapter build");
 
@@ -300,7 +300,7 @@ async fn test_kafka_transport_send_recv_roundtrip() {
     let producer = make_producer(&bootstrap);
     produce(&producer, topic, &payloads).await;
 
-    let adapter = TransportAdapter::new(&config, None)
+    let adapter = TransportAdapter::new(&config, &DlqConfig::default(), None)
         .await
         .expect("adapter build");
 
@@ -364,7 +364,7 @@ async fn test_kafka_transport_commit_offset() {
     produce(&producer, topic, &payloads).await;
 
     // --- First consumer: read 3, commit their offsets ---
-    let adapter_a = TransportAdapter::new(&config, None)
+    let adapter_a = TransportAdapter::new(&config, &DlqConfig::default(), None)
         .await
         .expect("first adapter");
 
@@ -395,7 +395,7 @@ async fn test_kafka_transport_commit_offset() {
     adapter_a.close().await.expect("close first adapter");
 
     // Empty-offset commit is a no-op — exercise the early-return branch.
-    let adapter_noop = TransportAdapter::new(&config, None)
+    let adapter_noop = TransportAdapter::new(&config, &DlqConfig::default(), None)
         .await
         .expect("noop adapter");
     adapter_noop
@@ -405,7 +405,7 @@ async fn test_kafka_transport_commit_offset() {
     adapter_noop.close().await.expect("close noop adapter");
 
     // --- Second consumer, same group: should NOT see the first 3 ---
-    let adapter_b = TransportAdapter::new(&config, None)
+    let adapter_b = TransportAdapter::new(&config, &DlqConfig::default(), None)
         .await
         .expect("second adapter");
 
@@ -442,7 +442,7 @@ async fn test_kafka_transport_max_messages_limit() {
     let producer = make_producer(&bootstrap);
     produce(&producer, topic, &payloads).await;
 
-    let adapter = TransportAdapter::new(&config, None)
+    let adapter = TransportAdapter::new(&config, &DlqConfig::default(), None)
         .await
         .expect("adapter build");
 
@@ -506,7 +506,7 @@ async fn test_kafka_transport_auto_create_topic() {
     let producer = make_producer(&bootstrap);
     produce(&producer, &topic, &[b"first-message".to_vec()]).await;
 
-    let adapter = TransportAdapter::new(&config, None)
+    let adapter = TransportAdapter::new(&config, &DlqConfig::default(), None)
         .await
         .expect("adapter build after topic auto-create");
 
@@ -581,7 +581,7 @@ async fn test_kafka_invalid_brokers() {
 
     // Must return an error, not panic. rdkafka may accept a nonsense hostname
     // and only fail later on recv; both outcomes are acceptable.
-    match TransportAdapter::new(&config, None).await {
+    match TransportAdapter::new(&config, &DlqConfig::default(), None).await {
         Ok(adapter) => {
             // Construction succeeded — recv should fail or return empty within
             // a reasonable window. We tolerate either, but it must NOT panic.
@@ -620,6 +620,101 @@ async fn test_kafka_invalid_brokers() {
 }
 
 // ============================================================================
+// Auto-discovery subscribes only *_land / *_load topics
+// ============================================================================
+
+/// Block until every topic in `want` is in the broker's metadata.
+async fn wait_for_topics(bootstrap: &str, want: &[&str]) {
+    let consumer: BaseConsumer = ClientConfig::new()
+        .set("bootstrap.servers", bootstrap)
+        .create()
+        .expect("metadata consumer");
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let present: Vec<String> = consumer
+            .fetch_metadata(None, Duration::from_secs(2))
+            .map(|md| md.topics().iter().map(|t| t.name().to_string()).collect())
+            .unwrap_or_default();
+        if want.iter().all(|w| present.iter().any(|p| p == w)) {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "topics {want:?} never appeared, broker has {present:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+/// An empty topic list on a broker that also carries Strimzi, Connect and
+/// schema-registry topics, plus a DLQ named like a landing topic. Only the two
+/// landing topics may be subscribed, and only their records may arrive.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_auto_discovery_subscribes_only_land_and_load_topics() {
+    use scalo::transport::kafka::TopicResolver;
+
+    let (_infra, bootstrap, config) = spin_up_kafka("autodiscover-land-load-group", vec![]).await;
+
+    let loader_topics = ["main_land", "x_load"];
+    let foreign_topics = [
+        "strimzi.cruisecontrol.metrics",
+        "dlq_land",
+        "foo_dlq",
+        "_schemas",
+        "connect-offsets",
+    ];
+    for topic in loader_topics.iter().chain(&foreign_topics) {
+        ensure_topic(&bootstrap, topic).await;
+    }
+    let all: Vec<&str> = loader_topics
+        .iter()
+        .chain(&foreign_topics)
+        .copied()
+        .collect();
+    wait_for_topics(&bootstrap, &all).await;
+
+    // A Cruise Control-shaped record on every foreign topic, JSON on ours.
+    let producer = make_producer(&bootstrap);
+    for topic in &foreign_topics {
+        produce(&producer, topic, &[vec![0x00, 0x00, 0x02, 0x00, 0x01]]).await;
+    }
+    for topic in &loader_topics {
+        produce(&producer, topic, &[br#"{"event_category":"x"}"#.to_vec()]).await;
+    }
+
+    let dlq = DlqConfig {
+        topic: "dlq_land".to_string(),
+        ..DlqConfig::default()
+    };
+
+    // The same resolver KafkaTransport::new runs when topics is empty.
+    let resolved = TopicResolver::new(&TransportAdapter::convert_config(&config, &dlq))
+        .expect("resolver builds")
+        .resolve()
+        .expect("broker metadata resolves");
+    assert_eq!(resolved, ["main_land", "x_load"]);
+
+    let adapter = TransportAdapter::new(&config, &dlq, None)
+        .await
+        .expect("adapter build with auto-discovery");
+    let mut received = recv_until(&adapter, 2, Duration::from_secs(30)).await;
+    // Anything wrongly subscribed would be delivered alongside ours by now;
+    // one more poll window catches a straggler.
+    received.extend(recv_until(&adapter, 1, Duration::from_secs(3)).await);
+
+    let mut topics: Vec<&str> = received.iter().map(|m| &*m.topic).collect();
+    topics.sort_unstable();
+    assert_eq!(
+        topics,
+        ["main_land", "x_load"],
+        "only the landing topics' records may arrive"
+    );
+
+    adapter.close().await.expect("close");
+}
+
+// ============================================================================
 // convert_config produces a sensible TransportKafkaConfig
 // ============================================================================
 
@@ -640,7 +735,7 @@ async fn test_kafka_transport_convert_config_auto_discover() {
         ..Default::default()
     };
 
-    let out = TransportAdapter::convert_config(&config);
+    let out = TransportAdapter::convert_config(&config, &DlqConfig::default());
     assert_eq!(out.brokers.len(), 2);
     assert_eq!(out.group, "cfg-group");
     assert!(

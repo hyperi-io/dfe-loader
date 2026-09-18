@@ -17,9 +17,12 @@ use serde::{Deserialize, Serialize};
 pub struct KafkaConfig {
     pub brokers: Vec<String>,
     pub group: String,
-    /// Explicit topic list. Empty = auto-discover all `*_load` / `*_land` topics
-    /// from the broker, with load-over-land fallback applied.
+    /// Explicit topic list. Empty = auto-discover every `*_load` / `*_land`
+    /// topic on the broker, with load-over-land fallback applied. The
+    /// loader's own DLQ topic is never discovered.
     pub topics: Vec<String>,
+    /// Regex that replaces the `*_load` / `*_land` match when auto-discovering.
+    /// Ignored when `topics` is set.
     pub topic_regex: Option<String>,
     pub client_id: String,
     pub sasl: Option<SaslConfig>,

@@ -20,7 +20,7 @@ use crate::buffer::KafkaOffset;
 use crate::clickhouse::SharedSchemaCache;
 use crate::column_meta::ColumnMetaCache;
 use crate::config::{CaptureMode, Config};
-use crate::payload::{FormatDetector, PayloadFormat};
+use crate::payload::{FormatDetector, LeadingBytes, PayloadFormat, detect_format};
 use crate::routing::{RouteResult, Router, TableChoice};
 use crate::transform::{ComputedColumnCache, FieldMappingCache, HeaderExtractor, Transformer};
 
@@ -96,6 +96,39 @@ fn log_routing_field_absent(topic: &str, table: &str) {
     }
 }
 
+/// Name why the format detector refused `payload`, with its leading bytes.
+///
+/// The detector's `Err` carries only the format it wanted, which in a forced
+/// mode is the same for foreign bytes and for the other supported format, so
+/// the payload is detected again here to tell the two apart.
+#[cold]
+#[inline(never)]
+fn format_rejection(payload: &[u8], expected: PayloadFormat) -> crate::Error {
+    let leading = LeadingBytes::of(payload);
+    match detect_format(payload) {
+        None => {
+            scalo::logger::security::input_validation_failure(
+                "format_check",
+                "unrecognised payload format",
+                None,
+            );
+            crate::Error::UnrecognisedFormat { leading }
+        }
+        Some(actual) => {
+            scalo::logger::security::input_validation_failure(
+                "format_check",
+                "payload format mismatch",
+                None,
+            );
+            crate::Error::FormatMismatch {
+                expected,
+                actual,
+                leading,
+            }
+        }
+    }
+}
+
 impl MessageProcessor<'_> {
     /// Process a single Kafka message through the full pipeline.
     ///
@@ -125,14 +158,7 @@ impl MessageProcessor<'_> {
         // Step 1: Check/detect format
         let format = match self.format_detector.check_and_detect(&msg.payload) {
             Ok(fmt) => fmt,
-            Err(_expected) => {
-                scalo::logger::security::input_validation_failure(
-                    "format_check",
-                    "payload format mismatch",
-                    None,
-                );
-                return Err(crate::Error::Json("Format mismatch".into()));
-            }
+            Err(expected) => return Err(format_rejection(&msg.payload, expected)),
         };
 
         // Step 2: Parse payload to JSON Value
@@ -154,12 +180,7 @@ impl MessageProcessor<'_> {
                 crate::Error::Json(format!("MessagePack parse error: {e}"))
             })?,
             PayloadFormat::Unknown => {
-                scalo::logger::security::input_validation_failure(
-                    "format_check",
-                    "unknown payload format",
-                    None,
-                );
-                return Err(crate::Error::Json("Unknown format".into()));
+                return Err(format_rejection(&msg.payload, PayloadFormat::Unknown));
             }
         };
 
@@ -655,8 +676,112 @@ mod tests {
         let proc = harness.processor();
         let msg = harness.make_msg(b"");
 
-        let result = proc.process(&msg);
-        assert!(result.is_err(), "Empty payload should fail");
+        let reason = proc
+            .process(&msg)
+            .err()
+            .expect("Empty payload should fail")
+            .to_string();
+        assert!(
+            reason.contains("unrecognised payload format") && reason.contains("empty payload"),
+            "an empty record must say it was empty, got: {reason}"
+        );
+    }
+
+    /// A Cruise Control metrics record: a serde version and class id where
+    /// JSON wants `{`, followed by bytes that must stay out of the reason.
+    const CRUISE_CONTROL_RECORD: &[u8] = &[
+        0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x01, 0x8c, 0xde, 0xad, 0xbe, 0xef,
+    ];
+
+    #[test]
+    fn unrecognised_payload_reason_names_the_case_and_leading_bytes() {
+        let harness = TestHarness::new();
+        let proc = harness.processor();
+
+        let err = proc
+            .process(&harness.make_msg(CRUISE_CONTROL_RECORD))
+            .err()
+            .expect("a binary record must be rejected");
+        assert!(
+            matches!(err, crate::Error::UnrecognisedFormat { .. }),
+            "got {err:?}"
+        );
+        let reason = err.to_string();
+
+        assert!(
+            reason.contains("unrecognised payload format"),
+            "reason must name the case, got: {reason}"
+        );
+        assert!(
+            reason.contains("00 00 02 00 00 00 01 8c"),
+            "reason must carry the first 8 bytes as hex, got: {reason}"
+        );
+        assert!(
+            !reason.contains("de ad"),
+            "reason must stop at 8 bytes, got: {reason}"
+        );
+    }
+
+    #[test]
+    fn msgpack_after_json_in_auto_mode_names_the_mismatch() {
+        let harness = TestHarness::new();
+        let proc = harness.processor();
+        let record = json!({"event_category": "x"});
+
+        let first = serde_json::to_vec(&record).expect("serialize");
+        assert!(
+            proc.process(&harness.make_msg(&first)).is_ok(),
+            "the first JSON record locks auto mode to JSON"
+        );
+
+        // fixmap(1), then fixstr(14) "event_category"
+        let msgpack = rmp_serde::to_vec(&record).expect("msgpack serialize");
+        let err = proc
+            .process(&harness.make_msg(&msgpack))
+            .err()
+            .expect("MessagePack after a JSON lock must be rejected");
+        assert!(
+            matches!(
+                err,
+                crate::Error::FormatMismatch {
+                    expected: crate::payload::PayloadFormat::Json,
+                    actual: crate::payload::PayloadFormat::MessagePack,
+                    ..
+                }
+            ),
+            "got {err:?}"
+        );
+        let reason = err.to_string();
+
+        assert!(
+            reason.contains("payload format mismatch: expected JSON, got MessagePack"),
+            "reason must name the lock and what arrived, got: {reason}"
+        );
+        assert!(
+            reason.contains("81 ae 65 76 65 6e 74 5f"),
+            "reason must carry the first 8 bytes as hex, got: {reason}"
+        );
+    }
+
+    #[test]
+    fn forced_json_calls_a_binary_record_unrecognised_not_a_mismatch() {
+        let harness = TestHarness::new();
+        let json_detector = FormatDetector::with_mode(FormatMode::ForceJson);
+        let proc = MessageProcessor {
+            format_detector: &json_detector,
+            ..harness.processor()
+        };
+
+        let reason = proc
+            .process(&harness.make_msg(CRUISE_CONTROL_RECORD))
+            .err()
+            .expect("forced JSON must reject a binary record")
+            .to_string();
+
+        assert!(
+            reason.contains("unrecognised payload format") && !reason.contains("mismatch"),
+            "a forced mode must not call unknown bytes a mismatch, got: {reason}"
+        );
     }
 
     #[test]
@@ -1295,8 +1420,9 @@ mod tests {
             Err(e) => {
                 let em = format!("{e}");
                 assert!(
-                    em.contains("parse") || em.contains("Format") || em.contains("Unknown"),
-                    "Error should indicate parse/format problem for DLQ routing: {em}"
+                    matches!(e, crate::Error::UnrecognisedFormat { .. })
+                        && em.contains("unrecognised payload format"),
+                    "Error should indicate a format problem for DLQ routing: {em}"
                 );
             }
             Ok(_) => panic!("Invalid payload must fail (DLQ-bound)"),
@@ -1596,6 +1722,11 @@ mod tests {
         assert!(
             result.is_err(),
             "JSON payload with strict msgpack format should error"
+        );
+        let reason = result.err().expect("checked above").to_string();
+        assert!(
+            reason.contains("payload format mismatch: expected MessagePack, got JSON"),
+            "reason must name the forced format and what arrived, got: {reason}"
         );
     }
 

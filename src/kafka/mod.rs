@@ -46,4 +46,14 @@ impl KafkaMessage {
             timestamp_ms: self.timestamp_ms,
         }
     }
+
+    /// Where this record sits, as `topic=X partition=N offset=M`, for the
+    /// log line that reports it dead-lettered.
+    #[must_use]
+    pub fn location(&self) -> String {
+        format!(
+            "topic={} partition={} offset={}",
+            self.topic, self.partition, self.offset
+        )
+    }
 }

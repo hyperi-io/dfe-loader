@@ -415,6 +415,26 @@ impl Default for DlqConfig {
 }
 
 impl DlqConfig {
+    /// Anchored regexes matching every Kafka topic this DLQ writes to.
+    ///
+    /// Kafka auto-discovery excludes these, so the loader never consumes its
+    /// own dead letters -- a common topic named like a landing topic
+    /// (`dlq_land`) would otherwise match the `_land` include. Built from the
+    /// config whether or not the Kafka backend is on, because the topic is
+    /// the loader's either way.
+    #[must_use]
+    pub fn topic_exclude_patterns(&self) -> Vec<String> {
+        if !self.topic.is_empty() {
+            return vec![format!("^{}$", regex::escape(&self.topic))];
+        }
+        // Per-destination routing writes `{db.table}{topic_suffix}`. An empty
+        // suffix would anchor to nothing and exclude every topic.
+        if self.topic_suffix.is_empty() {
+            return Vec::new();
+        }
+        vec![format!("{}$", regex::escape(&self.topic_suffix))]
+    }
+
     /// Convert to scalo `DlqConfig` for the unified DLQ module.
     pub fn to_scalo_config(&self) -> scalo::dlq::DlqConfig {
         use scalo::dlq::{DlqMode, FileDlqConfig};
@@ -1280,6 +1300,50 @@ mod tests {
         };
         let rc = cfg.to_scalo_config();
         assert_eq!(rc.file.path.to_string_lossy(), "/custom/dlq/path");
+    }
+
+    #[test]
+    fn dlq_common_topic_is_excluded_literally() {
+        let cfg = DlqConfig {
+            topic: "dfe.dlq".to_string(),
+            ..default_dlq_base()
+        };
+        let patterns = cfg.topic_exclude_patterns();
+        assert_eq!(patterns, [r"^dfe\.dlq$"]);
+
+        // The dot is escaped: a topic differing only there is not the DLQ.
+        let re = regex::Regex::new(&patterns[0]).expect("pattern compiles");
+        assert!(re.is_match("dfe.dlq"));
+        assert!(!re.is_match("dfeXdlq"));
+        assert!(!re.is_match("dfe.dlq_land"), "anchored at both ends");
+    }
+
+    #[test]
+    fn dlq_per_destination_routing_excludes_its_suffix() {
+        let cfg = DlqConfig {
+            topic: String::new(),
+            topic_suffix: ".dlq".to_string(),
+            ..default_dlq_base()
+        };
+        let patterns = cfg.topic_exclude_patterns();
+        assert_eq!(patterns, [r"\.dlq$"]);
+
+        let re = regex::Regex::new(&patterns[0]).expect("pattern compiles");
+        assert!(re.is_match("dfe.events.dlq"));
+        assert!(!re.is_match("events_land"));
+    }
+
+    #[test]
+    fn dlq_with_no_topic_and_no_suffix_excludes_nothing() {
+        let cfg = DlqConfig {
+            topic: String::new(),
+            topic_suffix: String::new(),
+            ..default_dlq_base()
+        };
+        assert!(
+            cfg.topic_exclude_patterns().is_empty(),
+            "an empty suffix must not become a `$` that excludes every topic"
+        );
     }
 
     fn default_dlq_base() -> DlqConfig {
