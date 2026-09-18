@@ -22,6 +22,20 @@ use super::capture::CaptureOverrides;
 use super::pending_schema::{EnqueueOutcome, PendingOverflow, PendingSchemaBuffer};
 use super::types::ProcessedMessage;
 
+/// Emit the `data.dlq_routed` security event, naming what was dead-lettered.
+///
+/// Built here rather than through scalo's `record_dlq` because that passes its
+/// context as `detail`, which scalo's failure-level event never writes
+/// (scalo-rs#145). `resource` is written, so the location goes there.
+pub(crate) fn record_dlq_routed(action: &str, reason: &str, resource: &str) {
+    use scalo::logger::security::{SecurityEvent, SecurityOutcome};
+
+    SecurityEvent::new("data.dlq_routed", action, SecurityOutcome::Failure)
+        .reason(reason)
+        .resource(resource)
+        .emit();
+}
+
 /// Counters returned from `apply_results` for the orchestrator to update stats.
 #[derive(Debug, Default)]
 pub struct BatchOutcome {
@@ -148,10 +162,10 @@ impl BatchCoordinator<'_> {
                                     );
                                 let _ = self.dlq_tx.try_send(entry);
                             }
-                            scalo::logger::security::record_dlq(
+                            record_dlq_routed(
                                 "pending_schema_overflow",
                                 &format!("per-table cap exceeded for {t}"),
-                                None,
+                                &msg.location(),
                             );
                             self.memory_guard.release(msg.payload.len() as u64);
                         }
@@ -170,14 +184,7 @@ impl BatchCoordinator<'_> {
                         match self.dlq_tx.try_send(entry) {
                             Ok(()) => {
                                 outcome.dlq += 1;
-                                scalo::logger::security::record_dlq(
-                                    "processing",
-                                    &e.to_string(),
-                                    Some(&format!(
-                                        "topic: {}, partition: {}, offset: {}",
-                                        msg.topic, msg.partition, msg.offset
-                                    )),
-                                );
+                                record_dlq_routed("processing", &e.to_string(), &msg.location());
                                 debug!(error = %e, "Message queued for DLQ");
                             }
                             Err(mpsc::error::TrySendError::Full(_)) => {
@@ -295,6 +302,109 @@ mod tests {
             memory_guard,
             pending_schema,
         }
+    }
+
+    /// Fields of every `data.dlq_routed` security event, as the log line carries them.
+    #[derive(Clone, Default)]
+    struct DlqEventCapture {
+        events: Arc<std::sync::Mutex<Vec<std::collections::HashMap<String, String>>>>,
+    }
+
+    #[derive(Default)]
+    struct FieldMap(std::collections::HashMap<String, String>);
+
+    impl tracing::field::Visit for FieldMap {
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            self.0.insert(field.name().to_string(), value.to_string());
+        }
+
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            self.0
+                .insert(field.name().to_string(), format!("{value:?}"));
+        }
+    }
+
+    impl tracing::Subscriber for DlqEventCapture {
+        fn register_callsite(
+            &self,
+            _: &'static tracing::Metadata<'static>,
+        ) -> tracing::subscriber::Interest {
+            tracing::subscriber::Interest::sometimes()
+        }
+
+        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+
+        fn event(&self, event: &tracing::Event<'_>) {
+            let mut fields = FieldMap::default();
+            event.record(&mut fields);
+            if fields.0.get("event_type").map(String::as_str) == Some("data.dlq_routed") {
+                self.events.lock().expect("capture lock").push(fields.0);
+            }
+        }
+
+        fn enter(&self, _: &tracing::span::Id) {}
+
+        fn exit(&self, _: &tracing::span::Id) {}
+    }
+
+    #[test]
+    fn dlq_routed_event_names_the_record_location() {
+        let (dlq_tx, _dlq_rx) = mpsc::channel(16);
+        let guard = MemoryGuard::new(MemoryGuardConfig {
+            limit_bytes: 1_073_741_824,
+            ..Default::default()
+        });
+        let mut buffer_manager = BufferManager::new(&BufferConfig::default());
+        let mut capture_overrides = CaptureOverrides::new(&MetadataConfig::default());
+        let mut field_mapping_cache = None;
+        let mut computed_column_cache = ComputedColumnCache::new(ComputedColumnsConfig::default());
+        let mut pending = make_pending();
+        let mut coord = make_coordinator(
+            &mut buffer_manager,
+            &mut capture_overrides,
+            &mut field_mapping_cache,
+            &mut computed_column_cache,
+            &None,
+            &dlq_tx,
+            true,
+            &guard,
+            &mut pending,
+        );
+
+        let messages = vec![make_kafka_message(
+            b"\x00\x00\x02",
+            "strimzi.cruisecontrol.metrics",
+            3,
+            42,
+        )];
+        let results: Vec<crate::Result<ProcessedMessage>> =
+            vec![Err(crate::Error::Json("format rejected".to_string()))];
+
+        let capture = DlqEventCapture::default();
+        tracing::subscriber::with_default(capture.clone(), || {
+            coord.apply_results(results, &messages);
+        });
+
+        let events = capture.events.lock().expect("capture lock");
+        assert_eq!(events.len(), 1, "one DLQ'd record, one event: {events:?}");
+        let resource = events[0].get("resource").map(String::as_str);
+        assert_eq!(
+            resource,
+            Some("topic=strimzi.cruisecontrol.metrics partition=3 offset=42"),
+            "the log line must say which record was dead-lettered: {events:?}"
+        );
+        let reason = events[0].get("reason").map(String::as_str).unwrap_or("");
+        assert!(reason.contains("format rejected"), "{events:?}");
     }
 
     // ---- BatchOutcome tests ----

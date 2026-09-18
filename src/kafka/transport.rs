@@ -20,7 +20,7 @@
 
 use crate::Result;
 use crate::buffer::KafkaOffset;
-use crate::config::KafkaConfig;
+use crate::config::{DlqConfig, KafkaConfig};
 use scalo::SelfRegulationGovernor;
 use scalo::transport::filter::FilteredDlqEntry;
 use scalo::transport::{
@@ -30,6 +30,10 @@ use scalo::transport::{
 use tracing::{debug, trace};
 
 use super::KafkaMessage;
+
+/// What auto-discovery subscribes to when neither `topics` nor `topic_regex`
+/// is set. scalo reads an empty include list as every topic on the broker.
+const LANDING_TOPIC_INCLUDE: &str = "_(land|load)$";
 
 /// A received block: the passing messages plus any inbound-filter DLQ entries.
 ///
@@ -56,7 +60,8 @@ impl TransportAdapter {
     /// Create a new transport adapter from local `KafkaConfig`.
     ///
     /// scalo's `KafkaTransport::new()` handles auto-discovery when
-    /// `config.topics` is empty — no app-side resolver needed.
+    /// `config.topics` is empty -- no app-side resolver needed. `dlq` names the
+    /// topics auto-discovery must never subscribe to (see [`Self::convert_config`]).
     ///
     /// When `governor` is `Some`, the self-regulation inbound brake is attached
     /// to the Kafka receiver: under memory pressure the consumer's ASSIGNED
@@ -67,9 +72,10 @@ impl TransportAdapter {
     /// `None` (self-regulation disabled) construction is byte-identical to before.
     pub async fn new(
         config: &KafkaConfig,
+        dlq: &DlqConfig,
         governor: Option<&SelfRegulationGovernor>,
     ) -> Result<Self> {
-        let transport_config = Self::convert_config(config);
+        let transport_config = Self::convert_config(config, dlq);
 
         let transport = KafkaTransport::new(&transport_config)
             .await
@@ -86,7 +92,12 @@ impl TransportAdapter {
     }
 
     /// Convert local `KafkaConfig` to scalo `TransportKafkaConfig`.
-    pub fn convert_config(config: &KafkaConfig) -> TransportKafkaConfig {
+    ///
+    /// The topic filters only take effect when `topics` is empty and scalo
+    /// auto-discovers. The include is `topic_regex` when set, else
+    /// `*_land` / `*_load`. The loader's own DLQ topics are appended to
+    /// scalo's default excludes (`^__`, `_dlq$`), never replacing them.
+    pub fn convert_config(config: &KafkaConfig, dlq: &DlqConfig) -> TransportKafkaConfig {
         let mut transport_config = TransportKafkaConfig {
             // loader is consume-only (Kafka -> ClickHouse). scalo 2.10 dropped the
             // explicit role enum for a profile-based config: a NON-EMPTY consumer
@@ -107,10 +118,16 @@ impl TransportAdapter {
             ..Default::default()
         };
 
-        // Map topic_regex to scalo's topic_include filter
-        if let Some(ref regex) = config.topic_regex {
-            transport_config.topic_include = vec![regex.clone()];
-        }
+        // An empty regex would match every topic, the same failure as no include.
+        let include = config
+            .topic_regex
+            .as_deref()
+            .filter(|r| !r.is_empty())
+            .unwrap_or(LANDING_TOPIC_INCLUDE);
+        transport_config.topic_include = vec![include.to_string()];
+        transport_config
+            .topic_exclude
+            .extend(dlq.topic_exclude_patterns());
 
         // SASL configuration
         if let Some(ref sasl) = config.sasl
@@ -553,7 +570,8 @@ impl TransportBackend {
             let adapter = GrpcTransportAdapter::new(&config.grpc).await?;
             Ok(Self::Grpc(adapter))
         } else {
-            let adapter = TransportAdapter::new(&config.kafka, governor).await?;
+            let adapter =
+                TransportAdapter::new(&config.kafka, &config.routing.dlq, governor).await?;
             Ok(Self::Kafka(adapter))
         }
     }
@@ -651,6 +669,140 @@ mod backend_tests {
             "gRPC commit is a no-op, so the kafka offset counters must not move"
         );
         backend.close().await.expect("close the gRPC server");
+    }
+}
+
+#[cfg(test)]
+mod discovery_tests {
+    use regex::Regex;
+    use scalo::transport::kafka::topic_resolver::{apply_suppression_rules, passes_filters};
+
+    use super::*;
+
+    /// A Strimzi broker: two loader topics plus everything else that lives on it.
+    const BROKER_TOPICS: &[&str] = &[
+        "main_land",
+        "x_load",
+        "strimzi.cruisecontrol.metrics",
+        "strimzi.cruisecontrol.modeltrainingsamples",
+        "dlq_land",
+        "__consumer_offsets",
+        "foo_dlq",
+        "_schemas",
+        "connect-offsets",
+    ];
+
+    /// The subscription scalo's `TopicResolver::resolve` computes, run over a
+    /// fixed broker topic list instead of a live metadata fetch.
+    fn resolve(cfg: &TransportKafkaConfig, broker_topics: &[&str]) -> Vec<String> {
+        let compile = |patterns: &[String]| -> Vec<Regex> {
+            patterns
+                .iter()
+                .map(|p| Regex::new(p).expect("topic filter compiles"))
+                .collect()
+        };
+        let include = compile(&cfg.topic_include);
+        let exclude = compile(&cfg.topic_exclude);
+        let topics = apply_suppression_rules(
+            broker_topics.iter().map(|t| (*t).to_string()).collect(),
+            &cfg.topic_suppression_rules,
+        );
+        let mut resolved: Vec<String> = topics
+            .into_iter()
+            .filter(|t| passes_filters(t, &include, &exclude))
+            .collect();
+        resolved.sort();
+        resolved
+    }
+
+    /// dfe-engine's default DLQ topic, which a `_land` include would match.
+    fn dlq_land() -> DlqConfig {
+        DlqConfig {
+            topic: "dlq_land".to_string(),
+            ..DlqConfig::default()
+        }
+    }
+
+    /// scalo's own defaults, which the loader's excludes are appended to.
+    fn scalo_default_excludes() -> Vec<String> {
+        TransportKafkaConfig::default().topic_exclude
+    }
+
+    #[test]
+    fn empty_topics_discover_only_land_and_load_topics() {
+        let cfg = TransportAdapter::convert_config(&KafkaConfig::default(), &dlq_land());
+
+        assert!(cfg.auto_discover, "an empty topic list auto-discovers");
+        assert_eq!(cfg.topic_include, [LANDING_TOPIC_INCLUDE]);
+        assert_eq!(resolve(&cfg, BROKER_TOPICS), ["main_land", "x_load"]);
+    }
+
+    #[test]
+    fn dlq_exclude_is_appended_to_scalo_defaults() {
+        let cfg = TransportAdapter::convert_config(&KafkaConfig::default(), &dlq_land());
+
+        let defaults = scalo_default_excludes();
+        assert!(!defaults.is_empty(), "scalo ships default excludes");
+        assert_eq!(cfg.topic_exclude[..defaults.len()], defaults[..]);
+        assert_eq!(cfg.topic_exclude[defaults.len()..], ["^dlq_land$"]);
+    }
+
+    #[test]
+    fn topic_regex_replaces_the_include_and_keeps_the_dlq_exclude() {
+        let kafka = KafkaConfig {
+            topic_regex: Some("^strimzi\\.".to_string()),
+            ..KafkaConfig::default()
+        };
+        let cfg = TransportAdapter::convert_config(&kafka, &dlq_land());
+
+        assert_eq!(cfg.topic_include, ["^strimzi\\."]);
+        assert!(cfg.topic_exclude.iter().any(|p| p == "^dlq_land$"));
+        assert_eq!(
+            resolve(&cfg, BROKER_TOPICS),
+            [
+                "strimzi.cruisecontrol.metrics",
+                "strimzi.cruisecontrol.modeltrainingsamples"
+            ]
+        );
+    }
+
+    #[test]
+    fn empty_topic_regex_falls_back_to_land_and_load() {
+        let kafka = KafkaConfig {
+            topic_regex: Some(String::new()),
+            ..KafkaConfig::default()
+        };
+        let cfg = TransportAdapter::convert_config(&kafka, &dlq_land());
+
+        assert_eq!(resolve(&cfg, BROKER_TOPICS), ["main_land", "x_load"]);
+    }
+
+    #[test]
+    fn per_destination_dlq_suffix_is_excluded_even_under_a_broad_regex() {
+        let kafka = KafkaConfig {
+            topic_regex: Some(".*".to_string()),
+            ..KafkaConfig::default()
+        };
+        let dlq = DlqConfig {
+            topic: String::new(),
+            topic_suffix: ".dlq".to_string(),
+            ..DlqConfig::default()
+        };
+        let cfg = TransportAdapter::convert_config(&kafka, &dlq);
+
+        let resolved = resolve(
+            &cfg,
+            &["dfe.events.dlq", "events_land", "__consumer_offsets"],
+        );
+        assert_eq!(resolved, ["events_land"]);
+    }
+
+    #[test]
+    fn load_still_suppresses_land_for_the_same_source() {
+        let cfg = TransportAdapter::convert_config(&KafkaConfig::default(), &dlq_land());
+
+        let resolved = resolve(&cfg, &["auth_land", "auth_load", "events_land"]);
+        assert_eq!(resolved, ["auth_load", "events_land"]);
     }
 }
 

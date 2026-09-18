@@ -8,7 +8,7 @@
 
 use std::env;
 
-use dfe_loader::config::{KafkaConfig, SaslConfig, SaslMechanism};
+use dfe_loader::config::{DlqConfig, KafkaConfig, SaslConfig, SaslMechanism};
 use dfe_loader::kafka::TransportAdapter;
 
 fn load_dotenv() {
@@ -134,7 +134,7 @@ async fn test_kafka_transport_creation() {
 
     let config = get_test_config();
     let start = std::time::Instant::now();
-    let result = TransportAdapter::new(&config, None).await;
+    let result = TransportAdapter::new(&config, &DlqConfig::default(), None).await;
 
     match result {
         Ok(transport) => {

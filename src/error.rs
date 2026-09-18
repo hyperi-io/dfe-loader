@@ -23,6 +23,27 @@ pub enum Error {
     #[error("JSON parse error: {0}")]
     Json(String),
 
+    /// The payload's leading bytes are neither JSON nor MessagePack, so no
+    /// parse was attempted: another system's binary topic, framing, or
+    /// compression the loader does not unwrap.
+    #[error("unrecognised payload format (neither JSON nor MessagePack), {leading}")]
+    UnrecognisedFormat {
+        leading: crate::payload::LeadingBytes,
+    },
+
+    /// The payload is JSON or MessagePack but not the format the detector
+    /// accepts, which `payload.format` forced or earlier records locked.
+    #[error(
+        "payload format mismatch: expected {}, got {}, {leading}",
+        crate::payload::format_name(.expected),
+        crate::payload::format_name(.actual)
+    )]
+    FormatMismatch {
+        expected: crate::payload::PayloadFormat,
+        actual: crate::payload::PayloadFormat,
+        leading: crate::payload::LeadingBytes,
+    },
+
     #[error("Configuration error: {0}")]
     Config(String),
 

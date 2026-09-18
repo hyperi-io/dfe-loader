@@ -23,6 +23,18 @@ quality:
     - tool: osv-scanner
       id: RUSTSEC-2024-0436
       reason: "paste (dtolnay) unmaintained, no replacement; transitive dep. Mirrors the deny.toml ignore. Drop when a maintained fork lands."
+    # GHSA-w9wp-h8wv-79jx / CVE-2026-48504: opentelemetry_sdk 0.31.0 is in the
+    # lock through scalo, in the affected range (<= 0.32.0, fixed in 0.32.1).
+    # The flaw is in BaggagePropagator::extract_with_context, which parses an
+    # inbound W3C Baggage header before enforcing its size limits. Nothing here
+    # reaches it: neither dfe-loader nor scalo names `baggage`, and neither
+    # installs a text map propagator, so the function is never called. It is a
+    # GitHub advisory with no RustSec entry, so only osv-scanner sees it and
+    # deny.toml needs no matching ignore. Drop this when scalo lifts its
+    # opentelemetry_sdk pin to >= 0.32.1 (scalo-rs#34, scalo-rs#100).
+    - tool: osv-scanner
+      id: GHSA-w9wp-h8wv-79jx
+      reason: "CVE-2026-48504, opentelemetry_sdk 0.31.0 via scalo: BaggagePropagator::extract_with_context is unreachable (no text map propagator, no baggage in dfe-loader or scalo). Drop when scalo allows opentelemetry_sdk >= 0.32.1 (scalo-rs#34/#100)."
   # Rust: test specific feature sets (avoids --all-features conflicts).
   # DFE policy 2026-04-17 — jemalloc only; mimalloc removed.
   rust:

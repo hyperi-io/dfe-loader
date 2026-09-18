@@ -18,10 +18,12 @@ kafka:
   # Explicit topic list.
   # Leave empty (default) to auto-discover all *_load / *_land topics from the broker,
   # with load-over-land fallback: if {source}_load exists, {source}_land is suppressed.
+  # The loader's own DLQ topic (routing.dlq.topic) is never discovered, even if
+  # it is named like a landing topic (e.g. dlq_land).
   topics: []
   # topics:
   #   - events_land    # Explicit list — disables auto-discovery
-  # Alternatively, use regex for topic matching:
+  # Alternatively, replace the *_load / *_land match with a regex (auto-discovery only):
   # topic_regex: "events-.*"
   client_id: dfe-loader
 

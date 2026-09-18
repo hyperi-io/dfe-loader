@@ -334,13 +334,17 @@ $defs:
         default: dfe-loader
       topics:
         description: |-
-          Explicit topic list. Empty = auto-discover all `*_load` / `*_land` topics
-          from the broker, with load-over-land fallback applied.
+          Explicit topic list. Empty = auto-discover every `*_load` / `*_land`
+          topic on the broker, with load-over-land fallback applied. The
+          loader's own DLQ topic is never discovered.
         type: array
         items:
           type: string
         default: []
       topic_regex:
+        description: |-
+          Regex that replaces the `*_load` / `*_land` match when auto-discovering.
+          Ignored when `topics` is set.
         type:
         - string
         - 'null'
