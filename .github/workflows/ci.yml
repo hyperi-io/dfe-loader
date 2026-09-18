@@ -43,9 +43,6 @@ jobs:
   ci:
     uses: hyperi-io/hyperi-ci/.github/workflows/rust-ci.yml@main
     with:
-      # `both` sets HYPERCI_CHANNEL=release for every build, a push to main
-      # included (hyperi-ci rust-ci.yml:132), so Tier 2 PGO+BOLT runs there too.
-      publish-target: both
       tag: ${{ inputs.tag || '' }}
       from-head: ${{ inputs.from-head || '' }}
       bump: ${{ inputs.bump || 'auto' }}

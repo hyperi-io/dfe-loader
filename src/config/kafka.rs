@@ -83,7 +83,7 @@ impl Default for KafkaConfig {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct GrpcConfig {
-    /// Server listen address (e.g., "0.0.0.0:6000").
+    /// Server listen address (e.g., "0.0.0.0:50051").
     /// Required when `transport = "grpc"`.
     pub listen: Option<String>,
 

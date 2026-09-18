@@ -431,7 +431,7 @@ impl Inserter {
     /// Insert rows into a table with error-aware retry.
     ///
     /// Dispatches based on `insert_format`:
-    /// - `RowBinary`: schema-reflected binary via `DynamicInsert` (fork)
+    /// - `RowBinary`: schema-reflected binary via `crate::clickhouse_ext::DynamicInsert`
     /// - `JsonEachRow`: HTTP `JSONEachRow` via `ClickHouseQueryClient`
     ///
     /// - **Transient errors**: Geometric backoff retry up to `max_retries`
