@@ -502,7 +502,7 @@ $defs:
     properties:
       listen:
         description: |-
-          Server listen address (e.g., "0.0.0.0:6000").
+          Server listen address (e.g., "0.0.0.0:50051").
           Required when `transport = "grpc"`.
         type:
         - string

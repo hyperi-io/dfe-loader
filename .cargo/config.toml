@@ -1,7 +1,7 @@
 # Cargo build configuration for dfe-loader
 #
 # Target platforms: Linux x86_64 and aarch64 only
-# SIMD optimizations enabled for sonic-rs and arrow
+# SIMD optimizations enabled for sonic-rs
 
 # =============================================================================
 # Per-target CPU optimizations
@@ -16,8 +16,7 @@ rustflags = ["-C", "target-cpu=x86-64-v3", "-C", "link-arg=-fuse-ld=mold"]  # AV
 linker = "aarch64-linux-gnu-gcc"
 rustflags = ["-C", "target-cpu=generic"]    # NEON is baseline for ARM64
 
-# For local development, use native CPU features
+# Native CPU features, only on a host with no matching [target] table above
+# (e.g. macOS): cargo applies a matching [target] table even without --target.
 [build]
 rustflags = ["-C", "target-cpu=native"]
-
-# Limit parallel jobs to reduce CPU/memory usage (prevents killing other processes)

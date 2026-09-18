@@ -582,7 +582,7 @@
       "type": "object",
       "properties": {
         "listen": {
-          "description": "Server listen address (e.g., \"0.0.0.0:6000\").\nRequired when `transport = \"grpc\"`.",
+          "description": "Server listen address (e.g., \"0.0.0.0:50051\").\nRequired when `transport = \"grpc\"`.",
           "type": [
             "string",
             "null"

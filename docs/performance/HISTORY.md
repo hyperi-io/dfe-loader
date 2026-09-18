@@ -61,7 +61,7 @@ sonic-rs is the production JSON parser for all DFE hot-path operations:
   extraction.
 - `get_from_slice` -- zero-copy lazy field access for routing-only paths.
 
-Benches: `benches/bakeoff.rs`, `benches/simdjson_spike.rs`.
+Bench: `benches/bakeoff.rs`.
 
 ### Mison -- evaluated, rejected (2025-Q4)
 
@@ -76,8 +76,8 @@ Benches: `benches/bakeoff.rs`, `benches/simdjson_spike.rs`.
 
 ### simd-json (0.17) -- evaluated, rejected (2026-03-11)
 
-**Bench:** `benches/simdjson_spike.rs` -- flat30 and nested payloads, 15/30
-schema columns, batch sizes 100/1K/10K.
+**Bench:** `benches/simdjson_spike.rs`, not retained -- flat30 and nested
+payloads, 15/30 schema columns, batch sizes 100/1K/10K.
 
 **Results (batch=10K, measured).** Extraction:
 

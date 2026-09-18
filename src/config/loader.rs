@@ -731,7 +731,7 @@ mod tests {
         let mut config = Config::default();
         config.transport = TRANSPORT_GRPC.to_string();
         config.kafka.brokers = vec![];
-        config.grpc.listen = Some("0.0.0.0:6000".to_string());
+        config.grpc.listen = Some("0.0.0.0:50051".to_string());
         assert!(config.is_direct());
         config
             .validate()

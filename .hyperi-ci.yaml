@@ -78,13 +78,9 @@ build:
       bolt:
         enabled: true  # Linux only; skipped on non-Linux targets
 
-# Publishing (on release)
-publish:
+# Release (where the artefacts go)
+release:
   enabled: true
-  # target is a legacy no-op -- every value routes to the OSS destinations,
-  # and the build channel that gates Tier 2 is resolved from the ref, not here.
-  target: both
-  binaries: both
   container:
     enabled: true
     dockerfile: Dockerfile
