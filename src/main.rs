@@ -286,13 +286,32 @@ fn heap_allocated_bytes() -> usize {
     tikv_jemalloc_ctl::stats::allocated::read().unwrap_or(0)
 }
 
+/// Whether jemalloc's live heap should stand in for the guard's own reading.
+///
+/// A registered heap source replaces that reading outright. Every kernel figure
+/// counts what jemalloc cannot see (librdkafka's glibc allocations, thread
+/// stacks, pages jemalloc keeps after a free), so jemalloc beats only the
+/// reservations fallback. The cost of keeping the kernel figure is that
+/// `memory.current` also counts reclaimable page cache, such as the mmap'd
+/// MaxMind database or a file DLQ, so the brake can engage a little early.
+#[cfg(any(feature = "jemalloc", test))]
+fn wants_heap_source(source: &scalo::memory::UsageSource) -> bool {
+    use scalo::memory::UsageSource;
+
+    match source {
+        UsageSource::Reservations => true,
+        UsageSource::CgroupV2(_) | UsageSource::CgroupV1(_) | UsageSource::ProcStatus(_) => false,
+    }
+}
+
 #[tokio::main]
 async fn main() {
-    // Until a heap source is registered the memory guard sees only the bytes
-    // the batch engine reserved, so `memory_used_bytes` and the inbound brake
-    // it feeds both read near zero (#162).
+    // A heap source would replace the guard's cgroup (else VmRSS) reading, the
+    // figure the OOM killer acts on, so jemalloc stands in only where neither exists.
     #[cfg(feature = "jemalloc")]
-    let _ = scalo::memory::set_heap_source(heap_allocated_bytes);
+    if wants_heap_source(&scalo::memory::UsageSource::detect()) {
+        let _ = scalo::memory::set_heap_source(heap_allocated_bytes);
+    }
 
     let app = App::parse();
 
@@ -359,8 +378,8 @@ mod tests {
         }
     }
 
-    /// The registered heap source must move with the process heap, not with the
-    /// batch engine's reservations.
+    /// Where the heap source stands in for the reservations fallback, it must
+    /// move with the process heap, not with the batch engine's reservations.
     #[cfg(feature = "jemalloc")]
     #[test]
     fn the_heap_source_tracks_a_live_allocation() {
@@ -372,5 +391,45 @@ mod tests {
             "heap source read {before} then {after} across a 64 MiB allocation"
         );
         drop(ballast);
+    }
+
+    /// jemalloc beats only the reservations fallback: every kernel figure also
+    /// counts librdkafka's glibc allocations, which jemalloc never sees.
+    #[test]
+    fn only_the_reservations_fallback_takes_the_heap_source() {
+        use scalo::memory::UsageSource;
+
+        assert!(wants_heap_source(&UsageSource::Reservations));
+        for kernel in [
+            UsageSource::CgroupV2(PathBuf::from("/sys/fs/cgroup")),
+            UsageSource::CgroupV1(PathBuf::from("/sys/fs/cgroup/memory")),
+            UsageSource::ProcStatus(PathBuf::from("/proc/self")),
+        ] {
+            assert!(
+                !wants_heap_source(&kernel),
+                "jemalloc's heap must not replace a {} reading",
+                kernel.name()
+            );
+        }
+    }
+
+    /// A Linux host always exposes a kernel figure (cgroup, else VmRSS), so a
+    /// Linux build leaves the guard on it and registers no heap source.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_linux_build_keeps_the_kernel_reading() {
+        use scalo::memory::UsageSource;
+
+        let source = UsageSource::detect();
+        assert_ne!(
+            source,
+            UsageSource::Reservations,
+            "no kernel memory figure detected on a Linux host"
+        );
+        assert!(
+            !wants_heap_source(&source),
+            "a Linux build must not replace the {} reading with jemalloc's heap",
+            source.name()
+        );
     }
 }
