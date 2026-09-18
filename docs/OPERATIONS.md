@@ -103,10 +103,9 @@ The loader runs under a cgroup-aware memory guard: it checks pressure before
 each Kafka poll and pauses the consumer when memory is tight, rather than
 risking an OOM kill mid-batch.
 
-The figure it checks is jemalloc's live heap, registered at startup under the
-`jemalloc` feature (the channel hyperi-ci builds). A build without that feature
-leaves the guard on the batch engine's own reservations, so `memory_used_bytes`
-reads well under the process heap and the brake fires late.
+The figure it checks is what the kernel charges the loader. On scalo 2.12.2 and later that is the cgroup's `memory.current` (v1 `memory.usage_in_bytes` on an older host), else `VmRSS` from `/proc/self/status`. The cgroup figure is the one the OOM killer compares against `memory.max`, and it counts what jemalloc never sees: librdkafka's allocations, thread stacks and pages jemalloc keeps after a free. Only where neither can be read, such as a macOS dev build, does a `jemalloc` build register jemalloc's live heap instead, so the guard is not left counting only the batch engine's reservations. The `usage_source` field on the `memory guard initialised` log line names the source in force: `cgroup-v2`, `cgroup-v1` or `proc-status` on Linux, `explicit` only in that fallback.
+
+`memory.current` also counts reclaimable page cache, such as the mmap'd MaxMind database or a file DLQ, so the brake can engage a little early. That is the safe direction.
 
 ## Source of truth
 
