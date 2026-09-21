@@ -248,14 +248,17 @@ metadata:
   # All modes extract promoted fields to schema columns; the only difference
   # is where (or whether) the full payload is preserved.
   #
-  #   full           — _json = full payload (JSON type), _raw = extracted from raw_source_fields
+  #   full           -- _json = full payload (JSON type), _raw = extracted from raw_source_fields
   #                    Default. Full observability: JSON path queries + text search.
   #
-  #   raw_only       — _json = NULL, _raw = entire Kafka payload as String
+  #   raw_only       -- _json = NULL, _raw = entire Kafka payload as String
   #                    CH CPU saving: skips JSON type overhead, text search via _raw index.
   #                    Note: _raw contains the FULL payload, not extracted from a field.
   #
-  #   extracted_only — _json = NULL, _raw = NULL
+  #   json_only      -- _json = full payload (JSON type), _raw = NULL
+  #                    JSON path queries without the duplicate text copy of the payload.
+  #
+  #   extracted_only -- _json = NULL, _raw = NULL
   #                    Minimal: only promoted schema fields. No payload preservation.
   capture_mode: full
 
