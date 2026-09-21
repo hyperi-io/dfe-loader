@@ -44,6 +44,8 @@
 //! ALTER TABLE dfe.events MODIFY COLUMN debug_info String COMMENT '@skip';
 //! ```
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use parking_lot::RwLock;
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
@@ -109,6 +111,7 @@ pub struct ColumnDirectivesConfig {
 pub struct ColumnMetaCache {
     config: ColumnDirectivesConfig,
     ddl: RwLock<FxHashMap<String, FxHashMap<String, ColumnDirectives>>>,
+    ddl_version: AtomicU64,
 }
 
 impl ColumnMetaCache {
@@ -118,7 +121,17 @@ impl ColumnMetaCache {
         Self {
             config,
             ddl: RwLock::new(FxHashMap::default()),
+            ddl_version: AtomicU64::new(0),
         }
+    }
+
+    /// Generation of the DDL layer, bumped by every `apply_ddl`.
+    ///
+    /// A caller caching work derived from directives compares this to know
+    /// whether its derived state still matches the directives in force.
+    #[must_use]
+    pub fn ddl_version(&self) -> u64 {
+        self.ddl_version.load(Ordering::Acquire)
     }
 
     /// Get merged directives for a specific column in a table.
@@ -153,6 +166,9 @@ impl ColumnMetaCache {
     pub fn apply_ddl(&self, table: &str, col_directives: FxHashMap<String, ColumnDirectives>) {
         let mut ddl = self.ddl.write();
         ddl.insert(table.to_string(), col_directives);
+        // Bumped under the write lock so a reader that sees the new directives
+        // never reads the old version and keeps stale derived state.
+        self.ddl_version.fetch_add(1, Ordering::Release);
     }
 
     /// Returns the set of column names with `skip = true` for a table.
