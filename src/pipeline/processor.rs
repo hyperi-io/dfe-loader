@@ -276,9 +276,17 @@ impl MessageProcessor<'_> {
         let capture_mode = self.capture_overrides.derive_config(&table).mode;
 
         let (mut data, raw_payload) = if let Some(schema) = extractor_schema {
-            let promoted =
-                self.extractor
-                    .extract(&msg.payload, &table, &schema, self.col_meta_cache);
+            // The `topic_name` fallback labels a record that carries no _source
+            // of its own, so the topic's source is derived once for the message
+            // and every column holding the marker resolves to it (#187).
+            let topic_source = self.router.derive_source_from_topic(&msg.topic);
+            let promoted = self.extractor.extract(
+                &msg.payload,
+                &table,
+                &schema,
+                self.col_meta_cache,
+                Some(topic_source.as_str()),
+            );
 
             // A header pass that promoted nothing would land a row of type
             // defaults — no _source, no _tags, _timestamp at epoch zero (#144).
@@ -2069,6 +2077,65 @@ mod tests {
         assert!(
             !processed.data.contains_key("src_field"),
             "source field should be renamed away, not left at top level"
+        );
+    }
+
+    /// Regression test for #187: the topic the message arrived on has to reach
+    /// the extractor, or the `topic_name` fallback dfe-schemas ships on every
+    /// timeseries table resolves nowhere and `_source` lands NULL.
+    #[test]
+    fn json_primary_labels_source_from_the_message_topic_187() {
+        use rustc_hash::FxHashMap;
+
+        use crate::clickhouse::{ColumnInfo, ParsedType, TableSchema};
+        use crate::column_meta::parse_directives;
+
+        let harness = TestHarness::new();
+        let msg = harness.make_msg_on("cisco-ios_load", br#"{"message":"ecs, no source"}"#);
+
+        let table = match harness.processor_json_primary().process(&msg) {
+            Err(crate::Error::SchemaPending { table }) => table,
+            Ok(_) => panic!("expected SchemaPending before schema cached, got Ok"),
+            Err(e) => panic!("expected SchemaPending, got Err({e:?})"),
+        };
+
+        // Verbatim from dfe-schemas common-header/timeseries.yaml.
+        let mut ddl = FxHashMap::default();
+        ddl.insert(
+            "_source".to_string(),
+            parse_directives(
+                "@source: first(_source) | topic_name - Data source label (e.g. beats, syslog, crowdstrike-edr)",
+            ),
+        );
+        harness.col_meta_cache.apply_ddl(&table, ddl);
+
+        let (db, tbl) = table.split_once('.').expect("db.table");
+        let schema = TableSchema {
+            database: db.to_string(),
+            table: tbl.to_string(),
+            columns: vec![ColumnInfo {
+                name: "_source".to_string(),
+                type_name: "LowCardinality(String)".to_string(),
+                parsed_type: ParsedType::parse("LowCardinality(String)"),
+                position: 0,
+                default_kind: String::new(),
+                default_expression: String::new(),
+                comment: String::new(),
+                is_in_primary_key: false,
+                is_in_sorting_key: false,
+            }],
+            comment: String::new(),
+        };
+        harness.schema_cache.insert(table.clone(), schema);
+
+        let processed = harness
+            .processor_json_primary()
+            .process(&msg)
+            .expect("extractor path should succeed once schema is cached");
+        assert_eq!(
+            processed.data.get("_source"),
+            Some(&serde_json::Value::String("cisco-ios".to_string())),
+            "the _load suffix is stripped and the topic's source labels the row"
         );
     }
 

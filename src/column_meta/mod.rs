@@ -20,6 +20,10 @@
 //! `@source` is the vocabulary dfe-schemas emits; `@renamed` is the equivalent
 //! hand-written form. Both resolve to the same `renamed` source-path list.
 //!
+//! A `| fallback` half takes a closed vocabulary; `now()`, `uuid()` and
+//! `topic_name` cannot be parse-time constants, so they travel as markers the
+//! extractor resolves per row.
+//!
 //! **Resolution order (highest → lowest priority):**
 //! 1. Config `column_directives.tables."db.table"."col"` — per-table per-column
 //! 2. Config `column_directives.global."col"` — global per-column name
@@ -283,6 +287,12 @@ impl ColumnMetaCache {
 // Directive parser
 // ============================================================================
 
+/// The `@source` fallback that resolves to the source a message's topic names.
+///
+/// Both the parser that accepts it and the extractor that resolves it read this
+/// one definition, so the closed vocabulary cannot drift between them.
+pub const TOPIC_NAME_MARKER: &str = "topic_name";
+
 /// Parse all column COMMENT directives into a `ColumnDirectives`.
 ///
 /// Handles `@skip`, `@default:value`, `@source:path`, `@renamed:path`,
@@ -484,11 +494,11 @@ pub fn parse_renamed_value(s: &str) -> Vec<String> {
 /// Parse the `| fallback` half of an `@source` directive.
 ///
 /// The vocabulary is closed (`docs/clickhouse/DDL-DIRECTIVES.md`): `now()`,
-/// `uuid()`, `null`, a quoted string literal, a number, a bool. Anything else
-/// is a FIELD REFERENCE the extractor cannot resolve -- `@source: first(_source)
-/// | topic_name` is the live example, and treating it as a literal writes the
-/// string "topic_name" into every `_source` that had no value. An unresolvable
-/// fallback leaves the column absent instead.
+/// `uuid()`, `topic_name`, `null`, a quoted string literal, a number, a bool.
+/// Anything else is a FIELD REFERENCE the extractor cannot resolve, and
+/// treating it as a literal would write the expression's own text into every
+/// row that had no value. An unresolvable fallback leaves the column absent
+/// instead.
 ///
 /// `null` also leaves the column absent: for a Nullable column that IS NULL,
 /// and for a non-Nullable one it lets the column DEFAULT apply rather than
@@ -499,7 +509,7 @@ fn parse_fallback_value(s: &str) -> Option<Value> {
         return None;
     }
     // Resolved per row in the extractor, so they travel as markers.
-    if s == "now()" || s == "uuid()" {
+    if s == "now()" || s == "uuid()" || s == TOPIC_NAME_MARKER {
         return Some(Value::String(s.to_string()));
     }
     match serde_json::from_str::<Value>(s) {
@@ -631,11 +641,11 @@ mod tests {
 
     #[test]
     fn test_parse_source_bare_word_fallback_is_ignored() {
-        // Verbatim from a deployed dfe.filebeat. `topic_name` is a FIELD
-        // REFERENCE the extractor cannot resolve, so inserting it as a literal
-        // would stamp the string "topic_name" into every _source with no value.
+        // A bare word outside the closed vocabulary is a FIELD REFERENCE the
+        // extractor cannot resolve, so inserting it as a literal would stamp the
+        // string "host_name" into every row the source field was absent from.
         let d = parse_directives(
-            "@source: first(_source) | topic_name - Data source label (falls back to the topic)",
+            "@source: first(_source) | host_name - Data source label (falls back to the host)",
         );
         assert_eq!(d.renamed, vec!["_source"]);
         assert_eq!(
@@ -645,11 +655,31 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_source_topic_name_fallback_is_a_marker() {
+        // Verbatim from dfe-schemas common-header/timeseries.yaml, deployed on
+        // every table on that profile: the marker reaches the extractor, which
+        // resolves it against the message topic (#187).
+        let d = parse_directives(
+            "@source: first(_source) | topic_name - Data source label (e.g. beats, syslog, crowdstrike-edr)",
+        );
+        assert_eq!(d.renamed, vec!["_source"]);
+        assert_eq!(
+            d.default,
+            Some(Value::String("topic_name".into())),
+            "topic_name must travel as a marker, not be dropped as unresolvable"
+        );
+    }
+
+    #[test]
     fn test_parse_source_fallback_vocabulary() {
         // docs/clickhouse/DDL-DIRECTIVES.md defines exactly these forms.
-        let cases: [(&str, Option<Value>); 7] = [
+        let cases: [(&str, Option<Value>); 8] = [
             ("@source: t | now()", Some(Value::String("now()".into()))),
             ("@source: t | uuid()", Some(Value::String("uuid()".into()))),
+            (
+                "@source: t | topic_name",
+                Some(Value::String("topic_name".into())),
+            ),
             ("@source: t | null", None),
             ("@source: t | \"lit\"", Some(Value::String("lit".into()))),
             ("@source: t | 0", Some(Value::Number(0.into()))),

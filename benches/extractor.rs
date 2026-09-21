@@ -123,6 +123,7 @@ fn bench_extract(c: &mut Criterion) {
                 "dfe.syslog",
                 &uncontended,
                 &plain_meta,
+                Some("syslog_load"),
             ))
         });
     });
@@ -136,6 +137,7 @@ fn bench_extract(c: &mut Criterion) {
                 "dfe.syslog",
                 &contended,
                 &sharing_meta,
+                Some("syslog_load"),
             ))
         });
     });
