@@ -258,6 +258,70 @@ pub fn split_json_array(payload: &[u8]) -> Option<Vec<Vec<u8>>> {
     Some(elements)
 }
 
+/// True when the payload carries a record boundary -- a closing brace meeting
+/// the next record's opening brace with only whitespace between.
+///
+/// Inside one JSON value a closing brace is always followed by a comma, a
+/// bracket or the end, so the shape occurs only between concatenated records or
+/// inside a string; [`split_ndjson`] decides which.
+#[must_use]
+pub fn has_ndjson_boundary(payload: &[u8]) -> bool {
+    // A raw newline is illegal inside a JSON string, so a compact single record
+    // carries none and stops here without the scan below.
+    if memchr::memchr(b'\n', payload).is_none() {
+        return false;
+    }
+
+    let mut closed = false;
+    for &b in payload {
+        match b {
+            b'}' => closed = true,
+            b'{' if closed => return true,
+            b if b.is_ascii_whitespace() => {}
+            _ => closed = false,
+        }
+    }
+    false
+}
+
+/// Split a batch of records carried as newline-separated JSON objects into the
+/// raw bytes of each record.
+///
+/// dfe-transform-elastic batches its output this way and every stage below the
+/// split takes one message to be one record, so a single-value parser meets the
+/// second object and the whole message is lost (#184). Only a body that is two
+/// or more whole JSON objects and nothing else is a batch: one object, a
+/// truncated tail, or an element that is not an object is left untouched so the
+/// format check and the DLQ see exactly what arrived.
+pub fn split_ndjson(payload: &[u8]) -> Option<Vec<Vec<u8>>> {
+    if !has_ndjson_boundary(payload) {
+        return None;
+    }
+
+    let mut elements: Vec<Vec<u8>> = Vec::new();
+    let mut consumed = 0usize;
+    // IgnoredAny skips each record without building a DOM; the raw bytes come
+    // from the stream's offset, so nothing is parsed twice.
+    let mut stream =
+        serde_json::Deserializer::from_slice(payload).into_iter::<serde::de::IgnoredAny>();
+    while let Some(item) = stream.next() {
+        item.ok()?;
+        let end = stream.byte_offset();
+        let record = payload.get(consumed..end)?.trim_ascii();
+        if record.first() != Some(&b'{') {
+            return None;
+        }
+        elements.push(record.to_vec());
+        consumed = end;
+    }
+
+    // Bytes the stream stopped short of are a truncated record, not a batch.
+    if payload[consumed..].iter().any(|b| !b.is_ascii_whitespace()) {
+        return None;
+    }
+    (elements.len() > 1).then_some(elements)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -559,6 +623,107 @@ mod tests {
         assert!(
             split_json_array(br#"[{"a": 1}] junk"#).is_none(),
             "the element iterator stops at the bracket, so the tail is checked"
+        );
+    }
+
+    // ---- newline-separated records (#184) ----
+
+    /// The shape dfe-transform-elastic put on `cisco-ios_load`: whole ECS
+    /// records, one per line, in one Kafka message.
+    const NDJSON_BATCH: &[u8] =
+        br#"{"event":{"code":"IPACCESSLOGRP"},"source":{"ip":"192.168.100.197"}}
+{"event":{"code":"IPACCESSLOGP"},"source":{"ip":"192.168.100.198"}}
+{"event":{"code":"IPACCESSLOGDP"},"source":{"ip":"192.168.100.199"}}
+"#;
+
+    #[test]
+    fn newline_separated_records_split_into_one_payload_each() {
+        let elements = split_ndjson(NDJSON_BATCH).expect("three records is a batch");
+
+        assert_eq!(
+            elements.len(),
+            3,
+            "every record, not the first and not zero"
+        );
+        for element in &elements {
+            let value = parse_payload(element).expect("each record parses on its own");
+            assert!(
+                value.is_object(),
+                "each element is a record, not a fragment"
+            );
+        }
+        assert_eq!(
+            parse_payload(&elements[2]).expect("third record")["event"]["code"],
+            "IPACCESSLOGDP",
+            "the last record survives the split as itself"
+        );
+    }
+
+    #[test]
+    fn the_whole_batch_is_what_a_single_value_parser_rejects() {
+        // The live symptom: sonic-rs reads the first object and calls the second
+        // one trailing characters, so all three records are lost at once.
+        let err = parse_payload(NDJSON_BATCH)
+            .expect_err("a single-value parser cannot read a batch")
+            .to_string();
+        assert!(
+            err.contains("trailing characters"),
+            "the split is what stops this reaching the parser, got: {err}"
+        );
+    }
+
+    #[test]
+    fn separator_whitespace_is_not_carried_into_a_record() {
+        let elements = split_ndjson(b"  {\"a\": 1}\r\n\r\n  {\"b\": 2}  \n").expect("a batch");
+        assert_eq!(
+            elements,
+            vec![br#"{"a": 1}"#.to_vec(), br#"{"b": 2}"#.to_vec()],
+            "_raw and _json capture the record, never the separators around it"
+        );
+    }
+
+    #[test]
+    fn a_single_record_is_not_a_batch() {
+        assert!(split_ndjson(br#"{"a": 1}"#).is_none());
+        assert!(
+            split_ndjson(b"{\n  \"a\": 1\n}\n").is_none(),
+            "a pretty-printed record is one record"
+        );
+        assert!(!has_ndjson_boundary(br#"{"a": 1}"#));
+    }
+
+    #[test]
+    fn a_batched_array_stays_with_the_array_split() {
+        // Between array elements a closing brace meets a comma, so the array
+        // never reads as a record boundary and keeps its own counters.
+        assert!(!has_ndjson_boundary(b"[{\"a\": 1},\n{\"b\": 2}]"));
+        assert!(split_ndjson(b"[{\"a\": 1},\n{\"b\": 2}]").is_none());
+    }
+
+    #[test]
+    fn a_truncated_or_non_object_batch_is_left_untouched() {
+        assert!(
+            split_ndjson(b"{\"a\": 1}\n{\"b\":").is_none(),
+            "a truncated tail must still reach the format check and the DLQ"
+        );
+        assert!(
+            split_ndjson(b"{\"a\": 1}\n{\"b\": 2}\njunk").is_none(),
+            "a body the stream stops short of is not a batch of records"
+        );
+        assert!(
+            split_ndjson(b"{\"a\": 1}\n[2]\n{\"b\": 3}").is_none(),
+            "splitting a mixed body would turn one DLQ entry into three"
+        );
+    }
+
+    #[test]
+    fn a_brace_pair_inside_a_string_is_not_a_batch() {
+        // The scan is string-unaware, so the stream parse is what decides.
+        let payload = b"{\"msg\": \"}\n{\"}";
+        assert!(has_ndjson_boundary(payload), "the cheap scan cannot tell");
+        assert!(
+            split_ndjson(payload).is_none(),
+            "one value parsed means one record"
         );
     }
 }

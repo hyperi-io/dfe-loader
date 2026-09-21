@@ -9,7 +9,9 @@
 pub mod parse;
 
 // Re-export from scalo with local type alias for backward compatibility
-pub use parse::{opens_json_array, parse_payload, split_json_array};
+pub use parse::{
+    has_ndjson_boundary, opens_json_array, parse_payload, split_json_array, split_ndjson,
+};
 pub use scalo::transport::{
     DetectedFormat as PayloadFormat, FormatDetector, FormatMode, detect_format,
 };

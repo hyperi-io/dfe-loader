@@ -19,7 +19,7 @@ time. The tail batches per table and inserts.
 ```mermaid
 flowchart LR
     M["bytes (Kafka/gRPC/Memory)"]
-    S["split batched arrays"]
+    S["split batched messages"]
     P["parse + format detect"]
     R["route -> db.table"]
     X["extract header + schema columns"]
@@ -33,21 +33,30 @@ flowchart LR
 The stages, in order, all in `src/pipeline/` (`MessageProcessor::process` is the
 per-message entry point):
 
-## 0. Split batched arrays
+## 0. Split batched messages
 
-Every stage below this takes one message to be one record, so a message whose
-body is a non-empty JSON array of objects is split into one message per element
-before anything else runs. Each element keeps its source message's topic,
-partition and offset, so a batch still commits as one unit, and
-`dfe_loader_batched_array_messages_total` /
-`dfe_loader_batched_array_records_total` count what was split. A scalar array,
-an empty one, and a body that does not parse are not batches of records: they go
-through untouched so the format check and the DLQ see exactly what arrived.
+Every stage below this takes one message to be one record, so a message
+carrying several is split into one message per record before anything else
+runs. Two wire shapes are batches, counted apart so a dashboard says which
+producer is batching:
 
-dfe-receiver splits its own batched POSTs, but any producer can put an array on
-a loader topic, so the split is here too. An array that reaches the next stage
-unsplit is refused by shape and named as such, rather than being carried into
-the capture and coming back as a ClickHouse encode error on an empty column.
+| Shape | Producer it came from | Counters |
+|-------|----------------------|----------|
+| a non-empty JSON array of objects | dfe-receiver forwarding a batched POST | `dfe_loader_batched_array_messages_total` / `dfe_loader_batched_array_records_total` |
+| newline-separated JSON objects | dfe-transform-elastic emitting its output | `dfe_loader_batched_ndjson_messages_total` / `dfe_loader_batched_ndjson_records_total` |
+
+Each element keeps its source message's topic, partition and offset, so a batch
+still commits as one unit. What is not a batch of records goes through
+untouched, so the format check and the DLQ see exactly what arrived: a scalar
+array, an empty array, a single object however it is formatted, a truncated
+tail, and any body whose elements are not all objects.
+
+The split belongs at the consumer rather than at each producer in turn. #128
+taught dfe-receiver not to forward an array; dfe-transform-elastic then lost
+five records a message to the same defect in the other wire shape (#184). A
+batch that reaches the next stage unsplit is refused by shape and named as
+such, rather than coming back as a ClickHouse encode error on an empty column
+or as a parse error about trailing characters.
 
 ## 1. Parse and detect format
 
