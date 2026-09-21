@@ -3,7 +3,7 @@
 
 //! Per-table capture mode resolution.
 //!
-//! Resolves `CaptureMode` (full/raw_only/extracted_only) from three sources:
+//! Resolves `CaptureMode` (full/raw_only/json_only/extracted_only) from three sources:
 //! 1. DDL comment tag `@capture_mode` — highest priority
 //! 2. Config `table_capture_modes` map — per-table override
 //! 3. Config `capture_mode` — global default
@@ -142,6 +142,7 @@ impl CaptureOverrides {
             let mode = match mode_str {
                 "full" => CaptureMode::Full,
                 "raw_only" => CaptureMode::RawOnly,
+                "json_only" => CaptureMode::JsonOnly,
                 "extracted_only" => CaptureMode::ExtractedOnly,
                 other => {
                     warn!(
@@ -252,6 +253,56 @@ mod tests {
         assert_eq!(
             overrides.derive_config("dfe.raw_logs").mode,
             CaptureMode::RawOnly
+        );
+    }
+
+    // ---- json_only resolves at each of the three layers ----
+
+    #[test]
+    fn test_global_capture_mode_json_only() {
+        let metadata_config = MetadataConfig {
+            capture_mode: CaptureMode::JsonOnly,
+            ..Default::default()
+        };
+        let overrides = CaptureOverrides::new(&metadata_config);
+
+        assert_eq!(
+            overrides.derive_config("dfe.events").mode,
+            CaptureMode::JsonOnly
+        );
+    }
+
+    #[test]
+    fn test_per_table_json_only_overrides_global() {
+        let metadata_config = MetadataConfig {
+            table_capture_modes: HashMap::from([("dfe.events".to_string(), CaptureMode::JsonOnly)]),
+            ..Default::default()
+        };
+        let overrides = CaptureOverrides::new(&metadata_config);
+
+        assert_eq!(
+            overrides.derive_config("dfe.events").mode,
+            CaptureMode::JsonOnly
+        );
+        assert_eq!(
+            overrides.derive_config("dfe.metrics").mode,
+            CaptureMode::Full
+        );
+    }
+
+    #[test]
+    fn test_ddl_capture_mode_json_only_overrides_config() {
+        let metadata_config = MetadataConfig {
+            table_capture_modes: HashMap::from([("dfe.events".to_string(), CaptureMode::RawOnly)]),
+            ..Default::default()
+        };
+        let mut overrides = CaptureOverrides::new(&metadata_config);
+
+        overrides.update_from_comment("dfe.events", "@capture_mode: json_only");
+
+        assert_eq!(
+            overrides.derive_config("dfe.events").mode,
+            CaptureMode::JsonOnly
         );
     }
 

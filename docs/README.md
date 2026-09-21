@@ -29,7 +29,7 @@ the hyperi-port migration), and [pipeline/](pipeline/) for the hot path.
 | A routing rule (`db_fields`/`table_fields`) | Pre-flatten routing to `db.table`, dot-notation nested access, DLQ on miss | A router, a dispatch table |
 | A ClickHouse table | Schema reflected from `system.columns`, fields promoted to typed columns, the rest kept in `_json` | A schema mapping, an ORM, a migration |
 | `insert_format` (default RowBinary) | Dynamic `Map<String,Value>` -> RowBinary over the unified `Client` (HTTP or TCP); JSONEachRow fallback | A serialiser, a type encoder, a wire format |
-| `capture_mode` (full/raw_only/extracted_only) | `_json` and `_raw` population per table, overridable per-table and per-DDL | Conditional capture plumbing |
+| `capture_mode` (full/raw_only/json_only/extracted_only) | `_json` and `_raw` population per table, overridable per-table and per-DDL | Conditional capture plumbing |
 | Enrichment toggles (geoip/reputation/risk) | Flat enriched columns injected on the promoted row only | Lookup, caching, CIDR matching |
 | Nothing extra | Per-table buffering, batch salvage, circuit breaker, schema-cache recovery, per-batch offset commit | The resilience layer |
 
