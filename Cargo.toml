@@ -170,6 +170,10 @@ harness = false
 name = "insert_bakeoff"
 harness = false
 
+[[bench]]
+name = "extractor"
+harness = false
+
 [profile.release]
 lto = "thin"           # Link-time optimization (use "fat" for max perf, slower compile)
 codegen-units = 1      # Single codegen unit for better optimization

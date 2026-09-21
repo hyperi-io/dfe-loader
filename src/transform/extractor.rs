@@ -33,8 +33,19 @@
 //! | `@renamed:first(a/b/c)` | First-match source field lookup |
 //! | `@default:value` | Applied when all source fields are absent |
 //! | `@source:field \| now()` | Fallback resolved to the ingest timestamp |
+//!
+//! ## Source fields more than one column reads
+//!
+//! A column takes its source field by moving it out of the parsed payload, so
+//! a field two columns read would reach only the first of them. The per-table
+//! plan counts every column's source paths once and copies the shared ones, so
+//! `_timestamp` and a meta `timestamp` column both fill from one input field.
+
+use std::sync::Arc;
 
 use chrono::Utc;
+use parking_lot::RwLock;
+use rustc_hash::{FxHashMap, FxHashSet};
 use serde_json::{Map, Value};
 use tracing::debug;
 
@@ -55,9 +66,66 @@ pub struct HeaderExtraction {
     pub empty_reason: Option<&'static str>,
 }
 
+/// The source paths one column reads, in the order the extractor tries them.
+///
+/// Both the extraction loop and the table plan resolve a column through
+/// `sources_for`, so a column cannot be counted as claiming one path and then
+/// read from another.
+enum Sources<'a> {
+    /// The column takes no value from the payload.
+    None,
+    /// Try each path in order; the first one present wins.
+    List(&'a [String]),
+    /// Try the first path, then the second when there is one.
+    Pair(&'a str, Option<&'a str>),
+}
+
+impl<'a> Sources<'a> {
+    /// Visit each source path in order, stopping at the first `f` accepts.
+    #[inline]
+    fn try_each(&self, mut f: impl FnMut(&'a str) -> bool) -> bool {
+        match *self {
+            Sources::None => false,
+            Sources::List(paths) => paths.iter().any(|path| f(path.as_str())),
+            Sources::Pair(first, second) => f(first) || second.is_some_and(f),
+        }
+    }
+}
+
+/// Per-table extraction state derived from the schema and its directives.
+///
+/// Built on the first row of a table and reused by every row after it, so
+/// resolving the shared source fields never reaches the per-row path.
+struct TablePlan {
+    /// Column names the plan was built from.
+    columns: Box<[String]>,
+    /// DDL generation the plan was built from.
+    ddl_version: u64,
+    /// Source paths more than one column of this table reads.
+    contended: FxHashSet<Box<str>>,
+}
+
+impl TablePlan {
+    /// Whether the plan still describes this schema and directive generation.
+    ///
+    /// An ALTER that adds, drops or renames a column changes the name list, and
+    /// a changed COMMENT bumps the DDL generation; either rebuilds the plan
+    /// rather than leaving a new collision undetected.
+    fn is_current(&self, schema: &TableSchema, ddl_version: u64) -> bool {
+        self.ddl_version == ddl_version
+            && self.columns.len() == schema.columns.len()
+            && self
+                .columns
+                .iter()
+                .zip(&schema.columns)
+                .all(|(name, col)| *name == col.name)
+    }
+}
+
 /// Schema-guided SIMD field extractor.
 ///
-/// Created once from config at startup. Stateless — safe to share across tasks.
+/// Created once from config at startup. The only mutable state is the per-table
+/// plan cache, behind an `RwLock` -- safe to share across tasks.
 pub struct HeaderExtractor {
     /// Field name in source data to extract for `_org_id` (RLS column).
     org_id_field: String,
@@ -67,6 +135,8 @@ pub struct HeaderExtractor {
     capture_source: bool,
     /// Whether the common header (all `_`-prefixed columns) is enabled.
     metadata_enabled: bool,
+    /// Per-table plans, built on first use and rebuilt when the table changes.
+    plans: RwLock<FxHashMap<String, Arc<TablePlan>>>,
 }
 
 impl HeaderExtractor {
@@ -80,6 +150,108 @@ impl HeaderExtractor {
             source_fields: metadata.source_fields.clone(),
             capture_source: metadata.capture_source,
             metadata_enabled: metadata.enabled,
+            plans: RwLock::new(FxHashMap::default()),
+        }
+    }
+
+    /// Resolve the source paths a column reads.
+    ///
+    /// Mirrors the branch order of `extract()`: the columns `ClickHouse`
+    /// generates, then `_timestamp`, then `@skip`, then `@source`/`@renamed`,
+    /// then the column-name rules.
+    fn sources_for<'a>(&'a self, name: &'a str, renamed: &'a [String], skip: bool) -> Sources<'a> {
+        if matches!(
+            name,
+            "_uuid" | "_timestamp_load" | "_json" | "_timestamp_received"
+        ) {
+            return Sources::None;
+        }
+        // _timestamp reads the payload ahead of any directive.
+        if name == "_timestamp" {
+            return Sources::Pair("timestamp", Some("_timestamp"));
+        }
+        if skip {
+            return Sources::None;
+        }
+        if !renamed.is_empty() {
+            return Sources::List(renamed);
+        }
+        match name {
+            "_org_id" => Sources::Pair(&self.org_id_field, None),
+            "_source" if self.capture_source && self.metadata_enabled => {
+                Sources::List(&self.source_fields)
+            }
+            // _foo reads "foo" before falling back to the literal "_foo".
+            _ if name.starts_with('_') => Sources::Pair(&name[1..], Some(name)),
+            _ => Sources::Pair(name, None),
+        }
+    }
+
+    /// Get this table's plan, rebuilding it when the table changed under it.
+    fn plan_for(
+        &self,
+        table: &str,
+        schema: &TableSchema,
+        col_meta: &ColumnMetaCache,
+    ) -> Arc<TablePlan> {
+        let ddl_version = col_meta.ddl_version();
+        {
+            let plans = self.plans.read();
+            if let Some(plan) = plans.get(table)
+                && plan.is_current(schema, ddl_version)
+            {
+                return Arc::clone(plan);
+            }
+        }
+        let plan = Arc::new(self.build_plan(table, schema, col_meta, ddl_version));
+        self.plans
+            .write()
+            .insert(table.to_string(), Arc::clone(&plan));
+        plan
+    }
+
+    /// Find the source paths more than one column of this table reads.
+    ///
+    /// A `first(a/b/c)` column claims every path in its list because which one
+    /// it takes is a property of the row, so a path any two columns could reach
+    /// is counted as shared.
+    fn build_plan(
+        &self,
+        table: &str,
+        schema: &TableSchema,
+        col_meta: &ColumnMetaCache,
+        ddl_version: u64,
+    ) -> TablePlan {
+        let mut claims: FxHashMap<Box<str>, u32> = FxHashMap::default();
+        for col in &schema.columns {
+            let directives = col_meta.get(table, &col.name);
+            let sources = self.sources_for(&col.name, &directives.renamed, directives.skip);
+            sources.try_each(|path| {
+                if let Some(count) = claims.get_mut(path) {
+                    *count += 1;
+                } else {
+                    claims.insert(Box::from(path), 1);
+                }
+                false
+            });
+        }
+
+        let contended: FxHashSet<Box<str>> = claims
+            .into_iter()
+            .filter_map(|(path, count)| (count > 1).then_some(path))
+            .collect();
+        if !contended.is_empty() {
+            debug!(
+                table = %table,
+                paths = contended.len(),
+                "Source fields read by more than one column are copied, not moved"
+            );
+        }
+
+        TablePlan {
+            columns: schema.columns.iter().map(|col| col.name.clone()).collect(),
+            ddl_version,
+            contended,
         }
     }
 
@@ -103,12 +275,15 @@ impl HeaderExtractor {
     ) -> HeaderExtraction {
         let now = Utc::now();
         let mut map = Map::with_capacity(schema.columns.len());
+        let plan = self.plan_for(table, schema, col_meta);
+        let contended = &plan.contended;
 
         // Parse once — all schema column lookups are O(1) hash operations on this map.
         // Misses are free here; with get_from_slice each miss still scans the full document.
         // Take ownership of the parsed map so we can move Values out (zero-clone).
-        // Each lookup_move/lookup_first_move call removes the value from `parsed`
-        // and moves it into the output map — no Value::clone() on the hot path.
+        // Each take_path call removes the value from `parsed` and moves it into
+        // the output map -- no Value::clone() on the hot path, except for the
+        // source fields `plan.contended` names, which more than one column reads.
         // A payload the header pass cannot read used to return an empty map at
         // debug level, and the row landed with every column at its type default.
         // Name the reason and let the caller reject it (#144).
@@ -149,8 +324,9 @@ impl HeaderExtractor {
             // The column is NOT Nullable and has no DEFAULT — omitting it would
             // produce 1970-01-01 00:00:00.000 (epoch zero).
             if name == "_timestamp" {
-                let found = lookup_move(&mut parsed, "timestamp", name, &mut map)
-                    || lookup_move(&mut parsed, name, name, &mut map);
+                let found = self
+                    .sources_for(name, &[], false)
+                    .try_each(|path| take_path(&mut parsed, path, name, &mut map, contended));
                 if found {
                     normalise_datetime(&mut map, name);
                 } else {
@@ -164,24 +340,10 @@ impl HeaderExtractor {
                 continue;
             }
 
-            // Determine source field path(s) for extraction.
             // Priority: @renamed directive > per-column defaults > column name.
-            let found = if directives.renamed.is_empty() {
-                match name.as_str() {
-                    "_org_id" => lookup_move(&mut parsed, &self.org_id_field, name, &mut map),
-                    "_source" if self.capture_source && self.metadata_enabled => {
-                        lookup_first_move(&mut parsed, &self.source_fields, name, &mut map)
-                    }
-                    _ if name.starts_with('_') => {
-                        // _foo → try "foo" (stripped) first, then "_foo" as literal fallback.
-                        lookup_move(&mut parsed, &name[1..], name, &mut map)
-                            || lookup_move(&mut parsed, name, name, &mut map)
-                    }
-                    _ => lookup_move(&mut parsed, name, name, &mut map),
-                }
-            } else {
-                lookup_first_move(&mut parsed, &directives.renamed, name, &mut map)
-            };
+            let found = self
+                .sources_for(name, &directives.renamed, directives.skip)
+                .try_each(|path| take_path(&mut parsed, path, name, &mut map, contended));
 
             // Apply column default when all source fields were absent.
             if !found && let Some(ref default) = directives.default {
@@ -304,41 +466,59 @@ fn remove_path(parsed: &mut Map<String, Value>, path: &str) -> Option<Value> {
     None
 }
 
-/// Move a source field from the parsed object into the output map (zero-clone).
+/// Read a source field without removing it, descending a dotted path.
 ///
-/// Uses `remove_path()` to take ownership of the Value — no allocation for the
-/// value itself. The key allocation (`dest.to_string()`) is unavoidable since
-/// `Map<String, Value>` requires owned keys.
+/// The borrowing twin of `remove_path`, for a field a later column still reads.
 #[inline]
-fn lookup_move(
-    parsed: &mut serde_json::Map<String, Value>,
+fn get_path<'a>(parsed: &'a Map<String, Value>, path: &str) -> Option<&'a Value> {
+    if let Some(v) = parsed.get(path) {
+        return Some(v);
+    }
+    if !path.contains('.') {
+        return None;
+    }
+
+    let mut parts = path.split('.');
+    let mut current = parsed.get(parts.next()?)?;
+    let mut parts = parts.peekable();
+    while let Some(part) = parts.next() {
+        if parts.peek().is_none() {
+            return current.as_object()?.get(part);
+        }
+        current = current.as_object()?.get(part)?;
+    }
+    None
+}
+
+/// Take a source field into the output map, moving it unless it is shared.
+///
+/// A common-header column used to empty the field it read, so a meta column
+/// reading the same field found nothing and landed NULL. A path in `contended`
+/// is copied instead, which leaves it there for the columns that follow.
+///
+/// `contended` is empty for every table with no shared source field, so the
+/// ordinary column costs one `is_empty` check and keeps the move.
+#[inline]
+fn take_path(
+    parsed: &mut Map<String, Value>,
     source: &str,
     dest: &str,
     map: &mut Map<String, Value>,
+    contended: &FxHashSet<Box<str>>,
 ) -> bool {
-    if let Some(v) = remove_path(parsed, source) {
-        map.insert(dest.to_string(), v);
+    if !contended.is_empty() && contended.contains(source) {
+        let Some(value) = get_path(parsed, source) else {
+            return false;
+        };
+        map.insert(dest.to_string(), value.clone());
+        return true;
+    }
+    if let Some(value) = remove_path(parsed, source) {
+        map.insert(dest.to_string(), value);
         true
     } else {
         false
     }
-}
-
-/// Try source field names in order, moving the first match (zero-clone).
-#[inline]
-fn lookup_first_move(
-    parsed: &mut serde_json::Map<String, Value>,
-    sources: &[String],
-    dest: &str,
-    map: &mut Map<String, Value>,
-) -> bool {
-    for source in sources {
-        if let Some(v) = remove_path(parsed, source.as_str()) {
-            map.insert(dest.to_string(), v);
-            return true;
-        }
-    }
-    false
 }
 
 // ============================================================================
@@ -1091,5 +1271,237 @@ mod tests {
             Some(&Value::String("2026-09-07 05:53:53.385".into())),
             "ClickHouse's own text form must pass through untouched"
         );
+    }
+
+    // ========================================================================
+    // Source fields more than one column reads (dfe-engine#456)
+    // ========================================================================
+
+    /// The `dfe.proofsyslog` directives, as the loader reads them from the DDL.
+    fn syslog_col_meta() -> ColumnMetaCache {
+        use crate::column_meta::parse_directives;
+        use rustc_hash::FxHashMap;
+
+        let mut ddl = FxHashMap::default();
+        ddl.insert(
+            "timestamp".to_string(),
+            parse_directives("@source: first(timestamp/@timestamp/time) - Event timestamp"),
+        );
+        ddl.insert(
+            "_timestamp".to_string(),
+            parse_directives("@source: timestamp | now()"),
+        );
+        let cache = ColumnMetaCache::new(ColumnDirectivesConfig::default());
+        cache.apply_ddl("dfe.proofsyslog", ddl);
+        cache
+    }
+
+    #[test]
+    fn test_header_and_meta_column_both_fill_from_one_timestamp_field() {
+        // One syslog record on dfe.proofsyslog landed _timestamp filled and
+        // timestamp NULL: the header column moved "timestamp" out of the
+        // payload before the meta column's first(timestamp/@timestamp/time)
+        // reached it.
+        let extractor = default_extractor();
+        let raw = br#"{"timestamp": "2026-09-21T04:45:00Z", "hostname": "proof-host-01"}"#;
+        let schema = make_datetime_schema(&["_timestamp", "timestamp"]);
+        let col_meta = syslog_col_meta();
+
+        let map = extractor
+            .extract(raw, "dfe.proofsyslog", &schema, &col_meta)
+            .fields;
+
+        assert_eq!(
+            map.get("_timestamp"),
+            Some(&Value::String("2026-09-21 04:45:00.000".into())),
+            "the header column still fills"
+        );
+        assert_eq!(
+            map.get("timestamp"),
+            Some(&Value::String("2026-09-21 04:45:00.000".into())),
+            "the meta column reading the same field must fill too, not land NULL"
+        );
+    }
+
+    #[test]
+    fn test_underscore_header_column_leaves_the_plain_field_behind() {
+        // The collision is not only `timestamp`: any header column `_foo` reads
+        // "foo" before falling back to "_foo", so it can empty the field a
+        // plain `foo` column reads.
+        let extractor = default_extractor();
+        let raw = br#"{"tenant": "acme"}"#;
+        let schema = make_schema(&["_tenant", "tenant"]);
+        let col_meta = empty_col_meta();
+
+        let map = extractor
+            .extract(raw, "dfe.events", &schema, &col_meta)
+            .fields;
+
+        assert_eq!(map.get("_tenant"), Some(&Value::String("acme".into())));
+        assert_eq!(
+            map.get("tenant"),
+            Some(&Value::String("acme".into())),
+            "the stripped-name rule must not empty the field its own column reads"
+        );
+    }
+
+    #[test]
+    fn test_uncontended_path_moves_the_value_rather_than_copying_it() {
+        // The move is what keeps the hot path free of a per-row allocation, so
+        // the promoted value must be the same buffer the payload held.
+        let mut parsed = Map::new();
+        parsed.insert("message".to_string(), Value::String("m".repeat(64)));
+        let before = parsed["message"].as_str().expect("string").as_ptr();
+
+        let mut map = Map::new();
+        let contended = FxHashSet::default();
+        assert!(take_path(
+            &mut parsed,
+            "message",
+            "message",
+            &mut map,
+            &contended
+        ));
+
+        assert_eq!(
+            map["message"].as_str().expect("string").as_ptr(),
+            before,
+            "an uncontended field must move, not allocate a copy"
+        );
+        assert!(
+            !parsed.contains_key("message"),
+            "a moved field leaves the payload"
+        );
+    }
+
+    #[test]
+    fn test_contended_path_copies_and_leaves_the_field_for_the_next_column() {
+        let mut parsed = Map::new();
+        parsed.insert("timestamp".to_string(), Value::String("t".repeat(64)));
+        let before = parsed["timestamp"].as_str().expect("string").as_ptr();
+
+        let mut map = Map::new();
+        let mut contended: FxHashSet<Box<str>> = FxHashSet::default();
+        contended.insert(Box::from("timestamp"));
+        assert!(take_path(
+            &mut parsed,
+            "timestamp",
+            "_timestamp",
+            &mut map,
+            &contended
+        ));
+
+        assert_ne!(
+            map["_timestamp"].as_str().expect("string").as_ptr(),
+            before,
+            "a shared field is copied"
+        );
+        assert!(
+            parsed.contains_key("timestamp"),
+            "the copy must leave the field for the columns that follow"
+        );
+    }
+
+    #[test]
+    fn test_ordinary_schema_shares_no_source_field() {
+        // The copy is confined to the collision: with nothing shared the set is
+        // empty, so every column takes the move branch.
+        let extractor = default_extractor();
+        let schema = make_schema(&[
+            "_timestamp",
+            "_timestamp_received",
+            "_source",
+            "_org_id",
+            "hostname",
+            "app_name",
+            "message",
+        ]);
+        let col_meta = empty_col_meta();
+
+        let plan = extractor.plan_for("dfe.events", &schema, &col_meta);
+        assert!(
+            plan.contended.is_empty(),
+            "no column shares a source field here: {:?}",
+            plan.contended
+        );
+    }
+
+    #[test]
+    fn test_plan_finds_only_the_shared_path() {
+        let extractor = default_extractor();
+        let schema = make_datetime_schema(&["_timestamp", "timestamp"]);
+        let col_meta = syslog_col_meta();
+
+        let plan = extractor.plan_for("dfe.proofsyslog", &schema, &col_meta);
+        let shared: Vec<&str> = plan.contended.iter().map(AsRef::as_ref).collect();
+        assert_eq!(
+            shared,
+            vec!["timestamp"],
+            "@timestamp and time are read by one column each, so they keep the move"
+        );
+    }
+
+    #[test]
+    fn test_plan_rebuilds_when_a_directive_starts_a_collision() {
+        use crate::column_meta::parse_directives;
+        use rustc_hash::FxHashMap;
+
+        let extractor = default_extractor();
+        let schema = make_schema(&["_timestamp", "event_time"]);
+        let col_meta = empty_col_meta();
+        let raw = br#"{"timestamp": "2026-09-21 04:45:00.000"}"#;
+
+        let map = extractor
+            .extract(raw, "dfe.events", &schema, &col_meta)
+            .fields;
+        assert!(
+            !map.contains_key("event_time"),
+            "event_time reads its own name, which this payload has no field for"
+        );
+
+        let mut ddl = FxHashMap::default();
+        ddl.insert(
+            "event_time".to_string(),
+            parse_directives("@source: timestamp"),
+        );
+        col_meta.apply_ddl("dfe.events", ddl);
+
+        let map = extractor
+            .extract(raw, "dfe.events", &schema, &col_meta)
+            .fields;
+        assert_eq!(
+            map.get("event_time"),
+            Some(&Value::String("2026-09-21 04:45:00.000".into())),
+            "the plan must rebuild on a directive change, or _timestamp takes the field alone"
+        );
+        assert_eq!(
+            map.get("_timestamp"),
+            Some(&Value::String("2026-09-21 04:45:00.000".into()))
+        );
+    }
+
+    #[test]
+    fn test_plan_rebuilds_when_a_column_is_added() {
+        let extractor = default_extractor();
+        let col_meta = empty_col_meta();
+        let raw = br#"{"tenant": "acme"}"#;
+
+        let before = make_schema(&["_tenant"]);
+        let map = extractor
+            .extract(raw, "dfe.events", &before, &col_meta)
+            .fields;
+        assert_eq!(map.get("_tenant"), Some(&Value::String("acme".into())));
+
+        // An ALTER adds the plain column the header column was already reading.
+        let after = make_schema(&["_tenant", "tenant"]);
+        let map = extractor
+            .extract(raw, "dfe.events", &after, &col_meta)
+            .fields;
+        assert_eq!(
+            map.get("tenant"),
+            Some(&Value::String("acme".into())),
+            "a plan keyed on the old column list would miss the new collision"
+        );
+        assert_eq!(map.get("_tenant"), Some(&Value::String("acme".into())));
     }
 }
