@@ -71,7 +71,16 @@ fn log_header_pass_skipped(table: &str, reason: &str) {
     }
 }
 
-/// Report a record that named no table on a source's own topic, at most once a
+/// One topic's state for the routing-field warning.
+#[derive(Default)]
+struct RoutingFieldWarn {
+    last_logged_ms: std::sync::atomic::AtomicU64,
+    /// Records seen since the last line, so a rate-limited warning still
+    /// reports the volume behind it rather than one record a minute.
+    records: std::sync::atomic::AtomicU64,
+}
+
+/// Report records that named no table on a source's own topic, at most once a
 /// minute per topic.
 ///
 /// The topic stays out of the metric labels for the same reason the table does
@@ -81,17 +90,21 @@ fn log_routing_field_absent(topic: &str, table: &str) {
 
     // Keyed by topic so a second broken source is not hidden by the first; the
     // subscribed topic set bounds the map.
-    static WARN_TS: std::sync::LazyLock<
-        parking_lot::Mutex<rustc_hash::FxHashMap<String, Arc<std::sync::atomic::AtomicU64>>>,
+    static WARN: std::sync::LazyLock<
+        parking_lot::Mutex<rustc_hash::FxHashMap<String, Arc<RoutingFieldWarn>>>,
     > = std::sync::LazyLock::new(|| parking_lot::Mutex::new(rustc_hash::FxHashMap::default()));
 
-    let slot = Arc::clone(WARN_TS.lock().entry(topic.to_string()).or_default());
-    if scalo::logger::log_debounced(&slot, 60_000) {
+    let slot = Arc::clone(WARN.lock().entry(topic.to_string()).or_default());
+    slot.records
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    if scalo::logger::log_debounced(&slot.last_logged_ms, 60_000) {
+        let records = slot.records.swap(0, std::sync::atomic::Ordering::Relaxed);
         warn!(
             topic = %topic,
             table = %table,
+            records = records,
             reason = "no_routing_field",
-            "No routing field on a source topic, falling back to the default table (max 1 per 60s per topic)"
+            "Records named no table on a source topic and were routed by topic name (max 1 per 60s per topic)"
         );
     }
 }
@@ -169,6 +182,14 @@ impl MessageProcessor<'_> {
                     "invalid JSON payload",
                     None,
                 );
+                // A batch the fan-out could not split reads as trailing
+                // characters, so the shape is named instead (#184).
+                if crate::payload::has_ndjson_boundary(&msg.payload) {
+                    return crate::Error::Json(
+                        "payload holds more than one JSON record and did not split into whole records"
+                            .into(),
+                    );
+                }
                 crate::Error::Json(format!("JSON parse error: {e}"))
             })?,
             PayloadFormat::MessagePack => rmp_serde::from_slice(&msg.payload).map_err(|e| {
@@ -198,8 +219,9 @@ impl MessageProcessor<'_> {
             ));
         }
 
-        // Step 3: Route to table (db.table)
-        let (result, choice) = self.router.route_value_traced(&value);
+        // Step 3: Route to table (db.table), falling back to the source the
+        // topic names when the record carries no routing field (#184).
+        let (result, choice) = self.router.route_value_on_topic(&value, &msg.topic);
         let routed = match result {
             RouteResult::Table(t) => {
                 if tracing::enabled!(tracing::Level::TRACE) {
@@ -214,9 +236,9 @@ impl MessageProcessor<'_> {
             }
         };
 
-        // A source's own topic carrying records that name no table is a producer
-        // defect, and the fallback to the default table is otherwise silent.
-        if choice == TableChoice::DefaultFallback && self.router.is_source_topic(&msg.topic) {
+        // A source's own topic carrying records that name no table is still a
+        // producer defect, and routing by topic is otherwise silent.
+        if choice == TableChoice::Topic {
             log_routing_field_absent(&msg.topic, &routed);
         }
 
@@ -1030,52 +1052,101 @@ mod tests {
         assert_eq!(processed.table, "dfe.acme_widgets");
     }
 
-    #[test]
-    fn a_record_with_no_routing_field_on_a_source_topic_is_counted() {
+    /// Routing config matching a deployment: `_source` names the table, the
+    /// landing table is `dfe.main`.
+    fn config_routing_by_source() -> Config {
         let mut config = Config::default();
         config.routing.table_fields = vec!["_source".to_string()];
         config.routing.default_db = "dfe".to_string();
         config.routing.default_table = "main".to_string();
+        config
+    }
 
-        let harness = TestHarness::with_config(config);
+    #[test]
+    fn a_record_with_no_routing_field_on_a_source_topic_lands_in_that_source_table() {
+        // The elastic case: the transform emits ECS, which carries no _source,
+        // and `cisco-ios_load` is the output topic of exactly one source (#184).
+        let harness = TestHarness::with_config(config_routing_by_source());
+        let proc = harness.processor();
+        let payload = serde_json::to_vec(&json!({
+            "event": {"code": "IPACCESSLOGRP", "action": "deny"},
+            "observer": {"vendor": "Cisco"}
+        }))
+        .expect("serialize");
+
+        let processed = proc
+            .process(&harness.make_msg_on("cisco-ios_load", &payload))
+            .expect("should succeed");
+        assert_eq!(
+            processed.table, "dfe.cisco-ios",
+            "the topic names the source, so the row lands in that source's table"
+        );
+    }
+
+    #[test]
+    fn a_record_with_no_routing_field_on_a_source_topic_is_counted() {
+        let harness = TestHarness::with_config(config_routing_by_source());
         let proc = harness.processor();
         let payload = serde_json::to_vec(&json!({"message": "no source here"})).expect("serialize");
 
-        // The elastic case: the transform stopped emitting _source on a topic
-        // the loader was told is a source's own.
+        // Routing by topic covers for the producer, so the count is what says
+        // the producer stopped naming the table.
         let hits = counted("dfe_loader_routing_field_absent_total", || {
             let processed = proc
                 .process(&harness.make_msg_on("elastic_load", &payload))
                 .expect("should succeed");
-            assert_eq!(
-                processed.table, "dfe.main",
-                "the fallback itself is unchanged, only the signal is new"
-            );
+            assert_eq!(processed.table, "dfe.elastic");
         });
         assert_eq!(hits, 1, "one record, one count");
     }
 
     #[test]
-    fn the_landing_topic_and_a_named_record_are_not_counted() {
-        let mut config = Config::default();
-        config.routing.table_fields = vec!["_source".to_string()];
-        config.routing.default_db = "dfe".to_string();
-        config.routing.default_table = "main".to_string();
-
-        let harness = TestHarness::with_config(config);
+    fn the_landing_topic_still_falls_back_to_the_landing_table() {
+        // Landing records genuinely carry no source, and `main_land` strips to
+        // the default table, so the fallback is right there.
+        let harness = TestHarness::with_config(config_routing_by_source());
         let proc = harness.processor();
         let unnamed = serde_json::to_vec(&json!({"message": "no source here"})).expect("serialize");
-        let named = serde_json::to_vec(&json!({"_source": "main"})).expect("serialize");
 
         let hits = counted("dfe_loader_routing_field_absent_total", || {
-            // Ordinary landing traffic names no source and is not a defect.
-            proc.process(&harness.make_msg_on("main_land", &unnamed))
+            let processed = proc
+                .process(&harness.make_msg_on("main_land", &unnamed))
                 .expect("should succeed");
-            // A source topic whose record names its table is not one either.
-            proc.process(&harness.make_msg_on("elastic_load", &named))
-                .expect("should succeed");
+            assert_eq!(processed.table, "dfe.main");
         });
-        assert_eq!(hits, 0, "neither case is a producer defect");
+        assert_eq!(hits, 0, "ordinary landing traffic is not a producer defect");
+    }
+
+    #[test]
+    fn a_topic_with_no_source_suffix_still_falls_back_to_the_landing_table() {
+        // An arbitrary topic name is not `{source}_land` or `{source}_load`, so
+        // it names no source to route by.
+        let harness = TestHarness::with_config(config_routing_by_source());
+        let proc = harness.processor();
+        let unnamed = serde_json::to_vec(&json!({"message": "no source here"})).expect("serialize");
+
+        let hits = counted("dfe_loader_routing_field_absent_total", || {
+            let processed = proc
+                .process(&harness.make_msg_on("dfe.events", &unnamed))
+                .expect("should succeed");
+            assert_eq!(processed.table, "dfe.main");
+        });
+        assert_eq!(hits, 0);
+    }
+
+    #[test]
+    fn a_record_that_names_its_table_is_not_counted() {
+        let harness = TestHarness::with_config(config_routing_by_source());
+        let proc = harness.processor();
+        let named = serde_json::to_vec(&json!({"_source": "elastic"})).expect("serialize");
+
+        let hits = counted("dfe_loader_routing_field_absent_total", || {
+            let processed = proc
+                .process(&harness.make_msg_on("elastic_load", &named))
+                .expect("should succeed");
+            assert_eq!(processed.table, "dfe.elastic");
+        });
+        assert_eq!(hits, 0, "the record named its own table");
     }
 
     #[test]

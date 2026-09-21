@@ -97,6 +97,10 @@ pub struct Metrics {
     pub batched_array_messages: Counter,
     /// Records those batched arrays were split into.
     pub batched_array_records: Counter,
+    /// Received messages carrying newline-separated JSON records.
+    pub batched_ndjson_messages: Counter,
+    /// Records those messages were split into.
+    pub batched_ndjson_records: Counter,
 
     // Legacy loader_* metrics (dual-emit — remove after dashboard migration)
     pub messages_received: Counter,
@@ -260,6 +264,16 @@ impl Metrics {
                 "dfe_loader_batched_array_records_total",
                 "Records split out of batched-array messages",
             ),
+
+            // Newline-separated batch fan-out (#184)
+            batched_ndjson_messages: manager.counter(
+                "dfe_loader_batched_ndjson_messages_total",
+                "Received messages carrying newline-separated JSON records",
+            ),
+            batched_ndjson_records: manager.counter(
+                "dfe_loader_batched_ndjson_records_total",
+                "Records split out of newline-separated messages",
+            ),
         }
     }
 
@@ -267,6 +281,15 @@ impl Metrics {
     pub fn record_batched_array_fanout(&self, arrays: u64, records: u64) {
         self.batched_array_messages.increment(arrays);
         self.batched_array_records.increment(records);
+    }
+
+    /// Record newline-separated batches split into one record per line.
+    ///
+    /// Counted apart from the array fan-out so an operator reads which producer
+    /// is batching, not merely that one is.
+    pub fn record_batched_ndjson_fanout(&self, messages: u64, records: u64) {
+        self.batched_ndjson_messages.increment(messages);
+        self.batched_ndjson_records.increment(records);
     }
 
     /// Record a message received.
@@ -612,6 +635,8 @@ mod tests {
             "dfe_loader_routing_field_absent_total",
             "dfe_loader_batched_array_messages_total",
             "dfe_loader_batched_array_records_total",
+            "dfe_loader_batched_ndjson_messages_total",
+            "dfe_loader_batched_ndjson_records_total",
         ] {
             assert!(
                 names.iter().any(|n| n == expected),
@@ -633,9 +658,10 @@ mod tests {
     }
 
     #[test]
-    fn batched_array_fanout_metrics_do_not_panic() {
+    fn batched_fanout_metrics_do_not_panic() {
         let m = test_metrics();
         m.record_batched_array_fanout(2, 25);
+        m.record_batched_ndjson_fanout(3, 15);
     }
 
     // ---- ServerState tests ----

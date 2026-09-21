@@ -47,7 +47,11 @@ pub enum RouteResult {
 pub enum TableChoice {
     /// A CEL rule or a routing field named the table.
     Named,
-    /// No routing field carried a value, so `default_table` was used.
+    /// No routing field carried a value, so a source's own topic named the
+    /// table instead.
+    Topic,
+    /// Neither a routing field nor the topic named a table, so `default_table`
+    /// was used.
     DefaultFallback,
 }
 
@@ -324,22 +328,35 @@ impl Router {
     /// stopped carrying the routing field reads as landing traffic (#159).
     #[inline]
     pub fn route_value_traced(&self, value: &Value) -> (RouteResult, TableChoice) {
+        // An empty topic strips no suffix, so it never names a source.
+        self.route_value_on_topic(value, "")
+    }
+
+    /// Route an already-parsed JSON Value, letting a source's own topic name the
+    /// table when the record does not.
+    ///
+    /// A transform emits ECS, which carries no DFE routing field, so on
+    /// `{source}_load` the topic name is the only thing that names the source
+    /// and the record would otherwise land in the landing table (#184).
+    #[inline]
+    pub fn route_value_on_topic(&self, value: &Value, topic: &str) -> (RouteResult, TableChoice) {
         // Try CEL rules first (top-to-bottom, first match wins)
         if let Some(result) = self.try_cel_rules(value) {
             return (result, TableChoice::Named);
         }
 
-        // Fall through to field-extraction routing
+        // Fall through to field-extraction routing, then to the topic.
         let db = self.extract_db_from_value(value);
-        let named = self.extract_first_match_from_value(value, &self.table_fields);
-        let choice = if named.is_some() {
-            TableChoice::Named
-        } else {
-            TableChoice::DefaultFallback
+        let (table, choice) = match self.extract_first_match_from_value(value, &self.table_fields) {
+            Some(named) => (named, TableChoice::Named),
+            None => match self.source_topic_name(topic) {
+                Some(source) => (source, TableChoice::Topic),
+                None => (self.default_table.as_str(), TableChoice::DefaultFallback),
+            },
         };
 
-        // The legacy source_to_table mapping applies to the default too.
-        let table = named.unwrap_or(&self.default_table);
+        // The legacy source_to_table mapping applies to a topic's source and to
+        // the default too.
         let table = self
             .source_to_table
             .get(table)
@@ -348,22 +365,31 @@ impl Router {
         (self.build_route_result(&db, table), choice)
     }
 
-    /// Whether the topic is a source's own topic rather than the landing topic.
+    /// The source a topic belongs to, or `None` when the topic names no source.
     ///
-    /// A source topic names a table of its own, so a record from one landing in
-    /// `default_table` is a producer defect rather than ordinary traffic.
+    /// A source's topic is its name plus a configured suffix, so a topic with no
+    /// suffix to strip names no source; the landing topic strips to the default
+    /// table, and its records carry no source of their own.
     #[inline]
-    pub fn is_source_topic(&self, topic: &str) -> bool {
+    fn source_topic_name<'t>(&self, topic: &'t str) -> Option<&'t str> {
         let source = self
             .topic_suffixes
             .iter()
-            .find_map(|suffix| topic.strip_suffix(suffix.as_str()))
-            .unwrap_or(topic);
+            .find_map(|suffix| topic.strip_suffix(suffix.as_str()))?;
         let table = self
             .source_to_table
             .get(source)
             .map_or(source, String::as_str);
-        table != self.default_table
+        (table != self.default_table).then_some(source)
+    }
+
+    /// Whether the topic is a source's own topic rather than the landing topic.
+    ///
+    /// A source topic names a table of its own, so a record from one arriving
+    /// without a routing field is routed by topic rather than to the default.
+    #[inline]
+    pub fn is_source_topic(&self, topic: &str) -> bool {
+        self.source_topic_name(topic).is_some()
     }
 
     /// Evaluate CEL routing rules against the message.
@@ -1404,5 +1430,79 @@ mod tests {
         let router = Router::new(&config);
 
         assert!(!router.is_source_topic("legacy_load"));
+    }
+
+    // ---- routing a record by its source topic (#184) ----
+
+    #[test]
+    fn a_source_topic_names_the_table_the_record_did_not() {
+        let router = Router::new(&test_config());
+        let unnamed = serde_json::json!({"org_id": "acme", "message": "no source here"});
+
+        assert_eq!(
+            router.route_value_on_topic(&unnamed, "cisco-ios_load"),
+            (
+                RouteResult::Table("acme.cisco-ios".to_string()),
+                TableChoice::Topic
+            ),
+            "a transform's ECS output carries no routing field, so the topic names the table"
+        );
+        assert_eq!(
+            router.route_value_on_topic(&unnamed, "cisco-ios_land"),
+            (
+                RouteResult::Table("acme.cisco-ios".to_string()),
+                TableChoice::Topic
+            ),
+            "a source's landing topic names the same source"
+        );
+    }
+
+    #[test]
+    fn the_landing_topic_and_a_suffixless_topic_keep_the_default_fallback() {
+        let router = Router::new(&test_config());
+        let unnamed = serde_json::json!({"org_id": "acme", "message": "no source here"});
+
+        for topic in ["main_land", "dfe.events", ""] {
+            assert_eq!(
+                router.route_value_on_topic(&unnamed, topic),
+                (
+                    RouteResult::Table("acme.main".to_string()),
+                    TableChoice::DefaultFallback
+                ),
+                "{topic} names no source of its own"
+            );
+        }
+    }
+
+    #[test]
+    fn a_record_that_names_its_table_ignores_the_topic() {
+        let router = Router::new(&test_config());
+        let named = serde_json::json!({"org_id": "acme", "event_category": "login"});
+
+        assert_eq!(
+            router.route_value_on_topic(&named, "cisco-ios_load"),
+            (
+                RouteResult::Table("acme.login".to_string()),
+                TableChoice::Named
+            )
+        );
+    }
+
+    #[test]
+    fn a_topic_mapped_by_source_to_table_routes_to_the_mapped_table() {
+        let mut config = test_config();
+        config
+            .source_to_table
+            .insert("cisco-ios".to_string(), "cisco_ios".to_string());
+        let router = Router::new(&config);
+        let unnamed = serde_json::json!({"org_id": "acme", "message": "no source here"});
+
+        assert_eq!(
+            router.route_value_on_topic(&unnamed, "cisco-ios_load"),
+            (
+                RouteResult::Table("acme.cisco_ios".to_string()),
+                TableChoice::Topic
+            )
+        );
     }
 }

@@ -53,12 +53,14 @@ See [clickhouse/INSERT-FORMATS.md](clickhouse/INSERT-FORMATS.md).
 - **Catalogue** -- `dfe-loader metrics-manifest` prints every metric the loader
   registers, so a dashboard or scaling rule can be written against the
   catalogue rather than a running pod.
-- **Counted in records** -- a message carrying a batched JSON array is split
-  into one record per element before anything counts it, so
-  `messages_received_total` and `events_per_second` read in records, matching
-  `rows_inserted_total`. `dfe_loader_batched_array_messages_total` and
-  `dfe_loader_batched_array_records_total` say how much of the traffic arrived
-  batched.
+- **Counted in records** -- a message carrying several records is split into one
+  record per element before anything counts it, so `messages_received_total` and
+  `events_per_second` read in records, matching `rows_inserted_total`. The two
+  wire shapes are counted apart, so the pair that moves says which producer is
+  batching: `dfe_loader_batched_array_messages_total` /
+  `..._batched_array_records_total` for a JSON array, and
+  `dfe_loader_batched_ndjson_messages_total` / `..._batched_ndjson_records_total`
+  for newline-separated records.
 - **`top`** -- `dfe-loader top` renders those metrics as a TUI. `--once`,
   `--json`, and `--filter` make it scriptable; the JSON/TSV output pipes into
   shell tooling.

@@ -854,14 +854,18 @@ impl Orchestrator {
                     let combined: crate::Result<Vec<crate::kafka::KafkaMessage>> = match messages {
                         Ok(fresh) => {
                             // Every stage below takes one message to be one
-                            // record, so a batched array is split first (#128).
-                            // Splitting ahead of the guard keeps the bytes
-                            // admitted equal to the bytes later released.
-                            let fan = fan_out_batched_arrays(fresh);
-                            if fan.arrays > 0
-                                && let Some(ref m) = self.metrics
-                            {
-                                m.record_batched_array_fanout(fan.arrays, fan.records);
+                            // record, so a batched message is split first
+                            // (#128, #184). Splitting ahead of the guard keeps
+                            // the bytes admitted equal to the bytes later
+                            // released.
+                            let fan = fan_out_batched_records(fresh);
+                            if let Some(ref m) = self.metrics {
+                                if fan.arrays > 0 {
+                                    m.record_batched_array_fanout(fan.arrays, fan.array_records);
+                                }
+                                if fan.ndjson > 0 {
+                                    m.record_batched_ndjson_fanout(fan.ndjson, fan.ndjson_records);
+                                }
                             }
                             let mut fresh = fan.messages;
                             for msg in &fresh {
@@ -2026,55 +2030,79 @@ fn rejected_payload(payloads: &[Arc<[u8]>], row: &FailedRow) -> Option<Vec<u8>> 
     row.row_json.clone().filter(|b| !b.is_empty())
 }
 
-/// What [`fan_out_batched_arrays`] made of a received batch.
+/// The wire shape a producer used to put several records in one message.
+enum BatchShape {
+    /// A top-level JSON array of objects, as dfe-receiver forwarded (#128).
+    Array,
+    /// Newline-separated JSON objects, as dfe-transform-elastic emits (#184).
+    Ndjson,
+}
+
+/// What [`fan_out_batched_records`] made of a received batch.
+#[derive(Default)]
 struct FanOut {
     messages: Vec<crate::kafka::KafkaMessage>,
     /// Received messages that carried a batch of records as a JSON array.
     arrays: u64,
     /// Records those arrays expanded into.
-    records: u64,
+    array_records: u64,
+    /// Received messages that carried newline-separated JSON records.
+    ndjson: u64,
+    /// Records those messages expanded into.
+    ndjson_records: u64,
 }
 
-/// Expand every message carrying a batch of records as a top-level JSON array
-/// into one message per element.
+/// Expand every message carrying several records into one message per record.
 ///
-/// Any producer can put a batch array on a loader topic, so the split belongs
-/// here and not in dfe-receiver alone (#128). Each element inherits its source
-/// message's topic, partition and offset, so a batch still commits as one unit
-/// and the memory guard counts the elements it will later release.
-fn fan_out_batched_arrays(batch: Vec<crate::kafka::KafkaMessage>) -> FanOut {
-    if !batch
-        .iter()
-        .any(|m| crate::payload::opens_json_array(&m.payload))
-    {
+/// Any producer can batch, in either wire shape, so the split belongs at the
+/// consumer rather than at each producer in turn (#128, #184). Each element
+/// inherits its source message's topic, partition and offset, so a batch still
+/// commits as one unit and the memory guard counts the elements it will later
+/// release.
+fn fan_out_batched_records(batch: Vec<crate::kafka::KafkaMessage>) -> FanOut {
+    if !batch.iter().any(|m| {
+        crate::payload::opens_json_array(&m.payload)
+            || crate::payload::has_ndjson_boundary(&m.payload)
+    }) {
         return FanOut {
             messages: batch,
-            arrays: 0,
-            records: 0,
+            ..FanOut::default()
         };
     }
 
-    let mut messages = Vec::with_capacity(batch.len());
-    let mut arrays = 0u64;
-    let mut records = 0u64;
+    let mut fan = FanOut {
+        messages: Vec::with_capacity(batch.len()),
+        ..FanOut::default()
+    };
     for msg in batch {
-        let Some(elements) = crate::payload::split_json_array(&msg.payload) else {
-            messages.push(msg);
+        let split = crate::payload::split_json_array(&msg.payload)
+            .map(|e| (BatchShape::Array, e))
+            .or_else(|| {
+                crate::payload::split_ndjson(&msg.payload).map(|e| (BatchShape::Ndjson, e))
+            });
+        let Some((shape, elements)) = split else {
+            fan.messages.push(msg);
             continue;
         };
 
-        arrays += 1;
-        records += elements.len() as u64;
+        let (shape_name, messages_seen, records_seen) = match shape {
+            BatchShape::Array => ("json_array", &mut fan.arrays, &mut fan.array_records),
+            BatchShape::Ndjson => ("ndjson", &mut fan.ndjson, &mut fan.ndjson_records),
+        };
+        *messages_seen += 1;
+        *records_seen += elements.len() as u64;
+
         static FANNED_TS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         if scalo::logger::log_debounced(&FANNED_TS, 60_000) {
             info!(
                 topic = %msg.topic,
+                shape = shape_name,
                 records = elements.len(),
-                "Split a batched JSON array into one record per element (max 1 per 60s)"
+                "Split a batched message into one record per element (max 1 per 60s)"
             );
         }
 
-        messages.extend(
+        fan.messages.extend(
             elements
                 .into_iter()
                 .map(|payload| crate::kafka::KafkaMessage {
@@ -2088,11 +2116,7 @@ fn fan_out_batched_arrays(batch: Vec<crate::kafka::KafkaMessage>) -> FanOut {
         );
     }
 
-    FanOut {
-        messages,
-        arrays,
-        records,
-    }
+    fan
 }
 
 /// Route a pending-schema message to the DLQ (with a security event) and
@@ -2161,13 +2185,13 @@ mod tests {
 
     #[test]
     fn a_batched_array_becomes_one_message_per_record() {
-        let fan = fan_out_batched_arrays(vec![msg_at(
+        let fan = fan_out_batched_records(vec![msg_at(
             7,
             br#"[{"_source": "syslog", "n": 1}, {"_source": "syslog", "n": 2}]"#,
         )]);
 
         assert_eq!(fan.arrays, 1);
-        assert_eq!(fan.records, 2);
+        assert_eq!(fan.array_records, 2);
         assert_eq!(fan.messages.len(), 2);
         assert_eq!(fan.messages[0].payload, br#"{"_source": "syslog", "n": 1}"#);
         assert_eq!(fan.messages[1].payload, br#"{"_source": "syslog", "n": 2}"#);
@@ -2183,26 +2207,28 @@ mod tests {
     #[test]
     fn an_unbatched_batch_is_returned_untouched() {
         let batch = vec![msg_at(1, br#"{"a": 1}"#), msg_at(2, br#"{"b": 2}"#)];
-        let fan = fan_out_batched_arrays(batch);
+        let fan = fan_out_batched_records(batch);
 
         assert_eq!(fan.arrays, 0);
-        assert_eq!(fan.records, 0);
+        assert_eq!(fan.array_records, 0);
+        assert_eq!(fan.ndjson, 0);
+        assert_eq!(fan.ndjson_records, 0);
         assert_eq!(fan.messages.len(), 2);
         assert_eq!(fan.messages[0].payload, br#"{"a": 1}"#);
         assert_eq!(fan.messages[1].payload, br#"{"b": 2}"#);
     }
 
     #[test]
-    fn a_mixed_batch_splits_only_the_arrays_and_keeps_order() {
+    fn a_mixed_batch_splits_only_the_batches_and_keeps_order() {
         let batch = vec![
             msg_at(1, br#"{"a": 1}"#),
             msg_at(2, br#"[{"b": 2}, {"c": 3}]"#),
             msg_at(3, br"[1, 2, 3]"),
         ];
-        let fan = fan_out_batched_arrays(batch);
+        let fan = fan_out_batched_records(batch);
 
         assert_eq!(fan.arrays, 1);
-        assert_eq!(fan.records, 2);
+        assert_eq!(fan.array_records, 2);
         let payloads: Vec<&[u8]> = fan.messages.iter().map(|m| m.payload.as_slice()).collect();
         assert_eq!(
             payloads,
@@ -2221,9 +2247,53 @@ mod tests {
     fn the_split_bytes_equal_what_the_memory_guard_will_release() {
         // The guard is fed after the split, so the two must agree or the
         // accounting drifts every batch.
-        let fan = fan_out_batched_arrays(vec![msg_at(9, br#"[{"a": 1}, {"b": 2}]"#)]);
+        let fan = fan_out_batched_records(vec![msg_at(9, br#"[{"a": 1}, {"b": 2}]"#)]);
         let admitted: usize = fan.messages.iter().map(|m| m.payload.len()).sum();
         assert_eq!(admitted, br#"{"a": 1}"#.len() + br#"{"b": 2}"#.len());
+    }
+
+    // ---- newline-separated records (#184) ----
+
+    #[test]
+    fn newline_separated_records_become_one_message_each() {
+        // The `cisco-ios_load` message: five records in one, which the parser
+        // refused whole, so all five were lost with the DLQ disabled.
+        let batch = br#"{"n": 1}
+{"n": 2}
+{"n": 3}
+{"n": 4}
+{"n": 5}
+"#;
+        let fan = fan_out_batched_records(vec![msg_at(11, batch)]);
+
+        assert_eq!(fan.ndjson, 1);
+        assert_eq!(fan.ndjson_records, 5);
+        assert_eq!(
+            fan.messages.len(),
+            5,
+            "every record, not the first and not zero"
+        );
+        assert_eq!(fan.arrays, 0, "ndjson is counted apart from an array");
+        for (i, m) in fan.messages.iter().enumerate() {
+            let value = crate::payload::parse_payload(&m.payload).expect("record parses alone");
+            assert_eq!(value["n"], i + 1);
+            assert_eq!(&*m.topic, "dfe.events");
+            assert_eq!(m.partition, 3);
+            assert_eq!(m.offset, 11, "a batch commits as one unit");
+        }
+    }
+
+    #[test]
+    fn the_two_wire_shapes_are_counted_apart() {
+        let batch = vec![
+            msg_at(1, br#"[{"a": 1}, {"b": 2}]"#),
+            msg_at(2, b"{\"c\": 3}\n{\"d\": 4}\n{\"e\": 5}"),
+        ];
+        let fan = fan_out_batched_records(batch);
+
+        assert_eq!((fan.arrays, fan.array_records), (1, 2));
+        assert_eq!((fan.ndjson, fan.ndjson_records), (1, 3));
+        assert_eq!(fan.messages.len(), 5);
     }
 
     // CaptureOverrides tests moved to capture.rs
