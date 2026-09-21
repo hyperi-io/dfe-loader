@@ -21,13 +21,16 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use parking_lot::RwLock;
 use rustc_hash::FxHashMap;
-use tracing::{debug, error, info, trace, warn};
+use tokio::sync::mpsc;
+// Entry age follows the runtime clock, not the system clock.
+use tokio::time::Instant;
+use tracing::{debug, info, trace, warn};
 
-use crate::clickhouse::{ClickHouseQueryClient, TableSchema};
+use crate::clickhouse::TableSchema;
 
 /// Cached schema with timestamp and metadata
 struct CachedSchema {
@@ -284,16 +287,24 @@ impl SchemaCache {
 
     /// Start background refresh task
     ///
-    /// Spawns a task that periodically refreshes expiring schemas.
-    /// Returns a handle that can be used to cancel the task.
+    /// Spawns a task that periodically hands expiring tables to the schema
+    /// resolver, and returns a handle that can be used to cancel it. Fetching
+    /// here instead would reset the entry's age while leaving a changed column
+    /// COMMENT unread, because the resolver is the only path that reads a
+    /// table's directives alongside its column set (#182).
     pub fn start_background_refresh(
         self: &Arc<Self>,
-        client: Arc<ClickHouseQueryClient>,
+        resolve_tx: mpsc::Sender<String>,
     ) -> tokio::task::JoinHandle<()> {
         let cache = Arc::clone(self);
         let interval = Duration::from_secs(cache.config.refresh_interval_secs);
 
         tokio::spawn(async move {
+            if !cache.config.auto_refresh {
+                info!("Schema cache background refresh disabled by config");
+                return;
+            }
+
             info!(
                 interval_secs = interval.as_secs(),
                 "Starting schema cache background refresh"
@@ -307,34 +318,45 @@ impl SchemaCache {
                     break;
                 }
 
-                let tables = cache.tables_needing_refresh();
-                if tables.is_empty() {
-                    continue;
-                }
-
-                debug!(count = tables.len(), "Refreshing expiring schemas");
-
-                for table in tables {
-                    if cache.is_shutdown() {
-                        break;
-                    }
-
-                    match client.fetch_table_schema(&table).await {
-                        Ok(schema) => {
-                            cache.insert(table.clone(), schema);
-                        }
-                        Err(e) => {
-                            error!(
-                                table = %table,
-                                error = %e,
-                                "Failed to refresh schema"
-                            );
-                            // Don't invalidate - keep using stale schema
-                        }
-                    }
-                }
+                cache.request_refresh(&resolve_tx);
             }
         })
+    }
+
+    /// Hand every expiring table to the schema resolver, and report how many
+    /// were taken.
+    ///
+    /// A full channel drops the remainder rather than waiting, because the ingest
+    /// path shares the channel and must not stall behind a refresh burst. An
+    /// entry the resolver has not answered for keeps ageing, so the next pass
+    /// re-requests it.
+    pub fn request_refresh(&self, resolve_tx: &mpsc::Sender<String>) -> usize {
+        let wanted = self.tables_needing_refresh();
+        if wanted.is_empty() {
+            return 0;
+        }
+
+        let requested = wanted.len();
+        let mut sent = 0;
+        for table in wanted {
+            if self.is_shutdown() {
+                break;
+            }
+            if resolve_tx.try_send(table).is_ok() {
+                sent += 1;
+            }
+        }
+
+        if sent < requested {
+            debug!(
+                requested = requested,
+                sent = sent,
+                "Schema resolve channel full, the rest retry on the next refresh pass"
+            );
+        } else {
+            debug!(count = sent, "Handed expiring schemas to the resolver");
+        }
+        sent
     }
 }
 
@@ -957,5 +979,67 @@ mod tests {
         }
         // 8 threads × 100 gets = 800 hits
         assert_eq!(cache.stats().hits, 800);
+    }
+
+    /// Regression for #182 at the production timings, on a paused clock.
+    ///
+    /// A table that keeps taking traffic never misses the cache, so the refresh
+    /// pass is the only thing that can re-request it. The pass must hand it to
+    /// the resolver once its age reaches `ttl - headroom` (270s on the defaults)
+    /// and not before.
+    #[tokio::test(start_paused = true)]
+    async fn background_refresh_hands_an_expiring_table_to_the_resolver_182() {
+        let cache = Arc::new(SchemaCache::with_config(SchemaCacheConfig::default()));
+        cache.insert("dfe.acceptsyslog".to_string(), make_test_schema("hot"));
+
+        let (tx, mut rx) = mpsc::channel(8);
+        let _handle = cache.start_background_refresh(tx);
+        // Let the loop arm its first sleep before the clock moves under it.
+        tokio::task::yield_now().await;
+
+        // Every pass inside the headroom (60s..240s) must leave it alone.
+        tokio::time::advance(Duration::from_secs(245)).await;
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), rx.recv())
+                .await
+                .is_err(),
+            "a table still inside its headroom must not be re-requested"
+        );
+
+        // The next pass sees the age past 270 and hands it over.
+        tokio::time::advance(Duration::from_secs(70)).await;
+        let requested = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .expect(
+                "an expiring table must reach the resolver, the only path that \
+                 re-reads its column COMMENT directives",
+            );
+        assert_eq!(requested.as_deref(), Some("dfe.acceptsyslog"));
+
+        cache.shutdown();
+    }
+
+    #[test]
+    fn request_refresh_reports_what_a_full_channel_left_behind() {
+        let cache = SchemaCache::new(0);
+        for name in ["a", "b", "c"] {
+            cache.insert(name.to_string(), make_test_schema(name));
+        }
+
+        let (tx, _rx) = mpsc::channel(2);
+        assert_eq!(
+            cache.request_refresh(&tx),
+            2,
+            "a full channel takes what fits and leaves the rest ageing"
+        );
+    }
+
+    #[test]
+    fn request_refresh_skips_a_fresh_table() {
+        let cache = SchemaCache::new(300);
+        cache.insert("fresh".to_string(), make_test_schema("fresh"));
+
+        let (tx, _rx) = mpsc::channel(8);
+        assert_eq!(cache.request_refresh(&tx), 0);
     }
 }
