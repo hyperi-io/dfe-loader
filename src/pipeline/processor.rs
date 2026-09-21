@@ -272,11 +272,14 @@ impl MessageProcessor<'_> {
             }
             let promoted = promoted.fields;
 
-            // raw_payload carries Kafka bytes for zero-copy _json splice (full mode only).
+            // raw_payload carries Kafka bytes for the zero-copy _json splice, so
+            // every mode that populates _json passes it.
             // raw_only: _raw set below from payload bytes, no _json splice needed.
-            // extracted_only: neither — no raw payload passed to inserter.
+            // extracted_only: neither -- no raw payload passed to inserter.
             let raw: Option<Arc<[u8]>> = match capture_mode {
-                CaptureMode::Full => Some(Arc::from(msg.payload.as_slice())),
+                CaptureMode::Full | CaptureMode::JsonOnly => {
+                    Some(Arc::from(msg.payload.as_slice()))
+                }
                 CaptureMode::RawOnly | CaptureMode::ExtractedOnly => None,
             };
             (promoted, raw)
@@ -325,6 +328,14 @@ impl MessageProcessor<'_> {
                         // but we want the full Kafka payload instead — overwrite it
                         d.remove(self.transformer.raw_output());
                     }
+                    CaptureMode::JsonOnly => {
+                        // _json: inject full payload as string (legacy path)
+                        if let Ok(json_str) = std::str::from_utf8(&msg.payload) {
+                            d.insert("_json".to_string(), Value::String(json_str.to_string()));
+                        }
+                        // _raw stays NULL, so drop anything @renamed extracted into it.
+                        d.remove(self.transformer.raw_output());
+                    }
                     CaptureMode::ExtractedOnly => {
                         // Neither _json nor _raw
                         d.remove(self.transformer.raw_output());
@@ -342,13 +353,14 @@ impl MessageProcessor<'_> {
         //   /ingest path leaves _raw NULL. Never clobber a _raw already set by
         //   @renamed (logoriginal) or upstream.
         // - ExtractedOnly: captures neither _json nor _raw.
+        // - JsonOnly: _json is the sole capture, so _raw stays NULL.
         let capture_full_raw = match capture_mode {
             CaptureMode::RawOnly => true,
             CaptureMode::Full => {
                 self.config.metadata.capture_raw
                     && !data.contains_key(self.config.metadata.raw_output.as_str())
             }
-            CaptureMode::ExtractedOnly => false,
+            CaptureMode::JsonOnly | CaptureMode::ExtractedOnly => false,
         };
         if capture_full_raw && let Ok(raw_str) = std::str::from_utf8(&msg.payload) {
             data.insert(
@@ -850,6 +862,31 @@ mod tests {
             raw.as_bytes(),
             payload.as_slice(),
             "_raw must be the full original payload"
+        );
+    }
+
+    #[test]
+    fn capture_mode_json_only_action_sets_json_not_raw() {
+        let harness = TestHarness::with_config(config_with_capture_mode(CaptureMode::JsonOnly));
+        let proc = harness.processor();
+        let payload = capture_sample_payload();
+        let processed = proc
+            .process(&harness.make_msg(&payload))
+            .expect("processed");
+
+        let json = processed
+            .data
+            .get("_json")
+            .and_then(|v| v.as_str())
+            .expect("capture_mode=json_only must populate _json");
+        assert_eq!(
+            json.as_bytes(),
+            payload.as_slice(),
+            "_json must be the full original payload"
+        );
+        assert!(
+            !processed.data.contains_key("_raw"),
+            "capture_mode=json_only must NOT populate _raw"
         );
     }
 

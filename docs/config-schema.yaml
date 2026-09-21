@@ -1508,7 +1508,10 @@ $defs:
     - description: '`_json` = NULL, `_raw` = entire Kafka payload as UTF-8 String'
       type: string
       const: raw_only
-    - description: '`_json` = NULL, `_raw` = NULL — only promoted schema fields'
+    - description: '`_json` = full payload (JSON type), `_raw` = NULL'
+      type: string
+      const: json_only
+    - description: '`_json` = NULL, `_raw` = NULL -- only promoted schema fields'
       type: string
       const: extracted_only
   CoercionConfig:

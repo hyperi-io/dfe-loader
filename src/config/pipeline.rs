@@ -907,7 +907,9 @@ pub enum CaptureMode {
     Full,
     /// `_json` = NULL, `_raw` = entire Kafka payload as UTF-8 String
     RawOnly,
-    /// `_json` = NULL, `_raw` = NULL — only promoted schema fields
+    /// `_json` = full payload (JSON type), `_raw` = NULL
+    JsonOnly,
+    /// `_json` = NULL, `_raw` = NULL -- only promoted schema fields
     ExtractedOnly,
 }
 
@@ -1428,6 +1430,15 @@ mod tests {
         assert_eq!(c.pending_max_per_table, 1000);
         assert_eq!(c.pending_max_total, 10_000);
         assert_eq!(c.pending_max_age_secs, 30);
+    }
+
+    #[test]
+    fn capture_mode_json_only_round_trips() {
+        let parsed: CaptureMode = serde_yaml_ng::from_str("json_only").unwrap();
+        assert_eq!(parsed, CaptureMode::JsonOnly);
+
+        let rendered = serde_json::to_string(&CaptureMode::JsonOnly).unwrap();
+        assert_eq!(rendered, "\"json_only\"");
     }
 
     #[test]
