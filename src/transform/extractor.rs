@@ -33,6 +33,7 @@
 //! | `@renamed:first(a/b/c)` | First-match source field lookup |
 //! | `@default:value` | Applied when all source fields are absent |
 //! | `@source:field \| now()` | Fallback resolved to the ingest timestamp |
+//! | `@source:field \| topic_name` | Fallback resolved to the source the message topic names |
 //!
 //! ## Source fields more than one column reads
 //!
@@ -52,7 +53,7 @@ use tracing::debug;
 use crate::transform::transformer::fmt_ts;
 
 use crate::clickhouse::TableSchema;
-use crate::column_meta::ColumnMetaCache;
+use crate::column_meta::{ColumnMetaCache, TOPIC_NAME_MARKER};
 use crate::config::{MetadataConfig, RoutingConfig};
 
 /// The outcome of one header pass.
@@ -266,12 +267,17 @@ impl HeaderExtractor {
     ///
     /// A pass that promotes nothing carries the reason back to the caller; the
     /// caller owns the rejection, so it owns the log and the counter (#145).
+    ///
+    /// `topic_source` is the source this message's topic names, which the
+    /// `topic_name` fallback resolves to; `None` or an empty label leaves that
+    /// fallback unresolved and the column absent.
     pub fn extract(
         &self,
         raw: &[u8],
         table: &str,
         schema: &TableSchema,
         col_meta: &ColumnMetaCache,
+        topic_source: Option<&str>,
     ) -> HeaderExtraction {
         let now = Utc::now();
         let mut map = Map::with_capacity(schema.columns.len());
@@ -346,8 +352,11 @@ impl HeaderExtractor {
                 .try_each(|path| take_path(&mut parsed, path, name, &mut map, contended));
 
             // Apply column default when all source fields were absent.
-            if !found && let Some(ref default) = directives.default {
-                map.insert(name.clone(), resolve_default(default, &now));
+            if !found
+                && let Some(ref default) = directives.default
+                && let Some(value) = resolve_default(default, &now, topic_source)
+            {
+                map.insert(name.clone(), value);
             } else if found && is_datetime(col) {
                 normalise_datetime(&mut map, name);
             }
@@ -423,20 +432,30 @@ fn looks_rfc3339(text: &str) -> bool {
         .any(|b| matches!(b, b'+' | b'-'))
 }
 
-/// Resolve a parsed `@default` / `@source` fallback against this extraction's clock.
+/// Resolve a parsed `@default` / `@source` fallback against this message's context.
 ///
-/// `now()` and `uuid()` are the two fallbacks that cannot be parse-time
-/// constants, so they travel as literal markers and are resolved here, once per
-/// row. `uuid()` is v7 to match the time-ordered form the schemas use.
+/// `now()`, `uuid()` and `topic_name` are the fallbacks that cannot be
+/// parse-time constants, so they travel as literal markers and are resolved
+/// here. `uuid()` is v7 to match the time-ordered form the schemas use.
 ///
 /// The parser has already rejected any fallback outside the documented
 /// vocabulary, so nothing reaching here is a stray field name.
+///
+/// `None` leaves the column absent: a `topic_name` with no topic to resolve
+/// against must stay NULL rather than stamp the marker text into a dimension.
 #[inline]
-fn resolve_default(default: &Value, now: &chrono::DateTime<Utc>) -> Value {
+fn resolve_default(
+    default: &Value,
+    now: &chrono::DateTime<Utc>,
+    topic_source: Option<&str>,
+) -> Option<Value> {
     match default.as_str() {
-        Some("now()") => Value::String(fmt_ts(now)),
-        Some("uuid()") => Value::String(uuid::Uuid::now_v7().to_string()),
-        _ => default.clone(),
+        Some("now()") => Some(Value::String(fmt_ts(now))),
+        Some("uuid()") => Some(Value::String(uuid::Uuid::now_v7().to_string())),
+        Some(TOPIC_NAME_MARKER) => topic_source
+            .filter(|source| !source.is_empty())
+            .map(|source| Value::String(source.to_string())),
+        _ => Some(default.clone()),
     }
 }
 
@@ -573,7 +592,7 @@ mod tests {
         let col_meta = empty_col_meta();
 
         let map = extractor
-            .extract(raw, "dfe.events", &schema, &col_meta)
+            .extract(raw, "dfe.events", &schema, &col_meta, None)
             .fields;
 
         assert_eq!(map.get("severity"), Some(&Value::String("high".into())));
@@ -592,7 +611,7 @@ mod tests {
         let col_meta = empty_col_meta();
 
         let map = extractor
-            .extract(raw, "dfe.events", &schema, &col_meta)
+            .extract(raw, "dfe.events", &schema, &col_meta, None)
             .fields;
         assert!(
             map.is_empty(),
@@ -608,7 +627,7 @@ mod tests {
         let col_meta = empty_col_meta();
 
         let map = extractor
-            .extract(raw, "dfe.events", &schema, &col_meta)
+            .extract(raw, "dfe.events", &schema, &col_meta, None)
             .fields;
         assert!(
             map.is_empty(),
@@ -624,7 +643,7 @@ mod tests {
         let col_meta = empty_col_meta();
 
         let map = extractor
-            .extract(raw, "dfe.events", &schema, &col_meta)
+            .extract(raw, "dfe.events", &schema, &col_meta, None)
             .fields;
         assert!(
             map.contains_key("_timestamp_received"),
@@ -644,7 +663,7 @@ mod tests {
         let col_meta = empty_col_meta();
 
         let map = extractor
-            .extract(raw, "dfe.events", &schema, &col_meta)
+            .extract(raw, "dfe.events", &schema, &col_meta, None)
             .fields;
         assert_eq!(map.get("_org_id"), Some(&Value::String("acme".into())));
     }
@@ -670,7 +689,7 @@ mod tests {
         col_meta.apply_ddl("dfe.events", ddl);
 
         let map = extractor
-            .extract(raw, "dfe.events", &schema, &col_meta)
+            .extract(raw, "dfe.events", &schema, &col_meta, None)
             .fields;
         assert!(
             !map.contains_key("debug_info"),
@@ -702,7 +721,7 @@ mod tests {
         let col_meta = ColumnMetaCache::new(config);
 
         let map = extractor
-            .extract(raw, "dfe.events", &schema, &col_meta)
+            .extract(raw, "dfe.events", &schema, &col_meta, None)
             .fields;
         assert_eq!(
             map.get("source.ip"),
@@ -731,7 +750,7 @@ mod tests {
         col_meta.apply_ddl("dfe.events", ddl);
 
         let map = extractor
-            .extract(raw, "dfe.events", &schema, &col_meta)
+            .extract(raw, "dfe.events", &schema, &col_meta, None)
             .fields;
         assert_eq!(map.get("severity"), Some(&Value::String("unknown".into())));
     }
@@ -744,7 +763,7 @@ mod tests {
         let col_meta = empty_col_meta();
 
         let map = extractor
-            .extract(raw, "dfe.events", &schema, &col_meta)
+            .extract(raw, "dfe.events", &schema, &col_meta, None)
             .fields;
         assert_eq!(map.get("count"), Some(&serde_json::json!(42)));
         assert_eq!(map.get("is_active"), Some(&serde_json::json!(true)));
@@ -767,7 +786,7 @@ mod tests {
         let col_meta = empty_col_meta();
 
         let map = extractor2
-            .extract(raw, "dfe.events", &schema, &col_meta)
+            .extract(raw, "dfe.events", &schema, &col_meta, None)
             .fields;
         assert_eq!(map.get("_source"), Some(&Value::String("auth".into())));
     }
@@ -782,7 +801,7 @@ mod tests {
         let col_meta = empty_col_meta();
 
         let map = extractor
-            .extract(raw, "dfe.events", &schema, &col_meta)
+            .extract(raw, "dfe.events", &schema, &col_meta, None)
             .fields;
 
         // _timestamp must be present (not omitted)
@@ -874,7 +893,7 @@ mod tests {
         let col_meta = filebeat_col_meta();
 
         let map = extractor
-            .extract(FILEBEAT_PAYLOAD, "dfe.filebeat", &schema, &col_meta)
+            .extract(FILEBEAT_PAYLOAD, "dfe.filebeat", &schema, &col_meta, None)
             .fields;
 
         assert_eq!(
@@ -911,7 +930,7 @@ mod tests {
         let col_meta = filebeat_col_meta();
 
         let map = extractor
-            .extract(FILEBEAT_PAYLOAD, "dfe.filebeat", &schema, &col_meta)
+            .extract(FILEBEAT_PAYLOAD, "dfe.filebeat", &schema, &col_meta, None)
             .fields;
         assert_eq!(map.get("process_pid"), Some(&serde_json::json!(4242)));
         assert_eq!(
@@ -929,7 +948,7 @@ mod tests {
         let col_meta = filebeat_col_meta();
 
         let map = extractor
-            .extract(raw, "dfe.filebeat", &schema, &col_meta)
+            .extract(raw, "dfe.filebeat", &schema, &col_meta, None)
             .fields;
         assert!(!map.contains_key("host_name"));
         assert!(!map.contains_key("agent_type"));
@@ -945,7 +964,7 @@ mod tests {
         let col_meta = filebeat_col_meta();
 
         let map = extractor
-            .extract(raw, "dfe.filebeat", &schema, &col_meta)
+            .extract(raw, "dfe.filebeat", &schema, &col_meta, None)
             .fields;
         assert_eq!(map.get("host_name"), Some(&Value::String("web-02".into())));
     }
@@ -968,7 +987,7 @@ mod tests {
         col_meta.apply_ddl("dfe.events", ddl);
 
         let map = extractor
-            .extract(raw, "dfe.events", &schema, &col_meta)
+            .extract(raw, "dfe.events", &schema, &col_meta, None)
             .fields;
         let Some(Value::String(ts)) = map.get("event_time") else {
             panic!("event_time must be a string timestamp");
@@ -982,10 +1001,9 @@ mod tests {
         use crate::column_meta::parse_directives;
         use rustc_hash::FxHashMap;
 
-        // Verbatim from a deployed dfe.filebeat. `topic_name` names a field the
-        // extractor cannot see, so _source must stay absent rather than be
-        // stamped with the string "topic_name" -- it is a LowCardinality
-        // dimension operators group by.
+        // `host_name` names a field the extractor cannot see, so _source must
+        // stay absent rather than be stamped with the string "host_name" -- it
+        // is a LowCardinality dimension operators group by.
         let extractor = default_extractor();
         let raw = br#"{"message": "no source key here"}"#;
         let schema = make_schema(&["_source"]);
@@ -995,19 +1013,99 @@ mod tests {
         ddl.insert(
             "_source".to_string(),
             parse_directives(
-                "@source: first(_source) | topic_name - Data source label (falls back to the topic)",
+                "@source: first(_source) | host_name - Data source label (falls back to the host)",
             ),
         );
         col_meta.apply_ddl("dfe.filebeat", ddl);
 
         let map = extractor
-            .extract(raw, "dfe.filebeat", &schema, &col_meta)
+            .extract(raw, "dfe.filebeat", &schema, &col_meta, Some("filebeat"))
             .fields;
         assert!(
             !map.contains_key("_source"),
             "an unresolvable fallback must not become a literal: {:?}",
             map.get("_source")
         );
+    }
+
+    // ---- the topic_name fallback (#187) ----
+
+    /// The directive dfe-schemas ships in `common-header/timeseries.yaml`, so
+    /// every table on that profile is covered by these tests.
+    const TIMESERIES_SOURCE_DIRECTIVE: &str = "@source: first(_source) | topic_name - Data source label (e.g. beats, syslog, crowdstrike-edr)";
+
+    fn timeseries_source_col_meta(table: &str) -> ColumnMetaCache {
+        use crate::column_meta::parse_directives;
+        use rustc_hash::FxHashMap;
+
+        let col_meta = ColumnMetaCache::new(ColumnDirectivesConfig::default());
+        let mut ddl = FxHashMap::default();
+        ddl.insert(
+            "_source".to_string(),
+            parse_directives(TIMESERIES_SOURCE_DIRECTIVE),
+        );
+        col_meta.apply_ddl(table, ddl);
+        col_meta
+    }
+
+    #[test]
+    fn the_topic_name_fallback_labels_a_record_that_carries_no_source() {
+        // The measured case on dfe-accept: 10 rows in dfe."cisco-ios", _source
+        // NULL on all of them, because a transform's ECS output carries no
+        // _source field of its own.
+        let extractor = default_extractor();
+        let raw = br#"{"message": "ecs output, no source key"}"#;
+        let schema = make_schema(&["_source"]);
+        let col_meta = timeseries_source_col_meta("dfe.cisco-ios");
+
+        let map = extractor
+            .extract(raw, "dfe.cisco-ios", &schema, &col_meta, Some("cisco-ios"))
+            .fields;
+        assert_eq!(
+            map.get("_source"),
+            Some(&Value::String("cisco-ios".into())),
+            "the topic's source must label the row rather than leaving it NULL"
+        );
+    }
+
+    #[test]
+    fn a_record_that_carries_its_own_source_keeps_it_over_the_topic() {
+        // `first(_source)` resolves first, which is why this defect hid on the
+        // landing table: most of its traffic already carries the field.
+        let extractor = default_extractor();
+        let raw = br#"{"_source": "crowdstrike-edr", "message": "named itself"}"#;
+        let schema = make_schema(&["_source"]);
+        let col_meta = timeseries_source_col_meta("dfe.main");
+
+        let map = extractor
+            .extract(raw, "dfe.main", &schema, &col_meta, Some("main"))
+            .fields;
+        assert_eq!(
+            map.get("_source"),
+            Some(&Value::String("crowdstrike-edr".into())),
+            "the record's own _source outranks the topic's"
+        );
+    }
+
+    #[test]
+    fn the_topic_name_marker_never_reaches_the_column_as_text() {
+        // With no topic to resolve against the column stays absent -- a NULL is
+        // visibly missing, the marker's own text is a dimension nobody queries.
+        let extractor = default_extractor();
+        let raw = br#"{"message": "ecs output, no source key"}"#;
+        let schema = make_schema(&["_source"]);
+        let col_meta = timeseries_source_col_meta("dfe.cisco-ios");
+
+        for topic_source in [None, Some("")] {
+            let map = extractor
+                .extract(raw, "dfe.cisco-ios", &schema, &col_meta, topic_source)
+                .fields;
+            assert!(
+                !map.contains_key("_source"),
+                "the marker must not become a literal: {:?}",
+                map.get("_source")
+            );
+        }
     }
 
     #[test]
@@ -1028,7 +1126,7 @@ mod tests {
         col_meta.apply_ddl("dfe.events", ddl);
 
         let map = extractor
-            .extract(raw, "dfe.events", &schema, &col_meta)
+            .extract(raw, "dfe.events", &schema, &col_meta, None)
             .fields;
         let Some(Value::String(id)) = map.get("trace_id") else {
             panic!("trace_id must be a string uuid");
@@ -1052,7 +1150,7 @@ mod tests {
         let col_meta = empty_col_meta();
 
         let map = extractor
-            .extract(raw, "dfe.events", &schema, &col_meta)
+            .extract(raw, "dfe.events", &schema, &col_meta, None)
             .fields;
         assert_eq!(
             map.get("_timestamp"),
@@ -1084,7 +1182,7 @@ mod tests {
         let col_meta = empty_col_meta();
 
         let map = extractor
-            .extract(raw, "dfe.events", &schema, &col_meta)
+            .extract(raw, "dfe.events", &schema, &col_meta, None)
             .fields;
         assert_eq!(
             map.get("_timestamp"),
@@ -1101,7 +1199,7 @@ mod tests {
         let col_meta = empty_col_meta();
 
         let map = extractor
-            .extract(raw, "dfe.events", &schema, &col_meta)
+            .extract(raw, "dfe.events", &schema, &col_meta, None)
             .fields;
         assert_eq!(
             map.get("_timestamp"),
@@ -1120,7 +1218,7 @@ mod tests {
         let col_meta = empty_col_meta();
 
         let map = extractor
-            .extract(raw, "dfe.events", &schema, &col_meta)
+            .extract(raw, "dfe.events", &schema, &col_meta, None)
             .fields;
         assert_eq!(
             map.get("seen_at"),
@@ -1136,7 +1234,7 @@ mod tests {
         let col_meta = empty_col_meta();
 
         let map = extractor
-            .extract(raw, "dfe.events", &schema, &col_meta)
+            .extract(raw, "dfe.events", &schema, &col_meta, None)
             .fields;
         assert_eq!(
             map.get("_timestamp"),
@@ -1153,7 +1251,7 @@ mod tests {
         let col_meta = empty_col_meta();
 
         let map = extractor
-            .extract(raw, "dfe.events", &schema, &col_meta)
+            .extract(raw, "dfe.events", &schema, &col_meta, None)
             .fields;
         assert_eq!(
             map.get("observed"),
@@ -1172,7 +1270,7 @@ mod tests {
         let schema = make_schema(&["message"]);
         let col_meta = empty_col_meta();
 
-        let out = extractor.extract(b"[1,2,3]", "dfe.events", &schema, &col_meta);
+        let out = extractor.extract(b"[1,2,3]", "dfe.events", &schema, &col_meta, None);
         assert!(
             out.fields.is_empty(),
             "a non-object payload has no columns to promote"
@@ -1186,7 +1284,7 @@ mod tests {
         let schema = make_schema(&["message"]);
         let col_meta = empty_col_meta();
 
-        let out = extractor.extract(b"{not json", "dfe.events", &schema, &col_meta);
+        let out = extractor.extract(b"{not json", "dfe.events", &schema, &col_meta, None);
         assert!(
             out.fields.is_empty(),
             "an unparseable payload promotes nothing"
@@ -1202,7 +1300,7 @@ mod tests {
         let schema = make_schema(&["message"]);
         let col_meta = empty_col_meta();
 
-        let out = extractor.extract(br#"{"other":1}"#, "dfe.events", &schema, &col_meta);
+        let out = extractor.extract(br#"{"other":1}"#, "dfe.events", &schema, &col_meta, None);
         assert!(out.fields.is_empty());
         assert_eq!(
             out.empty_reason,
@@ -1217,7 +1315,13 @@ mod tests {
         let schema = make_schema(&["message"]);
         let col_meta = empty_col_meta();
 
-        let out = extractor.extract(br#"{"message":"hi"}"#, "dfe.events", &schema, &col_meta);
+        let out = extractor.extract(
+            br#"{"message":"hi"}"#,
+            "dfe.events",
+            &schema,
+            &col_meta,
+            None,
+        );
         assert_eq!(out.empty_reason, None);
     }
 
@@ -1264,7 +1368,7 @@ mod tests {
         let col_meta = empty_col_meta();
 
         let map = extractor
-            .extract(raw, "dfe.events", &schema, &col_meta)
+            .extract(raw, "dfe.events", &schema, &col_meta, None)
             .fields;
         assert_eq!(
             map.get("seen_at"),
@@ -1308,7 +1412,7 @@ mod tests {
         let col_meta = syslog_col_meta();
 
         let map = extractor
-            .extract(raw, "dfe.proofsyslog", &schema, &col_meta)
+            .extract(raw, "dfe.proofsyslog", &schema, &col_meta, None)
             .fields;
 
         assert_eq!(
@@ -1334,7 +1438,7 @@ mod tests {
         let col_meta = empty_col_meta();
 
         let map = extractor
-            .extract(raw, "dfe.events", &schema, &col_meta)
+            .extract(raw, "dfe.events", &schema, &col_meta, None)
             .fields;
 
         assert_eq!(map.get("_tenant"), Some(&Value::String("acme".into())));
@@ -1452,7 +1556,7 @@ mod tests {
         let raw = br#"{"timestamp": "2026-09-21 04:45:00.000"}"#;
 
         let map = extractor
-            .extract(raw, "dfe.events", &schema, &col_meta)
+            .extract(raw, "dfe.events", &schema, &col_meta, None)
             .fields;
         assert!(
             !map.contains_key("event_time"),
@@ -1467,7 +1571,7 @@ mod tests {
         col_meta.apply_ddl("dfe.events", ddl);
 
         let map = extractor
-            .extract(raw, "dfe.events", &schema, &col_meta)
+            .extract(raw, "dfe.events", &schema, &col_meta, None)
             .fields;
         assert_eq!(
             map.get("event_time"),
@@ -1488,14 +1592,14 @@ mod tests {
 
         let before = make_schema(&["_tenant"]);
         let map = extractor
-            .extract(raw, "dfe.events", &before, &col_meta)
+            .extract(raw, "dfe.events", &before, &col_meta, None)
             .fields;
         assert_eq!(map.get("_tenant"), Some(&Value::String("acme".into())));
 
         // An ALTER adds the plain column the header column was already reading.
         let after = make_schema(&["_tenant", "tenant"]);
         let map = extractor
-            .extract(raw, "dfe.events", &after, &col_meta)
+            .extract(raw, "dfe.events", &after, &col_meta, None)
             .fields;
         assert_eq!(
             map.get("tenant"),

@@ -562,7 +562,7 @@ async fn test_rowbinary_tags_source_comment_lands_in_the_json_tags_column() {
     // Row 1: the json_primary extractor, which resolves @source itself.
     let extractor = HeaderExtractor::new(&MetadataConfig::default(), &RoutingConfig::default());
     let extracted = extractor
-        .extract(event, &qualified, &schema, &col_meta)
+        .extract(event, &qualified, &schema, &col_meta, None)
         .fields;
     assert_eq!(
         extracted.get("_tags"),
@@ -1313,9 +1313,17 @@ async fn common_header_survives(test: &str, format: InsertFormat) {
     // #144's event, verbatim off the topic.
     let payload = br#"{"_source":"filebeat-vector","_timestamp_receiver":1788760433385,"message":"ws21 probe: a line no filebeat module claims","tags":["filebeat_unmatched"],"timestamp":"2026-09-07T05:53:53.385Z","topic":"filebeat-vector_land"}"#;
 
+    // The topic the processor derives the source from, so the `| topic_name`
+    // fallback on `_source` is exercised the way production calls it.
     let extractor = HeaderExtractor::new(&MetadataConfig::default(), &RoutingConfig::default());
     let mut row = extractor
-        .extract(payload, &qualified, &schema, &col_meta)
+        .extract(
+            payload,
+            &qualified,
+            &schema,
+            &col_meta,
+            Some("filebeat-vector"),
+        )
         .fields;
     // The processor's capture step, which the extractor does not do.
     row.insert(

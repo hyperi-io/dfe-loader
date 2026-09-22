@@ -73,7 +73,9 @@ async fn renamed_directive_applied_end_to_end_36() {
     // field name. Pre-#36-fix this column would be NULL (transformer path).
     let extractor = HeaderExtractor::new(&MetadataConfig::default(), &RoutingConfig::default());
     let raw = br#"{"src_field":"hello","id":7}"#;
-    let map = extractor.extract(raw, &table, &schema, &col_meta).fields;
+    let map = extractor
+        .extract(raw, &table, &schema, &col_meta, None)
+        .fields;
 
     assert_eq!(
         map.get("dst_field"),

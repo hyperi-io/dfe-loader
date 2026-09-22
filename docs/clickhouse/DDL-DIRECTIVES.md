@@ -820,6 +820,12 @@ Provides a fallback when the source is missing or invalid:
 
 - `now()` - Current timestamp
 - `uuid()` - Generate UUID (v7, time-ordered)
+- `topic_name` - The source the message's topic names, with a configured
+  `routing.topic_suffixes` entry stripped: `cisco-ios_load` resolves to
+  `cisco-ios`. A topic with no suffix to strip resolves to the whole topic
+  name, so the label is never empty. Both transports resolve it - the gRPC
+  topic comes from the request's routing key, falling back to
+  `grpc.default_topic`
 - `null` - Leaves the column ABSENT from the row, which is not the same as
   writing a NULL. For a Nullable column the result is identical, and for a
   non-Nullable one it lets the column's DEFAULT apply instead of failing the
@@ -830,8 +836,12 @@ Provides a fallback when the source is missing or invalid:
 This vocabulary is closed. A fallback outside it is a field reference the
 loader cannot resolve, so it is ignored and the column is left absent rather
 than filled with the text of the expression - `@source: first(_source) |
-topic_name` leaves `_source` absent, it does not write the string
-`topic_name`. The loader logs the ignored fallback once per five minutes.
+host_name` leaves `_source` absent, it does not write the string `host_name`.
+The loader logs the ignored fallback once per five minutes.
+
+`now()`, `uuid()` and `topic_name` are resolved per row in the extractor rather
+than at parse time, so they are the three forms `@default:` also accepts as a
+bare word.
 
 ### List operator (`/`)
 
