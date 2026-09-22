@@ -1,15 +1,23 @@
-# cargo-deny v0.19+ configuration
+# cargo-deny configuration
 # Run: cargo deny check
 
+[graph]
+# The release build adds `--features jemalloc` on every channel, so the default
+# graph omits tikv-jemalloc-ctl and every advisory reachable through it.
+features = ["jemalloc"]
+
 [advisories]
-# RUSTSEC-2024-0436: `paste` (proc-macro) is unmaintained. Pulled transitively by
-# tikv-jemalloc-ctl -> jemalloc; no fix until that chain drops it. Compile-time
-# only (proc-macro), so no runtime exposure. Ignore until jemalloc-ctl moves off.
-# (RUSTSEC-2026-0066/astral-tokio-tar patched in d76e82c; memmap2/anyhow/quinn-proto
-# advisories cleared by lockfile bumps, not ignores.)
-ignore = ["RUSTSEC-2024-0436"]
+# A transitive crate still ships in the binary, so the scope covers the whole
+# graph, not just this crate's direct dependencies.
+unmaintained = "all"
+yanked = "warn"
+maximum-db-staleness = "P90D"
+ignore = [
+    { id = "RUSTSEC-2024-0436", reason = "paste is a compile-time proc-macro reached only through tikv-jemalloc-ctl, so it has no runtime exposure; drop when that chain moves to pastey, which cel already uses" },
+]
 
 [licenses]
+confidence-threshold = 0.8
 allow = [
     "BUSL-1.1",
     "MIT",
@@ -21,13 +29,13 @@ allow = [
     "Zlib",
     "MPL-2.0",
     "Unicode-3.0",
-    "OpenSSL",
     "CDLA-Permissive-2.0",
 ]
 
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
+highlight = "all"
 
 [sources]
 unknown-registry = "deny"
