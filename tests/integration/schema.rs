@@ -301,14 +301,22 @@ async fn test_schema_cache_with_clickhouse() {
 ///
 /// Test strategy:
 /// - Live ClickHouse table (so `fetch_table_schema()` actually works)
-/// - Short TTL (2s) + headroom (1s) + interval (500ms) — total runtime ~5s
-/// - Spawn background refresh, insert schema once
+/// - Short TTL (2s) + headroom (1s) + interval (1s) — total runtime ~5s
+/// - Spawn the background refresh alongside a resolver, insert schema once
 /// - Wait past TTL — schema must still be retrievable (background kept it warm)
+///
+/// The refresh hands expiring tables to the resolver rather than fetching, so the
+/// test runs the resolver too. It also proves #182: a COMMENT rewritten on a
+/// table that never leaves the cache reaches the directive cache without a
+/// restart.
 #[tokio::test]
 async fn test_schema_cache_background_refresh_keeps_warm() {
     skip_if_no_clickhouse!();
 
     use std::sync::Arc;
+
+    use dfe_loader::column_meta::{ColumnDirectivesConfig, ColumnMetaCache, parse_directives};
+    use tokio::sync::mpsc;
 
     let client = if let Some(c) = create_http_test_client() {
         Arc::new(c)
@@ -324,7 +332,7 @@ async fn test_schema_cache_background_refresh_keeps_warm() {
     let ddl = format!(
         "CREATE TABLE {table_name}{oc} (
             id UInt64,
-            name String
+            name String COMMENT '@source: old_field - the pre-ALTER directive'
         ) ENGINE = MergeTree() ORDER BY tuple()"
     );
     client.execute(&ddl).await.expect("Failed to create table");
@@ -337,17 +345,65 @@ async fn test_schema_cache_background_refresh_keeps_warm() {
         refresh_headroom_secs: 1, // refresh when 1s left → triggers around t=1s
     };
     let cache = Arc::new(SchemaCache::with_config(config));
+    let col_meta = Arc::new(ColumnMetaCache::new(ColumnDirectivesConfig::default()));
 
-    // Pre-populate the cache so background refresh has something to work on
+    // Pre-populate both caches, the way a cold resolution does
     let schema = client.fetch_table_schema(&table_name).await.unwrap();
     cache.insert(table_name.clone(), schema);
+    let warm_comments = client
+        .fetch_column_comments(&table_name)
+        .await
+        .expect("Failed to read the column comments");
+    col_meta.apply_ddl(
+        &table_name,
+        warm_comments
+            .into_iter()
+            .map(|(col, comment)| (col, parse_directives(&comment)))
+            .collect(),
+    );
     assert!(
         cache.get(&table_name).is_some(),
         "Cache should be populated"
     );
+    assert_eq!(
+        col_meta.get(&table_name, "name").renamed,
+        vec!["old_field".to_string()],
+        "the warm directive comes from the pre-ALTER COMMENT"
+    );
 
-    // Start the background refresh task (the bit that was missing)
-    let _handle = cache.start_background_refresh(Arc::clone(&client));
+    // Stand in for the orchestrator's resolution arm: everything the refresh
+    // hands over is re-read from ClickHouse and applied to both caches.
+    let (tx, mut rx) = mpsc::channel::<String>(8);
+    let resolver = {
+        let client = Arc::clone(&client);
+        let cache = Arc::clone(&cache);
+        let col_meta = Arc::clone(&col_meta);
+        tokio::spawn(async move {
+            while let Some(table) = rx.recv().await {
+                if let Ok(comments) = client.fetch_column_comments(&table).await {
+                    let directives = comments
+                        .into_iter()
+                        .map(|(col, comment)| (col, parse_directives(&comment)))
+                        .collect();
+                    col_meta.apply_ddl(&table, directives);
+                }
+                if let Ok(schema) = client.fetch_table_schema(&table).await {
+                    cache.insert(table, schema);
+                }
+            }
+        })
+    };
+
+    let _handle = cache.start_background_refresh(tx);
+
+    // Rewrite the COMMENT on the live table — how DFE ships a column directive.
+    client
+        .execute(&format!(
+            "ALTER TABLE {table_name}{oc} COMMENT COLUMN name \
+             '@source: new_field - the post-ALTER directive'"
+        ))
+        .await
+        .expect("Failed to rewrite the column comment");
 
     // Wait past TTL. Without background refresh, get() would return None here.
     tokio::time::sleep(Duration::from_millis(2500)).await;
@@ -371,13 +427,20 @@ async fn test_schema_cache_background_refresh_keeps_warm() {
         stats.refreshes
     );
 
+    assert_eq!(
+        col_meta.get(&table_name, "name").renamed,
+        vec!["new_field".to_string()],
+        "the rewritten COMMENT must reach the directive cache without a restart (#182)"
+    );
+
     eprintln!(
-        "✓ Background refresh kept schema warm past TTL ({} refreshes)",
+        "✓ Background refresh kept schema warm past TTL ({} refreshes) and picked up the new COMMENT",
         stats.refreshes
     );
 
     // Cleanup
     cache.shutdown();
+    resolver.abort();
     drop_http_test_table(&client, &table_name).await;
 }
 

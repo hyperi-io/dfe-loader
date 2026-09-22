@@ -165,6 +165,11 @@ impl ColumnMetaCache {
     /// when no config entry exists for a column.
     pub fn apply_ddl(&self, table: &str, col_directives: FxHashMap<String, ColumnDirectives>) {
         let mut ddl = self.ddl.write();
+        // The generation is cache-wide, so bumping it on a periodic refresh that
+        // changed nothing would rebuild every table's derived state.
+        if ddl.get(table) == Some(&col_directives) {
+            return;
+        }
         ddl.insert(table.to_string(), col_directives);
         // Bumped under the write lock so a reader that sees the new directives
         // never reads the old version and keeps stale derived state.

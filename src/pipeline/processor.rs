@@ -2309,4 +2309,185 @@ mod tests {
             Err(e) => panic!("expected a Transform rejection, got Err({e:?})"),
         }
     }
+
+    // ========================================================================
+    // #182 — a changed column COMMENT must reach a table that keeps taking
+    // traffic, because rewriting the COMMENT is how a column directive ships.
+    // Both probe fields ride in every payload at distinguishable values, so the
+    // landed value names which directive is in force.
+    // ========================================================================
+
+    const PROBE_OLD_COMMENT: &str =
+        "@source: probe_old_field - Promoted from _json.probe.promote.value";
+    const PROBE_NEW_COMMENT: &str =
+        "@source: probe_alt_field - Promoted from _json.probe.promote.value";
+    const PROBE_PAYLOAD: &[u8] =
+        br#"{"probe_old_field":"old-cf4c862c128","probe_alt_field":"new-9f1c33b0d41","in_json":"copy-d024c547a4"}"#;
+
+    /// `system.columns` as the resolver reads it: column name -> COMMENT.
+    fn probe_schema(table: &str, columns: &[(&str, &str)]) -> crate::clickhouse::TableSchema {
+        use crate::clickhouse::{ColumnInfo, ParsedType, TableSchema};
+
+        let (db, tbl) = table.split_once('.').expect("db.table");
+        TableSchema {
+            database: db.to_string(),
+            table: tbl.to_string(),
+            columns: columns
+                .iter()
+                .enumerate()
+                .map(|(i, (name, comment))| ColumnInfo {
+                    name: (*name).to_string(),
+                    type_name: "String".to_string(),
+                    parsed_type: ParsedType::parse("String"),
+                    position: i as u64 + 1,
+                    default_kind: String::new(),
+                    default_expression: String::new(),
+                    comment: (*comment).to_string(),
+                    is_in_primary_key: false,
+                    is_in_sorting_key: false,
+                })
+                .collect(),
+            comment: String::new(),
+        }
+    }
+
+    /// Apply a resolver result the way the orchestrator's resolution arm does:
+    /// the parsed column directives first, then the schema.
+    fn apply_resolution(harness: &TestHarness, table: &str, columns: &[(&str, &str)]) {
+        use crate::column_meta::parse_directives;
+
+        let directives = columns
+            .iter()
+            .map(|(name, comment)| ((*name).to_string(), parse_directives(comment)))
+            .collect();
+        harness.col_meta_cache.apply_ddl(table, directives);
+        harness
+            .schema_cache
+            .insert(table.to_string(), probe_schema(table, columns));
+    }
+
+    fn landed_probe_value(harness: &TestHarness, msg: &KafkaMessage) -> Option<String> {
+        harness
+            .processor_json_primary()
+            .process(msg)
+            .expect("the extractor path must succeed once the schema is cached")
+            .data
+            .get("probe_promote_value")
+            .and_then(|v| v.as_str())
+            .map(std::string::ToString::to_string)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn ddl_comment_change_reaches_a_hot_table_182() {
+        use std::time::Duration;
+
+        use tokio::sync::mpsc;
+
+        let harness = TestHarness::new();
+        let msg = harness.make_msg(PROBE_PAYLOAD);
+
+        let table = match harness.processor_json_primary().process(&msg) {
+            Err(crate::Error::SchemaPending { table }) => table,
+            Ok(_) => panic!("expected SchemaPending before schema cached, got Ok"),
+            Err(e) => panic!("expected SchemaPending, got Err({e:?})"),
+        };
+
+        let warm = &[("probe_promote_value", PROBE_OLD_COMMENT), ("in_json", "")];
+        apply_resolution(&harness, &table, warm);
+
+        // Control: the pre-ALTER directive is live, so only the COMMENT changes
+        // from here.
+        assert_eq!(
+            landed_probe_value(&harness, &msg).as_deref(),
+            Some("old-cf4c862c128"),
+            "the pre-ALTER directive must be in force before the ALTER"
+        );
+
+        // ALTER TABLE ... COMMENT COLUMN probe_promote_value '@source: probe_alt_field ...'
+        let altered = &[("probe_promote_value", PROBE_NEW_COMMENT), ("in_json", "")];
+
+        // The table keeps taking traffic, so it never misses the cache. Only the
+        // refresh pass can re-request it.
+        let (tx, mut rx) = mpsc::channel(8);
+        let _handle = harness.schema_cache.start_background_refresh(tx);
+        // Let the loop arm its first sleep before the clock moves under it.
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(305)).await;
+
+        let requested = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .expect("the refresh pass must re-request a hot table (#182)")
+            .expect("the resolver channel must stay open");
+        assert_eq!(requested, table);
+
+        apply_resolution(&harness, &requested, altered);
+
+        assert_eq!(
+            landed_probe_value(&harness, &msg).as_deref(),
+            Some("new-9f1c33b0d41"),
+            "the changed COMMENT must be in force without a restart (#182)"
+        );
+
+        harness.schema_cache.shutdown();
+    }
+
+    /// A column added to a hot table is the same defect: its COMMENT carries the
+    /// directive, and a refresh that fetched only the column set left the new
+    /// column present and empty.
+    #[tokio::test(start_paused = true)]
+    async fn new_column_on_a_hot_table_gets_its_directive_182() {
+        use std::time::Duration;
+
+        use tokio::sync::mpsc;
+
+        let harness = TestHarness::new();
+        let msg = harness.make_msg(PROBE_PAYLOAD);
+
+        let table = match harness.processor_json_primary().process(&msg) {
+            Err(crate::Error::SchemaPending { table }) => table,
+            Ok(_) => panic!("expected SchemaPending before schema cached, got Ok"),
+            Err(e) => panic!("expected SchemaPending, got Err({e:?})"),
+        };
+
+        apply_resolution(&harness, &table, &[("in_json", "")]);
+        assert_eq!(
+            landed_probe_value(&harness, &msg),
+            None,
+            "the column does not exist yet"
+        );
+
+        // ALTER TABLE ... ADD COLUMN probe_promote_value String COMMENT '@source: ...'
+        let added = &[("in_json", ""), ("probe_promote_value", PROBE_NEW_COMMENT)];
+
+        // Fetching the column set alone is what the refresh used to do: the
+        // column arrives, its directive does not, and the column lands empty.
+        harness
+            .schema_cache
+            .insert(table.clone(), probe_schema(&table, added));
+        assert_eq!(
+            landed_probe_value(&harness, &msg),
+            None,
+            "a schema-only refresh leaves the new column with no directive"
+        );
+
+        let (tx, mut rx) = mpsc::channel(8);
+        let _handle = harness.schema_cache.start_background_refresh(tx);
+        // Let the loop arm its first sleep before the clock moves under it.
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(305)).await;
+
+        let requested = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .expect("the refresh pass must re-request a hot table (#182)")
+            .expect("the resolver channel must stay open");
+        apply_resolution(&harness, &requested, added);
+
+        assert_eq!(
+            landed_probe_value(&harness, &msg).as_deref(),
+            Some("new-9f1c33b0d41"),
+            "a column added to a hot table must get its directive (#182)"
+        );
+
+        harness.schema_cache.shutdown();
+    }
 }
