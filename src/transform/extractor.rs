@@ -77,6 +77,8 @@ enum Sources<'a> {
     None,
     /// Try each path in order; the first one present wins.
     List(&'a [String]),
+    /// Try each compiled-in path in order; the first one present wins.
+    Fixed(&'static [&'static str]),
     /// Try the first path, then the second when there is one.
     Pair(&'a str, Option<&'a str>),
 }
@@ -88,10 +90,18 @@ impl<'a> Sources<'a> {
         match *self {
             Sources::None => false,
             Sources::List(paths) => paths.iter().any(|path| f(path.as_str())),
+            Sources::Fixed(paths) => paths.iter().any(|path| f(path)),
             Sources::Pair(first, second) => f(first) || second.is_some_and(f),
         }
     }
 }
+
+/// The payload keys `_timestamp` reads, in order.
+///
+/// `@timestamp` is ECS's spelling, so without it a beats event lands with its
+/// load time as its event time (dfe-engine#498). `timestamp` stays first, which
+/// leaves a source already sending that key unaffected.
+static TIMESTAMP_SOURCES: &[&str] = &["timestamp", "@timestamp", "_timestamp"];
 
 /// Per-table extraction state derived from the schema and its directives.
 ///
@@ -169,7 +179,7 @@ impl HeaderExtractor {
         }
         // _timestamp reads the payload ahead of any directive.
         if name == "_timestamp" {
-            return Sources::Pair("timestamp", Some("_timestamp"));
+            return Sources::Fixed(TIMESTAMP_SOURCES);
         }
         if skip {
             return Sources::None;
@@ -1158,6 +1168,45 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_timestamp_read_from_ecs_at_timestamp_498() {
+        // Every Elastic shipper sends the event time as `@timestamp`, never
+        // `timestamp`. Reading only `timestamp` left `| now()` to fire, so each
+        // beats event landed bucketed on its load time (dfe-engine#498).
+        let extractor = default_extractor();
+        let raw = br#"{"@timestamp": "2024-03-05 01:02:03.456", "message": "x"}"#;
+        let schema = make_schema(&["_timestamp", "message"]);
+        let col_meta = empty_col_meta();
+
+        let map = extractor
+            .extract(raw, "dfe.events", &schema, &col_meta, None)
+            .fields;
+        assert_eq!(
+            map.get("_timestamp"),
+            Some(&Value::String("2024-03-05 01:02:03.456".into())),
+            "_timestamp must carry the event's own time, not the load time"
+        );
+    }
+
+    #[test]
+    fn test_plain_timestamp_wins_over_at_timestamp_498() {
+        // A payload carrying both keeps the undecorated spelling, so a source
+        // already sending `timestamp` is unaffected by the ECS addition.
+        let extractor = default_extractor();
+        let raw =
+            br#"{"timestamp": "2026-03-15 10:30:00.123", "@timestamp": "2024-03-05 01:02:03.456"}"#;
+        let schema = make_schema(&["_timestamp"]);
+        let col_meta = empty_col_meta();
+
+        let map = extractor
+            .extract(raw, "dfe.events", &schema, &col_meta, None)
+            .fields;
+        assert_eq!(
+            map.get("_timestamp"),
+            Some(&Value::String("2026-03-15 10:30:00.123".into()))
+        );
+    }
+
     // ========================================================================
     // RFC3339 timestamps are normalised for the wire (#144)
     // ========================================================================
@@ -1537,11 +1586,38 @@ mod tests {
         let col_meta = syslog_col_meta();
 
         let plan = extractor.plan_for("dfe.proofsyslog", &schema, &col_meta);
-        let shared: Vec<&str> = plan.contended.iter().map(AsRef::as_ref).collect();
+        let mut shared: Vec<&str> = plan.contended.iter().map(AsRef::as_ref).collect();
+        shared.sort_unstable();
         assert_eq!(
             shared,
-            vec!["timestamp"],
-            "@timestamp and time are read by one column each, so they keep the move"
+            vec!["@timestamp", "timestamp"],
+            "both spellings are now read by two columns; `time` is read by one and keeps the move"
+        );
+    }
+
+    #[test]
+    fn test_header_and_meta_column_both_fill_from_at_timestamp_498() {
+        // The beats case of the shared-field rule: with `@timestamp` the only
+        // event time in the payload, the header column must not empty it before
+        // the meta column's first(timestamp/@timestamp/time) reaches it.
+        let extractor = default_extractor();
+        let raw = br#"{"@timestamp": "2024-03-05T01:02:03.456Z", "hostname": "probe498"}"#;
+        let schema = make_datetime_schema(&["_timestamp", "timestamp"]);
+        let col_meta = syslog_col_meta();
+
+        let map = extractor
+            .extract(raw, "dfe.proofsyslog", &schema, &col_meta, None)
+            .fields;
+
+        assert_eq!(
+            map.get("_timestamp"),
+            Some(&Value::String("2024-03-05 01:02:03.456".into())),
+            "the header column carries the event's own time"
+        );
+        assert_eq!(
+            map.get("timestamp"),
+            Some(&Value::String("2024-03-05 01:02:03.456".into())),
+            "the meta column reading the same field must fill too, not land NULL"
         );
     }
 
