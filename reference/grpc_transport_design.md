@@ -979,7 +979,7 @@ loader:
 10. Remove `src/transport/zenoh/` directory
 11. Remove `zenoh` dependency from Cargo.toml
 12. Write unit tests (config, token, round-trip, bidirectional, backpressure, shutdown)
-13. Publish to Artifactory (major bump — v2.0.0)
+13. Publish to crates.io (major bump -- v2.0.0)
 
 ### Phase 2: dfe-loader
 
