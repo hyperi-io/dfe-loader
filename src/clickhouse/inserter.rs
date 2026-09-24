@@ -316,7 +316,7 @@ impl Inserter {
             http_client,
             ch_client,
             dynamic_schema_cache: crate::clickhouse_ext::DynamicSchemaCache::new(
-                std::time::Duration::from_secs(300),
+                Duration::from_secs(crate::config::SchemaConfig::default().cache_ttl_secs),
             ),
             insert_format: InsertFormat::default(),
             max_retries: config.max_retries,
@@ -361,6 +361,28 @@ impl Inserter {
     pub fn with_refresh_on_error(mut self, enabled: bool) -> Self {
         self.refresh_on_error = enabled;
         self
+    }
+
+    /// Set how long the `RowBinary` encoder serves a fetched schema
+    /// (`schema.cache_ttl_secs`, default 300 s).
+    ///
+    /// Replaces the encoder's cache, so it belongs with construction, before the
+    /// first insert or clone.
+    pub fn with_schema_ttl(mut self, ttl: Duration) -> Self {
+        self.dynamic_schema_cache = crate::clickhouse_ext::DynamicSchemaCache::new(ttl);
+        self
+    }
+
+    /// The `RowBinary` encoder's schema TTL.
+    #[cfg(test)]
+    pub(crate) fn encoder_schema_ttl(&self) -> Duration {
+        self.dynamic_schema_cache.ttl()
+    }
+
+    /// Whether a schema-drift insert error drops the cached schema.
+    #[cfg(test)]
+    pub(crate) fn refreshes_on_error(&self) -> bool {
+        self.refresh_on_error
     }
 
     /// Drop the loader's cached schema for `table`, so its next reader re-fetches.
@@ -662,11 +684,11 @@ impl Inserter {
                 }
                 Err(e) => {
                     let message = format!("RowBinary insert: {e}");
-                    // insert.end() consumed the DynamicInsert, so only the
-                    // loader's cache is dropped here; the retry still reads the
-                    // encoder's cached schema.
                     if is_schema_drift_error(&e.to_string()) {
+                        // end() consumed the DynamicInsert, so the encoder's entry
+                        // is dropped by the key DynamicInsert caches it under.
                         if self.refresh_on_error {
+                            self.dynamic_schema_cache.invalidate(&format!("{db}.{tbl}"));
                             self.drop_cached_schema(table);
                         }
                         if attempt < self.max_retries {

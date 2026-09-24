@@ -257,13 +257,7 @@ impl Orchestrator {
 
         // Inserter dispatches based on insert_format — single client handles all inserts.
         // Schema cache is wired below (after creation) for drift-error invalidation.
-        let mut inserter = Inserter::new(
-            Arc::clone(&http_client),
-            ch_client,
-            InserterConfig::default(),
-        )
-        .with_insert_format(insert_format)
-        .with_refresh_on_error(self.config.schema.refresh_on_error);
+        let mut inserter = build_inserter(&self.config, Arc::clone(&http_client), ch_client);
 
         // DLQ (unified scalo module — cascade: Kafka primary, file fallback)
         let dlq_config = self.config.routing.dlq.to_scalo_config();
@@ -1918,6 +1912,18 @@ async fn warm_tables_once(
     out
 }
 
+/// The inserter the pipeline runs, with every setting that reaches it applied.
+fn build_inserter(
+    config: &Config,
+    http_client: Arc<ClickHouseQueryClient>,
+    ch_client: clickhouse::Client,
+) -> Inserter {
+    Inserter::new(http_client, ch_client, InserterConfig::default())
+        .with_insert_format(config.clickhouse.insert_format)
+        .with_refresh_on_error(config.schema.refresh_on_error)
+        .with_schema_ttl(Duration::from_secs(config.schema.cache_ttl_secs))
+}
+
 /// Record `ClickHouse`'s answer that `table` does not exist.
 ///
 /// Its cached schema is dropped too: the background refresh re-requests every
@@ -3093,6 +3099,38 @@ mod tests {
             ],
             "only the batch for the absent table moves, with its rows and offsets"
         );
+    }
+
+    fn inserter_for(config: &Config) -> Inserter {
+        let ch_config: crate::clickhouse::ClickHouseConfig = (&config.clickhouse).into();
+        let http_client = Arc::new(ClickHouseQueryClient::new(&ch_config).expect("query client"));
+        let ch_client =
+            crate::clickhouse::client_http::build_client(&ch_config).expect("insert client");
+        build_inserter(config, http_client, ch_client)
+    }
+
+    #[test]
+    fn the_schema_settings_reach_the_inserter() {
+        let mut config = Config::default();
+        config.schema.cache_ttl_secs = 60;
+        config.schema.refresh_on_error = false;
+
+        let inserter = inserter_for(&config);
+
+        assert_eq!(
+            inserter.encoder_schema_ttl(),
+            Duration::from_secs(60),
+            "schema.cache_ttl_secs must reach the RowBinary encoder's cache"
+        );
+        assert!(!inserter.refreshes_on_error());
+    }
+
+    #[test]
+    fn the_default_schema_settings_keep_300_s_and_refresh_on_error() {
+        let inserter = inserter_for(&Config::default());
+
+        assert_eq!(inserter.encoder_schema_ttl(), Duration::from_secs(300));
+        assert!(inserter.refreshes_on_error());
     }
 
     fn cached_schema(table: &str) -> crate::clickhouse::TableSchema {

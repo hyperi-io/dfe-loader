@@ -898,18 +898,32 @@ async fn stale_schema_after_a_dropped_column(
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_drift_error_drops_the_cached_schema_when_refresh_on_error_is_on() {
+async fn a_drift_error_re_reads_the_schema_and_lands_when_refresh_on_error_is_on() {
     let (_infra, client, ch) = spin_up(test_name!()).await;
     let table = unique_table_name("tc_refresh_on");
     let (inserter, schema_cache) =
         stale_schema_after_a_dropped_column(&client, ch, &table, true).await;
 
-    // The setting decides the cached schema, so that is all this asserts.
-    let _ = inserter.insert_rows(&table, &simple_rows(2), &[]).await;
+    // Far inside the encoder cache's 300 s TTL, so only a re-read can land it.
+    let landed = tokio::time::timeout(
+        Duration::from_secs(30),
+        inserter.insert_rows(&table, &simple_rows(2), &[]),
+    )
+    .await
+    .expect("the retry must finish well inside the schema TTL");
 
+    assert_eq!(
+        landed.expect("the retry must re-read the schema and land"),
+        2
+    );
     assert!(
         schema_cache.get(&table).is_none(),
         "the drift error must drop the loader's cached schema"
+    );
+    let count = client.query_count(&table, None).await.expect("count");
+    assert_eq!(
+        count, 5,
+        "3 rows before the drop and 2 after it are readable"
     );
 }
 
