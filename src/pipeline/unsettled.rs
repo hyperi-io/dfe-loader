@@ -3,17 +3,18 @@
 
 //! Rows the loader could not place yet, held until something takes them.
 //!
-//! A gRPC Push is answered once its record is queued, so a row the loader
-//! cannot place exists nowhere else. Two kinds wait here while gRPC intake is
-//! paused: batches whose insert failed, which go back to `ClickHouse`, and dead
-//! letters `ClickHouse` will never take, which go back to the DLQ. Both are
-//! retried on scalo's jittered exponential schedule until they land. Kafka
-//! never holds a batch, because withheld offsets re-deliver; it holds only dead
-//! letters the DLQ refused, and their offsets keep the commit below them.
+//! Two kinds wait here: batches whose insert failed, which go back to
+//! `ClickHouse`, and dead letters `ClickHouse` will never take, which go back to
+//! the DLQ. Both are retried on scalo's jittered exponential schedule until they
+//! land. A gRPC Push is answered once its record is queued, so there a held row
+//! exists nowhere else and intake pauses while anything is held. A Kafka
+//! consumer has already read past a held row and never reads it again, so its
+//! offset keeps the commit below it until it lands.
 
 use std::time::Duration;
 
 use backon::{BackoffBuilder, ExponentialBuilder};
+use rustc_hash::FxHashMap;
 use scalo::dlq::DlqEntry;
 use scalo::sink_stack::SinkStackConfig;
 use tokio::time::Instant;
@@ -27,6 +28,9 @@ type Schedule = <ExponentialBuilder as BackoffBuilder>::Backoff;
 pub(crate) struct Unsettled {
     batches: Vec<FlushBatch>,
     dead_letters: Vec<DlqEntry>,
+    /// The lowest offset per partition of rows this process no longer holds,
+    /// which only a re-read from Kafka after a restart can place.
+    awaiting_reread: Vec<KafkaOffset>,
     builder: ExponentialBuilder,
     schedule: Schedule,
     retry_at: Option<Instant>,
@@ -52,6 +56,34 @@ pub(crate) fn payload_bytes(dead_letters: &[DlqEntry]) -> u64 {
     dead_letters.iter().map(|e| e.payload.len() as u64).sum()
 }
 
+/// The Kafka offset a dead letter came from; an inbound-filter reject names none.
+fn kafka_source(entry: &DlqEntry) -> Option<KafkaOffset> {
+    let source = entry.source.as_ref()?;
+    Some(KafkaOffset::new(
+        source.topic.as_deref()?,
+        source.partition?,
+        source.offset?,
+    ))
+}
+
+/// The lowest of `offsets` on each topic partition.
+fn lowest_per_partition<'a>(
+    offsets: impl IntoIterator<Item = &'a KafkaOffset>,
+) -> Vec<KafkaOffset> {
+    let mut lowest: FxHashMap<(&str, i32), &KafkaOffset> = FxHashMap::default();
+    for off in offsets {
+        lowest
+            .entry((&*off.topic, off.partition))
+            .and_modify(|held| {
+                if off.offset < held.offset {
+                    *held = off;
+                }
+            })
+            .or_insert(off);
+    }
+    lowest.into_values().cloned().collect()
+}
+
 impl Unsettled {
     /// An empty hold whose attempts are never further apart than `max_delay`
     /// before jitter.
@@ -65,6 +97,7 @@ impl Unsettled {
         Self {
             batches: Vec::new(),
             dead_letters: Vec::new(),
+            awaiting_reread: Vec::new(),
             builder,
             schedule: builder.build(),
             retry_at: None,
@@ -81,7 +114,14 @@ impl Unsettled {
         self.dead_letters.extend(dead_letters);
     }
 
-    /// Whether nothing is held, which is when intake may run.
+    /// Keep the commit below `offsets` for as long as this process runs: their
+    /// rows are gone from memory, so only Kafka still has them.
+    pub(crate) fn await_reread(&mut self, offsets: &[KafkaOffset]) {
+        self.awaiting_reread = lowest_per_partition(self.awaiting_reread.iter().chain(offsets));
+    }
+
+    /// Whether nothing is held for another attempt, which is when intake may
+    /// run. Rows awaiting a re-read have nothing to attempt.
     pub(crate) fn is_empty(&self) -> bool {
         self.batches.is_empty() && self.dead_letters.is_empty()
     }
@@ -91,20 +131,19 @@ impl Unsettled {
         !self.dead_letters.is_empty()
     }
 
-    /// The Kafka offset of every held dead letter that came from Kafka: a
-    /// commit must stop below each one until the DLQ takes it.
-    pub(crate) fn dead_letter_offsets(&self) -> Vec<KafkaOffset> {
-        self.dead_letters
-            .iter()
-            .filter_map(|entry| {
-                let source = entry.source.as_ref()?;
-                Some(KafkaOffset::new(
-                    source.topic.as_deref()?,
-                    source.partition?,
-                    source.offset?,
-                ))
-            })
-            .collect()
+    /// The lowest Kafka offset held on each partition, across held batches,
+    /// held dead letters and rows awaiting a re-read: a commit must stop below
+    /// each until its row lands.
+    pub(crate) fn offsets(&self) -> Vec<KafkaOffset> {
+        let dead_letters: Vec<KafkaOffset> =
+            self.dead_letters.iter().filter_map(kafka_source).collect();
+        lowest_per_partition(
+            self.batches
+                .iter()
+                .flat_map(|batch| &batch.offsets)
+                .chain(&dead_letters)
+                .chain(&self.awaiting_reread),
+        )
     }
 
     /// Rows across every held batch and dead letter.
@@ -232,6 +271,27 @@ mod tests {
             .expect("a held dead letter was never retried");
     }
 
+    /// `(topic, partition, offset)` of each floor the hold names, sorted.
+    fn floors(held: &Unsettled) -> Vec<(String, i32, i64)> {
+        let mut out: Vec<_> = held
+            .offsets()
+            .into_iter()
+            .map(|o| (o.topic.to_string(), o.partition, o.offset))
+            .collect();
+        out.sort_unstable();
+        out
+    }
+
+    fn batch_at(topic: &str, partition: i32, offsets: std::ops::Range<i64>) -> FlushBatch {
+        let rows = offsets.clone().count();
+        FlushBatch {
+            offsets: offsets
+                .map(|off| KafkaOffset::new(topic, partition, off))
+                .collect(),
+            ..batch(rows)
+        }
+    }
+
     #[test]
     fn a_held_dead_letter_from_kafka_names_the_offset_a_commit_stops_below() {
         let mut held = Unsettled::new(Duration::from_secs(5));
@@ -242,16 +302,61 @@ mod tests {
             dead_letter(b"{}"),
         ]);
         assert!(held.holds_dead_letters());
-        let offsets: Vec<(String, i32, i64)> = held
-            .dead_letter_offsets()
-            .into_iter()
-            .map(|o| (o.topic.to_string(), o.partition, o.offset))
-            .collect();
-        assert_eq!(offsets, vec![("t".to_string(), 2, 41)]);
+        assert_eq!(floors(&held), vec![("t".to_string(), 2, 41)]);
 
         let _ = held.take();
-        assert!(held.dead_letter_offsets().is_empty());
+        assert!(held.offsets().is_empty());
         assert!(!held.holds_dead_letters());
+    }
+
+    #[test]
+    fn a_held_batch_names_its_lowest_offset_on_each_partition() {
+        let mut held = Unsettled::new(Duration::from_secs(5));
+        held.hold(batch_at("t", 0, 107..112));
+        held.hold(batch_at("t", 0, 100..105));
+        held.hold(batch_at("t", 1, 9..12));
+        held.hold_dead_letters(vec![
+            dead_letter(b"{}").with_source(scalo::dlq::DlqSource::kafka("t", 1, 4)),
+        ]);
+        assert_eq!(
+            floors(&held),
+            vec![("t".to_string(), 0, 100), ("t".to_string(), 1, 4)]
+        );
+
+        // Taken for another attempt, a batch no longer bounds the commit: the
+        // attempt either lands it or holds it again.
+        let taken = held.take();
+        assert_eq!(taken.batches.len(), 3);
+        assert!(held.offsets().is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn rows_awaiting_a_reread_hold_the_floor_and_are_never_due() {
+        let mut held = Unsettled::new(Duration::from_secs(5));
+        let lost = [
+            KafkaOffset::new("t", 0, 30),
+            KafkaOffset::new("t", 0, 20),
+            KafkaOffset::new("t", 3, 8),
+        ];
+        held.await_reread(&lost);
+        held.await_reread(&[KafkaOffset::new("t", 0, 25)]);
+        assert_eq!(
+            floors(&held),
+            vec![("t".to_string(), 0, 20), ("t".to_string(), 3, 8)]
+        );
+
+        // Nothing is left to attempt, so intake stays open and no retry fires.
+        assert!(held.is_empty());
+        held.rearm();
+        let due = tokio::time::timeout(Duration::from_secs(3600), held.due()).await;
+        assert!(
+            due.is_err(),
+            "rows with nothing to retry asked for an attempt"
+        );
+
+        // Only a restart re-reads them, so taking the hold leaves them in place.
+        let _ = held.take();
+        assert_eq!(floors(&held).len(), 2);
     }
 
     #[test]

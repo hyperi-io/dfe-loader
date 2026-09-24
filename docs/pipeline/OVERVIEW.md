@@ -106,13 +106,7 @@ per-table config > global). See [CAPTURE-MODES.md](CAPTURE-MODES.md).
 
 ## 7. Insert and commit
 
-Each table's buffer flushes on its own triggers (`flush_rows` / `flush_bytes` /
-`flush_age_secs`). The batch is encoded and inserted through `clickhouse_ext`
-(RowBinary by default), and only on success are that table's Kafka offsets
-committed -- at-least-once. Failures are isolated per row by batch salvage, and
-a wedged table trips its circuit breaker straight to the DLQ until a probe
-recovers. See [../ARCHITECTURE.md](../ARCHITECTURE.md#resilience) and
-[../clickhouse/INSERT-FORMATS.md](../clickhouse/INSERT-FORMATS.md).
+Each table's buffer flushes on its own triggers (`flush_rows` / `flush_bytes` / `flush_age_secs`). The batch is encoded and inserted through `clickhouse_ext` (RowBinary by default). Kafka offsets commit once per flush cycle, and on each partition stop below the lowest offset not placed yet -- at-least-once. Batch salvage isolates a row ClickHouse rejects for good and sends it to the DLQ. A batch that fails for any other reason is held and retried with jittered backoff until it lands. See [../ARCHITECTURE.md](../ARCHITECTURE.md#resilience) and [../clickhouse/INSERT-FORMATS.md](../clickhouse/INSERT-FORMATS.md).
 
 ## Parallelism
 

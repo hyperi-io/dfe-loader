@@ -10,10 +10,7 @@
 
 # Architecture
 
-dfe-loader is a per-message hot path with a per-table batching tail. A message
-arrives as bytes, gets routed and promoted into a typed row, accumulates in a
-per-table buffer, and flushes to ClickHouse as a batch. Kafka offsets commit
-per batch, after the insert succeeds -- at-least-once.
+dfe-loader is a per-message hot path with a per-table batching tail. A message arrives as bytes, gets routed and promoted into a typed row, accumulates in a per-table buffer, and flushes to ClickHouse as a batch. Kafka offsets commit once per flush cycle, never past a row not placed yet -- at-least-once.
 
 Everything on the hot path is shaped by one rule: do the cheap thing per
 message, defer the expensive thing to flush. Parse once (SIMD, zero-copy),
@@ -150,8 +147,7 @@ the full payload is kept.
   probe succeeds.
 - **Schema-cache recovery** -- on `SchemaMismatch` (e.g. `ALTER ... ADD COLUMN`),
   invalidate and re-fetch, then retry.
-- **Per-batch offset commit** -- each table commits independently; one table's
-  failure does not block another's.
+- **One commit per flush cycle** -- offsets commit once per cycle, and on each partition stop below the lowest offset not placed yet. A failed batch or a dead letter the DLQ refused is held and retried with jittered backoff, and holds its partition's commit until it lands.
 
 ## Source of truth
 

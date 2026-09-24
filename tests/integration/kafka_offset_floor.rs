@@ -7,8 +7,9 @@
 //! still held in memory loses that one to a crash. Each test runs the real
 //! orchestrator on the Kafka transport against Kafka and `ClickHouse`
 //! containers, keeps one record from being placed -- its table schema cannot be
-//! fetched, or the DLQ refuses every write -- lets a later record on the same
-//! partition insert, and reads the consumer group's committed offset.
+//! fetched, its insert fails, or the DLQ refuses every write -- lets a later
+//! record on the same partition insert, and reads the consumer group's
+//! committed offset.
 //!
 //! Gated behind `#[cfg(feature = "testcontainers")]`.
 
@@ -19,6 +20,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use dfe_loader::clickhouse::InsertFormat;
 use dfe_loader::config::Config;
 use dfe_loader::pipeline::Orchestrator;
 use rdkafka::consumer::{BaseConsumer, Consumer};
@@ -56,6 +58,10 @@ const DLQ_DOWN: Duration = Duration::from_secs(10);
 
 /// Records parked waiting on their schema when the loader is stopped.
 const PARKED: u64 = 20;
+
+/// The lowest id a table's constraint rejects, so `ClickHouse` rejects a row
+/// carrying it for good.
+const REJECTED_ID: u64 = 1_000_000;
 
 /// A loopback proxy to `ClickHouse` HTTP that can refuse every connection
 /// opening with anything but an INSERT, so schema fetches fail while inserts
@@ -469,5 +475,176 @@ async fn no_record_waiting_on_its_schema_is_lost_to_a_shutdown() {
         "{} of {PARKED} records waiting on their schema were in neither ClickHouse nor the DLQ \
          after a clean stop: {lost:?}",
         lost.len()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_batch_whose_insert_failed_holds_the_commit_below_it_until_it_lands() {
+    let infra = TestInfrastructure::new(test_name!(), true, true).await;
+    let clickhouse = clickhouse_address(&infra).await;
+    let bootstrap = kafka_bootstrap(&infra).await;
+    let direct = query_client(&clickhouse);
+
+    let landing = unique_table_name("kafka_held_landing");
+    let failing = unique_table_name("kafka_held_failing");
+    let create = |table: &str| {
+        format!("CREATE TABLE default.{table} (id UInt64) ENGINE = MergeTree() ORDER BY id")
+    };
+    for table in [&landing, &failing] {
+        direct.execute(&create(table)).await.expect("create table");
+    }
+    let topic = format!("held-{landing}");
+    let group = format!("dfe-{landing}");
+    ensure_topic(&bootstrap, &topic).await;
+
+    let config = kafka_loader(&bootstrap, &topic, &group, clickhouse.clone(), &landing);
+    let (shutdown, loader) = start_loader(config);
+    let producer = make_producer(&bootstrap);
+    wait_for_loader(&producer, &topic, &clickhouse, &landing).await;
+
+    // A record lands in the second table first, so the loader holds its schema
+    // and buffers the next one straight to it.
+    produce(
+        &producer,
+        &topic,
+        &format!(r#"{{"_source":"{failing}","id":100}}"#),
+    )
+    .await;
+    let warmed = wait_landed(&clickhouse, &failing, &BTreeSet::from([100]), BUDGET).await;
+
+    // With the table gone its insert fails, which ClickHouse can recover from,
+    // so the batch comes back for another attempt.
+    direct
+        .execute(&format!("DROP TABLE default.{failing} SYNC"))
+        .await
+        .expect("drop table");
+    let held = produce(
+        &producer,
+        &topic,
+        &format!(r#"{{"_source":"{failing}","id":1}}"#),
+    )
+    .await;
+    produce(&producer, &topic, r#"{"id":2}"#).await;
+    let first_later = wait_landed(&clickhouse, &landing, &BTreeSet::from([2]), BUDGET).await;
+    // Produced after id 2 landed, so it inserts in a later flush cycle than the
+    // failed batch, whose buffer is older than id 2's.
+    produce(&producer, &topic, r#"{"id":3}"#).await;
+    let later = wait_landed(&clickhouse, &landing, &BTreeSet::from([2, 3]), BUDGET).await;
+    let while_held = highest_committed_over_watch(&bootstrap, &group, &topic).await;
+
+    // Once the table is back the held batch lands, and a record after it moves
+    // the watermark past both.
+    direct
+        .execute(&create(&failing))
+        .await
+        .expect("re-create table");
+    let held_landed = wait_landed(&clickhouse, &failing, &BTreeSet::from([1]), RECOVERY).await;
+    let last = produce(&producer, &topic, r#"{"id":4}"#).await;
+    let after = wait_committed(&bootstrap, &group, &topic, last + 1).await;
+
+    shutdown.cancel();
+    let _ = tokio::time::timeout(Duration::from_secs(30), loader).await;
+    for table in [&landing, &failing] {
+        let _ = direct
+            .execute(&format!("DROP TABLE IF EXISTS default.{table}"))
+            .await;
+    }
+
+    assert!(
+        warmed.contains(&100),
+        "the record that caches the second table's schema never landed"
+    );
+    assert!(
+        first_later.contains(&2) && later.contains(&3),
+        "the records after the failed insert never landed: {later:?}"
+    );
+    assert!(
+        while_held.is_some_and(|next| next <= held),
+        "the group committed {while_held:?} while the batch holding offset {held} had not \
+         landed: a crash then would have lost it"
+    );
+    assert!(
+        held_landed.contains(&1),
+        "the held batch never landed once its table was back"
+    );
+    assert!(
+        after >= Some(last + 1),
+        "the watermark never moved past the held batch once it landed: {after:?}"
+    );
+}
+
+/// Needs process-per-test (nextest): the file size limit is process-wide.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rejected_row_the_dlq_refuses_holds_the_commit_below_it() {
+    let infra = TestInfrastructure::new(test_name!(), true, true).await;
+    let clickhouse = clickhouse_address(&infra).await;
+    let bootstrap = kafka_bootstrap(&infra).await;
+    let direct = query_client(&clickhouse);
+
+    let landing = unique_table_name("kafka_floor_reject");
+    direct
+        .execute(&format!(
+            "CREATE TABLE default.{landing} (id UInt64, \
+             CONSTRAINT below_limit CHECK id < {REJECTED_ID}) \
+             ENGINE = MergeTree() ORDER BY id"
+        ))
+        .await
+        .expect("create table");
+    let topic = format!("floor-{landing}");
+    let group = format!("dfe-{landing}");
+    ensure_topic(&bootstrap, &topic).await;
+
+    let dlq_dir = tempfile::tempdir().expect("DLQ spool directory");
+    let mut config = kafka_loader(&bootstrap, &topic, &group, clickhouse.clone(), &landing);
+    // JSONEachRow classifies by the server's code, and 469 VIOLATED_CONSTRAINT
+    // is a permanent rejection there.
+    config.clickhouse.insert_format = InsertFormat::JsonEachRow;
+    with_file_dlq(&mut config, dlq_dir.path());
+    let (shutdown, loader) = start_loader(config);
+    let producer = make_producer(&bootstrap);
+    wait_for_loader(&producer, &topic, &clickhouse, &landing).await;
+
+    let _xfsz = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::from_raw(SIGXFSZ))
+        .expect("handle SIGXFSZ");
+    let unlimited = file_size_soft_limit();
+    set_file_size_soft_limit("0");
+
+    let rejected = produce(&producer, &topic, &format!(r#"{{"id":{REJECTED_ID}}}"#)).await;
+    produce(&producer, &topic, r#"{"id":2}"#).await;
+    let first_later = wait_landed(&clickhouse, &landing, &BTreeSet::from([2]), BUDGET).await;
+    // Produced after id 2 landed, so it inserts in a later flush cycle than the
+    // rejected row.
+    produce(&producer, &topic, r#"{"id":3}"#).await;
+    let later = wait_landed(&clickhouse, &landing, &BTreeSet::from([2, 3]), BUDGET).await;
+    let while_refused = highest_committed_over_watch(&bootstrap, &group, &topic).await;
+    set_file_size_soft_limit(&unlimited);
+
+    let dead_lettered =
+        wait_dead_lettered(dlq_dir.path(), &BTreeSet::from([REJECTED_ID]), RECOVERY).await;
+    let last = produce(&producer, &topic, r#"{"id":4}"#).await;
+    let after = wait_committed(&bootstrap, &group, &topic, last + 1).await;
+
+    shutdown.cancel();
+    let _ = tokio::time::timeout(Duration::from_secs(30), loader).await;
+    let _ = direct
+        .execute(&format!("DROP TABLE IF EXISTS default.{landing}"))
+        .await;
+
+    assert!(
+        first_later.contains(&2) && later.contains(&3),
+        "the records after the rejected row never landed: {later:?}"
+    );
+    assert!(
+        while_refused.is_some_and(|next| next <= rejected),
+        "the group committed {while_refused:?} while the DLQ refused the rejected row at offset \
+         {rejected}: it was in neither the DLQ nor a re-delivery"
+    );
+    assert!(
+        dead_lettered.contains(&REJECTED_ID),
+        "the rejected row never reached the DLQ once it took writes again"
+    );
+    assert!(
+        after >= Some(last + 1),
+        "the watermark never moved past the rejected row once the DLQ took it: {after:?}"
     );
 }

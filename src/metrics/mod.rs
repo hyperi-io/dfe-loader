@@ -88,7 +88,7 @@ pub struct Metrics {
     pub pending_schema_expired: Counter,
     /// Messages currently held awaiting schema resolution.
     pub pending_schema_messages: Gauge,
-    /// Rows with no upstream copy that neither `ClickHouse` nor a DLQ took.
+    /// Rows neither `ClickHouse` nor a DLQ took, which nothing will deliver again.
     pub rows_lost: Counter,
     /// Pre-warm retry rounds beyond the first.
     pub schema_prewarm_retries: Counter,
@@ -250,7 +250,7 @@ impl Metrics {
             ),
             rows_lost: manager.counter(
                 "dfe_loader_rows_lost_total",
-                "Rows with no upstream copy that neither ClickHouse nor a DLQ took",
+                "Rows neither ClickHouse nor a DLQ took, which nothing will deliver again",
             ),
             schema_prewarm_retries: manager.counter(
                 "dfe_loader_schema_prewarm_retries_total",
@@ -397,8 +397,8 @@ impl Metrics {
         self.pending_schema_expired.increment(1);
     }
 
-    /// Record rows lost for good: no upstream copy, and neither `ClickHouse` nor
-    /// a DLQ took them.
+    /// Record rows lost for good: neither `ClickHouse` nor a DLQ took them, and
+    /// nothing will deliver them again.
     pub fn record_rows_lost(&self, rows: u64) {
         self.rows_lost.increment(rows);
     }
