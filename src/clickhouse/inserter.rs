@@ -124,6 +124,8 @@ pub struct InsertResult {
     pub failed: Vec<FailedRow>,
     /// Whether the batch's offsets may be committed.
     pub disposition: BatchDisposition,
+    /// The batch itself on a `Retry`, for a transport with nothing to re-deliver.
+    pub unsettled: Option<FlushBatch>,
 }
 
 impl InsertResult {
@@ -132,6 +134,7 @@ impl InsertResult {
             inserted: count,
             failed: Vec::new(),
             disposition: BatchDisposition::Settled,
+            unsettled: None,
         }
     }
 
@@ -140,6 +143,7 @@ impl InsertResult {
             inserted,
             failed,
             disposition: BatchDisposition::Settled,
+            unsettled: None,
         }
     }
 
@@ -149,7 +153,16 @@ impl InsertResult {
             inserted,
             failed: Vec::new(),
             disposition: BatchDisposition::Retry(reason.into()),
+            unsettled: None,
         }
+    }
+
+    /// Hand the batch back with a `Retry`, so a caller whose transport cannot
+    /// re-deliver it can hold it and insert it again.
+    #[must_use]
+    pub fn returning(mut self, batch: FlushBatch) -> Self {
+        self.unsettled = Some(batch);
+        self
     }
 
     /// Whether the flush path may commit this batch's offsets once the failed
@@ -853,9 +866,14 @@ impl Inserter {
                         table = %table,
                         rows = num_rows,
                         error = %e,
-                        "Insert failed — offsets withheld, messages will re-deliver"
+                        "Insert failed, returning the batch for retry"
                     );
-                    return InsertResult::retry(0, e.to_string());
+                    return InsertResult::retry(0, e.to_string()).returning(FlushBatch {
+                        table,
+                        rows,
+                        offsets,
+                        raw_payloads,
+                    });
                 }
 
                 if !self.enable_salvage || num_rows <= 1 {
@@ -897,11 +915,14 @@ impl Inserter {
         // the offsets are committed as a block, so a partial commit would lose
         // the rows behind it.
         match salvage.retry_reason {
-            Some(reason) => InsertResult {
-                inserted: salvage.inserted,
-                failed: Vec::new(),
-                disposition: BatchDisposition::Retry(reason),
-            },
+            // The whole batch goes back, so rows salvage already landed arrive
+            // twice on a retry: duplicates, never loss.
+            Some(reason) => InsertResult::retry(salvage.inserted, reason).returning(FlushBatch {
+                table,
+                rows,
+                offsets,
+                raw_payloads,
+            }),
             None => InsertResult::with_failures(salvage.inserted, salvage.failed),
         }
     }

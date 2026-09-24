@@ -68,6 +68,7 @@ impl KafkaOffset {
 /// `raw_payloads` is parallel to `rows`: each entry is the original Kafka message
 /// bytes (always JSON after format normalisation). Spliced as `_json` at serialisation
 /// time — zero-copy for the fast path (no `_json` key collision in source).
+#[derive(Debug)]
 pub struct FlushBatch {
     /// Destination table name (db.table) - stack-allocated for short names
     pub table: CompactString,
