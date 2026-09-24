@@ -134,6 +134,8 @@ reqwest = { version = ">=0.12, <0.13", default-features = false, features = ["bl
 # Integration test containers
 testcontainers = ">=0.27.3, <0.28"
 testcontainers-modules = { version = ">=0.15.0, <0.16", features = ["kafka", "clickhouse"] }
+# The reqwest major testcontainers' HttpWaitStrategy::with_client takes; the lib stays on 0.12 for scalo.
+testcontainers-reqwest = { package = "reqwest", version = ">=0.13.4, <0.14", default-features = false }
 
 # Kafka producer for e2e tests (test message injection)
 rdkafka = { version = ">=0.39.0, <0.40", features = ["dynamic-linking"] }
