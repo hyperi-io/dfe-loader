@@ -153,6 +153,9 @@ routing:
   dlq:
     enabled: true
     topic_suffix: ".dlq"
+    # How long a flush or shutdown waits for Kafka DLQ acks before counting the
+    # rest lost. Unset uses scalo's default (5000).
+    # kafka_send_timeout_ms: 5000
 
 buffer:
   flush_bytes: 1048576    # 1MB
