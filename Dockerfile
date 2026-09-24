@@ -41,7 +41,7 @@ USER appuser
 
 EXPOSE 9090
 # Conditional listeners, not EXPOSEd -- publish explicitly when enabled:
-#   50051/tcp push -- when config.transport is "grpc"
+#   6000/tcp push -- when config.transport is "grpc"
 
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
     CMD curl -sf http://localhost:9090/livez > /dev/null || exit 1

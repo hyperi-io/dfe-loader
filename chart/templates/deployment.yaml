@@ -50,7 +50,7 @@ spec:
               protocol: TCP
             {{- if eq (toString (.Values.config).transport) "grpc" }}
             - name: push
-              containerPort: 50051
+              containerPort: 6000
               protocol: TCP
             {{- end }}
           env:

@@ -584,7 +584,7 @@ impl Config {
             image_registry,
             // The Push listener binds only on the grpc transport.
             extra_ports: vec![
-                PortContract::tcp("push", 50051)
+                PortContract::tcp("push", 6000)
                     .when_equals("config.transport", TRANSPORT_GRPC)
                     .bound_from("grpc.listen"),
             ],
@@ -743,7 +743,7 @@ mod tests {
         let mut config = Config::default();
         config.transport = TRANSPORT_GRPC.to_string();
         config.kafka.brokers = vec![];
-        config.grpc.listen = Some("0.0.0.0:50051".to_string());
+        config.grpc.listen = Some("0.0.0.0:6000".to_string());
         assert!(config.is_direct());
         config
             .validate()
