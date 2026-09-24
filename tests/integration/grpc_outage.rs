@@ -57,7 +57,10 @@ const REJECTED: u64 = 30;
 const DLQ_DOWN: Duration = Duration::from_secs(10);
 
 /// `SIGXFSZ` on Linux: raised on a write past `RLIMIT_FSIZE`, fatal unless handled.
-const SIGXFSZ: i32 = 25;
+pub(super) const SIGXFSZ: i32 = 25;
+
+/// Records pushed that name an empty table, which routing sends to the DLQ.
+const UNROUTABLE: u64 = 30;
 
 /// Pending-schema caps one Push overflows on its own.
 const PENDING_PER_TABLE: usize = 20;
@@ -218,7 +221,7 @@ async fn landed_ids(clickhouse: &str, table: &str) -> BTreeSet<u64> {
 }
 
 /// Wait until every id in `want` has landed, or the budget runs out.
-async fn wait_landed(
+pub(super) async fn wait_landed(
     clickhouse: &str,
     table: &str,
     want: &BTreeSet<u64>,
@@ -235,7 +238,7 @@ async fn wait_landed(
 }
 
 /// The `ClickHouse` container's HTTP address.
-async fn clickhouse_address(infra: &TestInfrastructure) -> String {
+pub(super) async fn clickhouse_address(infra: &TestInfrastructure) -> String {
     let container = infra.clickhouse.as_ref().expect("ClickHouse container");
     let http_port = container
         .get_host_port_ipv4(8123)
@@ -255,7 +258,7 @@ async fn clickhouse_address(infra: &TestInfrastructure) -> String {
 }
 
 /// A query client that talks to `ClickHouse` directly, never through a proxy.
-fn query_client(clickhouse: &str) -> ClickHouseQueryClient {
+pub(super) fn query_client(clickhouse: &str) -> ClickHouseQueryClient {
     ClickHouseQueryClient::new(&ClickHouseConfig {
         hosts: vec![clickhouse.to_string()],
         transport: Transport::Http,
@@ -286,6 +289,15 @@ fn grpc_loader(listen_port: u16, clickhouse: String, table: &str) -> Config {
     config.schema.cache_ttl_secs = 3600;
     config.schema.pre_warm_retry_secs = 10;
     config
+}
+
+/// Send the loader's dead letters to a file DLQ under `dir`, and nowhere else.
+pub(super) fn with_file_dlq(config: &mut Config, dir: &Path) {
+    config.routing.dlq.enabled = true;
+    config.routing.dlq.mode = "file_only".to_string();
+    config.routing.dlq.file_enabled = true;
+    config.routing.dlq.file_path = dir.display().to_string();
+    config.routing.dlq.kafka_enabled = false;
 }
 
 /// Run the orchestrator and connect a gRPC client to its listener.
@@ -340,7 +352,7 @@ fn decode_base64(text: &str) -> Option<Vec<u8>> {
 }
 
 /// Every id the file DLQ under `dir` has written, skipping any torn line.
-fn dead_lettered_ids(dir: &Path) -> BTreeSet<u64> {
+pub(super) fn dead_lettered_ids(dir: &Path) -> BTreeSet<u64> {
     fn walk(dir: &Path, ids: &mut BTreeSet<u64>) {
         let Ok(entries) = std::fs::read_dir(dir) else {
             return;
@@ -370,7 +382,11 @@ fn dead_lettered_ids(dir: &Path) -> BTreeSet<u64> {
 }
 
 /// Wait until the DLQ holds every id in `want`, or the budget runs out.
-async fn wait_dead_lettered(dir: &Path, want: &BTreeSet<u64>, budget: Duration) -> BTreeSet<u64> {
+pub(super) async fn wait_dead_lettered(
+    dir: &Path,
+    want: &BTreeSet<u64>,
+    budget: Duration,
+) -> BTreeSet<u64> {
     let deadline = tokio::time::Instant::now() + budget;
     loop {
         let ids = dead_lettered_ids(dir);
@@ -382,7 +398,7 @@ async fn wait_dead_lettered(dir: &Path, want: &BTreeSet<u64>, budget: Duration) 
 }
 
 /// This process's soft `RLIMIT_FSIZE`, as `prlimit` spells it.
-fn file_size_soft_limit() -> String {
+pub(super) fn file_size_soft_limit() -> String {
     let limits = std::fs::read_to_string("/proc/self/limits").expect("read /proc/self/limits");
     limits
         .lines()
@@ -393,7 +409,7 @@ fn file_size_soft_limit() -> String {
 }
 
 /// Set this process's soft `RLIMIT_FSIZE`; a write past it fails with `EFBIG`.
-fn set_file_size_soft_limit(soft: &str) {
+pub(super) fn set_file_size_soft_limit(soft: &str) {
     let status = std::process::Command::new("prlimit")
         .arg("--pid")
         .arg(std::process::id().to_string())
@@ -518,11 +534,7 @@ async fn no_rejected_row_is_lost_while_the_dlq_refuses_writes() {
     // JSONEachRow classifies by the server's code, and 469 VIOLATED_CONSTRAINT
     // is a permanent rejection there.
     config.clickhouse.insert_format = InsertFormat::JsonEachRow;
-    config.routing.dlq.enabled = true;
-    config.routing.dlq.mode = "file_only".to_string();
-    config.routing.dlq.file_enabled = true;
-    config.routing.dlq.file_path = dlq_dir.path().display().to_string();
-    config.routing.dlq.kafka_enabled = false;
+    with_file_dlq(&mut config, dlq_dir.path());
     let (shutdown, loader, client) = start_loader(config, listen_port).await;
     wait_for_loader(&client, &clickhouse, &table).await;
 
@@ -637,5 +649,65 @@ async fn no_record_waiting_on_its_schema_is_lost_while_clickhouse_is_down() {
         "intake never paused: the listener took {} of {PENDING_PUSHED} records with the \
          pending-schema buffer full and refused {refused} pushes",
         pending.len()
+    );
+}
+
+/// A record naming an empty table fails processing, so only the DLQ can take
+/// it -- the same hand-over as a parse error or a pre-route reject.
+///
+/// Needs process-per-test (nextest): the file size limit is process-wide.
+#[tokio::test]
+async fn no_unroutable_record_is_lost_while_the_dlq_refuses_writes() {
+    let infra = TestInfrastructure::new(test_name!(), true, false).await;
+    let clickhouse = clickhouse_address(&infra).await;
+    let direct = query_client(&clickhouse);
+
+    let table = unique_table_name("grpc_unroutable");
+    direct
+        .execute(&format!(
+            "CREATE TABLE default.{table} (id UInt64) ENGINE = MergeTree() ORDER BY id"
+        ))
+        .await
+        .expect("create table");
+
+    let dlq_dir = tempfile::tempdir().expect("DLQ spool directory");
+    let listen_port = random_port();
+    let mut config = grpc_loader(listen_port, clickhouse.clone(), &table);
+    with_file_dlq(&mut config, dlq_dir.path());
+    let (shutdown, loader, client) = start_loader(config, listen_port).await;
+    wait_for_loader(&client, &clickhouse, &table).await;
+
+    let _xfsz = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::from_raw(SIGXFSZ))
+        .expect("handle SIGXFSZ");
+    let unlimited = file_size_soft_limit();
+    set_file_size_soft_limit("0");
+
+    let until = tokio::time::Instant::now() + Duration::from_secs(60);
+    let (unroutable, _) = push_ids(&client, 1..UNROUTABLE + 1, until, |id| {
+        format!(r#"{{"_source":"","id":{id}}}"#)
+    })
+    .await;
+    tokio::time::sleep(DLQ_DOWN).await;
+    set_file_size_soft_limit(&unlimited);
+
+    let dead_lettered = wait_dead_lettered(dlq_dir.path(), &unroutable, LANDING_BUDGET).await;
+
+    shutdown.cancel();
+    let _ = tokio::time::timeout(Duration::from_secs(30), loader).await;
+    let _ = direct
+        .execute(&format!("DROP TABLE IF EXISTS default.{table}"))
+        .await;
+
+    let lost: Vec<u64> = unroutable.difference(&dead_lettered).copied().collect();
+    assert!(
+        lost.is_empty(),
+        "{} of {} unroutable records never reached the DLQ: {lost:?}",
+        lost.len(),
+        unroutable.len()
+    );
+    assert_eq!(
+        unroutable.len() as u64,
+        UNROUTABLE,
+        "the listener refused unroutable records it had room to queue"
     );
 }

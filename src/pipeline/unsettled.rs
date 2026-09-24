@@ -1,14 +1,15 @@
 // SPDX-License-Identifier: BUSL-1.1
 // Copyright (c) 2026 HYPERI PTY LIMITED
 
-//! Rows held on a transport that cannot re-deliver, until something takes them.
+//! Rows the loader could not place yet, held until something takes them.
 //!
 //! A gRPC Push is answered once its record is queued, so a row the loader
-//! cannot place exists nowhere else. Two kinds wait here while intake is
+//! cannot place exists nowhere else. Two kinds wait here while gRPC intake is
 //! paused: batches whose insert failed, which go back to `ClickHouse`, and dead
 //! letters `ClickHouse` will never take, which go back to the DLQ. Both are
 //! retried on scalo's jittered exponential schedule until they land. Kafka
-//! never holds either: withheld offsets re-deliver.
+//! never holds a batch, because withheld offsets re-deliver; it holds only dead
+//! letters the DLQ refused, and their offsets keep the commit below them.
 
 use std::time::Duration;
 
@@ -17,7 +18,7 @@ use scalo::dlq::DlqEntry;
 use scalo::sink_stack::SinkStackConfig;
 use tokio::time::Instant;
 
-use crate::buffer::FlushBatch;
+use crate::buffer::{FlushBatch, KafkaOffset};
 
 /// The delay schedule `ExponentialBuilder` produces.
 type Schedule = <ExponentialBuilder as BackoffBuilder>::Backoff;
@@ -83,6 +84,27 @@ impl Unsettled {
     /// Whether nothing is held, which is when intake may run.
     pub(crate) fn is_empty(&self) -> bool {
         self.batches.is_empty() && self.dead_letters.is_empty()
+    }
+
+    /// Whether dead letters are held, so the DLQ refused the last attempt.
+    pub(crate) fn holds_dead_letters(&self) -> bool {
+        !self.dead_letters.is_empty()
+    }
+
+    /// The Kafka offset of every held dead letter that came from Kafka: a
+    /// commit must stop below each one until the DLQ takes it.
+    pub(crate) fn dead_letter_offsets(&self) -> Vec<KafkaOffset> {
+        self.dead_letters
+            .iter()
+            .filter_map(|entry| {
+                let source = entry.source.as_ref()?;
+                Some(KafkaOffset::new(
+                    source.topic.as_deref()?,
+                    source.partition?,
+                    source.offset?,
+                ))
+            })
+            .collect()
     }
 
     /// Rows across every held batch and dead letter.
@@ -208,6 +230,28 @@ mod tests {
         tokio::time::timeout(Duration::from_millis(200), held.due())
             .await
             .expect("a held dead letter was never retried");
+    }
+
+    #[test]
+    fn a_held_dead_letter_from_kafka_names_the_offset_a_commit_stops_below() {
+        let mut held = Unsettled::new(Duration::from_secs(5));
+        assert!(!held.holds_dead_letters());
+        held.hold_dead_letters(vec![
+            dead_letter(b"{}").with_source(scalo::dlq::DlqSource::kafka("t", 2, 41)),
+            // An inbound-filter reject carries no source and names no offset.
+            dead_letter(b"{}"),
+        ]);
+        assert!(held.holds_dead_letters());
+        let offsets: Vec<(String, i32, i64)> = held
+            .dead_letter_offsets()
+            .into_iter()
+            .map(|o| (o.topic.to_string(), o.partition, o.offset))
+            .collect();
+        assert_eq!(offsets, vec![("t".to_string(), 2, 41)]);
+
+        let _ = held.take();
+        assert!(held.dead_letter_offsets().is_empty());
+        assert!(!held.holds_dead_letters());
     }
 
     #[test]

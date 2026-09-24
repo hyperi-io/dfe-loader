@@ -4,11 +4,10 @@
 //! Sequential batch coordinator.
 //!
 //! Applies results from the parallel processing phase to mutable state:
-//! buffer push, mark_pending, stats, DLQ routing. Called after
+//! buffer push, mark_pending, stats, dead letters. Called after
 //! `super::processor::MessageProcessor` completes and its borrows are released.
 
-use tokio::sync::mpsc;
-use tracing::{debug, warn};
+use tracing::debug;
 
 use scalo::dlq::{DlqEntry, DlqSource};
 use scalo::memory::MemoryGuard;
@@ -36,17 +35,28 @@ pub(crate) fn record_dlq_routed(action: &str, reason: &str, resource: &str) {
         .emit();
 }
 
+/// The DLQ entry for a message only the DLQ can take, naming where it came from.
+pub(crate) fn dead_letter(msg: &KafkaMessage, reason: impl Into<String>) -> DlqEntry {
+    DlqEntry::new("loader", reason, msg.payload.clone()).with_source(DlqSource::kafka(
+        &*msg.topic,
+        msg.partition,
+        msg.offset,
+    ))
+}
+
 /// Counters returned from `apply_results` for the orchestrator to update stats.
 #[derive(Debug, Default)]
 pub struct BatchOutcome {
     pub processed: u64,
     pub errors: u64,
-    pub dlq: u64,
     /// Messages routed into the pending-schema buffer (awaiting resolution).
     pub pending: u64,
     /// Tables seen for the first time that need a resolution request kicked
     /// off by the orchestrator.
     pub needs_resolution: Vec<String>,
+    /// Messages only the DLQ can take, for the orchestrator to hand over and
+    /// hold until it does.
+    pub dead_letters: Vec<DlqEntry>,
 }
 
 /// Applies parallel processing results to mutable state.
@@ -60,8 +70,6 @@ pub(crate) struct BatchCoordinator<'a> {
     pub field_mapping_cache: &'a mut Option<FieldMappingCache>,
     pub computed_column_cache: &'a mut ComputedColumnCache,
     pub metrics: &'a Option<Metrics>,
-    pub dlq_tx: &'a mpsc::Sender<DlqEntry>,
-    pub dlq_enabled: bool,
     pub memory_guard: &'a MemoryGuard,
     pub pending_schema: &'a mut PendingSchemaBuffer,
 }
@@ -70,7 +78,7 @@ impl BatchCoordinator<'_> {
     /// Apply parallel processing results sequentially.
     ///
     /// For each `Ok(processed)`: ensure cache entry, mark_pending, buffer push.
-    /// For each `Err(e)`: DLQ routing, memory release.
+    /// For each `Err(e)`: a dead letter in the outcome, memory release.
     ///
     /// Returns counters for the orchestrator to update its own stats.
     pub fn apply_results(
@@ -142,71 +150,30 @@ impl BatchCoordinator<'_> {
                             outcome.needs_resolution.push(table);
                         }
                         Err(PendingOverflow::PerTable(t)) => {
-                            // Per-table cap hit — this message overflows to DLQ.
-                            // Memory is released (it won't be flushed). Other
-                            // buffered messages for the table stay put.
-                            outcome.dlq += 1;
+                            // Per-table cap hit: this message overflows to the
+                            // DLQ. Other buffered messages for the table stay put.
                             if let Some(m) = self.metrics {
-                                m.record_dlq();
                                 m.record_pending_schema_overflow();
-                            }
-                            if self.dlq_enabled {
-                                let entry =
-                                    DlqEntry::new(
-                                        "loader",
-                                        format!("pending_schema_per_table_overflow table={t}"),
-                                        msg.payload.clone(),
-                                    )
-                                    .with_source(
-                                        DlqSource::kafka(&*msg.topic, msg.partition, msg.offset),
-                                    );
-                                let _ = self.dlq_tx.try_send(entry);
                             }
                             record_dlq_routed(
                                 "pending_schema_overflow",
                                 &format!("per-table cap exceeded for {t}"),
                                 &msg.location(),
                             );
+                            outcome.dead_letters.push(dead_letter(
+                                msg,
+                                format!("pending_schema_per_table_overflow table={t}"),
+                            ));
                             self.memory_guard.release(msg.payload.len() as u64);
                         }
                     }
                 }
                 Err(e) => {
                     outcome.errors += 1;
-                    if let Some(m) = self.metrics {
-                        m.record_dlq();
-                    }
-
-                    if self.dlq_enabled {
-                        let entry = DlqEntry::new("loader", e.to_string(), msg.payload.clone())
-                            .with_source(DlqSource::kafka(&*msg.topic, msg.partition, msg.offset));
-
-                        match self.dlq_tx.try_send(entry) {
-                            Ok(()) => {
-                                outcome.dlq += 1;
-                                record_dlq_routed("processing", &e.to_string(), &msg.location());
-                                debug!(error = %e, "Message queued for DLQ");
-                            }
-                            Err(mpsc::error::TrySendError::Full(_)) => {
-                                static DLQ_FULL_TS: std::sync::atomic::AtomicU64 =
-                                    std::sync::atomic::AtomicU64::new(0);
-                                if scalo::logger::log_debounced(&DLQ_FULL_TS, 5000) {
-                                    warn!(error = %e, "DLQ channel full, messages dropped (max 1 per 5s)");
-                                }
-                            }
-                            Err(mpsc::error::TrySendError::Closed(_)) => {
-                                static DLQ_CLOSED_TS: std::sync::atomic::AtomicU64 =
-                                    std::sync::atomic::AtomicU64::new(0);
-                                if scalo::logger::log_debounced(&DLQ_CLOSED_TS, 5000) {
-                                    warn!(error = %e, "DLQ channel closed (max 1 per 5s)");
-                                }
-                            }
-                        }
-                    } else {
-                        warn!(error = %e, "Message processing failed, DLQ disabled");
-                    }
-
-                    // Release memory for failed messages (they won't be flushed)
+                    let reason = e.to_string();
+                    record_dlq_routed("processing", &reason, &msg.location());
+                    debug!(error = %e, "Message queued for DLQ");
+                    outcome.dead_letters.push(dead_letter(msg, reason));
                     self.memory_guard.release(msg.payload.len() as u64);
                 }
             }
@@ -226,9 +193,6 @@ impl BatchCoordinator<'_> {
 mod tests {
     use std::sync::Arc;
 
-    use tokio::sync::mpsc;
-
-    use scalo::dlq::DlqEntry;
     use scalo::memory::{MemoryGuard, MemoryGuardConfig};
 
     use crate::buffer::{BufferManager, KafkaOffset};
@@ -287,8 +251,6 @@ mod tests {
         field_mapping_cache: &'a mut Option<crate::transform::FieldMappingCache>,
         computed_column_cache: &'a mut ComputedColumnCache,
         metrics: &'a Option<crate::metrics::Metrics>,
-        dlq_tx: &'a mpsc::Sender<DlqEntry>,
-        dlq_enabled: bool,
         memory_guard: &'a MemoryGuard,
         pending_schema: &'a mut crate::pipeline::pending_schema::PendingSchemaBuffer,
     ) -> BatchCoordinator<'a> {
@@ -298,8 +260,6 @@ mod tests {
             field_mapping_cache,
             computed_column_cache,
             metrics,
-            dlq_tx,
-            dlq_enabled,
             memory_guard,
             pending_schema,
         }
@@ -360,7 +320,6 @@ mod tests {
 
     #[test]
     fn dlq_routed_event_names_the_record_location() {
-        let (dlq_tx, _dlq_rx) = mpsc::channel(16);
         let guard = MemoryGuard::new(MemoryGuardConfig {
             limit_bytes: 1_073_741_824,
             ..Default::default()
@@ -376,8 +335,6 @@ mod tests {
             &mut field_mapping_cache,
             &mut computed_column_cache,
             &None,
-            &dlq_tx,
-            true,
             &guard,
             &mut pending,
         );
@@ -415,16 +372,15 @@ mod tests {
         let outcome = BatchOutcome::default();
         assert_eq!(outcome.processed, 0);
         assert_eq!(outcome.errors, 0);
-        assert_eq!(outcome.dlq, 0);
         assert_eq!(outcome.pending, 0);
         assert!(outcome.needs_resolution.is_empty());
+        assert!(outcome.dead_letters.is_empty());
     }
 
     // ---- BatchCoordinator tests ----
 
     #[test]
     fn apply_results_empty_batch() {
-        let (dlq_tx, _dlq_rx) = mpsc::channel(16);
         let guard = MemoryGuard::new(MemoryGuardConfig {
             limit_bytes: 1_073_741_824,
             ..Default::default()
@@ -441,8 +397,6 @@ mod tests {
             &mut field_mapping_cache,
             &mut computed_column_cache,
             &None,
-            &dlq_tx,
-            true,
             &guard,
             &mut pending,
         );
@@ -453,12 +407,11 @@ mod tests {
         let outcome = coord.apply_results(results, &messages);
         assert_eq!(outcome.processed, 0);
         assert_eq!(outcome.errors, 0);
-        assert_eq!(outcome.dlq, 0);
+        assert!(outcome.dead_letters.is_empty());
     }
 
     #[test]
     fn apply_results_all_success() {
-        let (dlq_tx, _dlq_rx) = mpsc::channel(16);
         let guard = MemoryGuard::new(MemoryGuardConfig {
             limit_bytes: 1_073_741_824,
             ..Default::default()
@@ -475,8 +428,6 @@ mod tests {
             &mut field_mapping_cache,
             &mut computed_column_cache,
             &None,
-            &dlq_tx,
-            true,
             &guard,
             &mut pending,
         );
@@ -495,12 +446,11 @@ mod tests {
         let outcome = coord.apply_results(results, &messages);
         assert_eq!(outcome.processed, 3);
         assert_eq!(outcome.errors, 0);
-        assert_eq!(outcome.dlq, 0);
+        assert!(outcome.dead_letters.is_empty());
     }
 
     #[test]
-    fn apply_results_all_errors_dlq_enabled() {
-        let (dlq_tx, mut dlq_rx) = mpsc::channel(16);
+    fn apply_results_all_errors_become_dead_letters() {
         let guard = MemoryGuard::new(MemoryGuardConfig {
             limit_bytes: 1_073_741_824,
             ..Default::default()
@@ -517,8 +467,6 @@ mod tests {
             &mut field_mapping_cache,
             &mut computed_column_cache,
             &None,
-            &dlq_tx,
-            true,
             &guard,
             &mut pending,
         );
@@ -535,57 +483,24 @@ mod tests {
         let outcome = coord.apply_results(results, &messages);
         assert_eq!(outcome.processed, 0);
         assert_eq!(outcome.errors, 2);
-        assert_eq!(outcome.dlq, 2);
+        assert_eq!(outcome.dead_letters.len(), 2);
 
-        // Verify DLQ entries were sent
-        let entry1 = dlq_rx.try_recv().expect("DLQ entry 1");
-        assert_eq!(entry1.service, "loader");
-        assert!(entry1.reason.contains("parse failed"));
+        let first = &outcome.dead_letters[0];
+        assert_eq!(first.service, "loader");
+        assert!(first.reason.contains("parse failed"));
+        assert_eq!(first.payload, b"bad1");
+        let source = first
+            .source
+            .as_ref()
+            .expect("a dead letter names its source");
+        assert_eq!(source.topic.as_deref(), Some("topic"));
+        assert_eq!((source.partition, source.offset), (Some(0), Some(10)));
 
-        let entry2 = dlq_rx.try_recv().expect("DLQ entry 2");
-        assert!(entry2.reason.contains("missing field"));
-    }
-
-    #[test]
-    fn apply_results_errors_dlq_disabled() {
-        let (dlq_tx, mut dlq_rx) = mpsc::channel(16);
-        let guard = MemoryGuard::new(MemoryGuardConfig {
-            limit_bytes: 1_073_741_824,
-            ..Default::default()
-        });
-        let mut buffer_manager = BufferManager::new(&BufferConfig::default());
-        let mut capture_overrides = CaptureOverrides::new(&MetadataConfig::default());
-        let mut field_mapping_cache = None;
-        let mut computed_column_cache = ComputedColumnCache::new(ComputedColumnsConfig::default());
-        let mut pending = make_pending();
-
-        let mut coord = make_coordinator(
-            &mut buffer_manager,
-            &mut capture_overrides,
-            &mut field_mapping_cache,
-            &mut computed_column_cache,
-            &None,
-            &dlq_tx,
-            false, // DLQ disabled
-            &guard,
-            &mut pending,
-        );
-
-        let messages = vec![make_kafka_message(b"bad", "topic", 0, 1)];
-        let results: Vec<crate::Result<ProcessedMessage>> =
-            vec![Err(crate::Error::Json("boom".to_string()))];
-
-        let outcome = coord.apply_results(results, &messages);
-        assert_eq!(outcome.errors, 1);
-        assert_eq!(outcome.dlq, 0); // Nothing sent to DLQ
-
-        // Channel should be empty
-        assert!(dlq_rx.try_recv().is_err());
+        assert!(outcome.dead_letters[1].reason.contains("missing field"));
     }
 
     #[test]
     fn apply_results_mixed_success_and_failure() {
-        let (dlq_tx, mut dlq_rx) = mpsc::channel(16);
         let guard = MemoryGuard::new(MemoryGuardConfig {
             limit_bytes: 1_073_741_824,
             ..Default::default()
@@ -602,8 +517,6 @@ mod tests {
             &mut field_mapping_cache,
             &mut computed_column_cache,
             &None,
-            &dlq_tx,
-            true,
             &guard,
             &mut pending,
         );
@@ -626,18 +539,17 @@ mod tests {
         let outcome = coord.apply_results(results, &messages);
         assert_eq!(outcome.processed, 3);
         assert_eq!(outcome.errors, 2);
-        assert_eq!(outcome.dlq, 2);
-
-        // Verify exactly 2 DLQ entries
-        assert!(dlq_rx.try_recv().is_ok());
-        assert!(dlq_rx.try_recv().is_ok());
-        assert!(dlq_rx.try_recv().is_err()); // No more
+        let offsets: Vec<Option<i64>> = outcome
+            .dead_letters
+            .iter()
+            .map(|e| e.source.as_ref().and_then(|s| s.offset))
+            .collect();
+        assert_eq!(offsets, vec![Some(2), Some(4)]);
     }
 
     #[test]
-    fn apply_results_dlq_channel_full() {
-        // Channel capacity 1, send 3 errors — first succeeds, rest drop
-        let (dlq_tx, _dlq_rx) = mpsc::channel(1);
+    fn apply_results_keeps_every_failed_message_however_many_fail() {
+        // More failures than a bounded hand-off could hold, and none may drop.
         let guard = MemoryGuard::new(MemoryGuardConfig {
             limit_bytes: 1_073_741_824,
             ..Default::default()
@@ -654,32 +566,24 @@ mod tests {
             &mut field_mapping_cache,
             &mut computed_column_cache,
             &None,
-            &dlq_tx,
-            true,
             &guard,
             &mut pending,
         );
 
-        let messages = vec![
-            make_kafka_message(b"e1", "topic", 0, 1),
-            make_kafka_message(b"e2", "topic", 0, 2),
-            make_kafka_message(b"e3", "topic", 0, 3),
-        ];
-        let results: Vec<crate::Result<ProcessedMessage>> = vec![
-            Err(crate::Error::Json("err1".to_string())),
-            Err(crate::Error::Json("err2".to_string())),
-            Err(crate::Error::Json("err3".to_string())),
-        ];
+        let messages: Vec<KafkaMessage> = (0..2_000)
+            .map(|n| make_kafka_message(b"e", "topic", 0, n))
+            .collect();
+        let results: Vec<crate::Result<ProcessedMessage>> = (0..2_000)
+            .map(|n| Err(crate::Error::Json(format!("err{n}"))))
+            .collect();
 
         let outcome = coord.apply_results(results, &messages);
-        assert_eq!(outcome.errors, 3);
-        // Only 1 fits in the channel, remaining 2 are dropped
-        assert_eq!(outcome.dlq, 1);
+        assert_eq!(outcome.errors, 2_000);
+        assert_eq!(outcome.dead_letters.len(), 2_000);
     }
 
     #[test]
     fn apply_results_memory_released_on_error() {
-        let (dlq_tx, _dlq_rx) = mpsc::channel(16);
         let guard = MemoryGuard::new(MemoryGuardConfig {
             limit_bytes: 1_073_741_824,
             ..Default::default()
@@ -700,8 +604,6 @@ mod tests {
             &mut field_mapping_cache,
             &mut computed_column_cache,
             &None,
-            &dlq_tx,
-            false,
             &guard,
             &mut pending,
         );
@@ -721,7 +623,6 @@ mod tests {
 
     #[test]
     fn apply_results_refs_works_like_apply_results() {
-        let (dlq_tx, _dlq_rx) = mpsc::channel(16);
         let guard = MemoryGuard::new(MemoryGuardConfig {
             limit_bytes: 1_073_741_824,
             ..Default::default()
@@ -738,8 +639,6 @@ mod tests {
             &mut field_mapping_cache,
             &mut computed_column_cache,
             &None,
-            &dlq_tx,
-            true,
             &guard,
             &mut pending,
         );
@@ -755,13 +654,12 @@ mod tests {
         let outcome = coord.apply_results_refs(results, &messages);
         assert_eq!(outcome.processed, 1);
         assert_eq!(outcome.errors, 1);
-        assert_eq!(outcome.dlq, 1);
+        assert_eq!(outcome.dead_letters.len(), 1);
     }
 
     #[test]
     fn apply_results_more_results_than_messages_ignores_extras() {
         // zip() stops at the shorter iterator — excess results are ignored
-        let (dlq_tx, _dlq_rx) = mpsc::channel(16);
         let guard = MemoryGuard::new(MemoryGuardConfig {
             limit_bytes: 1_073_741_824,
             ..Default::default()
@@ -778,8 +676,6 @@ mod tests {
             &mut field_mapping_cache,
             &mut computed_column_cache,
             &None,
-            &dlq_tx,
-            true,
             &guard,
             &mut pending,
         );
@@ -797,7 +693,6 @@ mod tests {
 
     #[test]
     fn apply_results_more_messages_than_results_ignores_extras() {
-        let (dlq_tx, _dlq_rx) = mpsc::channel(16);
         let guard = MemoryGuard::new(MemoryGuardConfig {
             limit_bytes: 1_073_741_824,
             ..Default::default()
@@ -814,8 +709,6 @@ mod tests {
             &mut field_mapping_cache,
             &mut computed_column_cache,
             &None,
-            &dlq_tx,
-            true,
             &guard,
             &mut pending,
         );
@@ -838,7 +731,6 @@ mod tests {
         let mut fmc: Option<crate::transform::FieldMappingCache> = None;
         let mut ccc = ComputedColumnCache::new(ComputedColumnsConfig::default());
         let metrics: Option<crate::metrics::Metrics> = None;
-        let (dlq_tx, mut dlq_rx) = mpsc::channel::<DlqEntry>(8);
         let guard = MemoryGuard::new(MemoryGuardConfig {
             limit_bytes: 64 * 1024 * 1024,
             ..Default::default()
@@ -859,8 +751,6 @@ mod tests {
                 &mut fmc,
                 &mut ccc,
                 &metrics,
-                &dlq_tx,
-                true,
                 &guard,
                 &mut pending,
             );
@@ -873,11 +763,10 @@ mod tests {
         };
 
         assert_eq!(outcome.pending, 1);
-        assert_eq!(outcome.dlq, 0);
         assert_eq!(outcome.errors, 0);
         assert_eq!(outcome.needs_resolution, vec!["dfe.t1".to_string()]);
         assert_eq!(pending.len(), 1);
-        assert!(dlq_rx.try_recv().is_err(), "nothing should go to DLQ");
+        assert!(outcome.dead_letters.is_empty(), "nothing should go to DLQ");
     }
 
     #[test]
@@ -887,7 +776,6 @@ mod tests {
         let mut fmc: Option<crate::transform::FieldMappingCache> = None;
         let mut ccc = ComputedColumnCache::new(ComputedColumnsConfig::default());
         let metrics: Option<crate::metrics::Metrics> = None;
-        let (dlq_tx, mut dlq_rx) = mpsc::channel::<DlqEntry>(8);
         let guard = MemoryGuard::new(MemoryGuardConfig {
             limit_bytes: 64 * 1024 * 1024,
             ..Default::default()
@@ -908,8 +796,6 @@ mod tests {
                 &mut fmc,
                 &mut ccc,
                 &metrics,
-                &dlq_tx,
-                true,
                 &guard,
                 &mut pending,
             );
@@ -929,8 +815,9 @@ mod tests {
         };
 
         assert_eq!(outcome.pending, 1, "first fits");
-        assert_eq!(outcome.dlq, 1, "second overflows to DLQ");
-        let entry = dlq_rx.try_recv().expect("overflow DLQ entry");
+        assert_eq!(outcome.dead_letters.len(), 1, "second overflows to DLQ");
+        let entry = &outcome.dead_letters[0];
         assert!(entry.reason.contains("pending_schema"));
+        assert_eq!(entry.source.as_ref().and_then(|s| s.offset), Some(1));
     }
 }
