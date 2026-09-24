@@ -58,6 +58,14 @@ flowchart LR
 6. **K8s native** -- standard gRPC health protocol, Service discovery.
 7. **v1/v2 evolution** -- v1 proto includes mesh-ready fields (unused); v2
    activates them.
+8. **Held, never dropped** -- the ACK means the loader now holds the only copy.
+   When a ClickHouse insert fails the loader keeps the batch, stops pulling
+   from the listener, and inserts it again on scalo's jittered exponential
+   schedule, capped at `buffer.flush_age_secs` before jitter. The listener's
+   queue (`grpc.recv_buffer_size`) fills and Push answers `RESOURCE_EXHAUSTED`,
+   which dfe-receiver holds and re-sends. Intake resumes once the batch lands.
+   A loader stopped while it holds a batch loses that batch: this path keeps
+   no disk copy.
 
 ## Proto evolution: v1 -> v2
 

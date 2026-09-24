@@ -19,6 +19,8 @@ mod dlq;
 mod errors;
 mod field_mapping;
 mod geoip_download_e2e;
+#[cfg(feature = "testcontainers")]
+mod grpc_outage;
 mod helm_contract;
 mod inserter;
 mod kafka;

@@ -1166,6 +1166,7 @@ name = "dfe-loader"
 version = "1.18.2"
 dependencies = [
  "anyhow",
+ "backon",
  "bytes",
  "cel",
  "chrono",

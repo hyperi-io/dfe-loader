@@ -59,6 +59,7 @@ pub struct PipelineStats {
 use super::capture::CaptureOverrides;
 use super::enrichment::EnrichmentPipeline;
 use super::types::{SchemaResolution, TableResolutionResult};
+use super::unsettled::Unsettled;
 
 /// Orchestrates the Kafka → `ClickHouse` pipeline
 pub struct Orchestrator {
@@ -88,6 +89,15 @@ pub struct Orchestrator {
     /// observable "sink dead" signal — the loader's per-table CircuitBreaker is
     /// not wired into the inserter, so we derive the gate from insert outcomes.
     sink_circuit_open: bool,
+    /// Batches a failed insert handed back on a transport with no re-delivery.
+    /// Intake stays paused while any are held.
+    unsettled: Unsettled,
+}
+
+/// A hold whose attempts are never further apart than the flush interval,
+/// before jitter.
+fn unsettled_for(config: &Config) -> Unsettled {
+    Unsettled::new(Duration::from_secs(config.buffer.flush_age_secs.max(1)))
 }
 
 impl Orchestrator {
@@ -98,7 +108,9 @@ impl Orchestrator {
     /// [`with_memory_guard`](Self::with_memory_guard).
     pub fn new(config: Config) -> Self {
         let memory_guard = Arc::new(MemoryGuard::new(memory_guard_config(&config)));
+        let unsettled = unsettled_for(&config);
         Self {
+            unsettled,
             config,
             shared_config: None,
             shutdown: CancellationToken::new(),
@@ -120,7 +132,9 @@ impl Orchestrator {
     /// [`with_memory_guard`](Self::with_memory_guard).
     pub fn with_metrics(config: Config, metrics: Metrics) -> Self {
         let memory_guard = Arc::new(MemoryGuard::new(memory_guard_config(&config)));
+        let unsettled = unsettled_for(&config);
         Self {
+            unsettled,
             config,
             shared_config: None,
             shutdown: CancellationToken::new(),
@@ -667,6 +681,13 @@ impl Orchestrator {
                     }
                 }
 
+                // Held batches go back to ClickHouse on the backoff schedule.
+                () = self.unsettled.due(), if !self.unsettled.is_empty() => {
+                    let held = self.unsettled.take();
+                    let still_buffered = buffer_manager.lowest_pending_offsets();
+                    self.flush_batches_transport(&inserter, &transport, dlq.as_ref(), held, still_buffered).await;
+                }
+
                 // Apply schema resolution results from background resolver.
                 //
                 // Receives TableResolutionResult and applies to all three per-table caches:
@@ -773,7 +794,10 @@ impl Orchestrator {
                 // scales up. The gate is evaluated automatically inside recv, so
                 // recv simply returns an empty batch while paused. We never gate
                 // the outbound ClickHouse drain — gating the sink would deadlock.
-                received = transport.recv(RECV_BATCH_SIZE) => {
+                //
+                // A held batch pauses intake: with nothing pulled, the gRPC
+                // listener's queue fills and Push answers RESOURCE_EXHAUSTED.
+                received = transport.recv(RECV_BATCH_SIZE), if self.unsettled.is_empty() => {
                     // Surface any inbound-filter DLQ entries (no silent drop). The
                     // loader configures no inbound scalo filters, so this is
                     // normally empty, but the contract is honoured regardless.
@@ -1169,8 +1193,9 @@ impl Orchestrator {
         }
 
         // Final flush: `flush_all` empties every buffer, so nothing is left
-        // behind to hold the watermark down.
-        let final_batches = buffer_manager.flush_all();
+        // behind to hold the watermark down. Held batches get one last attempt.
+        let mut final_batches = buffer_manager.flush_all();
+        final_batches.extend(self.unsettled.take());
         if !final_batches.is_empty() {
             info!(batches = final_batches.len(), "Flushing remaining buffers");
             self.flush_batches_transport(
@@ -1181,6 +1206,12 @@ impl Orchestrator {
                 Vec::new(),
             )
             .await;
+        }
+        if !self.unsettled.is_empty() {
+            error!(
+                rows = self.unsettled.rows(),
+                "Stopping with rows ClickHouse has not taken and no upstream copy -- they are lost"
+            );
         }
 
         // Stop schema cache background refresh task.
@@ -1299,6 +1330,10 @@ impl Orchestrator {
         // (default 300s) evicts the pod from the consumer group.
         let dlq_deadline = tokio::time::Instant::now() + DLQ_ROUTE_DEADLINE;
 
+        // Withheld offsets re-deliver only on a transport that commits them;
+        // anywhere else a batch the inserter hands back is the only copy.
+        let redelivers = transport.commits_offsets();
+
         for (((((_, result), offsets), batch_bytes), table), payloads) in results
             .into_iter()
             .zip(per_batch_offsets)
@@ -1306,10 +1341,11 @@ impl Orchestrator {
             .zip(per_batch_tables)
             .zip(per_batch_payloads)
         {
-            // Release tracked memory regardless of insert outcome.
-            // Success: data is in ClickHouse, memory freed.
-            // Failure: offsets withheld, Kafka re-delivers — we'll re-track on re-consume.
-            self.memory_guard.release(batch_bytes);
+            // A held batch keeps its bytes tracked until it lands; any other
+            // outcome leaves the rows in ClickHouse, the DLQ or Kafka.
+            if redelivers || result.unsettled.is_none() {
+                self.memory_guard.release(batch_bytes);
+            }
 
             if result.inserted > 0 {
                 self.stats.rows_inserted += result.inserted as u64;
@@ -1325,18 +1361,40 @@ impl Orchestrator {
                 BatchDisposition::Retry(reason) => {
                     cycle_err += 1;
                     self.stats.errors += 1;
-                    error!(
-                        table = %table,
-                        rows = payloads.len(),
-                        error = %reason,
-                        "Batch insert failed — offsets withheld, messages will re-deliver"
-                    );
                     if let Some(ref m) = self.metrics {
                         m.record_error();
                         // ClickHouse-specific terminal insert error (2.8.10 audit).
                         m.record_clickhouse_insert_error();
                     }
-                    withheld.extend(offsets);
+                    match result.unsettled {
+                        Some(mut batch) if !redelivers => {
+                            warn!(
+                                table = %table,
+                                rows = payloads.len(),
+                                error = %reason,
+                                "Batch insert failed, holding it and pausing intake until it lands"
+                            );
+                            batch.offsets = offsets;
+                            self.unsettled.hold(batch);
+                        }
+                        _ if redelivers => {
+                            error!(
+                                table = %table,
+                                rows = payloads.len(),
+                                error = %reason,
+                                "Batch insert failed — offsets withheld, messages will re-deliver"
+                            );
+                            withheld.extend(offsets);
+                        }
+                        _ => {
+                            error!(
+                                table = %table,
+                                rows = payloads.len(),
+                                error = %reason,
+                                "Batch insert failed with no batch returned to hold, and no upstream copy -- rows lost"
+                            );
+                        }
+                    }
                 }
                 BatchDisposition::Settled if result.failed.is_empty() => {
                     cycle_ok += 1;
@@ -1446,6 +1504,7 @@ impl Orchestrator {
             scaling.set_circuit_open(self.sink_circuit_open);
         }
 
+        self.unsettled.rearm();
         self.stats.batches_flushed += batch_count as u64;
     }
 

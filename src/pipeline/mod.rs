@@ -15,5 +15,6 @@ pub mod orchestrator;
 pub(crate) mod pending_schema;
 pub mod processor;
 pub mod types;
+pub(crate) mod unsettled;
 
 pub use orchestrator::{Orchestrator, PipelineStats};
