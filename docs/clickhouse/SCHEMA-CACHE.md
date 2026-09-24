@@ -73,6 +73,11 @@ an out-of-band `ALTER` no longer wedges the loader until a restart -- the first
 rejected insert clears the stale entry and the retry succeeds against the new
 shape.
 
+`schema.refresh_on_error` (default `true`) switches this recovery. With `false`
+a drift error leaves both the encoder's entry and the loader's cached schema in
+place until they expire, so the retries run against the stale shape. A schema
+fetch that failed is still discarded either way.
+
 ## Where it lives
 
 `src/clickhouse_ext/schema.rs` (`DynamicSchema`, `DynamicSchemaCache`,

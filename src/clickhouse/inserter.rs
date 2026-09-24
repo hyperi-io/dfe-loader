@@ -290,6 +290,9 @@ pub struct Inserter {
     schema_cache: Option<Arc<SchemaCache>>,
     /// Type coercer applied before each insert (`JSONEachRow` path)
     coercer: Option<Arc<Coercer>>,
+    /// Whether a schema-drift insert error drops the cached schema
+    /// (`schema.refresh_on_error`).
+    refresh_on_error: bool,
 }
 
 impl Inserter {
@@ -324,6 +327,7 @@ impl Inserter {
             semaphore,
             schema_cache: None,
             coercer: None,
+            refresh_on_error: true,
         }
     }
 
@@ -346,6 +350,24 @@ impl Inserter {
     pub fn with_schema_cache(mut self, schema_cache: Arc<SchemaCache>) -> Self {
         self.schema_cache = Some(schema_cache);
         self
+    }
+
+    /// Set whether a schema-drift insert error drops the cached schema so the
+    /// retry re-reads it (default `true`).
+    ///
+    /// With `false` both the `RowBinary` encoder's cache and the loader's
+    /// [`SchemaCache`] keep the stale schema until its TTL expires, so the
+    /// retries run against it. A schema fetch that failed is still discarded.
+    pub fn with_refresh_on_error(mut self, enabled: bool) -> Self {
+        self.refresh_on_error = enabled;
+        self
+    }
+
+    /// Drop the loader's cached schema for `table`, so its next reader re-fetches.
+    fn drop_cached_schema(&self, table: &str) {
+        if let Some(cache) = &self.schema_cache {
+            cache.invalidate(table);
+        }
     }
 
     /// Enable schema-driven type coercion before each insert.
@@ -503,7 +525,8 @@ impl Inserter {
                 db,
                 tbl,
                 Arc::clone(&self.dynamic_schema_cache),
-            );
+            )
+            .refresh_on_error(self.refresh_on_error);
 
             let mut write_failed = false;
             for (i, row) in rows.iter().enumerate() {
@@ -532,9 +555,9 @@ impl Inserter {
                         e,
                         crate::clickhouse_ext::DynamicError::SchemaMismatch { .. }
                     ) {
-                        insert.invalidate_schema();
-                        if let Some(cache) = &self.schema_cache {
-                            cache.invalidate(table);
+                        if self.refresh_on_error {
+                            insert.invalidate_schema();
+                            self.drop_cached_schema(table);
                         }
                         last_error =
                             Some(crate::Error::ClickHouse(format!("Schema mismatch: {e}")));
@@ -543,9 +566,9 @@ impl Inserter {
                     }
                     // Check for schema-drift-indicative errors beyond SchemaMismatch
                     if is_schema_drift_error(&e.to_string()) {
-                        insert.invalidate_schema();
-                        if let Some(cache) = &self.schema_cache {
-                            cache.invalidate(table);
+                        if self.refresh_on_error {
+                            insert.invalidate_schema();
+                            self.drop_cached_schema(table);
                         }
                         last_error = Some(crate::Error::ClickHouse(format!(
                             "Schema drift in write: {e}"
@@ -562,9 +585,7 @@ impl Inserter {
                             | crate::clickhouse_ext::DynamicError::EmptySchema { .. }
                     ) {
                         insert.invalidate_schema();
-                        if let Some(cache) = &self.schema_cache {
-                            cache.invalidate(table);
-                        }
+                        self.drop_cached_schema(table);
                         last_error = Some(crate::Error::ClickHouse(format!(
                             "Schema unavailable during write: {e}"
                         )));
@@ -596,7 +617,8 @@ impl Inserter {
                         table = %table,
                         attempt,
                         delay_ms = delay.as_millis(),
-                        "Schema issue during write, re-fetching and retrying"
+                        refresh_on_error = self.refresh_on_error,
+                        "Schema issue during write, retrying"
                     );
                     sleep(delay).await;
                     continue;
@@ -616,8 +638,8 @@ impl Inserter {
                 }
                 Err(crate::clickhouse_ext::DynamicError::SchemaMismatch { .. }) => {
                     // Invalidate loader's schema cache alongside the fork's
-                    if let Some(cache) = &self.schema_cache {
-                        cache.invalidate(table);
+                    if self.refresh_on_error {
+                        self.drop_cached_schema(table);
                     }
                     if attempt < self.max_retries {
                         let delay = self.backoff_delay(attempt);
@@ -625,7 +647,8 @@ impl Inserter {
                             table = %table,
                             attempt,
                             delay_ms = delay.as_millis(),
-                            "Schema mismatch on end(), re-fetching and retrying"
+                            refresh_on_error = self.refresh_on_error,
+                            "Schema mismatch on end(), retrying"
                         );
                         sleep(delay).await;
                         last_error = Some(crate::Error::ClickHouse(
@@ -639,12 +662,12 @@ impl Inserter {
                 }
                 Err(e) => {
                     let message = format!("RowBinary insert: {e}");
-                    // insert.end() consumed the DynamicInsert, so the loader's
-                    // own cache is the only one left to invalidate; the next
-                    // attempt re-fetches through it.
+                    // insert.end() consumed the DynamicInsert, so only the
+                    // loader's cache is dropped here; the retry still reads the
+                    // encoder's cached schema.
                     if is_schema_drift_error(&e.to_string()) {
-                        if let Some(cache) = &self.schema_cache {
-                            cache.invalidate(table);
+                        if self.refresh_on_error {
+                            self.drop_cached_schema(table);
                         }
                         if attempt < self.max_retries {
                             let delay = self.backoff_delay(attempt);
@@ -653,7 +676,8 @@ impl Inserter {
                                 attempt,
                                 error = %e,
                                 delay_ms = delay.as_millis(),
-                                "Schema drift on end(), re-fetching and retrying"
+                                refresh_on_error = self.refresh_on_error,
+                                "Schema drift on end(), retrying"
                             );
                             sleep(delay).await;
                             last_error = Some(crate::Error::ClickHouse(message));

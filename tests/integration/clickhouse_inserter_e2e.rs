@@ -863,6 +863,80 @@ async fn test_inserter_schema_drift_recovery() {
     assert_eq!(count, 6, "3 rows before + 3 rows after ALTER");
 }
 
+/// Land a batch so both schema caches hold `table`, then drop `name` from the
+/// table underneath them. The next `RowBinary` insert names a column the table
+/// no longer has, which the server rejects as schema drift.
+async fn stale_schema_after_a_dropped_column(
+    client: &Arc<ClickHouseQueryClient>,
+    ch: clickhouse::Client,
+    table: &str,
+    refresh_on_error: bool,
+) -> (Inserter, Arc<SchemaCache>) {
+    create_simple_table(client, table).await;
+    let schema_cache = Arc::new(SchemaCache::new(300));
+    let fetched = client
+        .fetch_table_schema(table)
+        .await
+        .expect("fetch schema");
+    schema_cache.insert(table.to_string(), fetched);
+
+    let inserter = Inserter::new(Arc::clone(client), ch, fast_fail_config())
+        .with_insert_format(InsertFormat::RowBinary)
+        .with_schema_cache(Arc::clone(&schema_cache))
+        .with_refresh_on_error(refresh_on_error);
+    let first = inserter
+        .insert_rows(table, &simple_rows(3), &[])
+        .await
+        .expect("insert against the original schema");
+    assert_eq!(first, 3);
+
+    client
+        .execute(&format!("ALTER TABLE {table} DROP COLUMN name"))
+        .await
+        .expect("drop column");
+    (inserter, schema_cache)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_drift_error_drops_the_cached_schema_when_refresh_on_error_is_on() {
+    let (_infra, client, ch) = spin_up(test_name!()).await;
+    let table = unique_table_name("tc_refresh_on");
+    let (inserter, schema_cache) =
+        stale_schema_after_a_dropped_column(&client, ch, &table, true).await;
+
+    // The setting decides the cached schema, so that is all this asserts.
+    let _ = inserter.insert_rows(&table, &simple_rows(2), &[]).await;
+
+    assert!(
+        schema_cache.get(&table).is_none(),
+        "the drift error must drop the loader's cached schema"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_drift_error_keeps_the_cached_schema_when_refresh_on_error_is_off() {
+    let (_infra, client, ch) = spin_up(test_name!()).await;
+    let table = unique_table_name("tc_refresh_off");
+    let (inserter, schema_cache) =
+        stale_schema_after_a_dropped_column(&client, ch, &table, false).await;
+
+    let landed = inserter.insert_rows(&table, &simple_rows(2), &[]).await;
+
+    assert!(
+        landed.is_err(),
+        "every retry must run against the stale schema: {landed:?}"
+    );
+    let kept = schema_cache
+        .get(&table)
+        .expect("the loader's cached schema must survive the drift error");
+    assert!(
+        kept.columns.iter().any(|c| c.name == "name"),
+        "the kept schema is the one from before the drop"
+    );
+    let count = client.query_count(&table, None).await.expect("count");
+    assert_eq!(count, 3, "nothing lands after the drop");
+}
+
 // ============================================================================
 // Inserter: empty batch is a no-op
 // ============================================================================

@@ -111,6 +111,8 @@ Precedence, highest wins: **DDL tag > per-table > global**.
 
 Insert retry, batch salvage and insert concurrency are not settings. Every build retries a transient insert failure up to 5 times with jittered backoff, binary-splits a batch with a data error down to the bad rows, and runs at most 8 inserts at once. A batch that still fails is held and retried as described in [OPERATIONS.md](OPERATIONS.md).
 
+`schema.refresh_on_error` (default `true`) decides whether a RowBinary insert that fails on schema drift drops the table's cached schema. With `false` the stale schema is kept until it expires -- see [clickhouse/SCHEMA-CACHE.md](clickhouse/SCHEMA-CACHE.md#mismatch-recovery).
+
 ## Hot-reload
 
 Config hot-reloads on change. Some fields are safe to apply live; some require a

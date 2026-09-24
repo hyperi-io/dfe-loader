@@ -262,7 +262,8 @@ impl Orchestrator {
             ch_client,
             InserterConfig::default(),
         )
-        .with_insert_format(insert_format);
+        .with_insert_format(insert_format)
+        .with_refresh_on_error(self.config.schema.refresh_on_error);
 
         // DLQ (unified scalo module — cascade: Kafka primary, file fallback)
         let dlq_config = self.config.routing.dlq.to_scalo_config();
