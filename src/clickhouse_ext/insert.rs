@@ -65,6 +65,8 @@ pub struct DynamicInsert {
     /// The active sink (HTTP `FORMAT RowBinary`), created lazily on first write.
     sink: Option<clickhouse::insert_formatted::BufInsertFormatted>,
     rows_written: u64,
+    /// Whether a schema-mismatch error at `end` drops the cached schema.
+    refresh_on_error: bool,
 }
 
 impl DynamicInsert {
@@ -84,7 +86,16 @@ impl DynamicInsert {
             insert_columns: None,
             sink: None,
             rows_written: 0,
+            refresh_on_error: true,
         }
+    }
+
+    /// Set whether a schema-mismatch error at [`end`][Self::end] drops the
+    /// cached schema (default `true`). With `false` the stale schema stays
+    /// until the cache's TTL expires.
+    pub fn refresh_on_error(mut self, enabled: bool) -> Self {
+        self.refresh_on_error = enabled;
+        self
     }
 
     fn full_table(&self) -> String {
@@ -238,7 +249,8 @@ impl DynamicInsert {
     /// Flush and finalise the INSERT, returning the number of rows written.
     ///
     /// On a schema-mismatch error the cached schema is invalidated so the next
-    /// insert re-fetches from `system.columns`.
+    /// insert re-fetches from `system.columns`, unless
+    /// [`refresh_on_error`][Self::refresh_on_error] turned that off.
     ///
     /// # Errors
     ///
@@ -248,7 +260,7 @@ impl DynamicInsert {
             && let Err(e) = sink.end().await
         {
             let err = classify_error(&self.full_table(), &e);
-            if matches!(err, DynamicError::SchemaMismatch { .. }) {
+            if self.refresh_on_error && matches!(err, DynamicError::SchemaMismatch { .. }) {
                 self.schema_cache.invalidate(&self.full_table());
             }
             return Err(err);

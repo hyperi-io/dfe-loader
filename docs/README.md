@@ -31,7 +31,7 @@ the hyperi-port migration), and [pipeline/](pipeline/) for the hot path.
 | `insert_format` (default RowBinary) | Dynamic `Map<String,Value>` -> RowBinary over the unified `Client` (HTTP or TCP); JSONEachRow fallback | A serialiser, a type encoder, a wire format |
 | `capture_mode` (full/raw_only/json_only/extracted_only) | `_json` and `_raw` population per table, overridable per-table and per-DDL | Conditional capture plumbing |
 | Enrichment toggles (geoip/reputation/risk) | Flat enriched columns injected on the promoted row only | Lookup, caching, CIDR matching |
-| Nothing extra | Per-table buffering, batch salvage, circuit breaker, schema-cache recovery, per-batch offset commit | The resilience layer |
+| Nothing extra | Per-table buffering, batch salvage, held-batch retry, schema-cache recovery, one offset commit per flush cycle | The resilience layer |
 
 Everything else in these docs is "and here is how the pieces work".
 
@@ -71,8 +71,8 @@ flowchart TB
     CE -->|transport=http| HTTP --> CH
     CE -->|transport=native| TCP --> CH
     B -->|insert_format=json_each_row| JF --> CH
-    B -.salvage / circuit-open.-> DLQ
-    CH -.success.-> Commit["Per-batch Kafka offset commit"]
+    B -.salvaged bad rows.-> DLQ
+    CH -.success.-> Commit["One Kafka commit per flush cycle"]
 ```
 
 ---

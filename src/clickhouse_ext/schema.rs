@@ -168,6 +168,12 @@ impl DynamicSchemaCache {
         })
     }
 
+    /// How long a fetched schema is served before it is fetched again.
+    #[must_use]
+    pub fn ttl(&self) -> Duration {
+        self.ttl
+    }
+
     /// Return the cached schema if present and still fresh.
     #[must_use]
     pub fn get(&self, table: &str) -> Option<DynamicSchema> {

@@ -22,7 +22,7 @@ flowchart TB
     C["DynamicSchemaCache<br/>(TTL, shared via Arc)"]
     ENC["encode against ColumnDef[]"]
     INS["insert"]
-    MM{"SchemaMismatch?"}
+    MM{"drift error?"}
     INV["invalidate(table)"]
 
     W --> G
@@ -55,23 +55,28 @@ insert tasks behind an `Arc`. It is lazy, not background-refreshed:
 
 Lazy TTL keeps the steady state cheap (no timer threads, no work for idle
 tables) while bounding how long a stale schema can persist after a benign
-`ALTER`. The TTL is set once when the cache is constructed.
+`ALTER`. The TTL is set once when the cache is constructed, from
+`schema.cache_ttl_secs` (default 300 s).
 
 ## Mismatch recovery
 
 A TTL alone does not cover a schema change that happens mid-batch. So the insert
 path also recovers on error. When ClickHouse rejects an insert with a drift
-signal -- `TYPE_MISMATCH`, `NO_SUCH_COLUMN`, `THERE_IS_NO_COLUMN`,
-`CANNOT_PARSE`, `INCORRECT_DATA`, code 117, and friends -- `DynamicInsert`
-surfaces `DynamicError::SchemaMismatch` and the table's cache entry is
-invalidated. The next insert re-fetches from `system.columns` and re-encodes
-against the current schema. A non-drift error (network, auth, server down) is
+signal -- a code name such as `TYPE_MISMATCH`, `NO_SUCH_COLUMN` or
+`INCORRECT_DATA`, or a drift phrase such as "no such column" or "cannot
+parse" -- the table's cache entry is invalidated. The retry re-fetches from
+`system.columns` and re-encodes against the current schema. A non-drift error (network, auth, server down) is
 returned unchanged, so genuine outages are not mistaken for schema drift.
 
 This is the fix trail for the schema-cache-miss class of bug: a column added by
 an out-of-band `ALTER` no longer wedges the loader until a restart -- the first
 rejected insert clears the stale entry and the retry succeeds against the new
 shape.
+
+`schema.refresh_on_error` (default `true`) switches this recovery. With `false`
+a drift error leaves both the encoder's entry and the loader's cached schema in
+place until they expire, so the retries run against the stale shape. A schema
+fetch that failed is still discarded either way.
 
 ## Where it lives
 

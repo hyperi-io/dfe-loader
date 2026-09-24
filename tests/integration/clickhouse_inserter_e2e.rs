@@ -22,7 +22,6 @@ use compact_str::CompactString;
 use serde_json::{Map, Value, json};
 
 use dfe_loader::buffer::FlushBatch;
-use dfe_loader::clickhouse::circuit_breaker::{CircuitBreaker, CircuitBreakerConfig};
 use dfe_loader::clickhouse::config::{ClickHouseConfig, InsertFormat, Transport};
 use dfe_loader::clickhouse::{ClickHouseQueryClient, Inserter, InserterConfig, SchemaCache};
 
@@ -785,62 +784,6 @@ async fn test_inserter_concurrent_inserts() {
 }
 
 // ============================================================================
-// Inserter: circuit breaker opens after failures
-// ============================================================================
-
-#[tokio::test(flavor = "multi_thread")]
-async fn test_inserter_with_circuit_breaker() {
-    let (_infra, client, ch) = spin_up(test_name!()).await;
-    let missing_table = unique_table_name("tc_cb_missing");
-
-    let cb_cfg = CircuitBreakerConfig {
-        failure_threshold: 2,
-        success_threshold: 1,
-        open_duration: Duration::from_secs(5),
-        half_open_max_requests: 1,
-    };
-    let breaker = Arc::new(CircuitBreaker::new(cb_cfg));
-
-    let inserter = Inserter::new(client.clone(), ch, fast_fail_config())
-        .with_insert_format(InsertFormat::JsonEachRow)
-        .with_circuit_breaker(breaker.clone());
-
-    let rows = simple_rows(2);
-
-    // Simulate per-table failures to drive the breaker into Open state.
-    // Inserter methods don't automatically record via the breaker — so we
-    // drive it directly using the same API the loader uses elsewhere.
-    assert!(
-        breaker.allow_request(&missing_table),
-        "closed breaker should allow first request"
-    );
-    let first = inserter.insert_rows(&missing_table, &rows, &[]).await;
-    assert!(first.is_err(), "insert into missing table must fail");
-    breaker.record_failure(&missing_table);
-
-    assert!(
-        breaker.allow_request(&missing_table),
-        "one failure should not yet open the breaker"
-    );
-    let second = inserter.insert_rows(&missing_table, &rows, &[]).await;
-    assert!(second.is_err(), "second insert must also fail");
-    breaker.record_failure(&missing_table);
-
-    // After reaching the failure threshold, breaker must reject.
-    assert!(
-        !breaker.allow_request(&missing_table),
-        "breaker must open after {} failures",
-        2
-    );
-
-    // Another table is unaffected — state is per-table.
-    assert!(
-        breaker.allow_request("unrelated.table"),
-        "circuit breaker state must be isolated per-table"
-    );
-}
-
-// ============================================================================
 // Inserter: schema drift recovery — ALTER mid-batch invalidates cache
 // ============================================================================
 
@@ -918,6 +861,94 @@ async fn test_inserter_schema_drift_recovery() {
 
     let count = client.query_count(&table, None).await.expect("count");
     assert_eq!(count, 6, "3 rows before + 3 rows after ALTER");
+}
+
+/// Land a batch so both schema caches hold `table`, then drop `name` from the
+/// table underneath them. The next `RowBinary` insert names a column the table
+/// no longer has, which the server rejects as schema drift.
+async fn stale_schema_after_a_dropped_column(
+    client: &Arc<ClickHouseQueryClient>,
+    ch: clickhouse::Client,
+    table: &str,
+    refresh_on_error: bool,
+) -> (Inserter, Arc<SchemaCache>) {
+    create_simple_table(client, table).await;
+    let schema_cache = Arc::new(SchemaCache::new(300));
+    let fetched = client
+        .fetch_table_schema(table)
+        .await
+        .expect("fetch schema");
+    schema_cache.insert(table.to_string(), fetched);
+
+    let inserter = Inserter::new(Arc::clone(client), ch, fast_fail_config())
+        .with_insert_format(InsertFormat::RowBinary)
+        .with_schema_cache(Arc::clone(&schema_cache))
+        .with_refresh_on_error(refresh_on_error);
+    let first = inserter
+        .insert_rows(table, &simple_rows(3), &[])
+        .await
+        .expect("insert against the original schema");
+    assert_eq!(first, 3);
+
+    client
+        .execute(&format!("ALTER TABLE {table} DROP COLUMN name"))
+        .await
+        .expect("drop column");
+    (inserter, schema_cache)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_drift_error_re_reads_the_schema_and_lands_when_refresh_on_error_is_on() {
+    let (_infra, client, ch) = spin_up(test_name!()).await;
+    let table = unique_table_name("tc_refresh_on");
+    let (inserter, schema_cache) =
+        stale_schema_after_a_dropped_column(&client, ch, &table, true).await;
+
+    // Far inside the encoder cache's 300 s TTL, so only a re-read can land it.
+    let landed = tokio::time::timeout(
+        Duration::from_secs(30),
+        inserter.insert_rows(&table, &simple_rows(2), &[]),
+    )
+    .await
+    .expect("the retry must finish well inside the schema TTL");
+
+    assert_eq!(
+        landed.expect("the retry must re-read the schema and land"),
+        2
+    );
+    assert!(
+        schema_cache.get(&table).is_none(),
+        "the drift error must drop the loader's cached schema"
+    );
+    let count = client.query_count(&table, None).await.expect("count");
+    assert_eq!(
+        count, 5,
+        "3 rows before the drop and 2 after it are readable"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_drift_error_keeps_the_cached_schema_when_refresh_on_error_is_off() {
+    let (_infra, client, ch) = spin_up(test_name!()).await;
+    let table = unique_table_name("tc_refresh_off");
+    let (inserter, schema_cache) =
+        stale_schema_after_a_dropped_column(&client, ch, &table, false).await;
+
+    let landed = inserter.insert_rows(&table, &simple_rows(2), &[]).await;
+
+    assert!(
+        landed.is_err(),
+        "every retry must run against the stale schema: {landed:?}"
+    );
+    let kept = schema_cache
+        .get(&table)
+        .expect("the loader's cached schema must survive the drift error");
+    assert!(
+        kept.columns.iter().any(|c| c.name == "name"),
+        "the kept schema is the one from before the drop"
+    );
+    let count = client.query_count(&table, None).await.expect("count");
+    assert_eq!(count, 3, "nothing lands after the drop");
 }
 
 // ============================================================================

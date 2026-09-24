@@ -85,11 +85,9 @@ pub struct Orchestrator {
     governor: Option<SelfRegulationGovernor>,
     worker_pool: Option<Arc<scalo::worker::AdaptiveWorkerPool>>,
     batch_engine: Option<Arc<scalo::worker::BatchEngine>>,
-    /// Lightweight ClickHouse sink-health latch driving `set_circuit_open`.
-    /// Set when a whole flush cycle fails with zero successful inserts (sink
-    /// unreachable); cleared the moment any insert succeeds. This is the real,
-    /// observable "sink dead" signal — the loader's per-table CircuitBreaker is
-    /// not wired into the inserter, so we derive the gate from insert outcomes.
+    /// ClickHouse sink-health latch driving `set_circuit_open`, derived from
+    /// insert outcomes. Set when a whole flush cycle fails with zero successful
+    /// inserts (sink unreachable); cleared the moment any insert succeeds.
     sink_circuit_open: bool,
     /// Batches a failed insert handed back, and dead letters the DLQ did not
     /// take. On a transport with no re-delivery intake stays paused while any
@@ -259,12 +257,7 @@ impl Orchestrator {
 
         // Inserter dispatches based on insert_format — single client handles all inserts.
         // Schema cache is wired below (after creation) for drift-error invalidation.
-        let mut inserter = Inserter::new(
-            Arc::clone(&http_client),
-            ch_client,
-            InserterConfig::default(),
-        )
-        .with_insert_format(insert_format);
+        let mut inserter = build_inserter(&self.config, Arc::clone(&http_client), ch_client);
 
         // DLQ (unified scalo module — cascade: Kafka primary, file fallback)
         let dlq_config = self.config.routing.dlq.to_scalo_config();
@@ -728,7 +721,12 @@ impl Orchestrator {
                             // An unknown source is a routing miss, so its events
                             // fall back to the default table rather than ageing
                             // out to the DLQ.
-                            let marked = absent_tables.insert(table, std::time::Instant::now());
+                            let marked = record_table_absent(
+                                &mut absent_tables,
+                                &schema_cache,
+                                table,
+                                std::time::Instant::now(),
+                            );
                             // Only the move into absence is news: the entry is
                             // re-resolved every TTL, so warning on the state
                             // costs a line a minute per dead source name (#129).
@@ -1095,13 +1093,6 @@ impl Orchestrator {
 
                                 // ClickHouse connection pool stats (native transport only)
                                 m.update_pool_stats(inserter.pool_stats());
-
-                                // Per-table circuit breaker state
-                                if let Some(cb) = inserter.circuit_breaker() {
-                                    for (table, state) in cb.per_table_states() {
-                                        m.update_circuit_breaker_state(&table, state);
-                                    }
-                                }
                             }
 
                             // Update scaling pressure components
@@ -1919,6 +1910,33 @@ async fn warm_tables_once(
         }
     }
     out
+}
+
+/// The inserter the pipeline runs, with every setting that reaches it applied.
+fn build_inserter(
+    config: &Config,
+    http_client: Arc<ClickHouseQueryClient>,
+    ch_client: clickhouse::Client,
+) -> Inserter {
+    Inserter::new(http_client, ch_client, InserterConfig::default())
+        .with_insert_format(config.clickhouse.insert_format)
+        .with_refresh_on_error(config.schema.refresh_on_error)
+        .with_schema_ttl(Duration::from_secs(config.schema.cache_ttl_secs))
+}
+
+/// Record `ClickHouse`'s answer that `table` does not exist.
+///
+/// Its cached schema is dropped too: the background refresh re-requests every
+/// cached table, so a dropped one would be queried every interval for the life
+/// of the process. The absent-table TTL is what re-checks it instead.
+fn record_table_absent(
+    absent: &mut super::types::AbsentTables,
+    schema_cache: &SchemaCache,
+    table: &str,
+    now: std::time::Instant,
+) -> super::types::AbsentOutcome {
+    schema_cache.invalidate(table);
+    absent.insert(table, now)
 }
 
 /// Interval between resolution re-requests for tables still stuck in the
@@ -3080,6 +3098,71 @@ mod tests {
                 ("dfe.main".to_string(), 5, (100..105).collect()),
             ],
             "only the batch for the absent table moves, with its rows and offsets"
+        );
+    }
+
+    fn inserter_for(config: &Config) -> Inserter {
+        let ch_config: crate::clickhouse::ClickHouseConfig = (&config.clickhouse).into();
+        let http_client = Arc::new(ClickHouseQueryClient::new(&ch_config).expect("query client"));
+        let ch_client =
+            crate::clickhouse::client_http::build_client(&ch_config).expect("insert client");
+        build_inserter(config, http_client, ch_client)
+    }
+
+    #[test]
+    fn the_schema_settings_reach_the_inserter() {
+        let mut config = Config::default();
+        config.schema.cache_ttl_secs = 60;
+        config.schema.refresh_on_error = false;
+
+        let inserter = inserter_for(&config);
+
+        assert_eq!(
+            inserter.encoder_schema_ttl(),
+            Duration::from_secs(60),
+            "schema.cache_ttl_secs must reach the RowBinary encoder's cache"
+        );
+        assert!(!inserter.refreshes_on_error());
+    }
+
+    #[test]
+    fn the_default_schema_settings_keep_300_s_and_refresh_on_error() {
+        let inserter = inserter_for(&Config::default());
+
+        assert_eq!(inserter.encoder_schema_ttl(), Duration::from_secs(300));
+        assert!(inserter.refreshes_on_error());
+    }
+
+    fn cached_schema(table: &str) -> crate::clickhouse::TableSchema {
+        crate::clickhouse::TableSchema {
+            database: "dfe".to_string(),
+            table: table.to_string(),
+            columns: Vec::new(),
+            comment: String::new(),
+        }
+    }
+
+    #[test]
+    fn a_dropped_table_leaves_the_background_schema_refresh() {
+        // A zero TTL puts every cached schema inside the refresh window at once.
+        let cache = SchemaCache::with_config(crate::clickhouse::SchemaCacheConfig {
+            ttl_secs: 0,
+            ..Default::default()
+        });
+        cache.insert("dfe.gone".to_string(), cached_schema("dfe.gone"));
+        cache.insert("dfe.kept".to_string(), cached_schema("dfe.kept"));
+        let mut absent =
+            super::super::types::AbsentTables::new(ABSENT_TABLE_TTL, ABSENT_TABLE_CAPACITY);
+
+        let outcome =
+            record_table_absent(&mut absent, &cache, "dfe.gone", std::time::Instant::now());
+
+        assert_eq!(outcome, super::super::types::AbsentOutcome::Recorded);
+        assert!(absent.contains("dfe.gone"), "new records still divert");
+        assert_eq!(
+            cache.tables_needing_refresh(),
+            vec!["dfe.kept".to_string()],
+            "the dropped table stays on the 60 s refresh for the life of the process"
         );
     }
 
