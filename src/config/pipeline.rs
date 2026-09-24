@@ -1038,12 +1038,15 @@ pub struct SchemaConfig {
     /// `0` disables retry — pre-warm runs once and moves on.
     pub pre_warm_retry_secs: u64,
     /// Max messages buffered per table while waiting for schema resolution.
-    /// Excess messages route to DLQ with a security event.
+    /// On Kafka, excess messages route to DLQ with a security event. On gRPC,
+    /// a table at this cap stops intake until its schema resolves.
     pub pending_max_per_table: usize,
     /// Max messages buffered across all tables.
-    /// Hitting this cap evicts the oldest entry FIFO across tables.
+    /// On Kafka, hitting this cap evicts the oldest entry FIFO across tables.
+    /// On gRPC it stops intake until the buffer drains.
     pub pending_max_total: usize,
-    /// Max age of a pending message before it is routed to DLQ.
+    /// Max age of a pending message before it is routed to DLQ. On gRPC with
+    /// no working DLQ, messages keep waiting for their schema instead.
     pub pending_max_age_secs: u64,
 }
 

@@ -41,6 +41,7 @@ const LANDING_TOPIC_INCLUDE: &str = "_(land|load)$";
 /// can route them onward. The loader configures no inbound scalo filters, so
 /// `dlq_entries` is empty in practice -- but the no-silent-drop contract is
 /// honoured regardless.
+#[derive(Default)]
 pub struct ReceivedBatch {
     /// Passing messages, in the same order as the source records.
     pub messages: Vec<KafkaMessage>,
@@ -316,7 +317,14 @@ impl GrpcTransportAdapter {
     ///
     /// Requires `config.listen` to be set. The adapter starts a tonic gRPC
     /// server that accepts incoming Push RPCs.
-    pub async fn new(config: &crate::config::GrpcConfig) -> Result<Self> {
+    ///
+    /// When `governor` is `Some`, the listener answers Push with `UNAVAILABLE`
+    /// while the governor's shared pressure holds, so memory pressure reaches
+    /// the sender as backpressure before the loader admits another record.
+    pub async fn new(
+        config: &crate::config::GrpcConfig,
+        governor: Option<&SelfRegulationGovernor>,
+    ) -> Result<Self> {
         let transport_config = TransportGrpcConfig {
             listen: config.listen.clone(),
             endpoint: None, // receive-only
@@ -327,9 +335,12 @@ impl GrpcTransportAdapter {
             ..Default::default()
         };
 
-        let transport = GrpcTransport::new(&transport_config)
-            .await
-            .map_err(|e| crate::Error::Kafka(format!("gRPC transport error: {e}")))?;
+        let transport = GrpcTransport::with_pressure(
+            &transport_config,
+            governor.map(SelfRegulationGovernor::pressure),
+        )
+        .await
+        .map_err(|e| crate::Error::Kafka(format!("gRPC transport error: {e}")))?;
 
         Ok(Self {
             transport,
@@ -558,16 +569,16 @@ impl TransportBackend {
     /// - `"grpc"` → gRPC server mode (receives from dfe-receiver)
     /// - anything else → Kafka (default)
     ///
-    /// `governor`, when `Some`, attaches the Kafka pause-partitions inbound gate
-    /// to the receiver (default-on self-regulation). gRPC has no broker-side
-    /// brake (a push source sheds via the upstream's retry, not a pull pause), so
-    /// the governor is a no-op on that path.
+    /// `governor`, when `Some`, brakes intake under memory pressure
+    /// (default-on self-regulation): Kafka pauses its assigned partitions, and
+    /// the gRPC listener refuses Push with `UNAVAILABLE`, which the sender
+    /// holds and re-sends.
     pub async fn from_config(
         config: &crate::config::Config,
         governor: Option<&SelfRegulationGovernor>,
     ) -> Result<Self> {
         if config.is_direct() {
-            let adapter = GrpcTransportAdapter::new(&config.grpc).await?;
+            let adapter = GrpcTransportAdapter::new(&config.grpc, governor).await?;
             Ok(Self::Grpc(adapter))
         } else {
             let adapter =
@@ -669,6 +680,75 @@ mod backend_tests {
             "gRPC commit is a no-op, so the kafka offset counters must not move"
         );
         backend.close().await.expect("close the gRPC server");
+    }
+
+    /// A governor whose memory pressure is `used` of a 1000-byte limit, read
+    /// from the reservation counter rather than the host's own usage.
+    fn governor_at(used: u64) -> SelfRegulationGovernor {
+        let guard = std::sync::Arc::new(scalo::memory::MemoryGuard::with_usage_source(
+            scalo::memory::MemoryGuardConfig {
+                limit_bytes: 1000,
+                ..Default::default()
+            },
+            scalo::memory::UsageSource::Reservations,
+        ));
+        guard.add_bytes(used);
+        scalo::SelfRegulationConfig::default()
+            .build(guard)
+            .expect("self-regulation is on by default")
+    }
+
+    /// Push one record to a gRPC backend built with `governor`.
+    async fn push_through_backend(
+        governor: Option<&SelfRegulationGovernor>,
+    ) -> scalo::transport::SendResult {
+        use scalo::transport::TransportSender;
+
+        // The client dials the listener by number, so the port is chosen here.
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .and_then(|l| l.local_addr())
+            .expect("free loopback port")
+            .port();
+        let config = crate::config::Config {
+            transport: "grpc".to_string(),
+            grpc: crate::config::GrpcConfig {
+                listen: Some(format!("127.0.0.1:{port}")),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let backend = TransportBackend::from_config(&config, governor)
+            .await
+            .expect("gRPC backend binds");
+        let client = GrpcTransport::new(&TransportGrpcConfig::client(&format!(
+            "http://127.0.0.1:{port}"
+        )))
+        .await
+        .expect("gRPC client");
+        let result = client
+            .send("", bytes::Bytes::from_static(br#"{"id":1}"#))
+            .await;
+        client.close().await.expect("close the client");
+        backend.close().await.expect("close the gRPC server");
+        result
+    }
+
+    #[tokio::test]
+    async fn memory_pressure_makes_the_grpc_listener_refuse_push() {
+        let result = push_through_backend(Some(&governor_at(950))).await;
+        assert!(
+            matches!(result, scalo::transport::SendResult::Backpressured),
+            "a governor holding intake let Push through: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_governor_with_headroom_lets_push_through() {
+        let result = push_through_backend(Some(&governor_at(0))).await;
+        assert!(
+            matches!(result, scalo::transport::SendResult::Ok),
+            "a governor with headroom refused Push: {result:?}"
+        );
     }
 }
 
