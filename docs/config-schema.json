@@ -32,7 +32,7 @@
       "description": "gRPC transport config. **Restart required.**",
       "$ref": "#/$defs/GrpcConfig",
       "default": {
-        "listen": null,
+        "listen": "0.0.0.0:6000",
         "recv_buffer_size": 10000,
         "recv_timeout_ms": 100,
         "max_message_size": 16777216,
@@ -582,12 +582,12 @@
       "type": "object",
       "properties": {
         "listen": {
-          "description": "Server listen address (e.g., \"0.0.0.0:50051\").\nRequired when `transport = \"grpc\"`.",
+          "description": "Server listen address. Defaults to \"0.0.0.0:6000\", the push port the\ndeployment contract declares, so the Service and the listener agree.",
           "type": [
             "string",
             "null"
           ],
-          "default": null
+          "default": "0.0.0.0:6000"
         },
         "recv_buffer_size": {
           "description": "Receive buffer size (messages buffered from incoming RPCs).",

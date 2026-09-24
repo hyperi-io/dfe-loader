@@ -92,7 +92,7 @@ config:
     librdkafka_overrides:
       statistics.interval.ms: '5000'
   grpc:
-    listen: null
+    listen: 0.0.0.0:6000
     recv_buffer_size: 10000
     recv_timeout_ms: 100
     max_message_size: 16777216

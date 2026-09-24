@@ -334,11 +334,11 @@ Reference: [tonic-build docs](https://docs.rs/tonic-build)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GrpcConfig {
-    /// Server listen address (e.g., "0.0.0.0:50051")
+    /// Server listen address (e.g., "0.0.0.0:6000")
     /// Set to None for client-only mode.
     pub listen: Option<String>,
 
-    /// Target server address (e.g., "dfe-loader:50051")
+    /// Target server address (e.g., "dfe-loader:6000")
     /// Set to None for server-only mode.
     /// Supports K8s Service names -- DNS resolution handled by tonic Channel.
     pub target: Option<String>,
@@ -888,11 +888,11 @@ zenoh:
 # After
 transport: "grpc"
 grpc:
-  listen: "0.0.0.0:50051"
+  listen: "0.0.0.0:6000"
   subscribe: ["dfe"]
 ```
 
-ENV override: `DFE_LOADER__GRPC__LISTEN="0.0.0.0:50051"`
+ENV override: `DFE_LOADER__GRPC__LISTEN="0.0.0.0:6000"`
 
 ### Transport adapter (transport.rs)
 
@@ -988,7 +988,7 @@ Receiver uses gRPC client mode to push events to the loader:
 loader:
   transport: "grpc"
   grpc:
-    target: "dfe-loader:50051"    # K8s Service name
+    target: "dfe-loader:6000"    # K8s Service name
     request_timeout_ms: 10000
     retry_max_attempts: 3
 ```
@@ -1048,8 +1048,8 @@ spec:
     app: dfe-loader
   ports:
     - name: grpc
-      port: 50051
-      targetPort: 50051
+      port: 6000
+      targetPort: 6000
     - name: metrics
       port: 9090
       targetPort: 9090
@@ -1063,13 +1063,13 @@ supports native gRPC health probes (no sidecar needed):
 ```yaml
 livenessProbe:
   grpc:
-    port: 50051
+    port: 6000
   initialDelaySeconds: 10
   periodSeconds: 10
 
 readinessProbe:
   grpc:
-    port: 50051
+    port: 6000
   initialDelaySeconds: 5
   periodSeconds: 5
 ```

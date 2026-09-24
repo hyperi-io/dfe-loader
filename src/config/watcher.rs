@@ -221,7 +221,7 @@ buffer:
         let mut config = Config::default();
         config.transport = crate::config::loader::TRANSPORT_GRPC.to_string();
         config.kafka.brokers = vec![];
-        config.grpc.listen = Some("0.0.0.0:50051".to_string());
+        config.grpc.listen = Some("0.0.0.0:6000".to_string());
         assert!(config.is_direct());
         validate_config(&config).expect("a reload on the direct transport reaches no broker");
     }
