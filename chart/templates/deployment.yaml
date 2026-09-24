@@ -5,7 +5,7 @@ metadata:
   labels:
     {{- include "dfe-loader.labels" . | nindent 4 }}
 spec:
-  {{- if not (or .Values.keda.enabled .Values.autoscaling.enabled) }}
+  {{- if not (or (and .Values.keda.enabled .Values.keda.cpu.enabled) (and .Values.autoscaling.enabled (not .Values.keda.enabled))) }}
   replicas: {{ .Values.replicaCount }}
   {{- end }}
   selector:
@@ -48,6 +48,11 @@ spec:
             - name: metrics
               containerPort: {{ .Values.service.port }}
               protocol: TCP
+            {{- if eq (toString (.Values.config).transport) "grpc" }}
+            - name: push
+              containerPort: 6000
+              protocol: TCP
+            {{- end }}
           env:
             - name: OTEL_SERVICE_NAME
               value: "dfe-loader"

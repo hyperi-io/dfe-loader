@@ -92,7 +92,7 @@ async fn spin_up_kafka(
 
 /// Create a plain (no-SASL) rdkafka `FutureProducer` for the given bootstrap
 /// broker.
-fn make_producer(bootstrap: &str) -> FutureProducer {
+pub(super) fn make_producer(bootstrap: &str) -> FutureProducer {
     let mut cfg = ClientConfig::new();
     cfg.set("bootstrap.servers", bootstrap);
     // 30 s gives auto.create.topics.enable enough time to create the topic
@@ -118,7 +118,7 @@ async fn produce(producer: &FutureProducer, topic: &str, payloads: &[Vec<u8>]) {
 /// Best-effort pre-create a topic with a short `linger` so auto-create races
 /// don't cost the test valuable wall time. Errors are logged but not fatal —
 /// `auto.create.topics.enable` will catch the rest.
-async fn ensure_topic(bootstrap: &str, topic: &str) {
+pub(super) async fn ensure_topic(bootstrap: &str, topic: &str) {
     let mut cfg = ClientConfig::new();
     cfg.set("bootstrap.servers", bootstrap);
     let admin: AdminClient<_> = match cfg.create() {
@@ -143,7 +143,7 @@ async fn ensure_topic(bootstrap: &str, topic: &str) {
 /// its error the symptom surfaces later as a consumer reading a topic that was
 /// never created. The old emulated image hid this: it was so slow that the
 /// broker was always up by the time anything connected.
-async fn wait_for_broker(bootstrap: &str) {
+pub(super) async fn wait_for_broker(bootstrap: &str) {
     let consumer: BaseConsumer = ClientConfig::new()
         .set("bootstrap.servers", bootstrap)
         .create()

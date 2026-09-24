@@ -11,5 +11,11 @@ spec:
       targetPort: metrics
       protocol: TCP
       name: metrics
+    {{- if eq (toString (.Values.config).transport) "grpc" }}
+    - port: 6000
+      targetPort: 6000
+      protocol: TCP
+      name: push
+    {{- end }}
   selector:
     {{- include "dfe-loader.selectorLabels" . | nindent 4 }}

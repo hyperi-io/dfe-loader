@@ -32,7 +32,7 @@
       "description": "gRPC transport config. **Restart required.**",
       "$ref": "#/$defs/GrpcConfig",
       "default": {
-        "listen": null,
+        "listen": "0.0.0.0:6000",
         "recv_buffer_size": 10000,
         "recv_timeout_ms": 100,
         "max_message_size": 16777216,
@@ -582,12 +582,12 @@
       "type": "object",
       "properties": {
         "listen": {
-          "description": "Server listen address (e.g., \"0.0.0.0:50051\").\nRequired when `transport = \"grpc\"`.",
+          "description": "Server listen address. Defaults to \"0.0.0.0:6000\", the push port the\ndeployment contract declares, so the Service and the listener agree.",
           "type": [
             "string",
             "null"
           ],
-          "default": null
+          "default": "0.0.0.0:6000"
         },
         "recv_buffer_size": {
           "description": "Receive buffer size (messages buffered from incoming RPCs).",
@@ -764,21 +764,21 @@
           "default": 60
         },
         "pending_max_per_table": {
-          "description": "Max messages buffered per table while waiting for schema resolution.\nExcess messages route to DLQ with a security event.",
+          "description": "Max messages buffered per table while waiting for schema resolution.\nOn Kafka, excess messages route to DLQ with a security event. On gRPC,\na table at this cap stops intake until its schema resolves.",
           "type": "integer",
           "format": "uint",
           "minimum": 0,
           "default": 1000
         },
         "pending_max_total": {
-          "description": "Max messages buffered across all tables.\nHitting this cap evicts the oldest entry FIFO across tables.",
+          "description": "Max messages buffered across all tables.\nOn Kafka, hitting this cap evicts the oldest entry FIFO across tables.\nOn gRPC it stops intake until the buffer drains.",
           "type": "integer",
           "format": "uint",
           "minimum": 0,
           "default": 10000
         },
         "pending_max_age_secs": {
-          "description": "Max age of a pending message before it is routed to DLQ.",
+          "description": "Max age of a pending message before it is routed to DLQ. On gRPC with\nno working DLQ, messages keep waiting for their schema instead.",
           "type": "integer",
           "format": "uint64",
           "minimum": 0,

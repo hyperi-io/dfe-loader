@@ -4,8 +4,10 @@
 //! Pending-schema buffer.
 //!
 //! Holds messages whose destination table's schema is not yet cached.
-//! Drained when the background resolver populates the schema. Caps and
-//! age limits route overflow / stale messages to DLQ with security events.
+//! Drained when the background resolver populates the schema. Age limits route
+//! stale messages to the DLQ with security events. A full buffer either routes
+//! its overflow to the DLQ or admits it and reports itself full, so the caller
+//! stops intake -- see [`OnFull`].
 //!
 //! `last_requested_at` drives two things: the first-request signal
 //! (`EnqueueOutcome::NeedsResolution`) so the caller kicks off resolution,
@@ -14,10 +16,12 @@
 //! instead of silently ageing out to the DLQ.
 
 use std::collections::VecDeque;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use rustc_hash::FxHashMap;
 
+use crate::buffer::KafkaOffset;
 use crate::clickhouse::SchemaCache;
 use crate::kafka::KafkaMessage;
 
@@ -31,16 +35,29 @@ pub(crate) struct PendingSchemaConfig {
     pub max_per_table: usize,
     pub max_total: usize,
     pub max_age: Duration,
+    pub on_full: OnFull,
 }
 
 impl PendingSchemaConfig {
-    pub fn from_schema_config(c: &crate::config::SchemaConfig) -> Self {
+    pub fn from_schema_config(c: &crate::config::SchemaConfig, on_full: OnFull) -> Self {
         Self {
             max_per_table: c.pending_max_per_table,
             max_total: c.pending_max_total,
             max_age: Duration::from_secs(c.pending_max_age_secs),
+            on_full,
         }
     }
+}
+
+/// What a message does when the buffer has hit a cap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OnFull {
+    /// Route the overflow to the DLQ and keep taking messages.
+    DeadLetter,
+    /// Take the message anyway; the caller stops intake while
+    /// [`PendingSchemaBuffer::is_full`] holds, which is the only answer where
+    /// the buffer is a message's last copy.
+    Backpressure,
 }
 
 /// Outcome of a successful `enqueue` call.
@@ -105,25 +122,77 @@ impl PendingSchemaBuffer {
         self.per_table.get(table).map_or(0, VecDeque::len)
     }
 
+    /// Whether any cap is reached: the global one, or any single table's.
+    pub fn is_full(&self) -> bool {
+        self.total_count >= self.config.max_total
+            || self
+                .per_table
+                .values()
+                .any(|q| q.len() >= self.config.max_per_table)
+    }
+
+    /// The lowest offset held on each partition, evictions not yet collected
+    /// included: a Kafka commit must not pass a message whose only copy is here.
+    pub fn lowest_offsets(&self) -> Vec<KafkaOffset> {
+        let held = self
+            .per_table
+            .values()
+            .flatten()
+            .map(|p| &p.msg)
+            .chain(self.evicted.iter().map(|(msg, _)| msg));
+        let mut lowest: FxHashMap<(&str, i32), &KafkaMessage> = FxHashMap::default();
+        for msg in held {
+            lowest
+                .entry((&*msg.topic, msg.partition))
+                .and_modify(|low| {
+                    if msg.offset < low.offset {
+                        *low = msg;
+                    }
+                })
+                .or_insert(msg);
+        }
+        lowest
+            .into_values()
+            .map(|msg| {
+                KafkaOffset::with_shared_topic(Arc::clone(&msg.topic), msg.partition, msg.offset)
+            })
+            .collect()
+    }
+
+    /// The `limit` tables holding the most messages, deepest first.
+    pub fn deepest_tables(&self, limit: usize) -> Vec<(&str, usize)> {
+        let mut depths: Vec<(&str, usize)> = self
+            .per_table
+            .iter()
+            .map(|(table, queue)| (table.as_str(), queue.len()))
+            .collect();
+        depths.sort_unstable_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+        depths.truncate(limit);
+        depths
+    }
+
     /// Enqueue a message awaiting schema resolution.
     ///
     /// Returns `NeedsResolution` the first time a table is seen (caller must
     /// push the table to the resolver channel); `Enqueued` otherwise.
     ///
-    /// Per-table cap: returns `Err(PerTable)` and does NOT enqueue — the
-    /// caller routes the current message to DLQ. Global cap: evicts the
-    /// oldest message across all tables (queued in `evicted`) before inserting.
+    /// Under [`OnFull::DeadLetter`], the per-table cap returns `Err(PerTable)`
+    /// and does NOT enqueue -- the caller routes the current message to DLQ --
+    /// and the global cap evicts the oldest message across all tables (queued
+    /// in `evicted`) before inserting. Under [`OnFull::Backpressure`] every
+    /// message is enqueued and neither cap drops anything.
     pub fn enqueue(
         &mut self,
         table: String,
         msg: KafkaMessage,
     ) -> Result<EnqueueOutcome, PendingOverflow> {
-        if self.len_per_table(&table) >= self.config.max_per_table {
-            return Err(PendingOverflow::PerTable(table));
-        }
-
-        if self.total_count >= self.config.max_total {
-            self.evict_oldest();
+        if self.config.on_full == OnFull::DeadLetter {
+            if self.len_per_table(&table) >= self.config.max_per_table {
+                return Err(PendingOverflow::PerTable(table));
+            }
+            if self.total_count >= self.config.max_total {
+                self.evict_oldest();
+            }
         }
 
         let queue = self.per_table.entry(table.clone()).or_default();
@@ -295,6 +364,14 @@ mod tests {
             max_per_table: 3,
             max_total: 10,
             max_age: Duration::from_secs(30),
+            on_full: OnFull::DeadLetter,
+        }
+    }
+
+    fn backpressure_cfg() -> PendingSchemaConfig {
+        PendingSchemaConfig {
+            on_full: OnFull::Backpressure,
+            ..small_cfg()
         }
     }
 
@@ -389,6 +466,7 @@ mod tests {
             max_per_table: 100,
             max_total: 100,
             max_age: Duration::from_millis(20),
+            on_full: OnFull::DeadLetter,
         };
         let mut buf = PendingSchemaBuffer::new(cfg);
         buf.enqueue("dfe.unreachable".into(), make_msg(b"x"))
@@ -433,6 +511,7 @@ mod tests {
             max_per_table: 100,
             max_total: 3,
             max_age: Duration::from_secs(30),
+            on_full: OnFull::DeadLetter,
         };
         let mut buf = PendingSchemaBuffer::new(cfg);
         buf.enqueue("a".into(), make_msg(b"1")).unwrap();
@@ -458,6 +537,7 @@ mod tests {
             max_per_table: 100,
             max_total: 100,
             max_age: Duration::from_millis(20),
+            on_full: OnFull::DeadLetter,
         };
         let mut buf = PendingSchemaBuffer::new(cfg);
         buf.enqueue("a".into(), make_msg(b"old")).unwrap();
@@ -484,6 +564,156 @@ mod tests {
                 .all(|(_, r)| matches!(r, ExpireReason::Shutdown { .. }))
         );
         assert_eq!(buf.len(), 0);
+    }
+
+    #[test]
+    fn under_backpressure_a_full_table_takes_every_message_and_reports_full() {
+        let mut buf = PendingSchemaBuffer::new(backpressure_cfg()); // max_per_table = 3
+        for n in 0..5u8 {
+            buf.enqueue("dfe.t1".into(), make_msg(&[n]))
+                .expect("backpressure never refuses a message");
+        }
+        assert_eq!(buf.len_per_table("dfe.t1"), 5, "nothing was turned away");
+        assert!(buf.is_full(), "a table past its cap must stop intake");
+        assert!(
+            buf.expire(Instant::now()).is_empty(),
+            "nothing was evicted to the DLQ"
+        );
+    }
+
+    #[test]
+    fn under_backpressure_the_global_cap_evicts_nothing() {
+        let cfg = PendingSchemaConfig {
+            max_per_table: 100,
+            max_total: 3,
+            ..backpressure_cfg()
+        };
+        let mut buf = PendingSchemaBuffer::new(cfg);
+        for table in ["a", "b", "c", "d"] {
+            buf.enqueue(table.into(), make_msg(table.as_bytes()))
+                .expect("backpressure never refuses a message");
+        }
+        assert_eq!(buf.len(), 4);
+        assert!(buf.is_full());
+        assert!(buf.expire(Instant::now()).is_empty(), "no eviction queued");
+    }
+
+    #[test]
+    fn a_buffer_drained_below_its_caps_is_no_longer_full() {
+        let mut buf = PendingSchemaBuffer::new(backpressure_cfg());
+        for n in 0..3u8 {
+            buf.enqueue("dfe.t1".into(), make_msg(&[n])).unwrap();
+        }
+        assert!(buf.is_full());
+
+        let cache = SchemaCache::new(300);
+        cache.insert("dfe.t1".into(), dummy_schema("dfe.t1"));
+        assert_eq!(buf.take_ready(&cache, &no_absent_tables()).len(), 3);
+        assert!(!buf.is_full(), "a drained buffer must let intake run again");
+    }
+
+    #[test]
+    fn a_dead_letter_buffer_below_its_caps_is_not_full() {
+        let mut buf = PendingSchemaBuffer::new(small_cfg());
+        buf.enqueue("dfe.t1".into(), make_msg(b"a")).unwrap();
+        assert!(!buf.is_full());
+    }
+
+    fn msg_at(topic: &str, partition: i32, offset: i64) -> KafkaMessage {
+        KafkaMessage {
+            topic: Arc::from(topic),
+            partition,
+            offset,
+            ..make_msg(b"x")
+        }
+    }
+
+    /// `(topic, partition, offset)` of each floor, sorted.
+    fn floors(buf: &PendingSchemaBuffer) -> Vec<(String, i32, i64)> {
+        let mut out: Vec<_> = buf
+            .lowest_offsets()
+            .into_iter()
+            .map(|o| (o.topic.to_string(), o.partition, o.offset))
+            .collect();
+        out.sort_unstable();
+        out
+    }
+
+    #[test]
+    fn nothing_held_holds_no_offset_down() {
+        assert!(
+            PendingSchemaBuffer::new(small_cfg())
+                .lowest_offsets()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn the_floor_is_the_lowest_held_offset_per_partition_across_tables() {
+        let mut buf = PendingSchemaBuffer::new(PendingSchemaConfig {
+            max_per_table: 100,
+            max_total: 100,
+            ..small_cfg()
+        });
+        buf.enqueue("dfe.a".into(), msg_at("t", 0, 40)).unwrap();
+        buf.enqueue("dfe.b".into(), msg_at("t", 0, 12)).unwrap();
+        buf.enqueue("dfe.a".into(), msg_at("t", 1, 7)).unwrap();
+        buf.enqueue("dfe.b".into(), msg_at("u", 0, 3)).unwrap();
+        assert_eq!(
+            floors(&buf),
+            vec![
+                ("t".to_string(), 0, 12),
+                ("t".to_string(), 1, 7),
+                ("u".to_string(), 0, 3)
+            ]
+        );
+    }
+
+    #[test]
+    fn an_eviction_not_yet_collected_still_holds_its_offset_down() {
+        let mut buf = PendingSchemaBuffer::new(PendingSchemaConfig {
+            max_per_table: 100,
+            max_total: 1,
+            ..small_cfg()
+        });
+        buf.enqueue("dfe.a".into(), msg_at("t", 0, 5)).unwrap();
+        // The global cap evicts offset 5 into the queue `expire` drains.
+        buf.enqueue("dfe.b".into(), msg_at("t", 0, 9)).unwrap();
+        assert_eq!(buf.len(), 1);
+        assert_eq!(floors(&buf), vec![("t".to_string(), 0, 5)]);
+
+        let handed_on = buf.expire(Instant::now());
+        assert_eq!(handed_on.len(), 1);
+        assert_eq!(floors(&buf), vec![("t".to_string(), 0, 9)]);
+    }
+
+    #[test]
+    fn a_message_released_by_its_schema_no_longer_holds_the_floor() {
+        let mut buf = PendingSchemaBuffer::new(small_cfg());
+        buf.enqueue("dfe.t1".into(), msg_at("t", 0, 4)).unwrap();
+        let cache = SchemaCache::new(300);
+        cache.insert("dfe.t1".into(), dummy_schema("dfe.t1"));
+        assert_eq!(buf.take_ready(&cache, &no_absent_tables()).len(), 1);
+        assert!(buf.lowest_offsets().is_empty());
+    }
+
+    #[test]
+    fn the_deepest_tables_come_first_and_stop_at_the_limit() {
+        let mut buf = PendingSchemaBuffer::new(PendingSchemaConfig {
+            max_per_table: 100,
+            max_total: 100,
+            ..small_cfg()
+        });
+        for (table, n) in [("dfe.one", 1), ("dfe.three", 3), ("dfe.two", 2)] {
+            for _ in 0..n {
+                buf.enqueue(table.into(), make_msg(b"x")).unwrap();
+            }
+        }
+        assert_eq!(
+            buf.deepest_tables(2),
+            vec![("dfe.three", 3), ("dfe.two", 2)]
+        );
+        assert!(buf.deepest_tables(0).is_empty());
     }
 
     #[test]

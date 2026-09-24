@@ -10,10 +10,7 @@
 
 # Architecture
 
-dfe-loader is a per-message hot path with a per-table batching tail. A message
-arrives as bytes, gets routed and promoted into a typed row, accumulates in a
-per-table buffer, and flushes to ClickHouse as a batch. Kafka offsets commit
-per batch, after the insert succeeds -- at-least-once.
+dfe-loader is a per-message hot path with a per-table batching tail. A message arrives as bytes, gets routed and promoted into a typed row, accumulates in a per-table buffer, and flushes to ClickHouse as a batch. Kafka offsets commit once per flush cycle, never past a row not placed yet -- at-least-once.
 
 Everything on the hot path is shaped by one rule: do the cheap thing per
 message, defer the expensive thing to flush. Parse once (SIMD, zero-copy),
@@ -36,7 +33,7 @@ flowchart TB
     end
     subgraph L2["L2 -- Buffer + insert"]
         BUF["BufferManager<br/>per-table rows + raw + offsets"]
-        INS["Inserter<br/>format dispatch, salvage, circuit breaker"]
+        INS["Inserter<br/>format dispatch, retry, salvage"]
     end
     subgraph L1["L1 -- ClickHouse layer"]
         QC["ClickHouseQueryClient<br/>DDL, schema, health"]
@@ -117,7 +114,7 @@ flowchart TB
     F -->|json_each_row| JE
     HTTP & TCP --> SM
     SM -->|yes| REC --> RB
-    SM -->|no| OK["commit batch offsets"]
+    SM -->|no| OK["offsets join the flush cycle's one commit"]
 ```
 
 The RowBinary path splits by transport: HTTP ships row-wise `FORMAT RowBinary`
@@ -146,12 +143,12 @@ the full payload is kept.
 
 - **Batch salvage** -- on a data error, binary-split the batch to isolate the
   bad row(s), DLQ only those, keep the good ones.
-- **Circuit breaker** -- per-table; open -> inserts skip straight to DLQ until a
-  probe succeeds.
+- **Sink-down gate** -- a flush cycle in which every insert failed opens the
+  circuit gate on the KEDA scaling signal, and the next successful insert closes
+  it. A failed insert never sends its batch to the DLQ.
 - **Schema-cache recovery** -- on `SchemaMismatch` (e.g. `ALTER ... ADD COLUMN`),
   invalidate and re-fetch, then retry.
-- **Per-batch offset commit** -- each table commits independently; one table's
-  failure does not block another's.
+- **One commit per flush cycle** -- offsets commit once per cycle, and on each partition stop below the lowest offset not placed yet. A failed batch or a dead letter the DLQ refused is held and retried with jittered backoff, and holds its partition's commit until it lands. A held batch whose table ClickHouse has since reported absent is retried against the default table.
 
 ## Source of truth
 

@@ -17,6 +17,8 @@ use crate::transform::timestamp::{TimestampResult, TimestampValidator};
 /// Static field names (avoids allocation per message)
 /// Input field names - what we read from source data
 static TIMESTAMP_INPUT_FIELD: &str = "timestamp";
+/// ECS's spelling of the event time, read when `timestamp` is absent.
+static TIMESTAMP_ECS_INPUT_FIELD: &str = "@timestamp";
 static TIMESTAMP_RECEIVED_INPUT_FIELD: &str = "timestamp_received";
 /// Output field names - all common header fields use underscore prefix
 static TIMESTAMP_OUTPUT_FIELD: &str = "_timestamp";
@@ -223,9 +225,15 @@ impl Transformer {
 
         // Steps 3-8: Common header field injection (skip all when disabled)
         if self.common_header_enabled {
-            // Step 3: Validate/correct timestamp
-            // Read from input field (timestamp), remove it, write to output field (_timestamp)
-            if let Some(ts_value) = data.remove(TIMESTAMP_INPUT_FIELD) {
+            // Step 3: Validate/correct timestamp, writing to the output field
+            // (_timestamp). `timestamp` is taken; `@timestamp` -- the spelling a
+            // beats record uses, which sanitisation strips the `@` from only
+            // after this step -- is read in place, so the sanitised `timestamp`
+            // a meta column reads still appears (dfe-engine#498).
+            let ts_input = data
+                .remove(TIMESTAMP_INPUT_FIELD)
+                .or_else(|| data.get(TIMESTAMP_ECS_INPUT_FIELD).cloned());
+            if let Some(ts_value) = ts_input {
                 let ts_result = match &ts_value {
                     Value::String(s) => self.timestamp_validator.validate_with_now(s, now),
                     Value::Number(n) => {
@@ -579,9 +587,14 @@ mod tests {
 
         let result = transformer.transform(input).unwrap();
 
-        // @timestamp gets sanitized to "timestamp" AFTER timestamp processing,
-        // so _timestamp is injected with current time and @timestamp becomes "timestamp"
-        assert!(result.data.contains_key("_timestamp")); // injected current time
+        // The header claims @timestamp before sanitisation strips the prefix,
+        // so _timestamp carries the event's own time (dfe-engine#498) and the
+        // sanitised `timestamp` still appears for a meta column to read.
+        assert_eq!(
+            result.data["_timestamp"],
+            serde_json::json!("2024-12-24 10:00:00.000"),
+            "_timestamp must carry the event's own time, not the load time"
+        );
         assert!(result.data.contains_key("timestamp")); // sanitized from @timestamp
         assert!(result.data.contains_key("version")); // sanitized from @version
         assert!(!result.data.contains_key("@timestamp"));

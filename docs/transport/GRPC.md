@@ -58,6 +58,20 @@ flowchart LR
 6. **K8s native** -- standard gRPC health protocol, Service discovery.
 7. **v1/v2 evolution** -- v1 proto includes mesh-ready fields (unused); v2
    activates them.
+8. **Held, never dropped** -- the ACK means the loader now holds the only copy.
+   When a ClickHouse insert fails the loader keeps the batch, stops pulling
+   from the listener, and inserts it again on scalo's jittered exponential
+   schedule, capped at `buffer.flush_age_secs` before jitter. The listener's
+   queue (`grpc.recv_buffer_size`) fills and Push answers `RESOURCE_EXHAUSTED`,
+   which dfe-receiver holds and re-sends. Intake resumes once the batch lands.
+   A loader stopped while it holds a batch loses that batch: this path keeps
+   no disk copy.
+
+   Rows ClickHouse rejects for good go to the DLQ, and the loader holds them the same way until the DLQ proves them written -- a flush barrier that passes with entries dropped since does not count. Records that fail processing (unparseable, unroutable, a pre-route reject) take the same path at the next flush, and a shutdown hands every one of them to the DLQ before the DLQ closes. With no working DLQ those rows can never be placed: the loader logs the loss at `error` and counts every row in `dfe_loader_rows_lost_total`.
+
+   A message whose table schema is not cached yet waits in the pending-schema buffer. On gRPC a full buffer (`schema.pending_max_per_table`, `schema.pending_max_total`) stops intake instead of shedding to the DLQ -- the loader logs the tables holding it at `warn`, and logs at `info` when intake resumes -- and a message past `schema.pending_max_age_secs` goes to the DLQ under the same hold, or keeps waiting for its schema when there is no working DLQ.
+
+   Under memory pressure the self-regulation governor makes the listener answer Push with `UNAVAILABLE` before the loader admits another record.
 
 ## Proto evolution: v1 -> v2
 
@@ -334,11 +348,11 @@ Reference: [tonic-build docs](https://docs.rs/tonic-build)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GrpcConfig {
-    /// Server listen address (e.g., "0.0.0.0:50051")
+    /// Server listen address (e.g., "0.0.0.0:6000")
     /// Set to None for client-only mode.
     pub listen: Option<String>,
 
-    /// Target server address (e.g., "dfe-loader:50051")
+    /// Target server address (e.g., "dfe-loader:6000")
     /// Set to None for server-only mode.
     /// Supports K8s Service names -- DNS resolution handled by tonic Channel.
     pub target: Option<String>,
@@ -888,11 +902,11 @@ zenoh:
 # After
 transport: "grpc"
 grpc:
-  listen: "0.0.0.0:50051"
+  listen: "0.0.0.0:6000"
   subscribe: ["dfe"]
 ```
 
-ENV override: `DFE_LOADER__GRPC__LISTEN="0.0.0.0:50051"`
+ENV override: `DFE_LOADER__GRPC__LISTEN="0.0.0.0:6000"`
 
 ### Transport adapter (transport.rs)
 
@@ -988,7 +1002,7 @@ Receiver uses gRPC client mode to push events to the loader:
 loader:
   transport: "grpc"
   grpc:
-    target: "dfe-loader:50051"    # K8s Service name
+    target: "dfe-loader:6000"    # K8s Service name
     request_timeout_ms: 10000
     retry_max_attempts: 3
 ```
@@ -1048,8 +1062,8 @@ spec:
     app: dfe-loader
   ports:
     - name: grpc
-      port: 50051
-      targetPort: 50051
+      port: 6000
+      targetPort: 6000
     - name: metrics
       port: 9090
       targetPort: 9090
@@ -1063,13 +1077,13 @@ supports native gRPC health probes (no sidecar needed):
 ```yaml
 livenessProbe:
   grpc:
-    port: 50051
+    port: 6000
   initialDelaySeconds: 10
   periodSeconds: 10
 
 readinessProbe:
   grpc:
-    port: 50051
+    port: 6000
   initialDelaySeconds: 5
   periodSeconds: 5
 ```

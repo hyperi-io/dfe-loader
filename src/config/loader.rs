@@ -554,7 +554,7 @@ impl Config {
     pub fn deployment_contract() -> scalo::deployment::DeploymentContract {
         use scalo::deployment::{
             DeploymentContract, HealthContract, ImageProfile, NativeDepsContract, OciLabels,
-            SecretEnvContract, SecretGroupContract, base_image_from_cascade,
+            PortContract, SecretEnvContract, SecretGroupContract, base_image_from_cascade,
             image_registry_from_cascade,
         };
 
@@ -582,7 +582,13 @@ impl Config {
             metric_prefix: "loader".into(),
             config_mount_path: "/etc/dfe/loader.yaml".into(),
             image_registry,
-            extra_ports: vec![],
+            // The Push listener binds only on the grpc transport.
+            extra_ports: vec![
+                PortContract::tcp("push", 6000)
+                    .when_equals("config.transport", TRANSPORT_GRPC)
+                    .bound_from("grpc.listen"),
+            ],
+            unbound_listen_paths: vec![],
             entrypoint_args: vec!["--config".into(), "/etc/dfe/loader.yaml".into()],
             secrets: vec![
                 SecretGroupContract {
@@ -660,8 +666,11 @@ impl Config {
     /// KEDA half of the contract, from this crate's own [`KedaConfig`] defaults
     /// so the chart contract test compares against the documented numbers.
     fn keda_contract() -> scalo::deployment::KedaContract {
+        use scalo::deployment::{KafkaLagTrigger, KedaContract};
+
         let keda = KedaConfig::default();
-        scalo::deployment::KedaContract {
+        KedaContract {
+            enabled: keda.enabled,
             min_replicas: keda.min_replicas,
             max_replicas: keda.max_replicas,
             polling_interval: keda.polling_interval,
@@ -670,7 +679,10 @@ impl Config {
             activation_lag_threshold: keda.activation_lag_threshold,
             cpu_enabled: keda.cpu_enabled,
             cpu_threshold: keda.cpu_threshold,
+            ..KedaContract::default()
         }
+        // Raw consumer-group lag rises when a downstream stage breaks, so it never scales the loader.
+        .with_kafka_trigger(KafkaLagTrigger::disabled())
     }
 
     /// Capability catalog for dfe-loader: the ClickHouse sink + the enrichment /
@@ -731,7 +743,7 @@ mod tests {
         let mut config = Config::default();
         config.transport = TRANSPORT_GRPC.to_string();
         config.kafka.brokers = vec![];
-        config.grpc.listen = Some("0.0.0.0:50051".to_string());
+        config.grpc.listen = Some("0.0.0.0:6000".to_string());
         assert!(config.is_direct());
         config
             .validate()
@@ -2044,6 +2056,16 @@ logging:
         let contract = Config::deployment_contract();
         assert!(contract.depends_on.contains(&"kafka".to_string()));
         assert!(contract.depends_on.contains(&"clickhouse".to_string()));
+    }
+
+    /// `generate-artefacts` writes nothing for a contract that fails either check.
+    #[test]
+    fn test_deployment_contract_passes_the_generate_artefacts_checks() {
+        let contract = Config::deployment_contract();
+        contract
+            .validate()
+            .expect("every generator must accept the contract");
+        scalo::deployment::assert_listeners_declared(&contract);
     }
 
     #[test]

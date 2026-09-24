@@ -44,9 +44,9 @@ dfe-loader reads records off Kafka or a direct gRPC listener, works out which Cl
 | Enrich | Optional GeoIP, reputation and risk columns |
 | Buffer | Per-table, flushed on row count, byte size or age |
 | Insert | RowBinary by default, so ClickHouse skips JSON parsing. JSONEachRow is the fallback |
-| Commit | Kafka offsets commit per table after its insert succeeds -- at-least-once |
+| Commit | Kafka offsets commit once per flush cycle, never past a row not yet in ClickHouse or the DLQ -- at-least-once |
 
-Failures degrade rather than stall: a batch with a bad row is binary-split so only the bad rows are dead-lettered, a repeatedly failing table trips a circuit breaker, and a schema drift error invalidates the cached schema and retries.
+Failures degrade rather than stall: a batch with a bad row is binary-split so only the bad rows are dead-lettered, a batch whose insert fails is held and retried with backoff while the commit stays below it, and a schema drift error invalidates the cached schema and retries.
 
 ## Configuration essentials
 

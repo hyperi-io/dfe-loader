@@ -173,7 +173,7 @@ metrics:
   address: "0.0.0.0:9090"
 
 # =============================================================================
-# Horizontal scaling-pressure engine (hyperi-rustlib 2.8.10, ENGAGED since 2.8.11)
+# Horizontal scaling-pressure engine (scalo; ENGAGED since the run_app cascade fix)
 # =============================================================================
 # The engine computes a correlated composite pressure from this pod's LOCAL
 # context (CPU + Kafka assigned-partition lag + ClickHouse sink circuit state)
@@ -187,10 +187,10 @@ metrics:
 # memory_gate_threshold) keep their defaults unless overridden here.
 #
 # WIRING STATUS (read before tuning):
-#   - rustlib 2.8.11's run_app populates the global config cascade from this
-#     --config file BEFORE the ServiceRuntime build, so the engine now actually
-#     reads `transport.inbound: kafka` below and builds with inbound=Kafka (it
-#     was silently defaulting to inbound=Other / CPU-only on 2.8.10).
+#   - scalo's run_app populates the global config cascade from this --config
+#     file BEFORE the ServiceRuntime build, so the engine now actually reads
+#     `transport.inbound: kafka` below and builds with inbound=Kafka. Earlier
+#     builds silently defaulted to inbound=Other / CPU-only.
 #   - The ClickHouse sink circuit-open GATE is LIVE: the orchestrator pushes
 #     sink health to scaling_signals.set_circuit_open(...), so a dead sink
 #     zeroes the emitted pressure (more pods can't relieve a dead sink).
@@ -205,7 +205,7 @@ scaling:
   interval_secs: 15            # engine evaluation period (off the data hot-path)
   transport:
     inbound: kafka             # picks the Kafka assigned-lag inbound pressure term
-    outbound: other            # ClickHouse is NOT a rustlib transport -> no outbound term
+    outbound: other            # ClickHouse is NOT a scalo transport -> no outbound term
   params:
     cpu_target: 0.70           # CPU utilisation that counts as "full" for scale-out
     # lag_target: <PER-POD>    # INTENTIONALLY OMITTED — needs sizing. PER-POD =

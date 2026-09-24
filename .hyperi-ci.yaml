@@ -51,11 +51,20 @@ quality:
 test:
   enabled: true
   coverage: true
+  rust:
+    # Required, not auto: the DLQ-refusal tests set a process-wide RLIMIT_FSIZE of 0, and only nextest keeps each test in a process of its own.
+    nextest: true
   # min_coverage: 80       # Fail if coverage below this percentage
 
 # Building
 build:
   enabled: true
+  # PGO and BOLT are off for the rc.14 workstream: each adds 30-60 min per arch
+  # and the workstream needs fast turnaround on everything else first. Tier 1
+  # (allocator + LTO) still applies. Turning this back off is the LAST rc.14
+  # task. A STABLE release meanwhile needs `release-unoptimized: true` at
+  # dispatch; a prerelease (rc) is never refused.
+  skip_optimize: true
   type: app                # Build binaries (not just crate)
   strategies:
     - native
@@ -63,20 +72,6 @@ build:
     targets:
       - x86_64-unknown-linux-gnu
       - aarch64-unknown-linux-gnu
-    # Release-track build optimisation (hyperi-ci Tier 1/2).
-    # Channel-gated defaults apply automatically:
-    #   alpha       → jemalloc + thin LTO
-    #   beta        → jemalloc + fat LTO
-    #   release     → jemalloc + fat LTO + PGO/BOLT (opt-in below)
-    # See docs/performance/OVERVIEW.md and hyperi-ci's
-    # docs/languages/rust.md for the full contract.
-    optimize:
-      pgo:
-        enabled: true
-        workload_cmd: "bash scripts/pgo-workload.sh"
-        duration_secs: 300
-      bolt:
-        enabled: true  # Linux only; skipped on non-Linux targets
 
 # Release (where the artefacts go)
 release:

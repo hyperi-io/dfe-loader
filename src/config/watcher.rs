@@ -132,23 +132,13 @@ impl ConfigWatcher {
     }
 }
 
-/// Validate a config before applying
+/// Validate a config before applying.
+///
+/// Delegates to [`Config::validate`]: a reload judged by its own rule set
+/// refuses a config startup accepted, and the loader then runs on the stale
+/// one with only a log line to say so.
 fn validate_config(config: &Config) -> Result<()> {
-    if config.kafka.brokers.is_empty() {
-        return Err(crate::Error::Config("Kafka brokers cannot be empty".into()));
-    }
-
-    if config.clickhouse.hosts.is_empty() {
-        return Err(crate::Error::Config(
-            "ClickHouse hosts cannot be empty".into(),
-        ));
-    }
-
-    if config.buffer.flush_rows == 0 {
-        return Err(crate::Error::Config("Buffer flush_rows must be > 0".into()));
-    }
-
-    Ok(())
+    config.validate()
 }
 
 #[cfg(test)]
@@ -221,5 +211,18 @@ buffer:
         let mut config = Config::default();
         config.buffer.flush_rows = 0;
         assert!(validate_config(&config).is_err());
+    }
+
+    /// A brokerless profile gives the loader no broker address, and a reload
+    /// must accept that as readily as startup does: rejected, the loader keeps
+    /// serving the config it booted with.
+    #[test]
+    fn test_validate_config_grpc_transport_needs_no_broker() {
+        let mut config = Config::default();
+        config.transport = crate::config::loader::TRANSPORT_GRPC.to_string();
+        config.kafka.brokers = vec![];
+        config.grpc.listen = Some("0.0.0.0:6000".to_string());
+        assert!(config.is_direct());
+        validate_config(&config).expect("a reload on the direct transport reaches no broker");
     }
 }
