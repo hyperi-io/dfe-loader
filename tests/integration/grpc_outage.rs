@@ -511,6 +511,88 @@ async fn no_accepted_record_is_lost_to_a_clickhouse_outage() {
     );
 }
 
+/// A shutdown while a sender still pushes loses no record the listener acked:
+/// intake closes first and the loader drains what was queued before its final
+/// flush.
+#[tokio::test]
+async fn no_acked_record_is_lost_when_shutdown_races_a_sender() {
+    let infra = TestInfrastructure::new(test_name!(), true, false).await;
+    let clickhouse = clickhouse_address(&infra).await;
+    let direct = query_client(&clickhouse);
+
+    let table = unique_table_name("grpc_shutdown");
+    direct
+        .execute(&format!(
+            "CREATE TABLE default.{table} (id UInt64) ENGINE = MergeTree() ORDER BY id"
+        ))
+        .await
+        .expect("create table");
+
+    let listen_port = random_port();
+    let mut orchestrator = Orchestrator::new(grpc_loader(listen_port, clickhouse.clone(), &table));
+    let shutdown = orchestrator.shutdown_token();
+    let loader = tokio::spawn(async move {
+        let ran = orchestrator.run().await.is_ok();
+        (ran, orchestrator.stats().messages_received)
+    });
+    let client = GrpcTransport::new(&GrpcConfig::client(&format!(
+        "http://127.0.0.1:{listen_port}"
+    )))
+    .await
+    .expect("gRPC client");
+    wait_for_loader(&client, &clickhouse, &table).await;
+
+    // One Push a millisecond, counting the ones the listener acked.
+    let stop = Arc::new(AtomicBool::new(false));
+    let sender = {
+        let stop = Arc::clone(&stop);
+        tokio::spawn(async move {
+            let mut acked = BTreeSet::new();
+            let mut id = 1_u64;
+            while !stop.load(Ordering::SeqCst) {
+                let body = bytes::Bytes::from(id_payload(id));
+                if client.send("", body).await.is_ok() {
+                    acked.insert(id);
+                }
+                id += 1;
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+            acked
+        })
+    };
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    shutdown.cancel();
+    let stopped = tokio::time::timeout(Duration::from_secs(60), loader).await;
+    stop.store(true, Ordering::SeqCst);
+    let acked = sender.await.expect("sender task");
+    let landed = landed_ids(&clickhouse, &table).await;
+    let _ = direct
+        .execute(&format!("DROP TABLE IF EXISTS default.{table}"))
+        .await;
+
+    let (ran, received) = stopped
+        .expect("the loader stopped within 60 s of shutdown")
+        .expect("loader task");
+    assert!(ran, "the loader returned an error");
+    assert!(!acked.is_empty(), "the listener acked nothing");
+    // wait_for_loader's record is the one received beyond the sender's acks.
+    assert_eq!(
+        received,
+        acked.len() as u64 + 1,
+        "the listener acked {} records and the loader received {}",
+        acked.len() + 1,
+        received
+    );
+    let lost: Vec<u64> = acked.difference(&landed).copied().collect();
+    assert!(
+        lost.is_empty(),
+        "{} of {} acked records never landed: {lost:?}",
+        lost.len(),
+        acked.len()
+    );
+}
+
 /// Needs process-per-test (nextest): the file size limit is process-wide.
 #[tokio::test]
 async fn no_rejected_row_is_lost_while_the_dlq_refuses_writes() {

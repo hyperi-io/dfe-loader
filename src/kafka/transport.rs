@@ -698,12 +698,10 @@ mod backend_tests {
             .expect("self-regulation is on by default")
     }
 
-    /// Push one record to a gRPC backend built with `governor`.
-    async fn push_through_backend(
+    /// A gRPC backend built with `governor`, and a client dialled to it.
+    async fn grpc_backend_and_client(
         governor: Option<&SelfRegulationGovernor>,
-    ) -> scalo::transport::SendResult {
-        use scalo::transport::TransportSender;
-
+    ) -> (TransportBackend, GrpcTransport) {
         // The client dials the listener by number, so the port is chosen here.
         let port = std::net::TcpListener::bind("127.0.0.1:0")
             .and_then(|l| l.local_addr())
@@ -725,12 +723,55 @@ mod backend_tests {
         )))
         .await
         .expect("gRPC client");
+        (backend, client)
+    }
+
+    /// Push one record to a gRPC backend built with `governor`.
+    async fn push_through_backend(
+        governor: Option<&SelfRegulationGovernor>,
+    ) -> scalo::transport::SendResult {
+        use scalo::transport::TransportSender;
+
+        let (backend, client) = grpc_backend_and_client(governor).await;
         let result = client
             .send("", bytes::Bytes::from_static(br#"{"id":1}"#))
             .await;
         client.close().await.expect("close the client");
         backend.close().await.expect("close the gRPC server");
         result
+    }
+
+    /// A record the listener acked before close() is one recv still returns,
+    /// and recv reports the transport closed once it has.
+    #[tokio::test]
+    async fn an_acked_record_is_received_after_close() {
+        use scalo::transport::TransportSender;
+
+        let (backend, client) = grpc_backend_and_client(None).await;
+        let sent = client
+            .send("", bytes::Bytes::from_static(br#"{"id":1}"#))
+            .await;
+        assert!(
+            matches!(sent, scalo::transport::SendResult::Ok),
+            "the listener refused the record: {sent:?}"
+        );
+
+        backend.close().await.expect("close the gRPC server");
+        let received = backend.recv(100).await;
+        let drained = backend.recv(100).await;
+        client.close().await.expect("close the client");
+
+        let received = received.expect("the acked record after close()");
+        assert_eq!(
+            received.messages.len(),
+            1,
+            "the listener acked 1 record and recv returned {} after close()",
+            received.messages.len()
+        );
+        assert!(
+            drained.is_err(),
+            "recv after the drain must report the transport closed"
+        );
     }
 
     #[tokio::test]

@@ -550,6 +550,10 @@ impl Orchestrator {
         // Whether a full pending-schema buffer stopping intake has been logged.
         let mut schema_pause_logged = false;
 
+        // Set on shutdown: the transport is closed and recv hands back what it
+        // already accepted until it reports closed.
+        let mut draining = false;
+
         loop {
             // The Kafka recv blocks its worker without yielding, and outside the
             // select! a yield drops nothing, so the runtime drives timers and I/O
@@ -565,27 +569,22 @@ impl Orchestrator {
                 schema_full,
                 &pending_schema_buffer,
             );
-            let intake_open = redelivers || (self.unsettled.is_empty() && !schema_full);
+            // Everything a draining transport still holds was acknowledged, so
+            // it is read even while the loader holds work of its own.
+            let intake_open = draining || redelivers || (self.unsettled.is_empty() && !schema_full);
 
             tokio::select! {
                 biased; // Prioritize shutdown check
 
-                () = self.shutdown.cancelled() => {
-                    // Messages that never received a schema cannot be
-                    // processed (#36), so the final flush hands them to the DLQ.
-                    let drained = pending_schema_buffer.drain_all();
-                    if !drained.is_empty() {
-                        warn!(count = drained.len(), "Draining pending-schema buffer to DLQ on shutdown");
+                // A gRPC sender holds only an ack for what the listener queued,
+                // so intake closes first and the queue drains before the final
+                // flush.
+                () = self.shutdown.cancelled(), if !draining => {
+                    info!("Shutdown requested, draining the transport");
+                    if let Err(e) = transport.close().await {
+                        warn!(error = %e, "Error closing transport");
                     }
-                    let dead_letters = drained
-                        .into_iter()
-                        .map(|(msg, reason)| {
-                            expire_pending(&self.memory_guard, &self.metrics, msg, &reason)
-                        })
-                        .collect();
-                    self.queue_dead_letters(dead_letters);
-                    info!("Shutdown requested, flushing remaining buffers");
-                    break;
+                    draining = true;
                 }
 
                 // Hot-reload: rebuild mutable components on config change
@@ -1148,13 +1147,23 @@ impl Orchestrator {
                                 self.flush_batches_transport(&inserter, &transport, dlq.as_ref(), batches, still_held).await;
                             }
                         }
+                        // A closed transport accepts nothing new, so an empty
+                        // batch ends the drain as surely as Closed does.
+                        Ok(_) if draining => {
+                            info!("Transport drained");
+                            break;
+                        }
                         Ok(_) => {
                             // Empty batch - no messages available, continue
                         }
                         Err(e) => {
-                            // Check if transport is closed
+                            // A closed transport reports an error once it holds nothing more.
                             if !transport.is_healthy() {
-                                warn!("Transport closed");
+                                if draining {
+                                    info!("Transport drained");
+                                } else {
+                                    warn!("Transport closed");
+                                }
                                 break;
                             }
                             error!(error = %e, "Transport recv error");
@@ -1165,6 +1174,21 @@ impl Orchestrator {
                 }
             }
         }
+
+        // Messages that never received a schema cannot be processed (#36), so
+        // the final flush hands them to the DLQ.
+        let drained = pending_schema_buffer.drain_all();
+        if !drained.is_empty() {
+            warn!(
+                count = drained.len(),
+                "Draining pending-schema buffer to DLQ on shutdown"
+            );
+        }
+        let dead_letters = drained
+            .into_iter()
+            .map(|(msg, reason)| expire_pending(&self.memory_guard, &self.metrics, msg, &reason))
+            .collect();
+        self.queue_dead_letters(dead_letters);
 
         // Final flush: every buffer is empty after this, so only a row
         // ClickHouse or the DLQ still refuses holds the watermark down.
@@ -1202,7 +1226,7 @@ impl Orchestrator {
         // Stop schema cache background refresh task.
         schema_cache.shutdown();
 
-        // Close transport
+        // Idempotent: a drain has closed the transport already, a failed recv has not.
         if let Err(e) = transport.close().await {
             warn!(error = %e, "Error closing transport");
         }
