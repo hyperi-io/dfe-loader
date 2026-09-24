@@ -12,8 +12,11 @@
 mod testcontainers_impl {
     use std::time::Duration;
 
+    use testcontainers::core::WaitFor;
+    use testcontainers::core::logs::LogFrame;
+    use testcontainers::core::wait::HttpWaitStrategy;
     use testcontainers::{ContainerAsync, ImageExt, runners::AsyncRunner};
-    use testcontainers_modules::clickhouse::ClickHouse as ClickHouseImage;
+    use testcontainers_modules::clickhouse::{CLICKHOUSE_PORT, ClickHouse as ClickHouseImage};
     // The `apache` module, NOT the crate's default (`confluentinc/cp-kafka`).
     // cp-kafka is amd64-only, so on arm64 it runs a JVM under QEMU: ~30s to
     // become ready instead of ~1s, and concurrent brokers then trade
@@ -49,6 +52,10 @@ mod testcontainers_impl {
     /// a tag moved without this one still pulls the old server.
     const CLICKHOUSE_DIGEST: &str =
         "sha256:422be85ae7344058369cdd366ac0efea9daa8428b55c9cf50258e83a7d12fcb3";
+
+    /// Bound on one ClickHouse readiness probe, so a hung connection costs a
+    /// retry instead of the whole startup budget.
+    const READINESS_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
     use dfe_loader::config::{ClickHouseConfig, KafkaConfig};
 
@@ -158,6 +165,36 @@ mod testcontainers_impl {
         }
     }
 
+    /// Client for the readiness probe: testcontainers' default client has no
+    /// request timeout.
+    fn readiness_probe_client() -> testcontainers_reqwest::Client {
+        testcontainers_reqwest::Client::builder()
+            .timeout(READINESS_PROBE_TIMEOUT)
+            .build()
+            .expect("Failed to build the ClickHouse readiness probe client")
+    }
+
+    /// The module's own ready condition (GET / on 8123 answers 200), declared
+    /// here only to bound each probe.
+    fn clickhouse_ready() -> WaitFor {
+        WaitFor::http(
+            HttpWaitStrategy::new("/")
+                .with_port(CLICKHOUSE_PORT)
+                .with_expected_status_code(200_u16)
+                .with_client(readiness_probe_client()),
+        )
+    }
+
+    /// Echoes container output to stderr under the container's name, because
+    /// testcontainers removes the container, and its logs, on a failed start.
+    fn echo_logs(name: String) -> impl Fn(&LogFrame) + Send + Sync + 'static {
+        move |frame| {
+            for line in String::from_utf8_lossy(frame.bytes()).lines() {
+                eprintln!("[{name} {}] {line}", frame.source());
+            }
+        }
+    }
+
     /// Start ClickHouse container
     async fn start_clickhouse(test: &str) -> ContainerAsync<ClickHouseImage> {
         let name = crate::common::container_name(Some(test), "clickhouse");
@@ -171,6 +208,8 @@ mod testcontainers_impl {
             .with_env_var("CLICKHOUSE_SKIP_USER_SETUP", "1")
             .with_container_name(&name)
             .with_labels(crate::common::test_labels("clickhouse"))
+            .with_ready_conditions(vec![clickhouse_ready()])
+            .with_log_consumer(echo_logs(name.clone()))
             // The 60s testcontainers default is too tight under CI container
             // contention: the server cold-start intermittently overruns it and
             // fails the run with WaitContainer(StartupTimeout).
@@ -198,6 +237,36 @@ mod testcontainers_impl {
             .start()
             .await
             .expect("Failed to start Kafka container")
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::{READINESS_PROBE_TIMEOUT, readiness_probe_client};
+
+        /// A server that accepts the connection and never answers must fail the
+        /// probe within its bound, or the readiness wait never gets to retry.
+        #[tokio::test]
+        async fn readiness_probe_gives_up_on_a_server_that_never_answers() {
+            // Bound but never accepted: the kernel completes the handshake and nothing replies.
+            let silent = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let url = format!("http://{}/", silent.local_addr().unwrap());
+
+            let started = std::time::Instant::now();
+            let sent = tokio::time::timeout(
+                READINESS_PROBE_TIMEOUT * 3,
+                readiness_probe_client().get(url).send(),
+            )
+            .await
+            .expect("the probe was still waiting at three times its bound");
+            let elapsed = started.elapsed();
+
+            let err = sent.expect_err("a server that never answers cannot produce a response");
+            assert!(err.is_timeout(), "expected a timeout, got: {err}");
+            assert!(
+                elapsed >= READINESS_PROBE_TIMEOUT,
+                "probe gave up after {elapsed:?}, before its {READINESS_PROBE_TIMEOUT:?} bound"
+            );
+        }
     }
 }
 
