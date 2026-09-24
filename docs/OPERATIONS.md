@@ -89,8 +89,7 @@ The insert tail is built to degrade, not stall:
 - **Schema-cache recovery** -- a drift error (a column added by an out-of-band
   `ALTER`) invalidates the cached schema and the retry re-fetches and
   re-encodes. See [clickhouse/SCHEMA-CACHE.md](clickhouse/SCHEMA-CACHE.md).
-- **Per-table offset commit** -- offsets commit per table after its insert
-  succeeds (at-least-once); one table's failure does not block another's.
+- **One commit per flush cycle** -- Kafka offsets commit once per cycle, after the inserts and the DLQ hand-over. On each partition the commit stops below the lowest offset not placed yet: a buffered row, a row waiting on its schema, a failed batch, or a dead letter the DLQ refused. The loader holds a failed batch or refused dead letter and retries it with jittered backoff until it lands. Rows above the floor re-deliver as duplicates after a restart (at-least-once).
 
 ## DLQ
 
