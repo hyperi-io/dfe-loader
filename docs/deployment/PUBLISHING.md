@@ -40,7 +40,9 @@ flowchart TB
 
 ## How it works
 
-The CI submodule has built-in container and Helm publishing. On release, it:
+hyperi-ci's reusable Rust workflow (`rust-ci.yml`, called from
+`.github/workflows/ci.yml`) has built-in container and Helm publishing. On
+release, it:
 
 1. Builds the Dockerfile for `linux/amd64` and `linux/arm64`
 2. Pushes to the configured registry with semantic version tags
@@ -164,17 +166,11 @@ publish:
 `enableDockerSupport: true` for OCI push -- helm-type repos do not support OCI.
 JFrog is no longer the publishing path.)
 
-### 3. Update CI submodule
+### 3. Nothing to update in the workflow
 
-```bash
-git submodule update --remote ci
-```
-
-### 4. Update publish workflow
-
-Regenerate or update `.github/workflows/publish.yml` to include container
-publishing inputs. The CI actions/jobs/publish composite action already handles
-container publishing when the config is detected.
+There is no CI submodule and no separate publish workflow. `.github/workflows/ci.yml`
+calls hyperi-ci's `rust-ci.yml`, which publishes the container and chart when
+`.hyperi-ci.yaml` enables them.
 
 ## Verification
 

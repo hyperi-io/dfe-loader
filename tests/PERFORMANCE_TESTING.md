@@ -198,7 +198,7 @@ cargo test --test performance_example -- --nocapture
 
 - [tests/performance_example.rs](performance_example.rs) - Full working example
 - [tests/common/metrics.rs](common/metrics.rs) - Metrics snapshot implementation
-- [src/metrics/prometheus.rs](../src/metrics/prometheus.rs) - Available metrics
+- [src/metrics/mod.rs](../src/metrics/mod.rs) - Available metrics (`dfe-loader metrics-manifest` prints the full catalogue)
 
 ## Troubleshooting
 

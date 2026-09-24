@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Project:   dfe-loader
 # File:      scripts/pgo-workload.sh
-# Purpose:   PGO workload orchestrator — Kafka + ClickHouse + loader + producer
+# Purpose:   PGO workload orchestrator -- Kafka + ClickHouse + loader + producer
 # Language:  Bash
 #
 # License:   BUSL-1.1
@@ -10,8 +10,8 @@
 # Usage:
 #   scripts/pgo-workload.sh <path-to-dfe-loader-binary>
 #
-# Drives the loader's hot path (Kafka consume → SIMD JSON parse → route →
-# transform → ClickHouse insert) under representative load so a PGO-
+# Drives the loader's hot path (Kafka consume -> SIMD JSON parse -> route ->
+# transform -> ClickHouse insert) under representative load so a PGO-
 # instrumented binary accumulates useful profile data.
 #
 # Environment variables (all optional):
@@ -73,7 +73,7 @@ KAFKA_IMAGE="${PGO_WORKLOAD_KAFKA_IMAGE:-docker.redpanda.com/redpandadata/redpan
 CH_IMAGE="${PGO_WORKLOAD_CH_IMAGE:-clickhouse/clickhouse-server:${CH_TAG}}"
 KEEP="${PGO_WORKLOAD_KEEP:-0}"
 
-# Floor of 60s — shorter workloads produce bad PGO profiles
+# Floor of 60s -- shorter workloads produce bad PGO profiles
 if [[ "$DURATION" -lt 60 ]]; then
     echo "error: PGO_WORKLOAD_DURATION_SECS must be >= 60 (got $DURATION)" >&2
     echo "  short workloads produce NEGATIVE PGO gains by biasing the" >&2
@@ -119,7 +119,7 @@ CONFIG_DIR=""
 cleanup() {
     local rc=$?
     if [[ "$KEEP" == "1" ]]; then
-        echo "PGO_WORKLOAD_KEEP=1 — skipping cleanup" >&2
+        echo "PGO_WORKLOAD_KEEP=1 -- skipping cleanup" >&2
         echo "  loader PID: $LOADER_PID" >&2
         echo "  kafka CID:  $KAFKA_CID" >&2
         echo "  ch CID:     $CH_CID" >&2
