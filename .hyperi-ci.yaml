@@ -51,6 +51,9 @@ quality:
 test:
   enabled: true
   coverage: true
+  rust:
+    # Required, not auto: the DLQ-refusal tests set a process-wide RLIMIT_FSIZE of 0, and only nextest keeps each test in a process of its own.
+    nextest: true
   # min_coverage: 80       # Fail if coverage below this percentage
 
 # Building

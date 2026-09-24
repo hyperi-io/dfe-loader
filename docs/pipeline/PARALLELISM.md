@@ -247,7 +247,7 @@ For each remediated project:
 - [ ] `./binary generate-artefacts --output-dir docs/` succeeds.
 - [ ] Code review (`/review`).
 - [ ] Security review (`/security-review`).
-- [ ] `docs/metrics-manifest.json` committed.
+- [ ] `docs/config-schema.*` and `docs/capability-catalog.*` committed and current (`test_config_artifacts_do_not_drift` checks them). The metrics manifest is not committed: `dfe-loader metrics-manifest` prints it.
 - [ ] Push + CI green.
 
 ## See also
