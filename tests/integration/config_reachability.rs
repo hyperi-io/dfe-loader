@@ -137,6 +137,7 @@ fn keda_contract_tracks_this_crate_s_keda_defaults() {
         .keda
         .expect("contract carries a KEDA section");
 
+    assert_eq!(contract.enabled, keda.enabled);
     assert_eq!(contract.min_replicas, keda.min_replicas);
     assert_eq!(contract.max_replicas, keda.max_replicas);
     assert_eq!(contract.polling_interval, keda.polling_interval);
@@ -148,6 +149,32 @@ fn keda_contract_tracks_this_crate_s_keda_defaults() {
     );
     assert_eq!(contract.cpu_enabled, keda.cpu_enabled);
     assert_eq!(contract.cpu_threshold, keda.cpu_threshold);
+}
+
+/// Raw consumer-group lag rises when a downstream stage breaks, so neither the
+/// contract nor the committed chart may scale the loader on it.
+#[test]
+fn keda_scales_on_cpu_and_never_on_kafka_lag() {
+    let contract = Config::deployment_contract()
+        .keda
+        .expect("contract carries a KEDA section");
+    assert!(
+        !contract.kafka_trigger.enabled,
+        "the deployment contract turned the Kafka lag trigger back on"
+    );
+
+    let scaled_object = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("chart/templates/keda-scaledobject.yaml"),
+    )
+    .expect("read committed ScaledObject template");
+    assert!(
+        !scaled_object.contains("type: kafka"),
+        "chart/templates/keda-scaledobject.yaml carries a Kafka lag trigger"
+    );
+    assert!(
+        scaled_object.contains("type: cpu"),
+        "chart/templates/keda-scaledobject.yaml lost its CPU trigger"
+    );
 }
 
 // ============================================================================
