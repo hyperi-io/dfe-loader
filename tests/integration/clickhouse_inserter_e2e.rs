@@ -22,7 +22,6 @@ use compact_str::CompactString;
 use serde_json::{Map, Value, json};
 
 use dfe_loader::buffer::FlushBatch;
-use dfe_loader::clickhouse::circuit_breaker::{CircuitBreaker, CircuitBreakerConfig};
 use dfe_loader::clickhouse::config::{ClickHouseConfig, InsertFormat, Transport};
 use dfe_loader::clickhouse::{ClickHouseQueryClient, Inserter, InserterConfig, SchemaCache};
 
@@ -781,62 +780,6 @@ async fn test_inserter_concurrent_inserts() {
     assert_eq!(
         persisted, expected,
         "all concurrent rows must land in the table"
-    );
-}
-
-// ============================================================================
-// Inserter: circuit breaker opens after failures
-// ============================================================================
-
-#[tokio::test(flavor = "multi_thread")]
-async fn test_inserter_with_circuit_breaker() {
-    let (_infra, client, ch) = spin_up(test_name!()).await;
-    let missing_table = unique_table_name("tc_cb_missing");
-
-    let cb_cfg = CircuitBreakerConfig {
-        failure_threshold: 2,
-        success_threshold: 1,
-        open_duration: Duration::from_secs(5),
-        half_open_max_requests: 1,
-    };
-    let breaker = Arc::new(CircuitBreaker::new(cb_cfg));
-
-    let inserter = Inserter::new(client.clone(), ch, fast_fail_config())
-        .with_insert_format(InsertFormat::JsonEachRow)
-        .with_circuit_breaker(breaker.clone());
-
-    let rows = simple_rows(2);
-
-    // Simulate per-table failures to drive the breaker into Open state.
-    // Inserter methods don't automatically record via the breaker — so we
-    // drive it directly using the same API the loader uses elsewhere.
-    assert!(
-        breaker.allow_request(&missing_table),
-        "closed breaker should allow first request"
-    );
-    let first = inserter.insert_rows(&missing_table, &rows, &[]).await;
-    assert!(first.is_err(), "insert into missing table must fail");
-    breaker.record_failure(&missing_table);
-
-    assert!(
-        breaker.allow_request(&missing_table),
-        "one failure should not yet open the breaker"
-    );
-    let second = inserter.insert_rows(&missing_table, &rows, &[]).await;
-    assert!(second.is_err(), "second insert must also fail");
-    breaker.record_failure(&missing_table);
-
-    // After reaching the failure threshold, breaker must reject.
-    assert!(
-        !breaker.allow_request(&missing_table),
-        "breaker must open after {} failures",
-        2
-    );
-
-    // Another table is unaffected — state is per-table.
-    assert!(
-        breaker.allow_request("unrelated.table"),
-        "circuit breaker state must be isolated per-table"
     );
 }
 

@@ -23,7 +23,7 @@ tests/
 │   ├── kafka.rs                  # Kafka transport creation
 │   ├── offset.rs                 # Kafka offset tracking
 │   ├── property.rs               # Property-based tests (proptest)
-│   ├── resilience.rs             # MemoryGuard + CircuitBreaker state machine
+│   ├── resilience.rs             # MemoryGuard backpressure
 │   ├── rls.rs                    # Row-level security
 │   └── schema.rs                 # Schema introspection from system.columns
 ├── e2e/                          # Real infra tests — #[ignore] by default

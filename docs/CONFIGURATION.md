@@ -108,7 +108,8 @@ Precedence, highest wins: **DDL tag > per-table > global**.
 |---------|--------|
 | `enrichment.geoip` / `reputation` / `risk` | inject enriched columns on the promoted row |
 | `buffer.flush_rows` / `flush_bytes` / `flush_age_secs` | per-table flush triggers |
-| salvage / circuit breaker / `max_concurrent_inserts` | the insert resilience layer |
+
+Insert retry, batch salvage and insert concurrency are not settings. Every build retries a transient insert failure up to 5 times with jittered backoff, binary-splits a batch with a data error down to the bad rows, and runs at most 8 inserts at once. A batch that still fails is held and retried as described in [OPERATIONS.md](OPERATIONS.md).
 
 ## Hot-reload
 

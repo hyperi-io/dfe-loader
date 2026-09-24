@@ -5,7 +5,7 @@
 //!
 //! Three layers:
 //! 1. `ServiceMetrics` — platform `dfe_*` metrics (records, transport, scaling)
-//! 2. Metric groups — standardised `dfe_loader_*` metrics (app, buffer, consumer, sink, CB)
+//! 2. Metric groups — standardised `dfe_loader_*` metrics (app, buffer, consumer, sink)
 //! 3. Loader-specific — per-table gauges, salvage, routing metrics
 //!
 //! Legacy `loader_*` names are dual-emitted alongside new `dfe_loader_*` names.
@@ -19,8 +19,8 @@ use metrics::{Counter, Gauge, Histogram};
 
 use scalo::ScalingPressure;
 use scalo::metrics::groups::{
-    AppMetrics, BackpressureMetrics, BufferMetrics, CircuitBreakerMetrics, ConsumerMetrics,
-    EnrichmentMetrics, SchemaCacheMetrics, SinkMetrics,
+    AppMetrics, BackpressureMetrics, BufferMetrics, ConsumerMetrics, EnrichmentMetrics,
+    SchemaCacheMetrics, SinkMetrics,
 };
 use scalo::metrics::{MetricsManager, ServiceMetrics, TransportKind};
 
@@ -39,7 +39,6 @@ pub struct Metrics {
     pub buffer: BufferMetrics,
     pub consumer: ConsumerMetrics,
     pub sink: SinkMetrics,
-    pub circuit_breaker: CircuitBreakerMetrics,
     pub backpressure: BackpressureMetrics,
     pub enrichment: EnrichmentMetrics,
     pub schema_cache: SchemaCacheMetrics,
@@ -146,7 +145,6 @@ impl Metrics {
             buffer: BufferMetrics::new(manager),
             consumer: ConsumerMetrics::new(manager),
             sink: SinkMetrics::new(manager),
-            circuit_breaker: CircuitBreakerMetrics::new(manager),
             backpressure: BackpressureMetrics::new(manager),
             enrichment: EnrichmentMetrics::new(manager),
             schema_cache: SchemaCacheMetrics::new(manager),
@@ -459,13 +457,6 @@ impl Metrics {
             .set(rows as f64);
         metrics::gauge!("loader_buffer_bytes_by_table", "table" => table.to_string())
             .set(bytes as f64);
-    }
-
-    /// Update per-table circuit breaker state.
-    pub fn update_circuit_breaker_state(&self, table: &str, state: u8) {
-        metrics::gauge!("loader_circuit_breaker_state", "table" => table.to_string())
-            .set(f64::from(state));
-        self.circuit_breaker.set_state(table, state);
     }
 
     /// Record Kafka offsets committed after successful insert.
@@ -841,14 +832,6 @@ mod tests {
         let m = test_metrics();
         m.update_per_table_buffer("dfe.events", 1000, 65536);
         m.update_per_table_buffer("dfe.events", 0, 0); // reset
-    }
-
-    #[test]
-    fn metrics_update_circuit_breaker_state() {
-        let m = test_metrics();
-        m.update_circuit_breaker_state("dfe.events", 0); // closed
-        m.update_circuit_breaker_state("dfe.events", 1); // open
-        m.update_circuit_breaker_state("dfe.events", 2); // half-open
     }
 
     #[test]

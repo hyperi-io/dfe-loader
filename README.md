@@ -104,7 +104,7 @@ NOT a transform stage, NOT a schema manager. Its only outbound topic is the DLQ.
 | `src/main.rs`, `src/config/` | CLI entry, config structs, `Config::validate()`, flat env |
 | `src/pipeline/` | Orchestrator and per-message processor -- the hot path |
 | `src/routing/`, `src/transform/`, `src/enrich/` | Routing, coercion and capture, enrichment |
-| `src/buffer/`, `src/clickhouse/` | Per-table buffers; query client, schema cache, inserter, circuit breaker |
+| `src/buffer/`, `src/clickhouse/` | Per-table buffers; query client, schema cache, inserter |
 | `src/clickhouse_ext/` | Dynamic insert: runtime type parser, RowBinary encoder |
 | `chart/` | Helm chart, generated from the deployment contract and committed |
 | `tests/` | `smoke.rs`, `integration/`, `e2e/` -- see `tests/TESTING.md` |

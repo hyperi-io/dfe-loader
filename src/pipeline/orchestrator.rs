@@ -85,11 +85,9 @@ pub struct Orchestrator {
     governor: Option<SelfRegulationGovernor>,
     worker_pool: Option<Arc<scalo::worker::AdaptiveWorkerPool>>,
     batch_engine: Option<Arc<scalo::worker::BatchEngine>>,
-    /// Lightweight ClickHouse sink-health latch driving `set_circuit_open`.
-    /// Set when a whole flush cycle fails with zero successful inserts (sink
-    /// unreachable); cleared the moment any insert succeeds. This is the real,
-    /// observable "sink dead" signal — the loader's per-table CircuitBreaker is
-    /// not wired into the inserter, so we derive the gate from insert outcomes.
+    /// ClickHouse sink-health latch driving `set_circuit_open`, derived from
+    /// insert outcomes. Set when a whole flush cycle fails with zero successful
+    /// inserts (sink unreachable); cleared the moment any insert succeeds.
     sink_circuit_open: bool,
     /// Batches a failed insert handed back, and dead letters the DLQ did not
     /// take. On a transport with no re-delivery intake stays paused while any
@@ -728,7 +726,12 @@ impl Orchestrator {
                             // An unknown source is a routing miss, so its events
                             // fall back to the default table rather than ageing
                             // out to the DLQ.
-                            let marked = absent_tables.insert(table, std::time::Instant::now());
+                            let marked = record_table_absent(
+                                &mut absent_tables,
+                                &schema_cache,
+                                table,
+                                std::time::Instant::now(),
+                            );
                             // Only the move into absence is news: the entry is
                             // re-resolved every TTL, so warning on the state
                             // costs a line a minute per dead source name (#129).
@@ -1095,13 +1098,6 @@ impl Orchestrator {
 
                                 // ClickHouse connection pool stats (native transport only)
                                 m.update_pool_stats(inserter.pool_stats());
-
-                                // Per-table circuit breaker state
-                                if let Some(cb) = inserter.circuit_breaker() {
-                                    for (table, state) in cb.per_table_states() {
-                                        m.update_circuit_breaker_state(&table, state);
-                                    }
-                                }
                             }
 
                             // Update scaling pressure components
@@ -1919,6 +1915,21 @@ async fn warm_tables_once(
         }
     }
     out
+}
+
+/// Record `ClickHouse`'s answer that `table` does not exist.
+///
+/// Its cached schema is dropped too: the background refresh re-requests every
+/// cached table, so a dropped one would be queried every interval for the life
+/// of the process. The absent-table TTL is what re-checks it instead.
+fn record_table_absent(
+    absent: &mut super::types::AbsentTables,
+    schema_cache: &SchemaCache,
+    table: &str,
+    now: std::time::Instant,
+) -> super::types::AbsentOutcome {
+    schema_cache.invalidate(table);
+    absent.insert(table, now)
 }
 
 /// Interval between resolution re-requests for tables still stuck in the
@@ -3080,6 +3091,39 @@ mod tests {
                 ("dfe.main".to_string(), 5, (100..105).collect()),
             ],
             "only the batch for the absent table moves, with its rows and offsets"
+        );
+    }
+
+    fn cached_schema(table: &str) -> crate::clickhouse::TableSchema {
+        crate::clickhouse::TableSchema {
+            database: "dfe".to_string(),
+            table: table.to_string(),
+            columns: Vec::new(),
+            comment: String::new(),
+        }
+    }
+
+    #[test]
+    fn a_dropped_table_leaves_the_background_schema_refresh() {
+        // A zero TTL puts every cached schema inside the refresh window at once.
+        let cache = SchemaCache::with_config(crate::clickhouse::SchemaCacheConfig {
+            ttl_secs: 0,
+            ..Default::default()
+        });
+        cache.insert("dfe.gone".to_string(), cached_schema("dfe.gone"));
+        cache.insert("dfe.kept".to_string(), cached_schema("dfe.kept"));
+        let mut absent =
+            super::super::types::AbsentTables::new(ABSENT_TABLE_TTL, ABSENT_TABLE_CAPACITY);
+
+        let outcome =
+            record_table_absent(&mut absent, &cache, "dfe.gone", std::time::Instant::now());
+
+        assert_eq!(outcome, super::super::types::AbsentOutcome::Recorded);
+        assert!(absent.contains("dfe.gone"), "new records still divert");
+        assert_eq!(
+            cache.tables_needing_refresh(),
+            vec!["dfe.kept".to_string()],
+            "the dropped table stays on the 60 s refresh for the life of the process"
         );
     }
 

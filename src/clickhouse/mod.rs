@@ -25,7 +25,6 @@
 //!
 //! Resilience features:
 //! - `Inserter` - Batch insert with binary-split salvage
-//! - `CircuitBreaker` - Per-table failure detection
 //! - `SchemaCache` - TTL-based schema caching
 
 // Core client modules
@@ -35,7 +34,6 @@ pub mod error;
 pub mod types;
 
 // Resilience modules
-pub mod circuit_breaker;
 pub mod inserter;
 pub mod schema;
 
@@ -49,8 +47,5 @@ pub use types::{
 };
 
 // Export resilience modules
-pub use circuit_breaker::{
-    CircuitBreaker, CircuitBreakerConfig, CircuitBreakerStats, CircuitState,
-};
 pub use inserter::{BatchDisposition, FailedRow, InsertResult, Inserter, InserterConfig};
 pub use schema::{SchemaCache, SchemaCacheConfig, SchemaCacheStats, SharedSchemaCache};

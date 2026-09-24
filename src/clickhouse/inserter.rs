@@ -44,7 +44,6 @@ use tracing::{debug, error, info, trace, warn};
 
 use crate::Result;
 use crate::buffer::{FlushBatch, KafkaOffset};
-use crate::clickhouse::circuit_breaker::CircuitBreaker;
 use crate::clickhouse::client_http::escape_identifier;
 use crate::clickhouse::config::InsertFormat;
 use crate::clickhouse::error::{
@@ -287,8 +286,6 @@ pub struct Inserter {
     max_salvage_depth: u32,
     /// Semaphore for limiting concurrent inserts
     semaphore: Option<Arc<Semaphore>>,
-    /// Circuit breaker for per-table failure detection
-    circuit_breaker: Option<Arc<CircuitBreaker>>,
     /// Schema cache for type-aware coercion (`JSONEachRow` path)
     schema_cache: Option<Arc<SchemaCache>>,
     /// Type coercer applied before each insert (`JSONEachRow` path)
@@ -325,7 +322,6 @@ impl Inserter {
             enable_salvage: config.enable_salvage,
             max_salvage_depth: config.max_salvage_depth,
             semaphore,
-            circuit_breaker: None,
             schema_cache: None,
             coercer: None,
         }
@@ -438,17 +434,6 @@ impl Inserter {
     /// Calculate backoff delay for a given attempt.
     fn backoff_delay(&self, attempt: u32) -> Duration {
         calc_backoff(self.base_retry_delay_ms, attempt, self.max_retry_delay_ms)
-    }
-
-    /// Set the circuit breaker for per-table failure detection
-    pub fn with_circuit_breaker(mut self, cb: Arc<CircuitBreaker>) -> Self {
-        self.circuit_breaker = Some(cb);
-        self
-    }
-
-    /// Get a reference to the circuit breaker (for metrics emission).
-    pub fn circuit_breaker(&self) -> Option<&Arc<CircuitBreaker>> {
-        self.circuit_breaker.as_ref()
     }
 
     /// Get connection pool stats. Currently always `None`: the hyperi-port
