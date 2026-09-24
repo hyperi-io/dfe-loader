@@ -11,11 +11,13 @@
 # Source contract: dfe-loader::deployment::contract()
 # Regenerate with: `dfe-loader emit-dockerfile > Dockerfile`
 
-FROM debian:trixie-slim
+FROM debian:trixie-slim@sha256:a99cfc517144bc59b1978475ec53b46ecabec7e43635402ee5b77cc54cd1b20a
 
 LABEL io.hyperi.profile="production"
 
 # Runtime shared libraries for dynamically-linked Rust crates.
+# Apt versions are unpinned because Debian drops superseded ones, so the digest-pinned base is what fixes the release.
+# hadolint ignore=DL3008
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates curl netcat-openbsd iputils-ping gnupg \
     && curl -fsSL https://packages.confluent.io/clients/deb/archive.key -o /tmp/repo-key.asc \
@@ -37,12 +39,15 @@ RUN chmod +x /usr/local/bin/dfe-loader
 
 # Ubuntu 24.04 ships with ubuntu user at UID 1000 -- remove before creating appuser
 RUN if id ubuntu >/dev/null 2>&1; then userdel -r ubuntu; fi && useradd --create-home --uid 1000 appuser
-USER appuser
+# Numeric, so Kubernetes runAsNonRoot can verify it without reading /etc/passwd.
+USER 1000
 
 EXPOSE 9090
 # Conditional listeners, not EXPOSEd -- publish explicitly when enabled:
 #   6000/tcp push -- when config.transport is "grpc"
 
+# Shell form maps any curl failure to exit 1, the only unhealthy status Docker defines.
+# hadolint ignore=DL3025
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
     CMD curl -sf http://localhost:9090/livez > /dev/null || exit 1
 
