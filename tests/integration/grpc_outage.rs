@@ -129,10 +129,10 @@ async fn push_ids(
 }
 
 /// The ids `ClickHouse` holds for `table`, read over its HTTP interface.
-async fn landed_ids(http_port: u16, table: &str) -> BTreeSet<u64> {
+async fn landed_ids(clickhouse: &str, table: &str) -> BTreeSet<u64> {
     let sql = format!("SELECT DISTINCT id FROM default.{table} FORMAT TabSeparated");
     let Ok(response) = reqwest::Client::new()
-        .get(format!("http://127.0.0.1:{http_port}/"))
+        .get(format!("http://{clickhouse}/"))
         .query(&[("query", sql)])
         .send()
         .await
@@ -147,14 +147,14 @@ async fn landed_ids(http_port: u16, table: &str) -> BTreeSet<u64> {
 
 /// Wait until every id in `want` has landed, or the budget runs out.
 async fn wait_landed(
-    http_port: u16,
+    clickhouse: &str,
     table: &str,
     want: &BTreeSet<u64>,
     budget: Duration,
 ) -> BTreeSet<u64> {
     let deadline = tokio::time::Instant::now() + budget;
     loop {
-        let landed = landed_ids(http_port, table).await;
+        let landed = landed_ids(clickhouse, table).await;
         if want.is_subset(&landed) || tokio::time::Instant::now() >= deadline {
             return landed;
         }
@@ -170,10 +170,21 @@ async fn no_accepted_record_is_lost_to_a_clickhouse_outage() {
         .get_host_port_ipv4(8123)
         .await
         .expect("HTTP port mapping");
+    // `localhost` can resolve to ::1 where loopback has no IPv6.
+    let host = match container
+        .get_host()
+        .await
+        .expect("container host")
+        .to_string()
+    {
+        h if h == "localhost" => "127.0.0.1".to_string(),
+        h => h,
+    };
+    let clickhouse = format!("{host}:{http_port}");
 
     // Queries go straight to the container; the loader goes through the proxy.
     let direct = ClickHouseQueryClient::new(&ClickHouseConfig {
-        hosts: vec![format!("127.0.0.1:{http_port}")],
+        hosts: vec![clickhouse.clone()],
         transport: Transport::Http,
         database: "default".to_string(),
         username: "default".to_string(),
@@ -182,7 +193,7 @@ async fn no_accepted_record_is_lost_to_a_clickhouse_outage() {
         ..Default::default()
     })
     .expect("direct query client");
-    let proxy = OutageProxy::start(format!("127.0.0.1:{http_port}")).await;
+    let proxy = OutageProxy::start(clickhouse.clone()).await;
 
     let table = unique_table_name("grpc_outage");
     direct
@@ -227,7 +238,7 @@ async fn no_accepted_record_is_lost_to_a_clickhouse_outage() {
         BEFORE,
         "the listener refused records before the outage"
     );
-    let landed = wait_landed(http_port, &table, &before, Duration::from_secs(60)).await;
+    let landed = wait_landed(&clickhouse, &table, &before, Duration::from_secs(60)).await;
     assert!(
         before.is_subset(&landed),
         "records never landed before the outage: {landed:?}"
@@ -250,7 +261,7 @@ async fn no_accepted_record_is_lost_to_a_clickhouse_outage() {
         .chain(&after)
         .copied()
         .collect();
-    let landed = wait_landed(http_port, &table, &accepted, LANDING_BUDGET).await;
+    let landed = wait_landed(&clickhouse, &table, &accepted, LANDING_BUDGET).await;
 
     shutdown.cancel();
     let _ = tokio::time::timeout(Duration::from_secs(30), loader).await;
