@@ -7,9 +7,9 @@
 //! still held in memory loses that one to a crash. Each test runs the real
 //! orchestrator on the Kafka transport against Kafka and `ClickHouse`
 //! containers, keeps one record from being placed -- its table schema cannot be
-//! fetched, its insert fails, or the DLQ refuses every write -- lets a later
-//! record on the same partition insert, and reads the consumer group's
-//! committed offset.
+//! fetched, its insert fails, its table is dropped, or the DLQ refuses every
+//! write -- lets a later record on the same partition insert, and reads the
+//! consumer group's committed offset.
 //!
 //! Gated behind `#[cfg(feature = "testcontainers")]`.
 
@@ -62,6 +62,10 @@ const PARKED: u64 = 20;
 /// The lowest id a table's constraint rejects, so `ClickHouse` rejects a row
 /// carrying it for good.
 const REJECTED_ID: u64 = 1_000_000;
+
+/// How long the loader trusts a cached schema in the dropped-table test: long
+/// enough that the record after the drop is still buffered for the old table.
+const SCHEMA_TTL: Duration = Duration::from_secs(20);
 
 /// A loopback proxy to `ClickHouse` HTTP that can refuse every connection
 /// opening with anything but an INSERT, so schema fetches fail while inserts
@@ -566,6 +570,109 @@ async fn a_batch_whose_insert_failed_holds_the_commit_below_it_until_it_lands() 
     assert!(
         held_landed.contains(&1),
         "the held batch never landed once its table was back"
+    );
+    assert!(
+        after >= Some(last + 1),
+        "the watermark never moved past the held batch once it landed: {after:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_batch_held_for_a_dropped_table_follows_new_records_to_the_default_table() {
+    let infra = TestInfrastructure::new(test_name!(), true, true).await;
+    let clickhouse = clickhouse_address(&infra).await;
+    let bootstrap = kafka_bootstrap(&infra).await;
+    let direct = query_client(&clickhouse);
+
+    let landing = unique_table_name("kafka_gone_landing");
+    let gone = unique_table_name("kafka_gone_source");
+    for table in [&landing, &gone] {
+        direct
+            .execute(&format!(
+                "CREATE TABLE default.{table} (id UInt64) ENGINE = MergeTree() ORDER BY id"
+            ))
+            .await
+            .expect("create table");
+    }
+    let topic = format!("gone-{landing}");
+    let group = format!("dfe-{landing}");
+    ensure_topic(&bootstrap, &topic).await;
+
+    let mut config = kafka_loader(&bootstrap, &topic, &group, clickhouse.clone(), &landing);
+    config.schema.cache_ttl_secs = SCHEMA_TTL.as_secs();
+    let (shutdown, loader) = start_loader(config);
+    let producer = make_producer(&bootstrap);
+    wait_for_loader(&producer, &topic, &clickhouse, &landing).await;
+
+    // The loader caches the second table's schema as this record lands.
+    produce(
+        &producer,
+        &topic,
+        &format!(r#"{{"_source":"{gone}","id":100}}"#),
+    )
+    .await;
+    let warmed = wait_landed(&clickhouse, &gone, &BTreeSet::from([100]), BUDGET).await;
+    let cached = tokio::time::Instant::now();
+
+    // Dropped for good while the cached schema still names it, so the next
+    // record is buffered for it and its failed insert is held.
+    direct
+        .execute(&format!("DROP TABLE default.{gone} SYNC"))
+        .await
+        .expect("drop table");
+    let held = produce(
+        &producer,
+        &topic,
+        &format!(r#"{{"_source":"{gone}","id":1}}"#),
+    )
+    .await;
+    produce(&producer, &topic, r#"{"id":2}"#).await;
+    let later = wait_landed(&clickhouse, &landing, &BTreeSet::from([2]), BUDGET).await;
+    let while_held = highest_committed_over_watch(&bootstrap, &group, &topic).await;
+
+    // Past the cache TTL a record for the table finds it gone and falls back to
+    // the default table, and the held batch must follow it there.
+    tokio::time::sleep_until(cached + SCHEMA_TTL).await;
+    produce(
+        &producer,
+        &topic,
+        &format!(r#"{{"_source":"{gone}","id":3}}"#),
+    )
+    .await;
+    let fell_back = wait_landed(&clickhouse, &landing, &BTreeSet::from([3]), BUDGET).await;
+    let followed = wait_landed(&clickhouse, &landing, &BTreeSet::from([1]), RECOVERY).await;
+    let last = produce(&producer, &topic, r#"{"id":4}"#).await;
+    let after = wait_committed(&bootstrap, &group, &topic, last + 1).await;
+
+    shutdown.cancel();
+    let _ = tokio::time::timeout(Duration::from_secs(30), loader).await;
+    for table in [&landing, &gone] {
+        let _ = direct
+            .execute(&format!("DROP TABLE IF EXISTS default.{table}"))
+            .await;
+    }
+
+    assert!(
+        warmed.contains(&100),
+        "the record that caches the second table's schema never landed"
+    );
+    assert!(
+        later.contains(&2),
+        "the record after the held batch never landed"
+    );
+    assert!(
+        while_held.is_some_and(|next| next <= held),
+        "the group committed {while_held:?} while the batch holding offset {held} had not \
+         landed: a crash then would have lost it"
+    );
+    assert!(
+        fell_back.contains(&3),
+        "a record for the dropped table never fell back to the default table"
+    );
+    assert!(
+        followed.contains(&1),
+        "the batch held for the dropped table never reached the default table, so its \
+         partition's commit stays frozen until a restart"
     );
     assert!(
         after >= Some(last + 1),

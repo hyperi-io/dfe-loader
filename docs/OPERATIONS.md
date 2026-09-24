@@ -83,13 +83,15 @@ The insert tail is built to degrade, not stall:
 
 - **Batch salvage** -- a data error binary-splits the batch to isolate the bad
   row(s); only those go to the DLQ, the good rows still land.
-- **Circuit breaker** -- a repeatedly failing table trips open and its inserts
-  go straight to the DLQ until a probe succeeds, so one bad table does not back
-  up the others.
+- **Sink-down gate** -- a flush cycle in which every insert failed opens the
+  circuit gate on the scaling signal (`dfe_loader_scaling_circuit_open`), which
+  zeroes the pressure KEDA reads: more pods cannot relieve a dead ClickHouse.
+  The next successful insert closes it. A failed insert never sends its batch to
+  the DLQ. The batch is held and retried (below).
 - **Schema-cache recovery** -- a drift error (a column added by an out-of-band
   `ALTER`) invalidates the cached schema and the retry re-fetches and
   re-encodes. See [clickhouse/SCHEMA-CACHE.md](clickhouse/SCHEMA-CACHE.md).
-- **One commit per flush cycle** -- Kafka offsets commit once per cycle, after the inserts and the DLQ hand-over. On each partition the commit stops below the lowest offset not placed yet: a buffered row, a row waiting on its schema, a failed batch, or a dead letter the DLQ refused. The loader holds a failed batch or refused dead letter and retries it with jittered backoff until it lands. Rows above the floor re-deliver as duplicates after a restart (at-least-once).
+- **One commit per flush cycle** -- Kafka offsets commit once per cycle, after the inserts and the DLQ hand-over. On each partition the commit stops below the lowest offset not placed yet: a buffered row, a row waiting on its schema, a failed batch, or a dead letter the DLQ refused. The loader holds a failed batch or refused dead letter and retries it with jittered backoff until it lands. A held batch whose table ClickHouse has since reported absent is retried against the default table, where new records for that table already go. Rows above the floor re-deliver as duplicates after a restart (at-least-once).
 
 ## DLQ
 

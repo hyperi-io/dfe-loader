@@ -33,7 +33,7 @@ flowchart TB
     end
     subgraph L2["L2 -- Buffer + insert"]
         BUF["BufferManager<br/>per-table rows + raw + offsets"]
-        INS["Inserter<br/>format dispatch, salvage, circuit breaker"]
+        INS["Inserter<br/>format dispatch, retry, salvage"]
     end
     subgraph L1["L1 -- ClickHouse layer"]
         QC["ClickHouseQueryClient<br/>DDL, schema, health"]
@@ -114,7 +114,7 @@ flowchart TB
     F -->|json_each_row| JE
     HTTP & TCP --> SM
     SM -->|yes| REC --> RB
-    SM -->|no| OK["commit batch offsets"]
+    SM -->|no| OK["offsets join the flush cycle's one commit"]
 ```
 
 The RowBinary path splits by transport: HTTP ships row-wise `FORMAT RowBinary`
@@ -143,11 +143,12 @@ the full payload is kept.
 
 - **Batch salvage** -- on a data error, binary-split the batch to isolate the
   bad row(s), DLQ only those, keep the good ones.
-- **Circuit breaker** -- per-table; open -> inserts skip straight to DLQ until a
-  probe succeeds.
+- **Sink-down gate** -- a flush cycle in which every insert failed opens the
+  circuit gate on the KEDA scaling signal, and the next successful insert closes
+  it. A failed insert never sends its batch to the DLQ.
 - **Schema-cache recovery** -- on `SchemaMismatch` (e.g. `ALTER ... ADD COLUMN`),
   invalidate and re-fetch, then retry.
-- **One commit per flush cycle** -- offsets commit once per cycle, and on each partition stop below the lowest offset not placed yet. A failed batch or a dead letter the DLQ refused is held and retried with jittered backoff, and holds its partition's commit until it lands.
+- **One commit per flush cycle** -- offsets commit once per cycle, and on each partition stop below the lowest offset not placed yet. A failed batch or a dead letter the DLQ refused is held and retried with jittered backoff, and holds its partition's commit until it lands. A held batch whose table ClickHouse has since reported absent is retried against the default table.
 
 ## Source of truth
 
