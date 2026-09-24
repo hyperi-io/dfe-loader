@@ -66,7 +66,6 @@ dotenvy = ">=0.15.7, <0.16"
 
 # Error handling
 thiserror = ">=2.0.20, <3"
-anyhow = ">=1.0.104, <2"
 
 # Logging & metrics
 tracing = ">=0.1.44, <0.2"
@@ -103,22 +102,14 @@ memchr = ">=2.8.3, <3"     # SIMD byte scanning for directive parser
 regex = ">=1.13.1, <2"
 compact_str = ">=0.10.0, <0.11"  # Stack-allocated strings for short keys (≤23 bytes)
 chrono = { version = ">=0.4.45, <0.5", features = ["serde"] }
-chrono-tz = ">=0.10.4, <0.11"
 bytes = ">=1.12.1, <2"
 futures = ">=0.3.34, <0.4"
 parking_lot = ">=0.12.5, <0.13"
-dashmap = ">=6.2.1, <7"
 crossbeam-channel = ">=0.5.17, <0.6"
 indexmap = { version = ">=2.14.2, <3", features = ["serde"] }
 
-# Graceful shutdown
-tokio-graceful-shutdown = ">=0.20.0, <0.21"
-
 # File watching (config hot-reload) - using polling for S3/NFS/FUSE compatibility
 # notify = ">=6.1"  # Not needed - polling works on all filesystems
-
-# Async traits
-trait-variant = ">=0.1.3, <0.2"
 
 # PGO workload driver — Kafka producer for hyperi-ci Tier 2 PGO/BOLT builds.
 # Optional, gated by the `pgo-driver` feature. Main loader binary doesn't link it.
