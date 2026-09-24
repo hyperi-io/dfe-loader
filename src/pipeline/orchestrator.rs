@@ -1147,17 +1147,14 @@ impl Orchestrator {
                                 self.flush_batches_transport(&inserter, &transport, dlq.as_ref(), batches, still_held).await;
                             }
                         }
-                        // A closed transport accepts nothing new, so an empty
-                        // batch ends the drain as surely as Closed does.
-                        Ok(_) if draining => {
-                            info!("Transport drained");
-                            break;
-                        }
+                        // A drain continues past an empty batch, since a gRPC
+                        // handler may still be filling queue space it reserved.
                         Ok(_) => {
                             // Empty batch - no messages available, continue
                         }
                         Err(e) => {
-                            // A closed transport reports an error once it holds nothing more.
+                            // A closed transport reports an error once it holds
+                            // nothing more, which is what ends a drain.
                             if !transport.is_healthy() {
                                 if draining {
                                     info!("Transport drained");
