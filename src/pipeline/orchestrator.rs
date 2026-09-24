@@ -683,7 +683,7 @@ impl Orchestrator {
 
                 // Held work goes back to ClickHouse or the DLQ on the backoff schedule.
                 () = self.unsettled.due(), if !self.unsettled.is_empty() => {
-                    let held = self.take_unsettled();
+                    let held = self.take_unsettled_for(&absent_tables, &default_table);
                     self.queue_dead_letters(held.dead_letters);
                     let still_held = unplaced_offsets(&buffer_manager, &pending_schema_buffer);
                     self.flush_or_settle(&inserter, &transport, dlq.as_ref(), held.batches, still_held).await;
@@ -1177,7 +1177,7 @@ impl Orchestrator {
 
         // Final flush: every buffer is empty after this, so only a row
         // ClickHouse or the DLQ still refuses holds the watermark down.
-        let held = self.take_unsettled();
+        let held = self.take_unsettled_for(&absent_tables, &default_table);
         self.queue_dead_letters(held.dead_letters);
         let mut final_batches = buffer_manager.flush_all();
         final_batches.extend(held.batches);
@@ -1424,33 +1424,17 @@ impl Orchestrator {
                         m.record_error();
                         m.record_clickhouse_insert_error();
                     }
-                    let rejected = result.failed.len();
                     attach_row_offsets(&mut result.failed, &offsets);
                     note_permanent_rejects(&self.metrics, &table, &result.failed);
-                    let before = dead_letters.len();
-                    dead_letters.extend(
-                        result
-                            .failed
-                            .iter()
-                            .filter_map(|row| rejected_entry(&table, &payloads, row)),
-                    );
-                    let unplaceable = rejected - (dead_letters.len() - before);
                     error!(
                         table = %table,
                         inserted = result.inserted,
-                        rejected,
+                        rejected = result.failed.len(),
                         "Rows permanently rejected -- routing them to the DLQ"
                     );
-                    if unplaceable > 0 {
-                        // Unreachable in practice: the inserter serialises the
-                        // promoted row whenever the raw slot is empty.
-                        error!(
-                            table = %table,
-                            rows = unplaceable,
-                            "Rejected rows carry no payload to DLQ -- rows lost"
-                        );
-                        self.record_rows_lost(unplaceable);
-                    }
+                    let unplaceable =
+                        queue_rejected(&table, &payloads, &result.failed, &mut dead_letters);
+                    self.hold_unplaceable(&table, &unplaceable, redelivers);
                     // A rejected row the DLQ refuses below is held, and its own
                     // offset keeps the commit below it.
                     committable.extend(offsets);
@@ -1600,6 +1584,66 @@ impl Orchestrator {
         let held = self.unsettled.take();
         self.memory_guard.release(held.dead_letter_bytes());
         held
+    }
+
+    /// Take everything held for another attempt, pointing each batch whose
+    /// table `ClickHouse` has since confirmed absent at the default table,
+    /// where new records for that table already go.
+    fn take_unsettled_for(
+        &mut self,
+        absent: &super::types::AbsentTables,
+        default_table: &str,
+    ) -> Held {
+        let mut held = self.take_unsettled();
+        if absent.is_empty() {
+            return held;
+        }
+        for batch in &mut held.batches {
+            if batch.table.as_str() == default_table || !absent.contains(&batch.table) {
+                continue;
+            }
+            warn!(
+                table = %batch.table,
+                default_table,
+                rows = batch.rows.len(),
+                "Table of a held batch does not exist, re-routing the batch to the default table"
+            );
+            if let Some(ref m) = self.metrics {
+                m.record_unknown_table_fallback_n(&batch.table, batch.rows.len() as u64);
+            }
+            batch.table = default_table.into();
+        }
+        held
+    }
+
+    /// Keep the commit below each rejected row with no bytes for the DLQ where
+    /// Kafka re-delivers it, and count it lost where nothing does.
+    fn hold_unplaceable(&mut self, table: &str, rows: &[&FailedRow], redelivers: bool) {
+        if rows.is_empty() {
+            return;
+        }
+        let reread: Vec<KafkaOffset> = if redelivers {
+            rows.iter().filter_map(|row| row.offset.clone()).collect()
+        } else {
+            Vec::new()
+        };
+        if !reread.is_empty() {
+            error!(
+                table = %table,
+                rows = reread.len(),
+                "Rejected rows carry no payload to DLQ -- their offsets stay uncommitted until a restart re-reads them from Kafka"
+            );
+            self.unsettled.await_reread(&reread);
+        }
+        let lost = rows.len() - reread.len();
+        if lost > 0 {
+            error!(
+                table = %table,
+                rows = lost,
+                "Rejected rows carry no payload to DLQ, and no upstream copy -- rows lost"
+            );
+            self.record_rows_lost(lost);
+        }
     }
 
     /// Count rows lost for good.
@@ -2122,6 +2166,24 @@ fn rejected_entry(table: &str, payloads: &[Arc<[u8]>], row: &FailedRow) -> Optio
         )),
         None => entry,
     })
+}
+
+/// Queue a DLQ entry for every rejected row with bytes to hand over, and return
+/// the rows with none.
+fn queue_rejected<'a>(
+    table: &str,
+    payloads: &[Arc<[u8]>],
+    failed: &'a [FailedRow],
+    dead_letters: &mut Vec<DlqEntry>,
+) -> Vec<&'a FailedRow> {
+    let mut unplaceable = Vec::new();
+    for row in failed {
+        match rejected_entry(table, payloads, row) {
+            Some(entry) => dead_letters.push(entry),
+            None => unplaceable.push(row),
+        }
+    }
+    unplaceable
 }
 
 /// Wait for the DLQ to write everything queued so far, and confirm it dropped
@@ -2918,6 +2980,106 @@ mod tests {
             named,
             vec![Some(41), Some(43), None, Some(5)],
             "each row names its own batch offset, and one it already had stays"
+        );
+    }
+
+    /// Rows 0 and 2 carry payloads; row 1 carries neither a raw payload nor a
+    /// serialised row, which the inserter never produces, so it is built here.
+    fn a_batch_with_one_unplaceable_row() -> (Vec<Arc<[u8]>>, Vec<KafkaOffset>, Vec<FailedRow>) {
+        let payloads: Vec<Arc<[u8]>> = vec![
+            Arc::from(&b"{\"n\":0}"[..]),
+            Arc::from(&[][..]),
+            Arc::from(&b"{\"n\":2}"[..]),
+        ];
+        let batch: Vec<KafkaOffset> = (40..43).map(|off| offset("dfe-events", 0, off)).collect();
+        let mut failed: Vec<FailedRow> = (0..3)
+            .map(|row_index| FailedRow {
+                row_index,
+                offset: None,
+                reason: "code 117".to_string(),
+                row_json: None,
+            })
+            .collect();
+        attach_row_offsets(&mut failed, &batch);
+        (payloads, batch, failed)
+    }
+
+    #[test]
+    fn a_rejected_row_with_nothing_for_the_dlq_holds_the_commit_below_it_on_kafka() {
+        let (payloads, batch, failed) = a_batch_with_one_unplaceable_row();
+        let mut dead_letters = Vec::new();
+        let unplaceable = queue_rejected("dfe.main", &payloads, &failed, &mut dead_letters);
+        assert_eq!(
+            dead_letters.len(),
+            2,
+            "the rows with payloads go to the DLQ"
+        );
+
+        let mut orchestrator = Orchestrator::new(Config::default());
+        orchestrator.hold_unplaceable("dfe.main", &unplaceable, true);
+
+        let to_commit = committable_offsets(batch, &orchestrator.unsettled.offsets());
+        assert_eq!(
+            to_commit.iter().map(|o| o.offset).max(),
+            Some(40),
+            "the commit passed a rejected row that only a Kafka re-read can place"
+        );
+        assert!(
+            orchestrator.unsettled.is_empty(),
+            "a row with nothing to retry paused intake"
+        );
+    }
+
+    #[test]
+    fn a_rejected_row_with_nothing_for_the_dlq_holds_nothing_where_nothing_re_delivers() {
+        let (payloads, _, failed) = a_batch_with_one_unplaceable_row();
+        let mut dead_letters = Vec::new();
+        let unplaceable = queue_rejected("dfe.main", &payloads, &failed, &mut dead_letters);
+
+        let mut orchestrator = Orchestrator::new(Config::default());
+        orchestrator.hold_unplaceable("dfe.main", &unplaceable, false);
+
+        assert!(
+            orchestrator.unsettled.offsets().is_empty(),
+            "a floor was held for a row no transport will deliver again"
+        );
+    }
+
+    #[test]
+    fn a_batch_held_for_an_absent_table_is_taken_for_the_default_table() {
+        let mut orchestrator = Orchestrator::new(Config::default());
+        let mut buffers = staged_buffers();
+        for off in 100..105 {
+            buffered_row(&mut buffers, "dfe.gone", 0, off);
+        }
+        for off in 200..205 {
+            buffered_row(&mut buffers, "dfe.kept", 1, off);
+        }
+        for batch in buffers.get_ready_for_flush() {
+            orchestrator.unsettled.hold(batch);
+        }
+        let mut absent =
+            super::super::types::AbsentTables::new(ABSENT_TABLE_TTL, ABSENT_TABLE_CAPACITY);
+        absent.insert("dfe.gone", std::time::Instant::now());
+
+        let held = orchestrator.take_unsettled_for(&absent, "dfe.main");
+
+        let mut taken: Vec<(String, usize, Vec<i64>)> = held
+            .batches
+            .iter()
+            .map(|b| {
+                let offsets = b.offsets.iter().map(|o| o.offset).collect();
+                (b.table.to_string(), b.rows.len(), offsets)
+            })
+            .collect();
+        taken.sort();
+        assert_eq!(
+            taken,
+            vec![
+                ("dfe.kept".to_string(), 5, (200..205).collect()),
+                ("dfe.main".to_string(), 5, (100..105).collect()),
+            ],
+            "only the batch for the absent table moves, with its rows and offsets"
         );
     }
 
