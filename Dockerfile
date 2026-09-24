@@ -40,6 +40,8 @@ RUN if id ubuntu >/dev/null 2>&1; then userdel -r ubuntu; fi && useradd --create
 USER appuser
 
 EXPOSE 9090
+# Conditional listeners, not EXPOSEd -- publish explicitly when enabled:
+#   50051/tcp push -- when config.transport is "grpc"
 
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
     CMD curl -sf http://localhost:9090/livez > /dev/null || exit 1
