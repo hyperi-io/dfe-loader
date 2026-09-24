@@ -1319,6 +1319,16 @@ $defs:
         description: Kafka backend settings
         type: boolean
         default: true
+      kafka_send_timeout_ms:
+        description: |-
+          How long a flush or shutdown waits for the broker to acknowledge Kafka
+          DLQ writes, in milliseconds. Entries still unacknowledged are then
+          counted lost. Unset keeps scalo's default.
+        type:
+        - integer
+        - 'null'
+        format: uint64
+        minimum: 0
   BufferConfig:
     type: object
     properties:
