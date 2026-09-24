@@ -764,21 +764,21 @@
           "default": 60
         },
         "pending_max_per_table": {
-          "description": "Max messages buffered per table while waiting for schema resolution.\nExcess messages route to DLQ with a security event.",
+          "description": "Max messages buffered per table while waiting for schema resolution.\nOn Kafka, excess messages route to DLQ with a security event. On gRPC,\na table at this cap stops intake until its schema resolves.",
           "type": "integer",
           "format": "uint",
           "minimum": 0,
           "default": 1000
         },
         "pending_max_total": {
-          "description": "Max messages buffered across all tables.\nHitting this cap evicts the oldest entry FIFO across tables.",
+          "description": "Max messages buffered across all tables.\nOn Kafka, hitting this cap evicts the oldest entry FIFO across tables.\nOn gRPC it stops intake until the buffer drains.",
           "type": "integer",
           "format": "uint",
           "minimum": 0,
           "default": 10000
         },
         "pending_max_age_secs": {
-          "description": "Max age of a pending message before it is routed to DLQ.",
+          "description": "Max age of a pending message before it is routed to DLQ. On gRPC with\nno working DLQ, messages keep waiting for their schema instead.",
           "type": "integer",
           "format": "uint64",
           "minimum": 0,

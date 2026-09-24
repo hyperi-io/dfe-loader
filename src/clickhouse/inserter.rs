@@ -34,7 +34,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use backon::BackoffBuilder;
 use bytes::Bytes;
+use scalo::sink_stack::SinkStackConfig;
 use serde_json::{Map, Value};
 use tokio::sync::Semaphore;
 use tokio::time::sleep;
@@ -63,9 +65,9 @@ fn parse_db_table(table: &str) -> (&str, &str) {
 pub struct InserterConfig {
     /// Maximum retries for transient errors (geometric backoff)
     pub max_retries: u32,
-    /// Base delay for geometric backoff (doubles each retry)
+    /// Base delay for geometric backoff (doubles each retry), before jitter
     pub base_retry_delay_ms: u64,
-    /// Maximum delay cap for backoff (prevents excessive waits)
+    /// Cap on the geometric backoff, before jitter adds up to the same again
     pub max_retry_delay_ms: u64,
     /// Enable batch salvage on data errors
     pub enable_salvage: bool,
@@ -89,19 +91,34 @@ impl Default for InserterConfig {
 }
 
 impl InserterConfig {
-    /// Calculate backoff delay for a given attempt (geometric backoff).
+    /// Calculate backoff delay for a given attempt (jittered geometric backoff).
     ///
-    /// Delay = min(base * 2^attempt, `max_delay`)
+    /// Delay = `min(base * 2^attempt, max_delay)`, plus a random share of that
+    /// again.
     #[must_use]
     pub fn backoff_delay(&self, attempt: u32) -> Duration {
         calc_backoff(self.base_retry_delay_ms, attempt, self.max_retry_delay_ms)
     }
 }
 
-/// Geometric backoff: `min(base_ms * 2^attempt, max_ms)`.
+/// Doublings past which the backoff stops growing, whatever `max_ms` allows.
+const MAX_BACKOFF_DOUBLINGS: u32 = 16;
+
+/// Jittered geometric backoff on scalo's sink schedule: `min(base_ms *
+/// 2^attempt, max_ms)` plus up to the same again, so loader pods retrying one
+/// recovering server do not all arrive at once.
 fn calc_backoff(base_ms: u64, attempt: u32, max_ms: u64) -> Duration {
-    let delay_ms = base_ms.saturating_mul(1 << attempt.min(16));
-    Duration::from_millis(delay_ms.min(max_ms))
+    SinkStackConfig {
+        // backon takes its first step before it applies the cap.
+        min_backoff_ms: base_ms.min(max_ms),
+        max_backoff_ms: max_ms,
+        ..SinkStackConfig::default()
+    }
+    .backoff()
+    .without_max_times()
+    .build()
+    .nth(attempt.min(MAX_BACKOFF_DOUBLINGS) as usize)
+    .unwrap_or(Duration::from_millis(max_ms))
 }
 
 /// What the flush path must do with a batch's Kafka offsets.
@@ -1245,6 +1262,19 @@ mod tests {
         assert_eq!(unlimited.max_concurrent_inserts, 0);
     }
 
+    /// A jittered delay lies in `[step, 2 * step]`, give or take the
+    /// millisecond scalo's f32 schedule can round by.
+    #[track_caller]
+    fn assert_jittered(delay: Duration, step_ms: u64) {
+        let ms = delay.as_secs_f64() * 1000.0;
+        let step = step_ms as f64;
+        assert!(
+            ms >= step - 1.0 && ms <= 2.0 * step + 1.0,
+            "{delay:?} is outside the jittered step [{step_ms}ms, {}ms]",
+            2 * step_ms
+        );
+    }
+
     #[test]
     fn test_backoff_delay_geometric() {
         let config = InserterConfig {
@@ -1253,12 +1283,9 @@ mod tests {
             ..Default::default()
         };
 
-        assert_eq!(config.backoff_delay(0), Duration::from_millis(100));
-        assert_eq!(config.backoff_delay(1), Duration::from_millis(200));
-        assert_eq!(config.backoff_delay(2), Duration::from_millis(400));
-        assert_eq!(config.backoff_delay(3), Duration::from_millis(800));
-        assert_eq!(config.backoff_delay(4), Duration::from_millis(1600));
-        assert_eq!(config.backoff_delay(5), Duration::from_millis(3200));
+        for (attempt, step_ms) in [(0, 100), (1, 200), (2, 400), (3, 800), (4, 1600), (5, 3200)] {
+            assert_jittered(config.backoff_delay(attempt), step_ms);
+        }
     }
 
     #[test]
@@ -1269,8 +1296,22 @@ mod tests {
             ..Default::default()
         };
 
-        assert_eq!(config.backoff_delay(10), Duration::from_millis(1000));
-        assert_eq!(config.backoff_delay(20), Duration::from_millis(1000));
+        assert_jittered(config.backoff_delay(10), 1000);
+        assert_jittered(config.backoff_delay(20), 1000);
+    }
+
+    #[test]
+    fn two_retries_of_the_same_attempt_do_not_wait_in_lockstep() {
+        // Loader pods retrying one recovering server must spread out.
+        let delays: std::collections::BTreeSet<Duration> =
+            (0..20).map(|_| calc_backoff(100, 3, 30_000)).collect();
+        assert!(
+            delays.len() > 1,
+            "twenty retries of one attempt all waited {delays:?}"
+        );
+        for delay in delays {
+            assert_jittered(delay, 800);
+        }
     }
 
     // ========================================================================
@@ -1476,67 +1517,57 @@ mod tests {
     }
 
     // ============================================================
-    // calc_backoff — geometric growth, cap, overflow protection
+    // calc_backoff -- geometric growth, cap, jitter, overflow protection
     // ============================================================
 
     #[test]
     fn test_calc_backoff_attempt_zero() {
-        assert_eq!(calc_backoff(100, 0, 30_000), Duration::from_millis(100));
+        assert_jittered(calc_backoff(100, 0, 30_000), 100);
     }
 
     #[test]
     fn test_calc_backoff_geometric_progression() {
-        // Each attempt doubles the delay: base * 2^attempt
-        let results: Vec<u128> = (0..8)
-            .map(|attempt| calc_backoff(50, attempt, 60_000).as_millis())
-            .collect();
-        assert_eq!(results, vec![50, 100, 200, 400, 800, 1600, 3200, 6400]);
+        // Each attempt doubles the step: base * 2^attempt, then jitter.
+        for (attempt, step_ms) in (0..8).zip([50, 100, 200, 400, 800, 1600, 3200, 6400]) {
+            assert_jittered(calc_backoff(50, attempt, 60_000), step_ms);
+        }
     }
 
     #[test]
     fn test_calc_backoff_capped_at_max() {
-        // Once base * 2^attempt exceeds max_ms, output stays at max_ms.
-        assert_eq!(calc_backoff(100, 16, 500), Duration::from_millis(500));
-        assert_eq!(calc_backoff(100, 20, 1000), Duration::from_millis(1000));
+        // Once base * 2^attempt exceeds max_ms, the step stays at max_ms.
+        assert_jittered(calc_backoff(100, 16, 500), 500);
+        assert_jittered(calc_backoff(100, 20, 1000), 1000);
     }
 
     #[test]
     fn test_calc_backoff_attempt_clamped_to_16() {
-        // Shift cap is attempt.min(16) — bigger attempts don't overflow.
-        // base * 2^16 = 100 * 65536 = 6_553_600, above any reasonable cap.
-        assert_eq!(
-            calc_backoff(100, 100, 10_000),
-            Duration::from_millis(10_000)
-        );
-        assert_eq!(
-            calc_backoff(100, u32::MAX, 10_000),
-            Duration::from_millis(10_000)
-        );
+        // Attempts past MAX_BACKOFF_DOUBLINGS walk the schedule no further.
+        assert_jittered(calc_backoff(100, 100, 10_000), 10_000);
+        assert_jittered(calc_backoff(100, u32::MAX, 10_000), 10_000);
     }
 
     #[test]
-    fn test_calc_backoff_saturating_mul_protects_overflow() {
-        // saturating_mul handles u64 overflow — result caps at u64::MAX then min'd with max_ms
-        let result = calc_backoff(u64::MAX, 16, 1000);
-        assert_eq!(result, Duration::from_millis(1000));
+    fn test_calc_backoff_huge_base_is_held_to_max() {
+        assert_jittered(calc_backoff(u64::MAX, 16, 1000), 1000);
     }
 
     #[test]
     fn test_calc_backoff_zero_base() {
-        // 0 * anything = 0 — valid but weird config
-        assert_eq!(calc_backoff(0, 5, 30_000), Duration::from_millis(0));
+        // 0 * anything = 0, and so is its jitter -- valid but weird config
+        assert_eq!(calc_backoff(0, 5, 30_000), Duration::ZERO);
     }
 
     #[test]
     fn test_calc_backoff_zero_max_clamps_to_zero() {
         // max=0 clamps every delay to 0
-        assert_eq!(calc_backoff(100, 5, 0), Duration::from_millis(0));
+        assert_eq!(calc_backoff(100, 5, 0), Duration::ZERO);
     }
 
     #[test]
     fn test_calc_backoff_max_less_than_base() {
-        // Unusual: max < base. Output is max immediately.
-        assert_eq!(calc_backoff(1000, 0, 100), Duration::from_millis(100));
+        // Unusual: max < base. The first step is already max.
+        assert_jittered(calc_backoff(1000, 0, 100), 100);
     }
 
     // ============================================================
@@ -1557,16 +1588,16 @@ mod tests {
     #[test]
     fn test_inserter_config_backoff_at_default_max_retries() {
         let config = InserterConfig::default();
-        // With defaults, backoff at max_retries (5) should be 100 * 2^5 = 3200ms
-        assert_eq!(config.backoff_delay(5), Duration::from_millis(3200));
+        // With defaults, the step at max_retries (5) is 100 * 2^5 = 3200ms
+        assert_jittered(config.backoff_delay(5), 3200);
     }
 
     #[test]
     fn test_inserter_config_backoff_eventually_caps() {
         let config = InserterConfig::default();
         // 100 * 2^9 = 51200 > 30000, cap applies
-        assert_eq!(config.backoff_delay(9), Duration::from_millis(30_000));
-        assert_eq!(config.backoff_delay(100), Duration::from_millis(30_000));
+        assert_jittered(config.backoff_delay(9), 30_000);
+        assert_jittered(config.backoff_delay(100), 30_000);
     }
 
     // ============================================================

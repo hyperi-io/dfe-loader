@@ -34,6 +34,7 @@ use crate::clickhouse::{
 };
 use crate::column_meta::{ColumnMetaCache, parse_directives};
 use crate::config::{Config, SharedConfig};
+use crate::kafka::transport::ReceivedBatch;
 use crate::kafka::{TransportAdapter, TransportBackend};
 use crate::metrics::Metrics;
 use crate::payload::{FormatDetector, FormatMode};
@@ -58,8 +59,9 @@ pub struct PipelineStats {
 
 use super::capture::CaptureOverrides;
 use super::enrichment::EnrichmentPipeline;
+use super::pending_schema::{ExpireReason, OnFull, PendingSchemaConfig};
 use super::types::{SchemaResolution, TableResolutionResult};
-use super::unsettled::Unsettled;
+use super::unsettled::{Held, Unsettled};
 
 /// Orchestrates the Kafka → `ClickHouse` pipeline
 pub struct Orchestrator {
@@ -89,8 +91,9 @@ pub struct Orchestrator {
     /// observable "sink dead" signal — the loader's per-table CircuitBreaker is
     /// not wired into the inserter, so we derive the gate from insert outcomes.
     sink_circuit_open: bool,
-    /// Batches a failed insert handed back on a transport with no re-delivery.
-    /// Intake stays paused while any are held.
+    /// Batches a failed insert handed back, and dead letters the DLQ did not
+    /// take, on a transport with no re-delivery. Intake stays paused while
+    /// any are held.
     unsettled: Unsettled,
 }
 
@@ -219,6 +222,9 @@ impl Orchestrator {
             governed = self.governor.is_some(),
             "Transport initialized"
         );
+        // Only a transport that commits offsets hands back a row the loader
+        // could not place; on any other the loader holds the only copy.
+        let redelivers = transport.commits_offsets();
 
         // Validate ClickHouse config (transport/port mismatch, JSONEachRow+native)
         let ch_config: crate::clickhouse::ClickHouseConfig = (&self.config.clickhouse).into();
@@ -260,11 +266,13 @@ impl Orchestrator {
         let transport_kafka_config =
             TransportAdapter::convert_config(&self.config.kafka, &self.config.routing.dlq);
         let dlq: Option<Arc<Dlq>> = if dlq_config.enabled {
+            // Not the shutdown token: the final flush and the pending-schema
+            // drain still reach the DLQ after shutdown is signalled.
             match Dlq::spawn(
                 &dlq_config,
                 "loader",
                 Some(&transport_kafka_config),
-                self.shutdown.clone(),
+                CancellationToken::new(),
             ) {
                 Ok(d) => {
                     info!(mode = ?dlq_config.mode, "DLQ enabled");
@@ -289,16 +297,23 @@ impl Orchestrator {
         // alone (dlq.enabled with neither the file nor the Kafka backend).
         let dlq_enabled = dlq_accepts(dlq.as_ref());
         if dlq.is_some() && !dlq_enabled {
-            error!(
-                "DLQ is configured but no backend started — nothing can be DLQ'd, \
-                 so permanently rejected rows will withhold their offsets"
-            );
+            if redelivers {
+                error!(
+                    "DLQ is configured but no backend started -- nothing can be DLQ'd, \
+                     so permanently rejected rows will withhold their offsets"
+                );
+            } else {
+                error!(
+                    "DLQ is configured but no backend started -- nothing can be DLQ'd, \
+                     and with no upstream copy permanently rejected rows will be lost"
+                );
+            }
         }
 
         // Bounded DLQ channel — avoids unbounded tokio::spawn per failed message.
         // Background task drains the channel and forwards to the actual DLQ backend.
         let (dlq_tx, mut dlq_rx) = mpsc::channel::<DlqEntry>(DLQ_CHANNEL_CAPACITY);
-        if let Some(ref dlq_arc) = dlq {
+        let dlq_forwarder = dlq.as_ref().map(|dlq_arc| {
             let dlq_bg = Arc::clone(dlq_arc);
             let shutdown_bg = self.shutdown.clone();
             tokio::spawn(async move {
@@ -321,8 +336,8 @@ impl Orchestrator {
                         }
                     }
                 }
-            });
-        }
+            })
+        });
 
         // Schema cache — shared with background resolver and (after Change A) HeaderExtractor.
         // Background resolver populates it; orchestrator reads it in process_message.
@@ -428,9 +443,16 @@ impl Orchestrator {
         let mut buffer_manager = BufferManager::new(&self.config.buffer);
 
         // Pending-schema buffer — holds messages whose table schema is not yet cached.
-        // Drained when the background resolver populates the schema (later task).
+        // Drained when the background resolver populates the schema. Where
+        // nothing re-delivers, a full buffer stops intake instead of shedding
+        // its overflow to the DLQ.
+        let on_full = if redelivers {
+            OnFull::DeadLetter
+        } else {
+            OnFull::Backpressure
+        };
         let mut pending_schema_buffer = super::pending_schema::PendingSchemaBuffer::new(
-            super::pending_schema::PendingSchemaConfig::from_schema_config(&self.config.schema),
+            PendingSchemaConfig::from_schema_config(&self.config.schema, on_full),
         );
 
         // Tables ClickHouse has confirmed absent. The processor re-routes their
@@ -567,6 +589,11 @@ impl Orchestrator {
         }
 
         loop {
+            // Intake stops while anything is held and, where nothing
+            // re-delivers, while the pending-schema buffer is full.
+            let intake_open =
+                self.unsettled.is_empty() && (redelivers || !pending_schema_buffer.is_full());
+
             tokio::select! {
                 biased; // Prioritize shutdown check
 
@@ -575,19 +602,31 @@ impl Orchestrator {
                     // never received a schema and cannot be processed (#36).
                     let drained = pending_schema_buffer.drain_all();
                     let drained_n = drained.len() as u64;
-                    for (msg, reason) in drained {
-                        route_pending_to_dlq(
-                            &dlq_tx,
-                            dlq_enabled,
-                            &self.memory_guard,
-                            &self.metrics,
-                            msg,
-                            &reason,
-                        );
+                    if redelivers {
+                        for (msg, reason) in drained {
+                            route_pending_to_dlq(
+                                &dlq_tx,
+                                dlq_enabled,
+                                &self.memory_guard,
+                                &self.metrics,
+                                msg,
+                                &reason,
+                            );
+                        }
+                        self.stats.messages_dlq += drained_n;
+                    } else {
+                        // The last copy: held, so the final flush places it
+                        // in the DLQ or counts it lost.
+                        let dead_letters = drained
+                            .into_iter()
+                            .map(|(msg, reason)| {
+                                expire_pending(&self.memory_guard, &self.metrics, msg, &reason)
+                            })
+                            .collect();
+                        self.strand_dead_letters(dead_letters);
                     }
                     if drained_n > 0 {
-                        self.stats.messages_dlq += drained_n;
-                        warn!(count = drained_n, "Drained pending-schema buffer to DLQ on shutdown");
+                        warn!(count = drained_n, "Draining pending-schema buffer to DLQ on shutdown");
                     }
                     info!("Shutdown requested, flushing remaining buffers");
                     break;
@@ -681,11 +720,16 @@ impl Orchestrator {
                     }
                 }
 
-                // Held batches go back to ClickHouse on the backoff schedule.
+                // Held work goes back to ClickHouse or the DLQ on the backoff schedule.
                 () = self.unsettled.due(), if !self.unsettled.is_empty() => {
-                    let held = self.unsettled.take();
-                    let still_buffered = buffer_manager.lowest_pending_offsets();
-                    self.flush_batches_transport(&inserter, &transport, dlq.as_ref(), held, still_buffered).await;
+                    let held = self.take_unsettled();
+                    let dlq_deadline = tokio::time::Instant::now() + DLQ_ROUTE_DEADLINE;
+                    self.settle_dead_letters(dlq.as_ref(), held.dead_letters, dlq_deadline).await;
+                    if !held.batches.is_empty() {
+                        let still_buffered = buffer_manager.lowest_pending_offsets();
+                        self.flush_batches_transport(&inserter, &transport, dlq.as_ref(), held.batches, still_buffered).await;
+                    }
+                    self.unsettled.rearm();
                 }
 
                 // Apply schema resolution results from background resolver.
@@ -795,9 +839,10 @@ impl Orchestrator {
                 // recv simply returns an empty batch while paused. We never gate
                 // the outbound ClickHouse drain — gating the sink would deadlock.
                 //
-                // A held batch pauses intake: with nothing pulled, the gRPC
-                // listener's queue fills and Push answers RESOURCE_EXHAUSTED.
-                received = transport.recv(RECV_BATCH_SIZE), if self.unsettled.is_empty() => {
+                // Paused intake pulls nothing, so the gRPC listener's queue
+                // fills and Push answers RESOURCE_EXHAUSTED. The arm still
+                // fires on a short idle so pending-schema upkeep keeps running.
+                received = next_intake(&transport, intake_open, RECV_BATCH_SIZE) => {
                     // Surface any inbound-filter DLQ entries (no silent drop). The
                     // loader configures no inbound scalo filters, so this is
                     // normally empty, but the contract is honoured regardless.
@@ -835,25 +880,44 @@ impl Orchestrator {
                     // simply returns an empty batch every poll while partitions are
                     // paused. Maintenance therefore keeps running under sustained
                     // pressure: stuck tables still re-request and aged entries still
-                    // expire, while no new payload bytes are admitted. The global
-                    // cap still bounds the buffer via eviction on enqueue.
+                    // expire, while no new payload bytes are admitted. The caps
+                    // still bound the buffer: by eviction on Kafka, by stopping
+                    // intake on gRPC.
                     let now_pending = std::time::Instant::now();
                     {
-                        let expired = pending_schema_buffer.expire(now_pending);
+                        // With no re-delivery and no DLQ to take them, aged
+                        // messages keep waiting for their schema.
+                        let expired = if redelivers || dlq_enabled {
+                            pending_schema_buffer.expire(now_pending)
+                        } else {
+                            Vec::new()
+                        };
                         let expired_n = expired.len() as u64;
-                        for (msg, reason) in expired {
-                            route_pending_to_dlq(
-                                &dlq_tx,
-                                dlq_enabled,
-                                &self.memory_guard,
-                                &self.metrics,
-                                msg,
-                                &reason,
-                            );
-                        }
                         if expired_n > 0 {
-                            self.stats.messages_dlq += expired_n;
                             warn!(count = expired_n, "Expired pending-schema messages to DLQ");
+                        }
+                        if redelivers {
+                            for (msg, reason) in expired {
+                                route_pending_to_dlq(
+                                    &dlq_tx,
+                                    dlq_enabled,
+                                    &self.memory_guard,
+                                    &self.metrics,
+                                    msg,
+                                    &reason,
+                                );
+                            }
+                            self.stats.messages_dlq += expired_n;
+                        } else if expired_n > 0 {
+                            let dead_letters = expired
+                                .into_iter()
+                                .map(|(msg, reason)| {
+                                    expire_pending(&self.memory_guard, &self.metrics, msg, &reason)
+                                })
+                                .collect();
+                            let dlq_deadline = tokio::time::Instant::now() + DLQ_ROUTE_DEADLINE;
+                            self.settle_dead_letters(dlq.as_ref(), dead_letters, dlq_deadline).await;
+                            self.unsettled.rearm();
                         }
                         for table in pending_schema_buffer
                             .tables_needing_rerequest(now_pending, PENDING_REREQUEST_INTERVAL)
@@ -1193,9 +1257,10 @@ impl Orchestrator {
         }
 
         // Final flush: `flush_all` empties every buffer, so nothing is left
-        // behind to hold the watermark down. Held batches get one last attempt.
+        // behind to hold the watermark down. Held work gets one last attempt.
+        let held = self.take_unsettled();
         let mut final_batches = buffer_manager.flush_all();
-        final_batches.extend(self.unsettled.take());
+        final_batches.extend(held.batches);
         if !final_batches.is_empty() {
             info!(batches = final_batches.len(), "Flushing remaining buffers");
             self.flush_batches_transport(
@@ -1207,11 +1272,16 @@ impl Orchestrator {
             )
             .await;
         }
+        let dlq_deadline = tokio::time::Instant::now() + DLQ_ROUTE_DEADLINE;
+        self.settle_dead_letters(dlq.as_ref(), held.dead_letters, dlq_deadline)
+            .await;
         if !self.unsettled.is_empty() {
+            let rows = self.unsettled.rows();
             error!(
-                rows = self.unsettled.rows(),
-                "Stopping with rows ClickHouse has not taken and no upstream copy -- they are lost"
+                rows,
+                "Stopping with rows neither ClickHouse nor the DLQ has taken, and no upstream copy -- they are lost"
             );
+            self.record_rows_lost(rows);
         }
 
         // Stop schema cache background refresh task.
@@ -1220,6 +1290,17 @@ impl Orchestrator {
         // Close transport
         if let Err(e) = transport.close().await {
             warn!(error = %e, "Error closing transport");
+        }
+
+        // The forwarder hands over its channel first, then the DLQ writes out
+        // what it has queued before the process exits.
+        if let Some(forwarder) = dlq_forwarder {
+            let _ = forwarder.await;
+        }
+        if let Some(ref d) = dlq
+            && let Err(e) = d.shutdown().await
+        {
+            warn!(error = %e, "DLQ did not shut down cleanly");
         }
 
         info!(
@@ -1329,10 +1410,16 @@ impl Orchestrator {
         // and scalo warns that backing off recv past max.poll.interval.ms
         // (default 300s) evicts the pod from the consumer group.
         let dlq_deadline = tokio::time::Instant::now() + DLQ_ROUTE_DEADLINE;
+        // Read before any send: the barrier below counts what the DLQ dropped
+        // since.
+        let dlq_dropped = dlq.map_or(0, |d| d.dropped());
 
         // Withheld offsets re-deliver only on a transport that commits them;
         // anywhere else a batch the inserter hands back is the only copy.
         let redelivers = transport.commits_offsets();
+        // Where nothing re-delivers, the DLQ is the only place a rejected row
+        // can go, so it is held until the DLQ proves it written.
+        let mut dead_letters: Vec<DlqEntry> = Vec::new();
 
         for (((((_, result), offsets), batch_bytes), table), payloads) in results
             .into_iter()
@@ -1393,6 +1480,7 @@ impl Orchestrator {
                                 error = %reason,
                                 "Batch insert failed with no batch returned to hold, and no upstream copy -- rows lost"
                             );
+                            self.record_rows_lost(payloads.len());
                         }
                     }
                 }
@@ -1410,6 +1498,34 @@ impl Orchestrator {
                         m.record_clickhouse_insert_error();
                     }
                     let rejected = result.failed.len();
+                    if !redelivers {
+                        note_permanent_rejects(&self.metrics, &table, &result.failed);
+                        let before = dead_letters.len();
+                        dead_letters.extend(
+                            result
+                                .failed
+                                .iter()
+                                .filter_map(|row| rejected_entry(&table, &payloads, row)),
+                        );
+                        let unplaceable = rejected - (dead_letters.len() - before);
+                        error!(
+                            table = %table,
+                            inserted = result.inserted,
+                            rejected,
+                            "Rows permanently rejected -- routing them to the DLQ"
+                        );
+                        if unplaceable > 0 {
+                            // Unreachable in practice: the inserter serialises
+                            // the promoted row whenever the raw slot is empty.
+                            error!(
+                                table = %table,
+                                rows = unplaceable,
+                                "Rejected rows carry no payload to DLQ, and no upstream copy -- rows lost"
+                            );
+                            self.record_rows_lost(unplaceable);
+                        }
+                        continue;
+                    }
                     let delivery = route_rejected_rows_to_dlq(
                         dlq,
                         &self.metrics,
@@ -1456,14 +1572,10 @@ impl Orchestrator {
         // consumer past max.poll.interval.ms.
         if !dlq_pending.is_empty() {
             let flushed = match dlq {
-                Some(d) => match tokio::time::timeout_at(dlq_deadline, d.flush()).await {
-                    Ok(Ok(())) => true,
-                    Ok(Err(e)) => {
-                        error!(error = %e, "DLQ flush failed — offsets withheld");
-                        false
-                    }
-                    Err(_elapsed) => {
-                        error!("DLQ flush did not complete within the deadline — offsets withheld");
+                Some(d) => match dlq_barrier(d, dlq_dropped, dlq_deadline).await {
+                    Ok(()) => true,
+                    Err(reason) => {
+                        error!(error = %reason, "DLQ did not prove the rejected rows written -- offsets withheld");
                         false
                     }
                 },
@@ -1475,6 +1587,11 @@ impl Orchestrator {
             } else {
                 withheld.append(&mut dlq_pending);
             }
+        }
+
+        if !dead_letters.is_empty() {
+            self.settle_dead_letters(dlq, dead_letters, dlq_deadline)
+                .await;
         }
 
         // ONE commit for the cycle, bounded by the lowest withheld offset on
@@ -1506,6 +1623,72 @@ impl Orchestrator {
 
         self.unsettled.rearm();
         self.stats.batches_flushed += batch_count as u64;
+    }
+
+    /// Hand the DLQ rows only it can take, holding any it does not prove
+    /// written.
+    ///
+    /// Runs where nothing re-delivers, so a held row pauses intake until the
+    /// DLQ takes it. With no working DLQ the row can never be placed -- a
+    /// configuration fault -- so it is logged and counted as lost.
+    async fn settle_dead_letters(
+        &mut self,
+        dlq: Option<&Arc<Dlq>>,
+        dead_letters: Vec<DlqEntry>,
+        expiry: tokio::time::Instant,
+    ) {
+        if dead_letters.is_empty() {
+            return;
+        }
+        let Some(dlq) = dlq.filter(|d| d.is_enabled()) else {
+            error!(
+                rows = dead_letters.len(),
+                "No working DLQ for rows ClickHouse will never take, and no upstream copy -- rows lost"
+            );
+            self.record_rows_lost(dead_letters.len());
+            return;
+        };
+        match place_dead_letters(dlq, &dead_letters, expiry).await {
+            Ok(()) => {
+                self.stats.messages_dlq += dead_letters.len() as u64;
+                if let Some(ref m) = self.metrics {
+                    for _ in &dead_letters {
+                        m.record_dlq();
+                    }
+                }
+            }
+            Err(reason) => {
+                warn!(
+                    rows = dead_letters.len(),
+                    error = %reason,
+                    "DLQ did not take rows only it can hold, holding them and pausing intake until it does"
+                );
+                self.strand_dead_letters(dead_letters);
+            }
+        }
+    }
+
+    /// Hold dead letters for another attempt, tracking their bytes until they
+    /// land.
+    fn strand_dead_letters(&mut self, dead_letters: Vec<DlqEntry>) {
+        self.memory_guard
+            .add_bytes(super::unsettled::payload_bytes(&dead_letters));
+        self.unsettled.hold_dead_letters(dead_letters);
+    }
+
+    /// Take everything held for another attempt, releasing the bytes its dead
+    /// letters were tracked under.
+    fn take_unsettled(&mut self) -> Held {
+        let held = self.unsettled.take();
+        self.memory_guard.release(held.dead_letter_bytes());
+        held
+    }
+
+    /// Count rows lost for good.
+    fn record_rows_lost(&self, rows: usize) {
+        if let Some(ref m) = self.metrics {
+            m.record_rows_lost(rows as u64);
+        }
     }
 
     /// Get current statistics
@@ -1974,21 +2157,7 @@ async fn route_rejected_rows_to_dlq(
         };
     }
 
-    if let Some(m) = metrics {
-        for _ in failed {
-            m.record_permanent_reject(table);
-        }
-    }
-
-    let summary = format!(
-        "clickhouse_permanent_reject table={table}: {}",
-        failed[0].reason
-    );
-    super::coordinator::record_dlq_routed(
-        "clickhouse_permanent_reject",
-        &summary,
-        &format!("table={table}"),
-    );
+    note_permanent_rejects(metrics, table, failed);
 
     let Some(dlq) = dlq.filter(|d| d.is_enabled()) else {
         error!(
@@ -2002,7 +2171,7 @@ async fn route_rejected_rows_to_dlq(
     let mut delivered = 0u64;
 
     for row in failed {
-        let Some(payload) = rejected_payload(payloads, row) else {
+        let Some(entry) = rejected_entry(table, payloads, row) else {
             // Nothing at all to hand over: the offset is the only remaining
             // copy, so it stays put. Unreachable in practice -- the inserter
             // serialises the promoted row whenever the raw slot is empty.
@@ -2018,18 +2187,6 @@ async fn route_rejected_rows_to_dlq(
                 complete: false,
             };
         };
-        let mut entry = DlqEntry::new(
-            "loader",
-            format!("clickhouse_permanent_reject table={table}: {}", row.reason),
-            payload,
-        );
-        if let Some(offset) = &row.offset {
-            entry = entry.with_source(scalo::dlq::DlqSource::kafka(
-                &*offset.topic,
-                offset.partition,
-                offset.offset,
-            ));
-        }
         match tokio::time::timeout_at(expiry, dlq.send(entry)).await {
             Ok(Ok(())) => {
                 delivered += 1;
@@ -2068,6 +2225,109 @@ async fn route_rejected_rows_to_dlq(
     DlqDelivery {
         delivered,
         complete: true,
+    }
+}
+
+/// Surface a batch's permanently rejected rows: a metric per row and one
+/// security event for the batch.
+fn note_permanent_rejects(metrics: &Option<Metrics>, table: &str, failed: &[FailedRow]) {
+    let Some(first) = failed.first() else {
+        return;
+    };
+    if let Some(m) = metrics {
+        for _ in failed {
+            m.record_permanent_reject(table);
+        }
+    }
+    let summary = format!(
+        "clickhouse_permanent_reject table={table}: {}",
+        first.reason
+    );
+    super::coordinator::record_dlq_routed(
+        "clickhouse_permanent_reject",
+        &summary,
+        &format!("table={table}"),
+    );
+}
+
+/// The DLQ entry for one permanently rejected row, or `None` when there are
+/// no bytes to hand over.
+fn rejected_entry(table: &str, payloads: &[Arc<[u8]>], row: &FailedRow) -> Option<DlqEntry> {
+    let payload = rejected_payload(payloads, row)?;
+    let entry = DlqEntry::new(
+        "loader",
+        format!("clickhouse_permanent_reject table={table}: {}", row.reason),
+        payload,
+    );
+    Some(match &row.offset {
+        Some(offset) => entry.with_source(scalo::dlq::DlqSource::kafka(
+            &*offset.topic,
+            offset.partition,
+            offset.offset,
+        )),
+        None => entry,
+    })
+}
+
+/// Wait for the DLQ to write everything queued so far, and confirm it dropped
+/// nothing since the count read as `dropped_before`.
+///
+/// `Dlq::flush` reports only the batch its drain holds at the barrier; a batch
+/// the drain already wrote and lost shows in `dropped()` alone.
+async fn dlq_barrier(
+    dlq: &Dlq,
+    dropped_before: u64,
+    expiry: tokio::time::Instant,
+) -> std::result::Result<(), String> {
+    match tokio::time::timeout_at(expiry, dlq.flush()).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => return Err(format!("DLQ flush failed: {e}")),
+        Err(_elapsed) => return Err("DLQ flush did not complete within the deadline".to_string()),
+    }
+    match dlq.dropped().saturating_sub(dropped_before) {
+        0 => Ok(()),
+        dropped => Err(format!("DLQ dropped {dropped} entries")),
+    }
+}
+
+/// Queue every dead letter on the DLQ and prove them written.
+///
+/// A refused set goes back whole, so a DLQ that wrote part of it holds
+/// duplicates after the retry, never a gap.
+async fn place_dead_letters(
+    dlq: &Dlq,
+    dead_letters: &[DlqEntry],
+    expiry: tokio::time::Instant,
+) -> std::result::Result<(), String> {
+    let dropped_before = dlq.dropped();
+    for entry in dead_letters {
+        match tokio::time::timeout_at(expiry, dlq.send(entry.clone())).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => return Err(format!("DLQ send failed: {e}")),
+            Err(_elapsed) => {
+                return Err("DLQ send did not complete within the deadline".to_string());
+            }
+        }
+    }
+    dlq_barrier(dlq, dropped_before, expiry).await
+}
+
+/// How often a paused intake still runs pending-schema upkeep, so a buffer
+/// waiting on a schema drains once it resolves.
+const PAUSED_INTAKE_POLL: Duration = Duration::from_millis(100);
+
+/// The next batch from the transport, or an empty one after a short idle
+/// while intake is paused.
+async fn next_intake(
+    transport: &TransportBackend,
+    open: bool,
+    max: usize,
+) -> Result<ReceivedBatch> {
+    if open {
+        transport.recv(max).await
+    } else {
+        tokio::time::sleep(PAUSED_INTAKE_POLL).await;
+        Ok(ReceivedBatch::default())
     }
 }
 
@@ -2188,27 +2448,38 @@ fn route_pending_to_dlq(
     memory_guard: &MemoryGuard,
     metrics: &Option<Metrics>,
     msg: crate::kafka::KafkaMessage,
-    reason: &super::pending_schema::ExpireReason,
+    reason: &ExpireReason,
 ) {
-    let reason_str = format_pending_reason(reason);
+    let entry = expire_pending(memory_guard, metrics, msg, reason);
     if dlq_enabled {
-        let entry = DlqEntry::new("loader", reason_str.clone(), msg.payload.clone()).with_source(
-            scalo::dlq::DlqSource::kafka(&*msg.topic, msg.partition, msg.offset),
-        );
         let _ = dlq_tx.try_send(entry);
     }
+    // The generic DLQ counter too, so dashboards see this loss class (#36).
+    if let Some(m) = metrics {
+        m.record_dlq();
+    }
+}
+
+/// Retire a message whose schema never arrived: surface it (security event
+/// and metric), release its tracked memory, and build its DLQ entry.
+fn expire_pending(
+    memory_guard: &MemoryGuard,
+    metrics: &Option<Metrics>,
+    msg: crate::kafka::KafkaMessage,
+    reason: &ExpireReason,
+) -> DlqEntry {
+    let reason_str = format_pending_reason(reason);
     super::coordinator::record_dlq_routed(
         pending_reason_label(reason),
         &reason_str,
         &msg.location(),
     );
-    // Surface in Prometheus too — both the generic DLQ counter and the
-    // pending-schema-specific counter — so dashboards see this loss class (#36).
     if let Some(m) = metrics {
-        m.record_dlq();
         m.record_pending_schema_expired();
     }
     memory_guard.release(msg.payload.len() as u64);
+    let source = scalo::dlq::DlqSource::kafka(&*msg.topic, msg.partition, msg.offset);
+    DlqEntry::new("loader", reason_str, msg.payload).with_source(source)
 }
 
 #[cfg(test)]
@@ -2730,6 +3001,82 @@ mod tests {
 
         assert_eq!(delivery.delivered, 0);
         assert!(!delivery.complete, "nothing was kept, so nothing commits");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_barrier_over_an_entry_the_drain_lost_is_not_proof_it_was_written() {
+        // The drain writes on its own tick as well as at a barrier, and loses
+        // a batch every backend refuses; only dropped() records that loss.
+        let dir = dlq_dir("barrierdrop");
+        let dlq = file_dlq(&dir);
+        let dropped_before = dlq.dropped();
+
+        // The service directory becomes a regular file, so every write fails.
+        let service = dir.join("loader");
+        std::fs::remove_dir_all(&service).expect("remove the DLQ directory");
+        std::fs::write(&service, b"not a directory").expect("plant a file");
+
+        dlq.send(DlqEntry::new(
+            "loader",
+            "clickhouse_permanent_reject",
+            b"{}".to_vec(),
+        ))
+        .await
+        .expect("queued");
+        // Well past the drain's flush interval, so its tick writes the entry.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(
+            dlq.dropped() > dropped_before,
+            "the broken writer lost nothing"
+        );
+
+        let barrier = dlq_barrier(&dlq, dropped_before, in_30s()).await;
+        assert!(
+            barrier.is_err(),
+            "a barrier after the drain lost an entry proved it written"
+        );
+        let _ = std::fs::remove_file(&service);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn dead_letters_the_dlq_writes_are_placed() {
+        let dir = dlq_dir("placed");
+        let dlq = file_dlq(&dir);
+        let dead_letters: Vec<DlqEntry> = (0..3)
+            .map(|n| {
+                DlqEntry::new(
+                    "loader",
+                    "clickhouse_permanent_reject",
+                    format!("{{\"n\":{n}}}").into_bytes(),
+                )
+            })
+            .collect();
+
+        place_dead_letters(&dlq, &dead_letters, in_30s())
+            .await
+            .expect("a working DLQ takes them");
+        assert_eq!(spooled_lines(&dir).len(), 3);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn dead_letters_a_stopped_dlq_refuses_come_back_whole() {
+        let dir = dlq_dir("refused");
+        let dlq = file_dlq(&dir);
+        dlq.shutdown().await.expect("stop the drain");
+        let dead_letters = vec![DlqEntry::new(
+            "loader",
+            "clickhouse_permanent_reject",
+            b"{}".to_vec(),
+        )];
+
+        let placed = place_dead_letters(&dlq, &dead_letters, in_30s()).await;
+        assert!(
+            placed.is_err(),
+            "a stopped DLQ was taken as a home for the rows"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

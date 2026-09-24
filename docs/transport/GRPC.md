@@ -67,6 +67,12 @@ flowchart LR
    A loader stopped while it holds a batch loses that batch: this path keeps
    no disk copy.
 
+   Rows ClickHouse rejects for good go to the DLQ, and the loader holds them the same way until the DLQ proves them written -- a flush barrier that passes with entries dropped since does not count. With no working DLQ those rows can never be placed: the loader logs each loss at `error` and counts it in `dfe_loader_rows_lost_total`.
+
+   A message whose table schema is not cached yet waits in the pending-schema buffer. On gRPC a full buffer (`schema.pending_max_per_table`, `schema.pending_max_total`) stops intake instead of shedding to the DLQ, and a message past `schema.pending_max_age_secs` goes to the DLQ under the same hold, or keeps waiting for its schema when there is no working DLQ.
+
+   Under memory pressure the self-regulation governor makes the listener answer Push with `UNAVAILABLE` before the loader admits another record.
+
 ## Proto evolution: v1 -> v2
 
 The proto is designed with forward-compatible fields so the wire format does not

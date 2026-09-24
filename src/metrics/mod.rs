@@ -88,6 +88,8 @@ pub struct Metrics {
     pub pending_schema_expired: Counter,
     /// Messages currently held awaiting schema resolution.
     pub pending_schema_messages: Gauge,
+    /// Rows with no upstream copy that neither `ClickHouse` nor a DLQ took.
+    pub rows_lost: Counter,
     /// Pre-warm retry rounds beyond the first.
     pub schema_prewarm_retries: Counter,
     /// Tables still failing pre-warm after the retry budget.
@@ -246,6 +248,10 @@ impl Metrics {
                 "dfe_loader_pending_schema_messages",
                 "Messages held awaiting schema resolution",
             ),
+            rows_lost: manager.counter(
+                "dfe_loader_rows_lost_total",
+                "Rows with no upstream copy that neither ClickHouse nor a DLQ took",
+            ),
             schema_prewarm_retries: manager.counter(
                 "dfe_loader_schema_prewarm_retries_total",
                 "Schema pre-warm retry rounds beyond the first",
@@ -389,6 +395,12 @@ impl Metrics {
     /// globally evicted, or drained on shutdown) (#36).
     pub fn record_pending_schema_expired(&self) {
         self.pending_schema_expired.increment(1);
+    }
+
+    /// Record rows lost for good: no upstream copy, and neither `ClickHouse` nor
+    /// a DLQ took them.
+    pub fn record_rows_lost(&self, rows: u64) {
+        self.rows_lost.increment(rows);
     }
 
     /// Record a row DLQ'd because ClickHouse rejected it deterministically and
@@ -629,6 +641,7 @@ mod tests {
             "dfe_loader_pending_schema_overflow_total",
             "dfe_loader_pending_schema_expired_total",
             "dfe_loader_pending_schema_messages",
+            "dfe_loader_rows_lost_total",
             "dfe_loader_schema_prewarm_retries_total",
             "dfe_loader_schema_prewarm_failed_tables",
             "dfe_loader_header_pass_skipped_total",
@@ -655,6 +668,8 @@ mod tests {
         m.update_pending_schema_messages(42);
         m.record_schema_prewarm_retry();
         m.update_schema_prewarm_failed_tables(3);
+        m.record_rows_lost(0);
+        m.record_rows_lost(7);
     }
 
     #[test]

@@ -262,6 +262,7 @@ mod tests {
                 max_per_table: 100,
                 max_total: 1000,
                 max_age: std::time::Duration::from_secs(30),
+                on_full: crate::pipeline::pending_schema::OnFull::DeadLetter,
             },
         )
     }
@@ -847,6 +848,7 @@ mod tests {
                 max_per_table: 100,
                 max_total: 1000,
                 max_age: std::time::Duration::from_secs(30),
+                on_full: crate::pipeline::pending_schema::OnFull::DeadLetter,
             },
         );
 
@@ -895,6 +897,7 @@ mod tests {
                 max_per_table: 1, // second message for the table overflows
                 max_total: 1000,
                 max_age: std::time::Duration::from_secs(30),
+                on_full: crate::pipeline::pending_schema::OnFull::DeadLetter,
             },
         );
 
