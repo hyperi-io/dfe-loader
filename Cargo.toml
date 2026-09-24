@@ -32,7 +32,7 @@ tokio = { version = ">=1.53.1, <2", features = ["full"] }
 tokio-util = { version = ">=0.7.19, <0.8", features = ["rt"] }
 
 # Shared library with transport abstraction
-scalo = { version = ">=2.12.7, <3", features = ["config-schema", "transport-kafka", "transport-grpc", "dlq-kafka", "config", "config-reload", "deployment", "version-check", "scaling", "cli-service", "top", "logger", "metrics", "service-metrics", "expression", "memory", "worker-batch", "governor", "secrets", "sink-stack"] }
+scalo = { version = ">=2.12.8, <3", features = ["config-schema", "transport-kafka", "transport-grpc", "dlq-kafka", "config", "config-reload", "deployment", "version-check", "scaling", "cli-service", "top", "logger", "metrics", "service-metrics", "expression", "memory", "worker-batch", "governor", "secrets", "sink-stack"] }
 
 # Steps scalo's jittered retry schedule (sink_stack backoff). Range MUST track
 # scalo's: BackoffBuilder only applies to the ExponentialBuilder scalo returns.
@@ -50,7 +50,7 @@ schemars = { version = ">=1.2.2, <2", default-features = false, features = ["std
 cel = { version = ">=0.13, <0.14", features = ["json"] }
 
 # JSON parsing (SIMD-accelerated)
-sonic-rs = ">=0.5.8, <0.6"
+sonic-rs = ">=0.5.10, <0.6"
 serde = { version = ">=1.0.229, <2", features = ["derive"] }
 serde_json = ">=1.0.151, <2"  # Fallback for complex cases
 serde_yaml_ng = ">=0.10, <0.11"  # YAML remap file parsing (maintained serde_yaml fork)
@@ -61,7 +61,7 @@ rmp-serde = ">=1.3.1, <2"
 
 # Configuration
 figment = { version = ">=0.10.19, <0.11", features = ["env"] }
-clap = { version = ">=4.6.6, <5", features = ["derive", "env"] }
+clap = { version = ">=4.6.7, <5", features = ["derive", "env"] }
 dotenvy = ">=0.15.7, <0.16"
 
 # Error handling
@@ -78,8 +78,8 @@ metrics = ">=0.24.6, <0.25"
 tikv-jemalloc-ctl = { version = ">=0.7.0, <0.8", optional = true, features = ["stats"] }
 tikv-jemallocator = { version = ">=0.7.0, <0.8", optional = true }
 
-# GeoIP enrichment (mmap for long-running apps, simdutf8 for SIMD UTF-8 validation)
-maxminddb = { version = ">=0.30.3, <0.31", features = ["mmap", "simdutf8"] }
+# GeoIP enrichment (mmap for long-running apps)
+maxminddb = { version = ">=0.32.0, <0.33", features = ["mmap"] }
 
 # GeoIP auto-download (HTTP + gzip decompression + tar extraction)
 # Pinned to 0.12 to match scalo (reqwest-middleware/vaultrs don't support 0.13 yet)
@@ -95,12 +95,12 @@ clickhouse = { version = ">=0.15.0, <0.16", features = ["lz4", "time", "rustls-t
 time = ">=0.3.55, <0.4"
 
 # Utilities
-uuid = { version = ">=1.26.0, <2", features = ["v4", "v7"] }
+uuid = { version = ">=1.26.1, <2", features = ["v4", "v7"] }
 rustc-hash = ">=2.1.3, <3"  # FxHashMap - faster hashing for internal maps
 memchr = ">=2.8.3, <3"     # SIMD byte scanning for directive parser
 # Kafka auto-discovery filters are regexes in scalo; escape() keeps a DLQ topic
 # name literal. Same crate scalo resolves, so cargo unifies to one regex.
-regex = ">=1.12.4, <2"
+regex = ">=1.13.1, <2"
 compact_str = ">=0.10.0, <0.11"  # Stack-allocated strings for short keys (≤23 bytes)
 chrono = { version = ">=0.4.45, <0.5", features = ["serde"] }
 chrono-tz = ">=0.10.4, <0.11"
@@ -108,8 +108,8 @@ bytes = ">=1.12.1, <2"
 futures = ">=0.3.34, <0.4"
 parking_lot = ">=0.12.5, <0.13"
 dashmap = ">=6.2.1, <7"
-crossbeam-channel = ">=0.5.16, <0.6"
-indexmap = { version = ">=2.14.1, <3", features = ["serde"] }
+crossbeam-channel = ">=0.5.17, <0.6"
+indexmap = { version = ">=2.14.2, <3", features = ["serde"] }
 
 # Graceful shutdown
 tokio-graceful-shutdown = ">=0.20.0, <0.21"
@@ -129,7 +129,6 @@ rdkafka = { version = ">=0.39.0, <0.40", features = ["dynamic-linking"], optiona
 criterion = { version = ">=0.8.2, <0.9", features = ["html_reports"] }
 proptest = ">=1.11.0, <2"
 test-case = ">=3.3.1, <4"
-rstest = ">=0.26.1, <0.27"
 
 # Blocking HTTP for sync test reachability probes (skip_if_no_clickhouse macro).
 # Adds the `blocking` feature to the reqwest already-pinned by the lib.
@@ -139,7 +138,7 @@ reqwest = { version = ">=0.12, <0.13", default-features = false, features = ["bl
 testcontainers = ">=0.27.3, <0.28"
 testcontainers-modules = { version = ">=0.15.0, <0.16", features = ["kafka", "clickhouse"] }
 # The reqwest major testcontainers' HttpWaitStrategy::with_client takes; the lib stays on 0.12 for scalo.
-testcontainers-reqwest = { package = "reqwest", version = ">=0.13.4, <0.14", default-features = false }
+testcontainers-reqwest = { package = "reqwest", version = ">=0.13.5, <0.14", default-features = false }
 
 # Kafka producer for e2e tests (test message injection)
 rdkafka = { version = ">=0.39.0, <0.40", features = ["dynamic-linking"] }
