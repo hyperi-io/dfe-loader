@@ -70,6 +70,12 @@ const DLQ_DOWN_PAST_THE_HOLD: Duration = Duration::from_millis(3 * SHORT_HOLD_MS
 /// Senders pushing rows that insert while that DLQ refuses.
 const GOOD_SENDERS: usize = 4;
 
+/// Good records pushed in one Push with a record `ClickHouse` refuses.
+const GOOD_WITH_OVERFLOW: u64 = 20;
+
+/// Id of the record whose JSON holds an integer no `ClickHouse` integer holds.
+const OVERFLOW_ID: u64 = 500_000;
+
 /// `SIGXFSZ` on Linux: raised on a write past `RLIMIT_FSIZE`, fatal unless handled.
 pub(super) const SIGXFSZ: i32 = 25;
 
@@ -468,32 +474,42 @@ fn decode_base64(text: &str) -> Option<Vec<u8>> {
 
 /// Every id the file DLQ under `dir` has written, skipping any torn line.
 pub(super) fn dead_lettered_ids(dir: &Path) -> BTreeSet<u64> {
-    fn walk(dir: &Path, ids: &mut BTreeSet<u64>) {
+    dead_letter_reasons(dir).into_keys().collect()
+}
+
+/// The reason the file DLQ under `dir` recorded for each id it has written,
+/// skipping any torn line.
+fn dead_letter_reasons(dir: &Path) -> std::collections::BTreeMap<u64, String> {
+    fn walk(dir: &Path, reasons: &mut std::collections::BTreeMap<u64, String>) {
         let Ok(entries) = std::fs::read_dir(dir) else {
             return;
         };
         for entry in entries.flatten() {
             let path = entry.path();
             if path.is_dir() {
-                walk(&path, ids);
+                walk(&path, reasons);
                 continue;
             }
             let Ok(body) = std::fs::read_to_string(&path) else {
                 continue;
             };
             for line in body.lines() {
-                let id = serde_json::from_str::<serde_json::Value>(line)
-                    .ok()
-                    .and_then(|entry| decode_base64(entry["payload"].as_str()?))
+                let Ok(entry) = serde_json::from_str::<serde_json::Value>(line) else {
+                    continue;
+                };
+                let id = decode_base64(entry["payload"].as_str().unwrap_or_default())
                     .and_then(|payload| serde_json::from_slice::<serde_json::Value>(&payload).ok())
                     .and_then(|record| record["id"].as_u64());
-                ids.extend(id);
+                if let Some(id) = id {
+                    let reason = entry["reason"].as_str().unwrap_or_default().to_string();
+                    reasons.insert(id, reason);
+                }
             }
         }
     }
-    let mut ids = BTreeSet::new();
-    walk(dir, &mut ids);
-    ids
+    let mut reasons = std::collections::BTreeMap::new();
+    walk(dir, &mut reasons);
+    reasons
 }
 
 /// Wait until the DLQ holds every id in `want`, or the budget runs out.
@@ -1220,5 +1236,91 @@ async fn no_unroutable_record_is_lost_while_the_dlq_refuses_writes() {
         unroutable.len() as u64,
         UNROUTABLE,
         "unroutable records were never accepted once the DLQ took writes again"
+    );
+}
+
+/// A record whose JSON holds an integer no `ClickHouse` integer type holds.
+fn overflow_payload(id: u64) -> String {
+    format!(
+        r#"{{"id":{id},"message":"an integer no ClickHouse integer type holds","big":123456789012345678901234567890}}"#
+    )
+}
+
+/// A record `ClickHouse` refuses for its data -- an integer no integer type
+/// holds, in the JSON column the default `RowBinary` insert has the server
+/// parse (code 117) -- is dead-lettered with the server's reason, and the good
+/// records flushed with it land. The refusal is not taken for schema drift, so
+/// nothing behind it waits.
+#[tokio::test]
+async fn a_row_clickhouse_refuses_for_its_data_is_dead_lettered_and_the_rest_land() {
+    let infra = TestInfrastructure::new(test_name!(), true, false).await;
+    let clickhouse = clickhouse_address(&infra).await;
+    let direct = query_client(&clickhouse);
+
+    let table = unique_table_name("grpc_data_refusal");
+    direct
+        .execute(&format!(
+            "CREATE TABLE default.{table} (id UInt64, message String DEFAULT '', \
+             _json JSON(max_dynamic_paths = 2048)) ENGINE = MergeTree() ORDER BY id"
+        ))
+        .await
+        .expect("create table");
+
+    let dlq_dir = tempfile::tempdir().expect("DLQ spool directory");
+    let listen_port = free_port();
+    let mut config = grpc_loader(listen_port, clickhouse.clone(), &table);
+    with_file_dlq(&mut config, dlq_dir.path());
+    let (shutdown, loader, client) = start_loader(config, listen_port).await;
+    wait_for_loader(&client, &clickhouse, &table).await;
+
+    // One Push with the refused record among good ones, so they flush as one
+    // batch, then good records one at a time behind it.
+    let mut records: Vec<String> = (1..=GOOD_WITH_OVERFLOW).map(id_payload).collect();
+    records.insert(records.len() / 2, overflow_payload(OVERFLOW_ID));
+    let until = tokio::time::Instant::now() + Duration::from_secs(45);
+    let (batch_accepted, told_to_retry) = push_until_accepted(
+        &client,
+        bytes::Bytes::from(format!("[{}]", records.join(","))),
+        until,
+    )
+    .await;
+    let behind = GOOD_WITH_OVERFLOW + 1..GOOD_WITH_OVERFLOW + 11;
+    let (accepted_behind, _) = push_ids(&client, behind.clone(), until, id_payload).await;
+
+    let good: BTreeSet<u64> = (1..=GOOD_WITH_OVERFLOW).chain(behind).collect();
+    let landed = wait_landed(&clickhouse, &table, &good, Duration::from_secs(30)).await;
+    let refused = BTreeSet::from([OVERFLOW_ID]);
+    wait_dead_lettered(dlq_dir.path(), &refused, Duration::from_secs(30)).await;
+    let reasons = dead_letter_reasons(dlq_dir.path());
+
+    shutdown.cancel();
+    let _ = tokio::time::timeout(Duration::from_secs(30), loader).await;
+    let _ = direct
+        .execute(&format!("DROP TABLE IF EXISTS default.{table}"))
+        .await;
+
+    assert!(
+        batch_accepted,
+        "the Push carrying the refused record was never answered OK: told to retry {told_to_retry} times"
+    );
+    let missing: Vec<u64> = good.difference(&landed).copied().collect();
+    assert!(
+        missing.is_empty(),
+        "{} of {} good records never landed: {missing:?}",
+        missing.len(),
+        good.len()
+    );
+    assert_eq!(
+        accepted_behind.len(),
+        10,
+        "records behind the refused one waited"
+    );
+    assert!(!landed.contains(&OVERFLOW_ID), "the refused record landed");
+    let reason = reasons
+        .get(&OVERFLOW_ID)
+        .expect("the refused record never reached the DLQ");
+    assert!(
+        reason.contains("117"),
+        "the dead letter does not carry the server's refusal: {reason}"
     );
 }

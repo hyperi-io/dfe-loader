@@ -285,6 +285,12 @@ impl DynamicInsert {
     pub fn schema(&self) -> Option<&DynamicSchema> {
         self.schema.as_ref()
     }
+
+    /// Take the resolved schema the rows were encoded against. [`end`][Self::end]
+    /// still finishes the insert: it needs only the rows already written.
+    pub fn take_schema(&mut self) -> Option<DynamicSchema> {
+        self.schema.take()
+    }
 }
 
 /// Choose the columns to include in the INSERT: every column present in the

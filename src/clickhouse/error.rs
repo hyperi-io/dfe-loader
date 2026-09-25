@@ -141,6 +141,10 @@ pub fn is_max_dynamic_paths_error(err: &str) -> bool {
 /// of those as a permanent verdict destroys a batch the next schema fetch
 /// would have encoded correctly, so drift withholds the offsets and comes
 /// back instead.
+///
+/// A refusal carrying a payload-rejection code ([`is_payload_refusal`]) gets
+/// here only when the inserter's re-read of the schema found the table changed
+/// or could not read it. An unchanged table makes it the rows' own first.
 #[must_use]
 pub fn classify_insert_end_error(msg: &str) -> ErrorCategory {
     if is_schema_drift_error(msg) {
@@ -189,9 +193,10 @@ pub fn classify_dynamic_error(err: &crate::clickhouse_ext::DynamicError) -> Erro
 /// fail the same way on every redelivery, so retrying wedges the partition.
 ///
 /// Codes come from the server's `src/Common/ErrorCodes.cpp`. 27, 33 and 72 are
-/// observed against a live server on the `JSONEachRow` path; the rest are the
-/// sibling failures the same reader raises for other column types.
-const JSON_PAYLOAD_REJECTION_CODES: &[i32] = &[
+/// observed against a live server on the `JSONEachRow` path, and 33 and 117 on
+/// the `RowBinary` path. The rest are the sibling failures the same readers
+/// raise for other column types.
+const PAYLOAD_REJECTION_CODES: &[i32] = &[
     6,   // CANNOT_PARSE_TEXT
     26,  // CANNOT_PARSE_QUOTED_STRING
     27,  // CANNOT_PARSE_INPUT_ASSERTION_FAILED
@@ -248,7 +253,7 @@ pub fn classify_json_insert_error(err: &clickhouse::error::Error) -> ErrorCatego
         if ChError::is_retriable_code(*code) {
             return ErrorCategory::Transient;
         }
-        if JSON_PAYLOAD_REJECTION_CODES.contains(code) {
+        if PAYLOAD_REJECTION_CODES.contains(code) {
             return ErrorCategory::Data;
         }
     }
@@ -257,6 +262,29 @@ pub fn classify_json_insert_error(err: &clickhouse::error::Error) -> ErrorCatego
         ErrorCategory::Data => ErrorCategory::Transient,
         category => category,
     }
+}
+
+/// The server's exception code in a clickhouse-rs error's text, which reads
+/// `server error code {code}: {message}` wherever it is nested.
+#[must_use]
+pub fn server_code(msg: &str) -> Option<i32> {
+    const MARKER: &str = "server error code ";
+    let after = &msg[msg.find(MARKER)? + MARKER.len()..];
+    let end = after
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(after.len());
+    after[..end].parse().ok()
+}
+
+/// Whether a `RowBinary` refusal carries a code the server gives only for
+/// bytes it read and cannot accept.
+///
+/// Rows encoded against a stale schema draw the same codes, so this alone is
+/// not a verdict on the payload: the caller rules drift out by reading the
+/// table's schema again first.
+#[must_use]
+pub fn is_payload_refusal(msg: &str) -> bool {
+    server_code(msg).is_some_and(|code| PAYLOAD_REJECTION_CODES.contains(&code))
 }
 
 /// Classify error from HTTP response message.
@@ -546,6 +574,36 @@ mod tests {
                 "drift must withhold offsets, not DLQ: {msg}"
             );
         }
+    }
+
+    #[test]
+    fn a_row_binary_refusal_is_read_by_the_code_wherever_it_is_nested() {
+        // What the RowBinary end() hands back for the overflow in a JSON
+        // column: the server names no exception, and the body echoes the row.
+        let refusal = format!(
+            "RowBinary insert: encoding error for column '': {}",
+            server_exception(
+                117,
+                "Cannot parse JSON object here: {\"reason\":\"connection reset\",\"big\":123456789012345678901234567890}"
+            )
+        );
+        assert_eq!(server_code(&refusal), Some(117));
+        assert!(is_payload_refusal(&refusal));
+        assert!(is_payload_refusal(
+            &server_exception(469, "Constraint `below_limit` violated").to_string()
+        ));
+
+        // An operator fix, a struggling server, or no code at all is no
+        // verdict on the rows, whatever the words.
+        for not_the_rows in [
+            server_exception(60, "Table default.events does not exist").to_string(),
+            server_exception(16, "No such column name in table").to_string(),
+            server_exception(241, "Memory limit exceeded: cannot parse").to_string(),
+            "bad response: Cannot parse input: INCORRECT_DATA".to_string(),
+        ] {
+            assert!(!is_payload_refusal(&not_the_rows), "{not_the_rows}");
+        }
+        assert_eq!(server_code("server error code : empty"), None);
     }
 
     #[test]

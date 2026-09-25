@@ -111,6 +111,8 @@ invalidated so the next attempt re-fetches from `system.columns` and re-encodes.
 A non-drift error (network, auth) is returned as-is. See
 [SCHEMA-CACHE.md](SCHEMA-CACHE.md).
 
+The same codes come back for a row the server can never accept, so a refusal against a table unchanged since the rows were encoded is the rows' own: salvage dead-letters the bad row and the rest land.
+
 ## Configuring it
 
 | Setting | Values | Default |

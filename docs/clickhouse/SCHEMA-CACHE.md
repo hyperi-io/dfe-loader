@@ -68,6 +68,8 @@ parse" -- the table's cache entry is invalidated. The retry re-fetches from
 `system.columns` and re-encodes against the current schema. A non-drift error (network, auth, server down) is
 returned unchanged, so genuine outages are not mistaken for schema drift.
 
+A row the server can never accept draws the same signals: an integer no ClickHouse integer type holds, in a JSON column, comes back as code 117 whatever the schema. So a refusal carrying a payload-rejection code (117, 27, 33, 469 and the rest listed in `src/clickhouse/error.rs`) re-reads `system.columns` before anything else. A table unchanged since the rows were encoded makes the refusal the rows' own: the insert returns it as permanent, salvage isolates the bad row for the DLQ, and the rest land. A changed table is drift, recovered as above.
+
 This is the fix trail for the schema-cache-miss class of bug: a column added by
 an out-of-band `ALTER` no longer wedges the loader until a restart -- the first
 rejected insert clears the stale entry and the retry succeeds against the new

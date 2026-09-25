@@ -48,7 +48,7 @@ use crate::clickhouse::client_http::escape_identifier;
 use crate::clickhouse::config::InsertFormat;
 use crate::clickhouse::error::{
     ErrorCategory, classify_dynamic_error, classify_insert_end_error, classify_json_insert_error,
-    is_schema_drift_error,
+    is_payload_refusal, is_schema_drift_error,
 };
 use crate::clickhouse::{ClickHouseQueryClient, SchemaCache};
 use crate::clickhouse_ext::{ColumnDef, json_shaping_changes, shape_json_for_type};
@@ -475,6 +475,23 @@ impl Inserter {
             .collect()
     }
 
+    /// Whether `table`'s columns, read from `ClickHouse` now, are the ones in
+    /// `encoded_against`. A read that fails, or no schema to compare, is not
+    /// proof, so answers `false`.
+    async fn schema_unchanged(
+        &self,
+        db: &str,
+        tbl: &str,
+        encoded_against: Option<&crate::clickhouse_ext::DynamicSchema>,
+    ) -> bool {
+        let Some(encoded_against) = encoded_against else {
+            return false;
+        };
+        crate::clickhouse_ext::fetch_dynamic_schema(&self.ch_client, db, tbl)
+            .await
+            .is_ok_and(|now| now.same_columns(encoded_against))
+    }
+
     /// Calculate backoff delay for a given attempt.
     fn backoff_delay(&self, attempt: u32) -> Duration {
         calc_backoff(self.base_retry_delay_ms, attempt, self.max_retry_delay_ms)
@@ -648,7 +665,34 @@ impl Inserter {
                 break;
             }
 
-            match insert.end().await {
+            let encoded_against = insert.take_schema();
+            let outcome = insert.end().await;
+            if let Err(e) = &outcome
+                && is_payload_refusal(&e.to_string())
+            {
+                // A refusal of the bytes against the table as it still stands
+                // is the rows' own: no re-fetch can change the server's verdict.
+                if self
+                    .schema_unchanged(db, tbl, encoded_against.as_ref())
+                    .await
+                {
+                    debug!(
+                        table = %table,
+                        error = %e,
+                        "Server refused the rows against a current schema, returning for salvage"
+                    );
+                    return Err(crate::Error::ClickHousePermanent(format!(
+                        "RowBinary insert: {e}"
+                    )));
+                }
+                // The table changed under the rows, so the retry encodes
+                // against it as it is now.
+                if self.refresh_on_error {
+                    self.dynamic_schema_cache.invalidate(&format!("{db}.{tbl}"));
+                    self.drop_cached_schema(table);
+                }
+            }
+            match outcome {
                 Ok(count) => {
                     debug!(
                         table = %table,

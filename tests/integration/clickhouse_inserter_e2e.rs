@@ -951,6 +951,113 @@ async fn a_drift_error_keeps_the_cached_schema_when_refresh_on_error_is_off() {
     assert_eq!(count, 3, "nothing lands after the drop");
 }
 
+/// A batch whose third row holds an integer no `ClickHouse` integer type holds,
+/// in the JSON column the server parses: code 117 against an unchanged table
+/// is the row's own, so salvage isolates it and the rest land at once.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_row_the_server_refuses_against_a_current_schema_is_salvaged_not_retried() {
+    let (_infra, client, ch) = spin_up(test_name!()).await;
+    let table = unique_table_name("tc_data_refusal");
+    client
+        .execute(&format!(
+            "CREATE TABLE {table} (id UInt64, _json JSON(max_dynamic_paths=2048)) \
+             ENGINE = MergeTree() ORDER BY id"
+        ))
+        .await
+        .expect("create table");
+    let inserter = Inserter::new(client.clone(), ch, InserterConfig::default())
+        .with_insert_format(InsertFormat::RowBinary);
+
+    let rows: Vec<Map<String, Value>> = (0..5u64)
+        .map(|id| json!({ "id": id }).as_object().unwrap().clone())
+        .collect();
+    let raw_payloads: Vec<Arc<[u8]>> = (0..5u64)
+        .map(|id| {
+            let body = if id == 2 {
+                format!(r#"{{"id":{id},"big":123456789012345678901234567890}}"#)
+            } else {
+                format!(r#"{{"id":{id}}}"#)
+            };
+            Arc::from(body.into_bytes().as_slice())
+        })
+        .collect();
+
+    let started = std::time::Instant::now();
+    let result = inserter
+        .insert_with_salvage(FlushBatch {
+            table: CompactString::from(table.as_str()),
+            rows,
+            offsets: Vec::new(),
+            raw_payloads,
+        })
+        .await;
+
+    assert!(
+        result.is_settled(),
+        "a refusal of the row's data was held for retry: {:?}",
+        result.disposition
+    );
+    assert_eq!(result.inserted, 4, "the good rows did not land");
+    assert_eq!(result.failed.len(), 1, "failed: {:?}", result.failed);
+    assert_eq!(result.failed[0].row_index, 2);
+    assert!(
+        result.failed[0].reason.contains("117"),
+        "the reason does not carry the server's code: {}",
+        result.failed[0].reason
+    );
+    // The default five retries with backoff take about 3 s per failing insert.
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "the refusal was retried as drift: {:?}",
+        started.elapsed()
+    );
+    let count = client.query_count(&table, None).await.expect("count");
+    assert_eq!(count, 4);
+}
+
+/// A column's type changed under the cached schema: the server refuses bytes
+/// encoded for the old type, but the table no longer matches them, so the
+/// insert re-reads the schema and lands instead of dead-lettering the row.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refusal_after_a_type_change_re_reads_the_schema_and_lands() {
+    let (_infra, client, ch) = spin_up(test_name!()).await;
+    let table = unique_table_name("tc_type_change");
+    client
+        .execute(&format!(
+            "CREATE TABLE {table} (id UInt64, v UInt8) ENGINE = MergeTree() ORDER BY id"
+        ))
+        .await
+        .expect("create table");
+    let inserter = Inserter::new(client.clone(), ch, fast_fail_config())
+        .with_insert_format(InsertFormat::RowBinary);
+    let row = |id: u64| vec![json!({ "id": id, "v": 5 }).as_object().unwrap().clone()];
+    inserter
+        .insert_rows(&table, &row(1), &[])
+        .await
+        .expect("insert against the original schema");
+
+    client
+        .execute(&format!("ALTER TABLE {table} MODIFY COLUMN v UInt16"))
+        .await
+        .expect("widen the column");
+
+    // One row, so the one-byte value leaves the server short of its read.
+    let first = inserter.insert_rows(&table, &row(2), &[]).await;
+    assert!(
+        matches!(first, Err(dfe_loader::Error::ClickHouse(_))),
+        "bytes encoded for the old type were not refused as retryable: {first:?}"
+    );
+    inserter
+        .insert_rows(&table, &row(2), &[])
+        .await
+        .expect("the retry re-reads the schema and lands");
+    let count = client.query_count(&table, None).await.expect("count");
+    assert_eq!(
+        count, 2,
+        "the row written against the old type never landed"
+    );
+}
+
 // ============================================================================
 // Inserter: empty batch is a no-op
 // ============================================================================
