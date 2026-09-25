@@ -286,5 +286,5 @@ cargo pgo bolt optimize --with-pgo
 - [The Rust Performance Book](https://nnethercote.github.io/perf-book/)
 - [LLVM BOLT](https://github.com/llvm/llvm-project/tree/main/bolt)
 - [jemalloc tuning](https://github.com/jemalloc/jemalloc/wiki/Getting-Started)
-- hyperi-ci `docs/RUST-RELEASE-TRACK-OPTIMISATION.md` -- channel x tier matrix
-- hyperi-ci `docs/PGO-WORKLOAD-GUIDE.md` -- workload design rules
+- hyperi-ci's PGO and BOLT runtime guide (`runtime/pgo-bolt.md` in the hyperi-ci
+  repo's docs) -- tiers, channels and workload design

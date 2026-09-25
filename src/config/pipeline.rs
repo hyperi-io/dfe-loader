@@ -396,6 +396,11 @@ pub struct DlqConfig {
     pub file_path: String,
     /// Kafka backend settings
     pub kafka_enabled: bool,
+    /// How long a flush or shutdown waits for the broker to acknowledge Kafka
+    /// DLQ writes, in milliseconds. Entries still unacknowledged are then
+    /// counted lost. Unset keeps scalo's default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kafka_send_timeout_ms: Option<u64>,
 }
 
 impl Default for DlqConfig {
@@ -410,6 +415,7 @@ impl Default for DlqConfig {
             file_enabled: true,
             file_path: "/var/spool/dfe/dlq".to_string(),
             kafka_enabled: true,
+            kafka_send_timeout_ms: None,
         }
     }
 }
@@ -453,6 +459,21 @@ impl DlqConfig {
             }
         };
 
+        let mut kafka = scalo::dlq::KafkaDlqConfig {
+            enabled: self.kafka_enabled,
+            topic_suffix: self.topic_suffix.clone(),
+            common_topic: self.topic.clone(),
+            routing: if self.topic.is_empty() {
+                scalo::dlq::DlqRouting::PerTable
+            } else {
+                scalo::dlq::DlqRouting::Common
+            },
+            ..scalo::dlq::KafkaDlqConfig::default()
+        };
+        if let Some(ms) = self.kafka_send_timeout_ms {
+            kafka.send_timeout_ms = ms;
+        }
+
         scalo::dlq::DlqConfig {
             enabled,
             mode,
@@ -461,17 +482,7 @@ impl DlqConfig {
                 path: self.file_path.clone().into(),
                 ..FileDlqConfig::default()
             },
-            kafka: scalo::dlq::KafkaDlqConfig {
-                enabled: self.kafka_enabled,
-                topic_suffix: self.topic_suffix.clone(),
-                common_topic: self.topic.clone(),
-                routing: if self.topic.is_empty() {
-                    scalo::dlq::DlqRouting::PerTable
-                } else {
-                    scalo::dlq::DlqRouting::Common
-                },
-                ..scalo::dlq::KafkaDlqConfig::default()
-            },
+            kafka,
             ..scalo::dlq::DlqConfig::default()
         }
     }
@@ -1259,6 +1270,28 @@ mod tests {
     }
 
     #[test]
+    fn dlq_kafka_send_timeout_reaches_scalo_and_unset_keeps_its_default() {
+        let set = DlqConfig {
+            kafka_send_timeout_ms: Some(30_000),
+            ..default_dlq_base()
+        };
+        assert_eq!(set.to_scalo_config().kafka.send_timeout_ms, 30_000);
+
+        let unset = default_dlq_base();
+        assert_eq!(
+            unset.to_scalo_config().kafka.send_timeout_ms,
+            scalo::dlq::KafkaDlqConfig::default().send_timeout_ms
+        );
+    }
+
+    #[test]
+    fn dlq_kafka_send_timeout_parses_from_yaml() {
+        let cfg: DlqConfig =
+            serde_yaml_ng::from_str("kafka_send_timeout_ms: 12000").expect("parse dlq yaml");
+        assert_eq!(cfg.kafka_send_timeout_ms, Some(12_000));
+    }
+
+    #[test]
     fn dlq_config_topic_propagated_as_common_topic() {
         let cfg = DlqConfig {
             enabled: true,
@@ -1360,6 +1393,7 @@ mod tests {
             file_enabled: true,
             file_path: "/var/spool".to_string(),
             kafka_enabled: true,
+            kafka_send_timeout_ms: None,
         }
     }
 

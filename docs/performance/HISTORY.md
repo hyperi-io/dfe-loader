@@ -76,7 +76,7 @@ Bench: `benches/bakeoff.rs`.
 
 ### simd-json (0.17) -- evaluated, rejected (2026-03-11)
 
-**Bench:** `benches/simdjson_spike.rs`, not retained -- flat30 and nested
+**Bench:** a `simdjson_spike` bench, not retained -- flat30 and nested
 payloads, 15/30 schema columns, batch sizes 100/1K/10K.
 
 **Results (batch=10K, measured).** Extraction:
