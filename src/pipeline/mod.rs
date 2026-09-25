@@ -8,6 +8,7 @@
 //! - `coordinator::BatchCoordinator` — sequential state mutation (buffer, DLQ)
 //! - [`orchestrator::Orchestrator`] — thin event loop coordinator
 
+pub(crate) mod acks;
 pub mod capture;
 pub mod coordinator;
 pub mod enrichment;

@@ -25,6 +25,9 @@
         "allow_insecure_transport": false,
         "librdkafka_overrides": {
           "statistics.interval.ms": "5000"
+        },
+        "acknowledgements": {
+          "enabled": true
         }
       }
     },
@@ -37,7 +40,11 @@
         "recv_timeout_ms": 100,
         "max_message_size": 16777216,
         "compression": false,
-        "default_topic": "main_land"
+        "default_topic": "main_land",
+        "acknowledgements": {
+          "enabled": true
+        },
+        "max_hold_ms": 13500
       }
     },
     "clickhouse": {
@@ -429,6 +436,13 @@
           "default": {
             "statistics.interval.ms": "5000"
           }
+        },
+        "acknowledgements": {
+          "description": "`enabled: true` (the default) commits an offset only once its row is in\n`ClickHouse` or the DLQ, so a crash re-delivers it. `enabled: false`\ncommits each batch as it is received: a crash or a failed insert loses\nwhat was committed.",
+          "$ref": "#/$defs/AcknowledgementsConfig",
+          "default": {
+            "enabled": true
+          }
         }
       }
     },
@@ -577,6 +591,17 @@
         }
       }
     },
+    "AcknowledgementsConfig": {
+      "description": "The `acknowledgements` section of an ack-capable transport.\n\nWith `enabled: true` (the default) a source releases its acknowledgement --\na Kafka offset commit, a gRPC or HTTP response -- only once every piece of\nwork built from the record has been delivered, dead-lettered with the DLQ's\nconfirmation, or dropped by policy. A failed delivery withholds it, so the\nrecord is delivered again: duplicates are possible, loss is not.\n\nWith `enabled: false` the source acknowledges at receipt, before the record\nis processed: a crash or a failed delivery loses what was acknowledged.\n\n```yaml\nkafka:\n  acknowledgements:\n    enabled: true\n```",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "description": "Hold the source acknowledgement until every piece is delivered.",
+          "type": "boolean",
+          "default": true
+        }
+      }
+    },
     "GrpcConfig": {
       "description": "gRPC transport configuration for receiving messages from dfe-receiver.\n\nWhen `transport = \"grpc\"`, the loader starts a gRPC server listening on\n`listen` and accepts Push RPCs from remote senders (e.g. dfe-receiver).",
       "type": "object",
@@ -619,6 +644,20 @@
           "description": "Default topic name for messages without a topic in gRPC metadata.\nUsed as the routing key when the sender doesn't set a topic.",
           "type": "string",
           "default": "main_land"
+        },
+        "acknowledgements": {
+          "description": "`enabled: true` (the default) answers a Push only once its rows are in\n`ClickHouse`, dead-lettered with the DLQ's confirmation, or dropped. A\nfailed insert answers `UNAVAILABLE` and the sender retries.\n`enabled: false` answers once the records are queued: a crash loses\nwhat was answered.",
+          "$ref": "#/$defs/AcknowledgementsConfig",
+          "default": {
+            "enabled": true
+          }
+        },
+        "max_hold_ms": {
+          "description": "The longest a Push waits for its answer before it is told to retry, in\nmilliseconds. A sender's own deadline shortens it to leave a tenth of\nthat deadline, at least 1 s, for the answer to travel. Keep it below the\nsender's send timeout and above the flush delay.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 13500
         }
       }
     },

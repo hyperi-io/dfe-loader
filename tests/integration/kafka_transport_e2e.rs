@@ -538,7 +538,7 @@ async fn test_transport_backend_kafka_dispatch() {
         ..Default::default()
     };
 
-    let backend = TransportBackend::from_config(&config, None)
+    let backend = TransportBackend::from_config(&config, None, None)
         .await
         .expect("from_config should build Kafka backend against live broker");
 
@@ -608,7 +608,7 @@ async fn test_kafka_invalid_brokers() {
         kafka: config,
         ..Default::default()
     };
-    match TransportBackend::from_config(&full_config, None).await {
+    match TransportBackend::from_config(&full_config, None, None).await {
         Ok(backend) => {
             let _ = backend.close().await;
         }

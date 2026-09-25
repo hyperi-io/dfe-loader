@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::mpsc;
-use tokio::time::interval;
+use tokio::time::{MissedTickBehavior, interval};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, trace, warn};
 
@@ -25,6 +25,8 @@ use scalo::ScalingPressure;
 use scalo::SelfRegulationGovernor;
 use scalo::dlq::{Dlq, DlqEntry};
 use scalo::memory::{MemoryGuard, MemoryGuardConfig};
+use scalo::transport::DeliveryStatus;
+use scalo::transport::ack::{EffectiveGuarantee, SinkConfirmation};
 
 use crate::Result;
 use crate::buffer::{BufferManager, FlushBatch, KafkaOffset};
@@ -57,6 +59,7 @@ pub struct PipelineStats {
 // CaptureOverrides moved to super::capture (capture.rs)
 // TableResolutionResult moved to super::types (types.rs)
 
+use super::acks::AckLedger;
 use super::capture::CaptureOverrides;
 use super::enrichment::EnrichmentPipeline;
 use super::pending_schema::{ExpireReason, OnFull, PendingSchemaConfig};
@@ -91,11 +94,21 @@ pub struct Orchestrator {
     sink_circuit_open: bool,
     /// Batches a failed insert handed back, and dead letters the DLQ did not
     /// take. On a transport with no re-delivery intake stays paused while any
-    /// are held; on Kafka each keeps the commit below it until it lands.
+    /// are held, and on Kafka each keeps the commit below it until it lands.
+    /// Never used while the transport holds its answers: the sender keeps that
+    /// copy.
     unsettled: Unsettled,
     /// Dead letters not yet offered to the DLQ. The next flush hands them over
     /// before it commits, so no offset is committed past one.
     dead_letters: Vec<DlqEntry>,
+    /// Received records whose Push answer waits on their rows.
+    acks: AckLedger,
+    /// Whether the transport answers each Push only once it is released, set
+    /// when `run` builds the transport.
+    holds_answers: bool,
+    /// Whether Kafka offsets are committed as they are received
+    /// (`kafka.acknowledgements.enabled: false`), set when `run` starts.
+    commits_at_receipt: bool,
 }
 
 /// A hold whose attempts are never further apart than the flush interval,
@@ -127,6 +140,9 @@ impl Orchestrator {
             batch_engine: None,
             sink_circuit_open: false,
             dead_letters: Vec::new(),
+            acks: AckLedger::default(),
+            holds_answers: false,
+            commits_at_receipt: false,
         }
     }
 
@@ -152,6 +168,9 @@ impl Orchestrator {
             batch_engine: None,
             sink_circuit_open: false,
             dead_letters: Vec::new(),
+            acks: AckLedger::default(),
+            holds_answers: false,
+            commits_at_receipt: false,
         }
     }
 
@@ -219,15 +238,27 @@ impl Orchestrator {
         // gate is attached to the receiver so intake brakes under memory pressure
         // (the gate is evaluated automatically inside recv). The outbound
         // ClickHouse insert drain is NEVER gated — gating the sink would deadlock.
-        let transport = TransportBackend::from_config(&self.config, self.governor.as_ref()).await?;
+        let transport = TransportBackend::from_config(
+            &self.config,
+            self.governor.as_ref(),
+            Some(&self.memory_guard),
+        )
+        .await?;
+        self.holds_answers = transport.holds_answers();
+        self.commits_at_receipt =
+            transport.commits_offsets() && !self.config.kafka.acknowledgements.enabled;
+        // Only a transport that re-reads from an offset committed after delivery
+        // hands back a row the loader could not place. On any other the loader
+        // holds the only copy.
+        let redelivers = self.rereads(&transport);
         info!(
             transport = transport.name(),
             governed = self.governor.is_some(),
+            holds_answers = self.holds_answers,
+            commits_at_receipt = self.commits_at_receipt,
             "Transport initialized"
         );
-        // Only a transport that commits offsets hands back a row the loader
-        // could not place; on any other the loader holds the only copy.
-        let redelivers = transport.commits_offsets();
+        EffectiveGuarantee::of(transport.ack_control(), SinkConfirmation::Remote).publish();
 
         // Validate ClickHouse config (transport/port mismatch, JSONEachRow+native)
         let ch_config: crate::clickhouse::ClickHouseConfig = (&self.config.clickhouse).into();
@@ -554,11 +585,15 @@ impl Orchestrator {
         // already accepted until it reports closed.
         let mut draining = false;
 
+        let mut early_flush = interval(EARLY_FLUSH_AGE);
+        early_flush.set_missed_tick_behavior(MissedTickBehavior::Delay);
+
         loop {
             // The Kafka recv blocks its worker without yielding, and outside the
             // select! a yield drops nothing, so the runtime drives timers and I/O
             // once a turn.
             tokio::task::yield_now().await;
+            self.release_settled(&transport).await;
 
             // Where nothing re-delivers, intake stops while anything is held
             // and while the pending-schema buffer is full. Kafka keeps reading:
@@ -780,6 +815,16 @@ impl Orchestrator {
                     }
                 }
 
+                // A sender waits on each held row, so rows flush at a short age
+                // instead of waiting for a batch to fill.
+                _ = early_flush.tick(), if self.holds_answers => {
+                    if transport.held_records() > 0 {
+                        let batches = buffer_manager.take_older_than(EARLY_FLUSH_AGE);
+                        let still_held = unplaced_offsets(&buffer_manager, &pending_schema_buffer);
+                        self.flush_or_settle(&inserter, &transport, dlq.as_ref(), batches, still_held).await;
+                    }
+                }
+
                 // Receive batch of messages from transport.
                 // Zero-copy: payload Bytes is moved, topic is an Arc<str> clone
                 // (refcount only).
@@ -832,21 +877,12 @@ impl Orchestrator {
                     {
                         // With no re-delivery and no DLQ to take them, aged
                         // messages keep waiting for their schema.
-                        let expired = if redelivers || dlq_enabled {
+                        let expired = if redelivers || dlq_enabled || self.holds_answers {
                             pending_schema_buffer.expire(now_pending)
                         } else {
                             Vec::new()
                         };
-                        if !expired.is_empty() {
-                            warn!(count = expired.len(), "Expired pending-schema messages to DLQ");
-                        }
-                        let dead_letters = expired
-                            .into_iter()
-                            .map(|(msg, reason)| {
-                                expire_pending(&self.memory_guard, &self.metrics, msg, &reason)
-                            })
-                            .collect();
-                        self.queue_dead_letters(dead_letters);
+                        self.retire_pending(expired);
                         for table in pending_schema_buffer
                             .tables_needing_rerequest(now_pending, PENDING_REREQUEST_INTERVAL)
                         {
@@ -886,6 +922,12 @@ impl Orchestrator {
                             let mut fresh = fan.messages;
                             for msg in &fresh {
                                 self.memory_guard.add_bytes(msg.payload.len() as u64);
+                                if self.holds_answers {
+                                    self.acks.admit(seq_of(msg.offset));
+                                }
+                            }
+                            if self.commits_at_receipt {
+                                commit_offsets(&transport, &self.metrics, &received_offsets(&fresh)).await;
                             }
                             self.stats.messages_received += fresh.len() as u64;
                             if let Some(ref m) = self.metrics {
@@ -941,6 +983,9 @@ impl Orchestrator {
                                             filtered_count += 1;
                                             // Release memory for filtered messages
                                             self.memory_guard.release(msg.payload.len() as u64);
+                                            if self.holds_answers {
+                                                self.acks.settle(seq_of(msg.offset), DeliveryStatus::Dropped);
+                                            }
                                         }
                                         PreRouteOutcome::Dlq(reason) => {
                                             dlq_entries.push((idx, reason));
@@ -1173,19 +1218,9 @@ impl Orchestrator {
         }
 
         // Messages that never received a schema cannot be processed (#36), so
-        // the final flush hands them to the DLQ.
+        // the final flush hands them to the DLQ, or to their senders to retry.
         let drained = pending_schema_buffer.drain_all();
-        if !drained.is_empty() {
-            warn!(
-                count = drained.len(),
-                "Draining pending-schema buffer to DLQ on shutdown"
-            );
-        }
-        let dead_letters = drained
-            .into_iter()
-            .map(|(msg, reason)| expire_pending(&self.memory_guard, &self.metrics, msg, &reason))
-            .collect();
-        self.queue_dead_letters(dead_letters);
+        self.retire_pending(drained);
 
         // Final flush: every buffer is empty after this, so only a row
         // ClickHouse or the DLQ still refuses holds the watermark down.
@@ -1204,6 +1239,13 @@ impl Orchestrator {
             Vec::new(),
         )
         .await;
+        self.release_settled(&transport).await;
+        if self.acks.open() > 0 {
+            warn!(
+                records = self.acks.open(),
+                "Stopping with received records whose rows never settled -- their senders are answered to retry"
+            );
+        }
         if !self.unsettled.is_empty() {
             let rows = self.unsettled.rows();
             if redelivers {
@@ -1342,9 +1384,9 @@ impl Orchestrator {
         // pod from the consumer group.
         let dlq_deadline = tokio::time::Instant::now() + DLQ_ROUTE_DEADLINE;
 
-        // Only a transport that commits offsets still has a row this process
-        // lost from memory, for a restart to re-read.
-        let redelivers = transport.commits_offsets();
+        // Only a source that re-reads still has a row this process lost from
+        // memory, for a restart to re-read.
+        let redelivers = self.rereads(transport);
         // Everything only the DLQ can take -- queued dead letters and rows
         // ClickHouse rejected for good -- is held until the DLQ proves it
         // written.
@@ -1358,9 +1400,9 @@ impl Orchestrator {
             .zip(per_batch_payloads)
         {
             // A held batch keeps its bytes tracked until it lands; any other
-            // outcome leaves the rows in ClickHouse, the dead-letter hand-over
-            // or Kafka.
-            if result.unsettled.is_none() {
+            // outcome leaves the rows in ClickHouse, the dead-letter hand-over,
+            // Kafka or the sender waiting on its answer.
+            if self.holds_answers || result.unsettled.is_none() {
                 self.memory_guard.release(batch_bytes);
             }
 
@@ -1382,6 +1424,16 @@ impl Orchestrator {
                         m.record_error();
                         // ClickHouse-specific terminal insert error (2.8.10 audit).
                         m.record_clickhouse_insert_error();
+                    }
+                    if self.holds_answers {
+                        warn!(
+                            table = %table,
+                            rows = payloads.len(),
+                            error = %reason,
+                            "Batch insert failed, answering its senders to retry"
+                        );
+                        self.settle_offsets(&offsets, DeliveryStatus::Errored);
+                        continue;
                     }
                     match result.unsettled {
                         Some(mut batch) => {
@@ -1425,6 +1477,7 @@ impl Orchestrator {
                 }
                 BatchDisposition::Settled if result.failed.is_empty() => {
                     cycle_ok += 1;
+                    self.settle_offsets(&offsets, DeliveryStatus::Delivered);
                     committable.extend(offsets);
                 }
                 BatchDisposition::Settled => {
@@ -1437,6 +1490,7 @@ impl Orchestrator {
                         m.record_clickhouse_insert_error();
                     }
                     attach_row_offsets(&mut result.failed, &offsets);
+                    self.settle_inserted(&offsets, &result.failed);
                     note_permanent_rejects(&self.metrics, &table, &result.failed);
                     error!(
                         table = %table,
@@ -1463,8 +1517,12 @@ impl Orchestrator {
         // each partition. Doing it per batch buries a sibling table's withheld
         // offset, and `get_ready_for_flush` iterates an FxHashMap, so batch
         // order is not even deterministic.
-        let to_commit = committable_offsets(committable, &withheld);
-        commit_offsets(transport, &self.metrics, &to_commit).await;
+        // Committed at receipt already, and a lower offset committed now
+        // would rewind the watermark.
+        if !self.commits_at_receipt {
+            let to_commit = committable_offsets(committable, &withheld);
+            commit_offsets(transport, &self.metrics, &to_commit).await;
+        }
 
         // Refresh the ClickHouse rows-per-second gauge once per flush cycle.
         if let Some(ref m) = self.metrics {
@@ -1516,8 +1574,15 @@ impl Orchestrator {
                 );
             }
             self.record_rows_lost(dead_letters.len());
+            // A row that can never insert is never answered as a failure: a
+            // retry would fail the same way at every hop.
+            self.drop_dead_letters(&dead_letters, DROPPED_NO_DLQ);
             return;
         };
+        if self.holds_answers {
+            self.place_or_refuse(dlq, dead_letters, expiry).await;
+            return;
+        }
         if self.unsettled.holds_dead_letters() {
             self.strand_dead_letters(dead_letters);
             return;
@@ -1655,6 +1720,135 @@ impl Orchestrator {
                 "Rejected rows carry no payload to DLQ, and no upstream copy -- rows lost"
             );
             self.record_rows_lost(lost);
+        }
+        if self.holds_answers {
+            for row in rows {
+                if let Some(offset) = &row.offset {
+                    self.acks
+                        .settle(seq_of(offset.offset), DeliveryStatus::Dropped);
+                }
+            }
+            if let Some(ref m) = self.metrics {
+                m.record_rows_dropped(DROPPED_NO_PAYLOAD, rows.len() as u64);
+            }
+        }
+    }
+
+    /// Whether a row the loader could not place comes back from its source:
+    /// Kafka re-reads from an offset committed only after delivery.
+    fn rereads(&self, transport: &TransportBackend) -> bool {
+        transport.commits_offsets() && !self.commits_at_receipt
+    }
+
+    /// Settle one row of each record in `offsets` with `status`.
+    fn settle_offsets(&mut self, offsets: &[KafkaOffset], status: DeliveryStatus) {
+        if !self.holds_answers {
+            return;
+        }
+        for offset in offsets {
+            self.acks.settle(seq_of(offset.offset), status);
+        }
+    }
+
+    /// Settle every row of a batch `ClickHouse` took, which is each row not in
+    /// `failed`.
+    fn settle_inserted(&mut self, offsets: &[KafkaOffset], failed: &[FailedRow]) {
+        if !self.holds_answers {
+            return;
+        }
+        let rejected: FxHashSet<usize> = failed.iter().map(|row| row.row_index).collect();
+        for (index, offset) in offsets.iter().enumerate() {
+            if !rejected.contains(&index) {
+                self.acks
+                    .settle(seq_of(offset.offset), DeliveryStatus::Delivered);
+            }
+        }
+    }
+
+    /// Settle dead letters no DLQ can take as dropped, counted under `reason`.
+    fn drop_dead_letters(&mut self, dead_letters: &[DlqEntry], reason: &'static str) {
+        if !self.holds_answers {
+            return;
+        }
+        self.settle_dead_letters_as(dead_letters, DeliveryStatus::Dropped);
+        if let Some(ref m) = self.metrics {
+            m.record_rows_dropped(reason, dead_letters.len() as u64);
+        }
+    }
+
+    /// Settle the row each dead letter came from with `status`.
+    fn settle_dead_letters_as(&mut self, dead_letters: &[DlqEntry], status: DeliveryStatus) {
+        for entry in dead_letters {
+            if let Some(offset) = entry.source.as_ref().and_then(|s| s.offset) {
+                self.acks.settle(seq_of(offset), status);
+            }
+        }
+    }
+
+    /// Hand dead letters to the DLQ once: `Rejected` when it proves them
+    /// written, `Errored` when it does not, so their senders retry.
+    async fn place_or_refuse(
+        &mut self,
+        dlq: &Arc<Dlq>,
+        dead_letters: Vec<DlqEntry>,
+        expiry: tokio::time::Instant,
+    ) {
+        match place_dead_letters(dlq, &dead_letters, expiry).await {
+            Ok(()) => {
+                self.stats.messages_dlq += dead_letters.len() as u64;
+                if let Some(ref m) = self.metrics {
+                    for _ in &dead_letters {
+                        m.record_dlq();
+                    }
+                }
+                self.settle_dead_letters_as(&dead_letters, DeliveryStatus::Rejected);
+            }
+            Err(reason) => {
+                warn!(
+                    rows = dead_letters.len(),
+                    error = %reason,
+                    "DLQ did not take rows only it can hold, answering their senders to retry"
+                );
+                self.settle_dead_letters_as(&dead_letters, DeliveryStatus::Errored);
+            }
+        }
+    }
+
+    /// Retire messages whose schema never arrived: to the DLQ, or, where the
+    /// sender still holds each one, back to the sender to retry.
+    fn retire_pending(&mut self, messages: Vec<(crate::kafka::KafkaMessage, ExpireReason)>) {
+        if messages.is_empty() {
+            return;
+        }
+        if !self.holds_answers {
+            warn!(count = messages.len(), "Pending-schema messages to DLQ");
+            let dead_letters = messages
+                .into_iter()
+                .map(|(msg, reason)| {
+                    expire_pending(&self.memory_guard, &self.metrics, msg, &reason)
+                })
+                .collect();
+            self.queue_dead_letters(dead_letters);
+            return;
+        }
+        warn!(
+            count = messages.len(),
+            "Pending-schema messages still without a schema, answering their senders to retry"
+        );
+        for (msg, _) in messages {
+            if let Some(ref m) = self.metrics {
+                m.record_pending_schema_expired();
+            }
+            self.memory_guard.release(msg.payload.len() as u64);
+            self.acks
+                .settle(seq_of(msg.offset), DeliveryStatus::Errored);
+        }
+    }
+
+    /// Answer every sender whose records have all settled.
+    async fn release_settled(&mut self, transport: &TransportBackend) {
+        for (status, seqs) in self.acks.take_settled() {
+            transport.release(&seqs, status).await;
         }
     }
 
@@ -1982,6 +2176,29 @@ const ABSENT_TABLE_CAPACITY: usize = 1024;
 /// 300s) evicts the pod from the consumer group, which costs far more than the
 /// rows it was waiting on -- a refused row is held and offered again.
 const DLQ_ROUTE_DEADLINE: Duration = Duration::from_secs(30);
+
+/// How long a row whose sender waits on it sits in a buffer before it flushes.
+const EARLY_FLUSH_AGE: Duration = Duration::from_millis(200);
+
+/// `reason` for rows that can never insert and had no working DLQ.
+const DROPPED_NO_DLQ: &str = "no_dlq";
+
+/// `reason` for rejected rows with no payload bytes for the DLQ.
+const DROPPED_NO_PAYLOAD: &str = "no_payload";
+
+/// The record sequence number a gRPC offset carries: the adapter stores each
+/// token's `seq` as the message offset.
+fn seq_of(offset: i64) -> u64 {
+    offset as u64
+}
+
+/// The offsets of `messages`, for a commit at receipt.
+fn received_offsets(messages: &[crate::kafka::KafkaMessage]) -> Vec<KafkaOffset> {
+    messages
+        .iter()
+        .map(|m| KafkaOffset::with_shared_topic(Arc::clone(&m.topic), m.partition, m.offset))
+        .collect()
+}
 
 /// Offsets whose only copy is in memory: rows in a buffer not yet flushed, and
 /// messages waiting on their table schema. A Kafka commit must stop below each.

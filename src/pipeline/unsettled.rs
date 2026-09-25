@@ -6,10 +6,14 @@
 //! Two kinds wait here: batches whose insert failed, which go back to
 //! `ClickHouse`, and dead letters `ClickHouse` will never take, which go back to
 //! the DLQ. Both are retried on scalo's jittered exponential schedule until they
-//! land. A gRPC Push is answered once its record is queued, so there a held row
-//! exists nowhere else and intake pauses while anything is held. A Kafka
-//! consumer has already read past a held row and never reads it again, so its
-//! offset keeps the commit below it until it lands.
+//! land. A Kafka consumer has already read past a held row and never reads it
+//! again, so its offset keeps the commit below it until it lands.
+//!
+//! A gRPC Push with `grpc.acknowledgements.enabled` (the default) is answered
+//! only once its rows land, so a row that fails is released for its sender to
+//! retry and never held here. With acknowledgements off a Push is answered once
+//! its record is queued, so a held row exists nowhere else and intake pauses
+//! while anything is held.
 
 use std::time::Duration;
 

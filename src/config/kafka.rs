@@ -6,6 +6,7 @@
 use std::collections::HashMap;
 
 use scalo::config::sensitive::SensitiveString;
+use scalo::transport::AcknowledgementsConfig;
 use serde::{Deserialize, Serialize};
 
 // ============================================================================
@@ -38,6 +39,12 @@ pub struct KafkaConfig {
 
     /// Raw librdkafka configuration overrides (highest priority).
     pub librdkafka_overrides: HashMap<String, String>,
+
+    /// `enabled: true` (the default) commits an offset only once its row is in
+    /// `ClickHouse` or the DLQ, so a crash re-delivers it. `enabled: false`
+    /// commits each batch as it is received: a crash or a failed insert loses
+    /// what was committed.
+    pub acknowledgements: AcknowledgementsConfig,
 }
 
 impl Default for KafkaConfig {
@@ -68,6 +75,7 @@ impl Default for KafkaConfig {
             tls: None,
             allow_insecure_transport: false,
             librdkafka_overrides: overrides,
+            acknowledgements: AcknowledgementsConfig::default(),
         }
     }
 }
@@ -102,7 +110,24 @@ pub struct GrpcConfig {
     /// Default topic name for messages without a topic in gRPC metadata.
     /// Used as the routing key when the sender doesn't set a topic.
     pub default_topic: String,
+
+    /// `enabled: true` (the default) answers a Push only once its rows are in
+    /// `ClickHouse`, dead-lettered with the DLQ's confirmation, or dropped. A
+    /// failed insert answers `UNAVAILABLE` and the sender retries.
+    /// `enabled: false` answers once the records are queued: a crash loses
+    /// what was answered.
+    pub acknowledgements: AcknowledgementsConfig,
+
+    /// The longest a Push waits for its answer before it is told to retry, in
+    /// milliseconds. A sender's own deadline shortens it to leave a tenth of
+    /// that deadline, at least 1 s, for the answer to travel. Keep it below the
+    /// sender's send timeout and above the flush delay.
+    pub max_hold_ms: u64,
 }
+
+/// Hold budget under the 15 s send deadline a transform gives the loader, the
+/// shortest upstream hop.
+pub const DEFAULT_MAX_HOLD_MS: u64 = 13_500;
 
 impl Default for GrpcConfig {
     fn default() -> Self {
@@ -113,6 +138,8 @@ impl Default for GrpcConfig {
             max_message_size: 16 * 1024 * 1024,
             compression: false,
             default_topic: "main_land".to_string(),
+            acknowledgements: AcknowledgementsConfig::default(),
+            max_hold_ms: DEFAULT_MAX_HOLD_MS,
         }
     }
 }

@@ -18,14 +18,19 @@
 //! The `TransportBackend` enum provides a unified interface over all compiled transports.
 //! The orchestrator uses this to be transport-agnostic.
 
+use std::sync::Arc;
+use std::time::Duration;
+
 use crate::Result;
 use crate::buffer::KafkaOffset;
 use crate::config::{DlqConfig, KafkaConfig};
 use scalo::SelfRegulationGovernor;
+use scalo::memory::MemoryGuard;
 use scalo::transport::filter::FilteredDlqEntry;
 use scalo::transport::{
-    GrpcConfig as TransportGrpcConfig, GrpcTransport, KafkaConfig as TransportKafkaConfig,
-    KafkaToken, KafkaTransport, TransportBase, TransportError, TransportReceiver,
+    AckControl, DeliveryStatus, GrpcConfig as TransportGrpcConfig, GrpcToken, GrpcTransport,
+    KafkaConfig as TransportKafkaConfig, KafkaToken, KafkaTransport, TransportBase, TransportError,
+    TransportReceiver,
 };
 use tracing::{debug, trace};
 
@@ -80,7 +85,8 @@ impl TransportAdapter {
 
         let transport = KafkaTransport::new(&transport_config)
             .await
-            .map_err(|e| crate::Error::Kafka(format!("Transport error: {e}")))?;
+            .map_err(|e| crate::Error::Kafka(format!("Transport error: {e}")))?
+            .with_acknowledgements(config.acknowledgements);
 
         // Attach the self-regulation pause-partitions gate over the runtime's
         // shared pressure (the gate is evaluated automatically inside `recv`).
@@ -305,7 +311,9 @@ impl From<TransportError> for crate::Error {
 /// the `Push` RPC to deliver messages. The adapter converts those into the
 /// common `KafkaMessage` type used by the rest of the pipeline.
 ///
-/// gRPC has no broker-side persistence, so commit is always a no-op.
+/// With `acknowledgements.enabled` a Push is answered only when the loader
+/// [releases](Self::release) every record it carried. gRPC has no broker-side
+/// persistence, so commit is always a no-op.
 pub struct GrpcTransportAdapter {
     transport: GrpcTransport,
     /// Fallback topic when the sender doesn't set one in gRPC metadata.
@@ -316,14 +324,19 @@ impl GrpcTransportAdapter {
     /// Create a new gRPC transport adapter in server (receive) mode.
     ///
     /// Requires `config.listen` to be set. The adapter starts a tonic gRPC
-    /// server that accepts incoming Push RPCs.
+    /// server that accepts incoming Push RPCs, armed before it listens: with
+    /// `acknowledgements.enabled` the first Push that can arrive is already
+    /// held until its records are released.
     ///
     /// When `governor` is `Some`, the listener answers Push with `UNAVAILABLE`
     /// while the governor's shared pressure holds, so memory pressure reaches
     /// the sender as backpressure before the loader admits another record.
+    /// Held Pushes are leased on `memory_guard`, whose limit sizes the
+    /// held-byte ceiling at a quarter of it.
     pub async fn new(
         config: &crate::config::GrpcConfig,
         governor: Option<&SelfRegulationGovernor>,
+        memory_guard: Option<&Arc<MemoryGuard>>,
     ) -> Result<Self> {
         let transport_config = TransportGrpcConfig {
             listen: config.listen.clone(),
@@ -335,12 +348,21 @@ impl GrpcTransportAdapter {
             ..Default::default()
         };
 
-        let transport = GrpcTransport::with_pressure(
-            &transport_config,
-            governor.map(SelfRegulationGovernor::pressure),
-        )
-        .await
-        .map_err(|e| crate::Error::Kafka(format!("gRPC transport error: {e}")))?;
+        // Armed here, never later: a Push answered before arming is lost on a crash.
+        let mut builder = GrpcTransport::builder(&transport_config)
+            .acknowledgements(config.acknowledgements)
+            .armed(true)
+            .max_hold(Duration::from_millis(config.max_hold_ms));
+        if let Some(governor) = governor {
+            builder = builder.pressure(governor.pressure());
+        }
+        if let Some(guard) = memory_guard {
+            builder = builder.memory_guard(Arc::clone(guard));
+        }
+        let transport = builder
+            .start()
+            .await
+            .map_err(|e| crate::Error::Kafka(format!("gRPC transport error: {e}")))?;
 
         Ok(Self {
             transport,
@@ -355,13 +377,23 @@ impl GrpcTransportAdapter {
     /// The sender sets the topic via the gRPC metadata routing key
     /// (`record.key`). If absent, `default_topic` is used. `records` and
     /// `commit_tokens` are 1:1 in the same order; the per-token sequence becomes
-    /// the message offset.
+    /// the message offset, which [`release`](Self::release) takes back.
     pub async fn recv(&self, max: usize) -> Result<ReceivedBatch> {
         let batch = self
             .transport
             .recv(max)
             .await
             .map_err(|e| crate::Error::Kafka(format!("gRPC recv error: {e}")))?;
+
+        // The listener carries no inbound filters, so a token past the last
+        // record is a policy drop and is released as one.
+        let filtered = batch
+            .commit_tokens
+            .get(batch.records.len()..)
+            .unwrap_or_default();
+        if !filtered.is_empty() {
+            self.release_tokens(filtered, DeliveryStatus::Dropped).await;
+        }
 
         let default = self.default_topic.clone();
         let messages = batch
@@ -385,7 +417,35 @@ impl GrpcTransportAdapter {
         })
     }
 
-    /// Commit (no-op — gRPC ACK is the Push RPC response itself).
+    /// Release the records `seqs` with `status`: a Push is answered once every
+    /// record it carried is released, `OK` unless one is `Errored`.
+    pub async fn release(&self, seqs: &[u64], status: DeliveryStatus) {
+        let tokens: Vec<GrpcToken> = seqs.iter().map(|&seq| GrpcToken::new(seq)).collect();
+        self.release_tokens(&tokens, status).await;
+    }
+
+    async fn release_tokens(&self, tokens: &[GrpcToken], status: DeliveryStatus) {
+        if let Err(e) = self.transport.release(tokens, status).await {
+            tracing::warn!(error = %e, records = tokens.len(), "gRPC release failed");
+        }
+    }
+
+    /// Whether a Push waits for its records to be released before it is
+    /// answered: `acknowledgements.enabled` on an armed listener.
+    pub fn holds_answers(&self) -> bool {
+        self.transport
+            .ack_control()
+            .is_some_and(|control| control.enabled() && control.is_armed())
+    }
+
+    /// Records received but not yet released.
+    pub fn held_records(&self) -> u64 {
+        self.transport
+            .ack_control()
+            .map_or(0, |control| control.held().count)
+    }
+
+    /// Commit (no-op: a Push is answered through [`release`](Self::release)).
     // async is deliberate: TransportBackend::commit awaits every adapter arm
     // uniformly, and the Kafka adapter's commit genuinely awaits.
     #[allow(clippy::unused_async_trait_impl)]
@@ -572,13 +632,15 @@ impl TransportBackend {
     /// `governor`, when `Some`, brakes intake under memory pressure
     /// (default-on self-regulation): Kafka pauses its assigned partitions, and
     /// the gRPC listener refuses Push with `UNAVAILABLE`, which the sender
-    /// holds and re-sends.
+    /// holds and re-sends. `memory_guard` leases the Pushes the gRPC listener
+    /// holds.
     pub async fn from_config(
         config: &crate::config::Config,
         governor: Option<&SelfRegulationGovernor>,
+        memory_guard: Option<&Arc<MemoryGuard>>,
     ) -> Result<Self> {
         if config.is_direct() {
-            let adapter = GrpcTransportAdapter::new(&config.grpc, governor).await?;
+            let adapter = GrpcTransportAdapter::new(&config.grpc, governor, memory_guard).await?;
             Ok(Self::Grpc(adapter))
         } else {
             let adapter =
@@ -649,6 +711,45 @@ impl TransportBackend {
     pub const fn commits_offsets(&self) -> bool {
         matches!(self, Self::Kafka(_))
     }
+
+    /// Whether each received record waits for [`release`](Self::release)
+    /// before its sender is answered. Kafka re-delivers from its committed
+    /// offset instead, so it never holds.
+    #[must_use]
+    pub fn holds_answers(&self) -> bool {
+        match self {
+            Self::Kafka(_) => false,
+            Self::Grpc(a) => a.holds_answers(),
+        }
+    }
+
+    /// The source's acknowledgement controls, for the delivery guarantee the
+    /// pipeline reports.
+    #[must_use]
+    pub fn ack_control(&self) -> Option<&dyn AckControl> {
+        match self {
+            Self::Kafka(a) => a.transport.ack_control(),
+            Self::Grpc(a) => a.transport.ack_control(),
+        }
+    }
+
+    /// Records received but not yet released (0 for Kafka).
+    #[must_use]
+    pub fn held_records(&self) -> u64 {
+        match self {
+            Self::Kafka(_) => 0,
+            Self::Grpc(a) => a.held_records(),
+        }
+    }
+
+    /// Release the records `seqs` with `status` (a no-op for Kafka, which
+    /// commits offsets instead).
+    pub async fn release(&self, seqs: &[u64], status: DeliveryStatus) {
+        match self {
+            Self::Kafka(_) => {}
+            Self::Grpc(a) => a.release(seqs, status).await,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -666,7 +767,7 @@ mod backend_tests {
             },
             ..Default::default()
         };
-        TransportBackend::from_config(&config, None)
+        TransportBackend::from_config(&config, None, None)
             .await
             .expect("gRPC backend binds on an ephemeral port")
     }
@@ -698,24 +799,31 @@ mod backend_tests {
             .expect("self-regulation is on by default")
     }
 
-    /// A gRPC backend built with `governor`, and a client dialled to it.
+    /// A gRPC backend built with `governor` and `acknowledgements`, and a
+    /// client dialled to it.
     async fn grpc_backend_and_client(
         governor: Option<&SelfRegulationGovernor>,
+        acknowledgements: bool,
     ) -> (TransportBackend, GrpcTransport) {
-        // The client dials the listener by number, so the port is chosen here.
-        let port = std::net::TcpListener::bind("127.0.0.1:0")
-            .and_then(|l| l.local_addr())
-            .expect("free loopback port")
-            .port();
+        // The client dials the listener by number, so the port is chosen here,
+        // below the kernel's ephemeral range an outgoing connection could take
+        // it from between the pick and the bind.
+        let span = 10_240 - 9_000;
+        let start = std::process::id() % span;
+        let port = (0..span)
+            .map(|i| u16::try_from(9_000 + (start + i) % span).expect("below 10240"))
+            .find(|&port| std::net::TcpListener::bind(("127.0.0.1", port)).is_ok())
+            .expect("a free loopback port below 10240");
         let config = crate::config::Config {
             transport: "grpc".to_string(),
             grpc: crate::config::GrpcConfig {
                 listen: Some(format!("127.0.0.1:{port}")),
+                acknowledgements: scalo::transport::AcknowledgementsConfig::new(acknowledgements),
                 ..Default::default()
             },
             ..Default::default()
         };
-        let backend = TransportBackend::from_config(&config, governor)
+        let backend = TransportBackend::from_config(&config, governor, None)
             .await
             .expect("gRPC backend binds");
         let client = GrpcTransport::new(&TransportGrpcConfig::client(&format!(
@@ -726,51 +834,160 @@ mod backend_tests {
         (backend, client)
     }
 
-    /// Push one record to a gRPC backend built with `governor`.
+    /// Push one record from `client` in the background.
+    fn push(client: GrpcTransport) -> tokio::task::JoinHandle<scalo::transport::SendResult> {
+        use scalo::transport::TransportSender;
+
+        tokio::spawn(async move {
+            let result = client
+                .send("", bytes::Bytes::from_static(br#"{"id":1}"#))
+                .await;
+            client.close().await.expect("close the client");
+            result
+        })
+    }
+
+    /// Receive until a record arrives or `pushed` has already been answered,
+    /// returning the sequence numbers received.
+    async fn receive_one(
+        backend: &TransportBackend,
+        pushed: &tokio::task::JoinHandle<scalo::transport::SendResult>,
+    ) -> Vec<u64> {
+        for _ in 0..50 {
+            let received = backend.recv(100).await.expect("recv");
+            let seqs: Vec<u64> = received.messages.iter().map(|m| m.offset as u64).collect();
+            if !seqs.is_empty() || pushed.is_finished() {
+                return seqs;
+            }
+        }
+        Vec::new()
+    }
+
+    /// Push one record to a gRPC backend built with `governor`, releasing it
+    /// `Delivered` if it arrives, and return the sender's answer.
     async fn push_through_backend(
         governor: Option<&SelfRegulationGovernor>,
     ) -> scalo::transport::SendResult {
-        use scalo::transport::TransportSender;
-
-        let (backend, client) = grpc_backend_and_client(governor).await;
-        let result = client
-            .send("", bytes::Bytes::from_static(br#"{"id":1}"#))
-            .await;
-        client.close().await.expect("close the client");
+        let (backend, client) = grpc_backend_and_client(governor, true).await;
+        let pushed = push(client);
+        let seqs = receive_one(&backend, &pushed).await;
+        backend.release(&seqs, DeliveryStatus::Delivered).await;
+        let result = pushed.await.expect("push task");
         backend.close().await.expect("close the gRPC server");
         result
     }
 
-    /// A record the listener acked before close() is one recv still returns,
-    /// and recv reports the transport closed once it has.
     #[tokio::test]
-    async fn an_acked_record_is_received_after_close() {
-        use scalo::transport::TransportSender;
-
-        let (backend, client) = grpc_backend_and_client(None).await;
-        let sent = client
-            .send("", bytes::Bytes::from_static(br#"{"id":1}"#))
-            .await;
+    async fn a_push_is_answered_only_once_its_record_is_released() {
+        let (backend, client) = grpc_backend_and_client(None, true).await;
         assert!(
-            matches!(sent, scalo::transport::SendResult::Ok),
-            "the listener refused the record: {sent:?}"
+            backend.holds_answers(),
+            "acknowledgements are on by default"
         );
+        let pushed = push(client);
+        let seqs = receive_one(&backend, &pushed).await;
+        assert_eq!(seqs.len(), 1, "the record reached recv");
+
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(
+            !pushed.is_finished(),
+            "the Push was answered before its record was released"
+        );
+        assert_eq!(backend.held_records(), 1);
+
+        backend.release(&seqs, DeliveryStatus::Delivered).await;
+        let result = tokio::time::timeout(Duration::from_secs(5), pushed)
+            .await
+            .expect("answered once released")
+            .expect("push task");
+        assert!(
+            matches!(result, scalo::transport::SendResult::Ok),
+            "a delivered record answered {result:?}"
+        );
+        assert_eq!(backend.held_records(), 0);
+        backend.close().await.expect("close the gRPC server");
+    }
+
+    #[tokio::test]
+    async fn an_errored_release_tells_the_sender_to_retry() {
+        let (backend, client) = grpc_backend_and_client(None, true).await;
+        let pushed = push(client);
+        let seqs = receive_one(&backend, &pushed).await;
+        backend.release(&seqs, DeliveryStatus::Errored).await;
+        let result = pushed.await.expect("push task");
+        assert!(
+            matches!(result, scalo::transport::SendResult::Backpressured),
+            "a record that failed downstream answered {result:?}"
+        );
+        backend.close().await.expect("close the gRPC server");
+    }
+
+    #[tokio::test]
+    async fn a_dropped_or_rejected_release_answers_ok() {
+        for status in [DeliveryStatus::Dropped, DeliveryStatus::Rejected] {
+            let (backend, client) = grpc_backend_and_client(None, true).await;
+            let pushed = push(client);
+            let seqs = receive_one(&backend, &pushed).await;
+            backend.release(&seqs, status).await;
+            let result = pushed.await.expect("push task");
+            assert!(
+                matches!(result, scalo::transport::SendResult::Ok),
+                "a record released {status:?} answered {result:?}, and a retry could only fail the same way"
+            );
+            backend.close().await.expect("close the gRPC server");
+        }
+    }
+
+    #[tokio::test]
+    async fn with_acknowledgements_off_a_push_is_answered_at_enqueue() {
+        let (backend, client) = grpc_backend_and_client(None, false).await;
+        assert!(!backend.holds_answers());
+        let result = push(client).await.expect("push task");
+        assert!(
+            matches!(result, scalo::transport::SendResult::Ok),
+            "the listener refused the record: {result:?}"
+        );
+        let received = backend.recv(100).await.expect("recv");
+        assert_eq!(received.messages.len(), 1, "answered before any recv");
+        backend.close().await.expect("close the gRPC server");
+    }
+
+    /// A record queued before close() is one recv still returns, its sender is
+    /// answered when it is released, and recv reports the transport closed
+    /// once it has.
+    #[tokio::test]
+    async fn a_queued_record_is_received_and_answered_after_close() {
+        let (backend, client) = grpc_backend_and_client(None, true).await;
+        let pushed = push(client);
+        for _ in 0..100 {
+            if backend.held_records() == 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(backend.held_records(), 1, "the Push was never held");
 
         backend.close().await.expect("close the gRPC server");
         let received = backend.recv(100).await;
         let drained = backend.recv(100).await;
-        client.close().await.expect("close the client");
 
-        let received = received.expect("the acked record after close()");
+        let received = received.expect("the queued record after close()");
         assert_eq!(
             received.messages.len(),
             1,
-            "the listener acked 1 record and recv returned {} after close()",
+            "the listener queued 1 record and recv returned {} after close()",
             received.messages.len()
         );
         assert!(
             drained.is_err(),
             "recv after the drain must report the transport closed"
+        );
+        let seqs: Vec<u64> = received.messages.iter().map(|m| m.offset as u64).collect();
+        backend.release(&seqs, DeliveryStatus::Delivered).await;
+        let result = pushed.await.expect("push task");
+        assert!(
+            matches!(result, scalo::transport::SendResult::Ok),
+            "a record released after close() answered {result:?}"
         );
     }
 
@@ -1239,7 +1456,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = TransportBackend::from_config(&config, None).await;
+        let result = TransportBackend::from_config(&config, None, None).await;
         // Either the adapter constructs (listen is lazy) or fails — both are
         // fine. What matters is if it did construct, it is a Grpc variant.
         if let Ok(backend) = result {
@@ -1265,7 +1482,7 @@ mod tests {
 
         // Either succeeds (lazy) or fails — both are acceptable; what matters is
         // that dispatch did not panic and did not go to the gRPC path.
-        let _ = TransportBackend::from_config(&config, None).await;
+        let _ = TransportBackend::from_config(&config, None, None).await;
     }
 
     #[tokio::test]
@@ -1282,7 +1499,7 @@ mod tests {
         };
 
         // Just verify dispatch doesn't panic — construction may fail
-        let _ = TransportBackend::from_config(&config, None).await;
+        let _ = TransportBackend::from_config(&config, None, None).await;
     }
 
     // ========================================================================

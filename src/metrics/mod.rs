@@ -24,6 +24,9 @@ use scalo::metrics::groups::{
 };
 use scalo::metrics::{MetricsManager, ServiceMetrics, TransportKind};
 
+/// Rows answered to their sender as dropped, by `reason`.
+pub const ROWS_DROPPED_TOTAL: &str = "dfe_loader_rows_dropped_total";
+
 /// Application metrics backed by scalo `MetricsManager`.
 ///
 /// Registers metrics at three layers:
@@ -135,6 +138,13 @@ impl Metrics {
         let _ = manager.counter(
             "dfe_loader_routing_field_absent_total",
             "Records on a source topic that named no table and fell back to the default",
+        );
+        // Labelled, so emitted from the macro at the call site.
+        let _ = manager.counter_with_labels(
+            ROWS_DROPPED_TOTAL,
+            "Rows that can never be inserted and had no DLQ to take them, so their sender was answered as a drop",
+            &["reason"],
+            "custom",
         );
 
         Self {
@@ -307,12 +317,14 @@ impl Metrics {
     }
 
     /// Record a message processed for a table.
+    ///
+    /// Buffered, not delivered: `records_delivered_total` is counted by
+    /// [`record_flush`](Self::record_flush) once `ClickHouse` has the rows.
     pub fn record_processed(&self, table: &str) {
         self.messages_processed.increment(1);
         self.app.record_processed(1);
         metrics::counter!("loader_messages_by_table_total", "table" => table.to_string())
             .increment(1);
-        self.dfe.records_delivered(1);
     }
 
     /// Record a message sent to DLQ.
@@ -322,10 +334,11 @@ impl Metrics {
         self.dfe.records_dlq(1);
     }
 
-    /// Record a batch flush.
+    /// Record a batch flush that inserted `rows` into `ClickHouse`.
     pub fn record_flush(&self, rows: usize, latency_secs: f64) {
         self.batches_flushed.increment(1);
         self.rows_inserted.increment(rows as u64);
+        self.dfe.records_delivered(rows as u64);
         self.insert_latency.record(latency_secs);
         self.sink.record_duration("clickhouse", latency_secs);
         self.dfe.transport_sent(TransportKind::Http, rows as u64);
@@ -352,21 +365,6 @@ impl Metrics {
     /// Set the in-flight concurrent insert count (inserter queue/concurrency depth).
     pub fn set_inserter_inflight(&self, inflight: u64) {
         self.ch_inserter_inflight.set(inflight as f64);
-    }
-
-    /// Record a batch flush for a specific table.
-    pub fn record_flush_table(&self, table: &str, rows: usize, latency_secs: f64) {
-        self.batches_flushed.increment(1);
-        self.rows_inserted.increment(rows as u64);
-        self.insert_latency.record(latency_secs);
-        metrics::histogram!(
-            "loader_insert_latency_by_table_seconds",
-            "table" => table.to_string()
-        )
-        .record(latency_secs);
-        self.sink.record_duration("clickhouse", latency_secs);
-        self.dfe.transport_sent(TransportKind::Http, rows as u64);
-        self.dfe.transport_send_duration("clickhouse", latency_secs);
     }
 
     /// Record an insert error.
@@ -401,6 +399,11 @@ impl Metrics {
     /// nothing will deliver them again.
     pub fn record_rows_lost(&self, rows: u64) {
         self.rows_lost.increment(rows);
+    }
+
+    /// Record rows released to their sender as dropped, and `reason` why.
+    pub fn record_rows_dropped(&self, reason: &'static str, rows: u64) {
+        metrics::counter!(ROWS_DROPPED_TOTAL, "reason" => reason).increment(rows);
     }
 
     /// Record a row DLQ'd because ClickHouse rejected it deterministically and
@@ -723,6 +726,7 @@ mod tests {
             "dfe_loader_pending_schema_expired_total",
             "dfe_loader_pending_schema_messages",
             "dfe_loader_rows_lost_total",
+            "dfe_loader_rows_dropped_total",
             "dfe_loader_schema_prewarm_retries_total",
             "dfe_loader_schema_prewarm_failed_tables",
             "dfe_loader_header_pass_skipped_total",
@@ -863,6 +867,33 @@ mod tests {
     }
 
     #[test]
+    fn records_count_as_delivered_at_the_insert_not_at_the_buffer() {
+        let manager = MetricsManager::with_config(scalo::metrics::MetricsConfig::offline(""));
+        let buffered = counted("records_delivered_total", || {
+            let m = Metrics::new(&manager);
+            m.record_processed("dfe.events");
+            m.record_processed("dfe.events");
+        });
+        assert_eq!(buffered, 0, "a buffered row is not delivered yet");
+
+        let inserted = counted("records_delivered_total", || {
+            Metrics::new(&manager).record_flush(5, 0.01);
+        });
+        assert_eq!(inserted, 5, "five rows inserted read as five delivered");
+    }
+
+    #[test]
+    fn dropped_rows_are_counted_under_their_reason() {
+        let manager = MetricsManager::with_config(scalo::metrics::MetricsConfig::offline(""));
+        let dropped = counted(super::ROWS_DROPPED_TOTAL, || {
+            let m = Metrics::new(&manager);
+            m.record_rows_dropped("no_dlq", 3);
+            m.record_rows_dropped("no_payload", 1);
+        });
+        assert_eq!(dropped, 4);
+    }
+
+    #[test]
     fn metrics_record_received_increments() {
         let m = test_metrics();
         // Should not panic — exercises counter + eps_counter
@@ -895,13 +926,6 @@ mod tests {
     fn metrics_record_flush_large_batch() {
         let m = test_metrics();
         m.record_flush(1_000_000, 2.5);
-    }
-
-    #[test]
-    fn metrics_record_flush_table() {
-        let m = test_metrics();
-        m.record_flush_table("dfe.events", 500, 0.042);
-        m.record_flush_table("dfe.events", 0, 0.0); // zero rows
     }
 
     #[test]
