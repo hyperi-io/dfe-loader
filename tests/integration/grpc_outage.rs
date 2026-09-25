@@ -61,6 +61,15 @@ const REJECTED: u64 = 30;
 /// How long the DLQ refuses every write.
 const DLQ_DOWN: Duration = Duration::from_secs(10);
 
+/// `grpc.max_hold_ms` for a test whose DLQ refuses for several holds.
+const SHORT_HOLD_MS: u64 = 4_000;
+
+/// How long the DLQ refuses every write in that test: three holds.
+const DLQ_DOWN_PAST_THE_HOLD: Duration = Duration::from_millis(3 * SHORT_HOLD_MS);
+
+/// Senders pushing rows that insert while that DLQ refuses.
+const GOOD_SENDERS: usize = 4;
+
 /// `SIGXFSZ` on Linux: raised on a write past `RLIMIT_FSIZE`, fatal unless handled.
 pub(super) const SIGXFSZ: i32 = 25;
 
@@ -253,7 +262,27 @@ async fn push_id_arrays(
 
 /// The ids `ClickHouse` holds for `table`, read over its HTTP interface.
 async fn landed_ids(clickhouse: &str, table: &str) -> BTreeSet<u64> {
-    let sql = format!("SELECT DISTINCT id FROM default.{table} FORMAT TabSeparated");
+    query_ids(
+        clickhouse,
+        &format!("SELECT DISTINCT id FROM default.{table} FORMAT TabSeparated"),
+    )
+    .await
+}
+
+/// The ids `ClickHouse` holds more than one row of for `table`.
+async fn duplicated_ids(clickhouse: &str, table: &str) -> BTreeSet<u64> {
+    query_ids(
+        clickhouse,
+        &format!(
+            "SELECT id FROM default.{table} GROUP BY id HAVING count() > 1 FORMAT TabSeparated"
+        ),
+    )
+    .await
+}
+
+/// The ids a one-column `sql` query returns over the HTTP interface, or none
+/// when it fails.
+async fn query_ids(clickhouse: &str, sql: &str) -> BTreeSet<u64> {
     let Ok(response) = reqwest::Client::new()
         .get(format!("http://{clickhouse}/"))
         .query(&[("query", sql)])
@@ -950,6 +979,132 @@ async fn no_rejected_row_is_lost_while_the_dlq_refuses_writes() {
         rejected.len() as u64,
         REJECTED,
         "rejected rows were never accepted once the DLQ took writes again"
+    );
+}
+
+/// A DLQ refusing for longer than a sender's hold keeps only the senders of
+/// the rows it must take waiting: every row that inserts is answered OK within
+/// the hold, first time, and lands once, while the rejected row's sender is
+/// told to retry until the DLQ takes it.
+///
+/// Needs process-per-test (nextest): the file size limit is process-wide.
+#[tokio::test]
+async fn a_dlq_refusing_past_the_hold_holds_only_the_rows_it_must_take() {
+    let infra = TestInfrastructure::new(test_name!(), true, false).await;
+    let clickhouse = clickhouse_address(&infra).await;
+    let direct = query_client(&clickhouse);
+
+    let table = unique_table_name("grpc_dlq_past_hold");
+    create_id_table(
+        &direct,
+        &table,
+        &format!(", CONSTRAINT below_limit CHECK id < {REJECTED_FROM}"),
+    )
+    .await;
+
+    let dlq_dir = tempfile::tempdir().expect("DLQ spool directory");
+    let listen_port = free_port();
+    let mut config = grpc_loader(listen_port, clickhouse.clone(), &table);
+    // JSONEachRow classifies by the server's code, and 469 VIOLATED_CONSTRAINT
+    // is a permanent rejection there.
+    config.clickhouse.insert_format = InsertFormat::JsonEachRow;
+    config.grpc.max_hold_ms = SHORT_HOLD_MS;
+    with_file_dlq(&mut config, dlq_dir.path());
+    let (shutdown, loader, rejected_client) = start_loader(config, listen_port).await;
+    wait_for_loader(&rejected_client, &clickhouse, &table).await;
+    let mut good_clients = Vec::with_capacity(GOOD_SENDERS);
+    for _ in 0..GOOD_SENDERS {
+        good_clients.push(client_for(listen_port).await);
+    }
+
+    let _xfsz = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::from_raw(SIGXFSZ))
+        .expect("handle SIGXFSZ");
+    let unlimited = file_size_soft_limit();
+    set_file_size_soft_limit("0");
+    let outage_end = tokio::time::Instant::now() + DLQ_DOWN_PAST_THE_HOLD;
+
+    // One sender retries a row ClickHouse rejects until the DLQ takes it.
+    let rejecting = tokio::spawn(async move {
+        push_until_accepted(
+            &rejected_client,
+            bytes::Bytes::from(id_payload(REJECTED_FROM)),
+            outage_end + LANDING_BUDGET,
+        )
+        .await
+    });
+    // The others push good rows at once, one Push after another, each row
+    // once, timing each answer. Several at once put a Push close behind every
+    // rejected one.
+    let good_pushing: Vec<_> = good_clients
+        .into_iter()
+        .zip(0_u64..)
+        .map(|(client, sender)| {
+            tokio::spawn(async move {
+                let mut answered_ok = BTreeSet::new();
+                let mut not_ok = Vec::new();
+                let mut slowest = Duration::ZERO;
+                let mut id = 1 + sender;
+                while tokio::time::Instant::now() < outage_end {
+                    let started = tokio::time::Instant::now();
+                    let result = client.send("", bytes::Bytes::from(id_payload(id))).await;
+                    slowest = slowest.max(started.elapsed());
+                    if matches!(result, SendResult::Ok) {
+                        answered_ok.insert(id);
+                    } else {
+                        not_ok.push((id, format!("{result:?}")));
+                    }
+                    id += GOOD_SENDERS as u64;
+                }
+                (answered_ok, not_ok, slowest)
+            })
+        })
+        .collect();
+
+    tokio::time::sleep_until(outage_end).await;
+    set_file_size_soft_limit(&unlimited);
+    let mut good = BTreeSet::new();
+    let mut not_ok = Vec::new();
+    let mut slowest = Duration::ZERO;
+    for task in good_pushing {
+        let (answered_ok, refused, slowest_here) = task.await.expect("good sender task");
+        good.extend(answered_ok);
+        not_ok.extend(refused);
+        slowest = slowest.max(slowest_here);
+    }
+    let (rejected_accepted, told_to_retry) = rejecting.await.expect("rejecting sender task");
+
+    let landed = wait_landed(&clickhouse, &table, &good, LANDING_BUDGET).await;
+    let rejected = BTreeSet::from([REJECTED_FROM]);
+    let dead_lettered = wait_dead_lettered(dlq_dir.path(), &rejected, LANDING_BUDGET).await;
+    let duplicated = duplicated_ids(&clickhouse, &table).await;
+
+    shutdown.cancel();
+    let _ = tokio::time::timeout(Duration::from_secs(30), loader).await;
+    let _ = direct
+        .execute(&format!("DROP TABLE IF EXISTS default.{table}"))
+        .await;
+
+    let hold = Duration::from_millis(SHORT_HOLD_MS);
+    assert!(
+        not_ok.is_empty(),
+        "{} of {} rows that insert were not answered OK while the DLQ refused: {not_ok:?}",
+        not_ok.len(),
+        good.len() + not_ok.len()
+    );
+    assert!(
+        slowest < hold,
+        "a row that inserts waited {slowest:?} for its answer, past the {hold:?} hold"
+    );
+    let lost: Vec<u64> = good.difference(&landed).copied().collect();
+    assert!(lost.is_empty(), "rows answered OK never landed: {lost:?}");
+    assert!(duplicated.is_empty(), "rows landed twice: {duplicated:?}");
+    assert!(
+        told_to_retry > 0,
+        "the rejected row was never answered retryable in a DLQ outage of {DLQ_DOWN_PAST_THE_HOLD:?}"
+    );
+    assert!(
+        rejected_accepted && dead_lettered.contains(&REJECTED_FROM),
+        "the rejected row was not taken by the DLQ once it recovered"
     );
 }
 

@@ -445,6 +445,13 @@ impl GrpcTransportAdapter {
             .map_or(0, |control| control.held().count)
     }
 
+    /// When the listener answers the earliest held Push among the records
+    /// `seqs` itself, as `UNAVAILABLE`, or `None` when none of them is held.
+    pub fn hold_deadline(&self, seqs: &[u64]) -> Option<std::time::Instant> {
+        let tokens: Vec<GrpcToken> = seqs.iter().map(|&seq| GrpcToken::new(seq)).collect();
+        self.transport.hold_deadline(&tokens)
+    }
+
     /// Commit (no-op: a Push is answered through [`release`](Self::release)).
     // async is deliberate: TransportBackend::commit awaits every adapter arm
     // uniformly, and the Kafka adapter's commit genuinely awaits.
@@ -750,6 +757,17 @@ impl TransportBackend {
             Self::Grpc(a) => a.release(seqs, status).await,
         }
     }
+
+    /// When the earliest sender waiting on the records `seqs` is answered
+    /// `UNAVAILABLE` without them, or `None` when nobody waits (always for
+    /// Kafka).
+    #[must_use]
+    pub fn hold_deadline(&self, seqs: &[u64]) -> Option<std::time::Instant> {
+        match self {
+            Self::Kafka(_) => None,
+            Self::Grpc(a) => a.hold_deadline(seqs),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -905,6 +923,33 @@ mod backend_tests {
             "a delivered record answered {result:?}"
         );
         assert_eq!(backend.held_records(), 0);
+        backend.close().await.expect("close the gRPC server");
+    }
+
+    #[tokio::test]
+    async fn a_held_record_names_the_deadline_its_push_is_answered_by() {
+        let (backend, client) = grpc_backend_and_client(None, true).await;
+        let pushed = push(client);
+        let seqs = receive_one(&backend, &pushed).await;
+        assert_eq!(seqs.len(), 1, "the record reached recv");
+
+        let deadline = backend
+            .hold_deadline(&seqs)
+            .expect("a held record has a deadline");
+        let budget = Duration::from_millis(crate::config::kafka::DEFAULT_MAX_HOLD_MS);
+        assert!(
+            deadline <= std::time::Instant::now() + budget,
+            "the deadline lies past the {budget:?} hold"
+        );
+        assert_eq!(backend.hold_deadline(&[seqs[0] + 1_000]), None);
+
+        backend.release(&seqs, DeliveryStatus::Delivered).await;
+        pushed.await.expect("push task");
+        assert_eq!(
+            backend.hold_deadline(&seqs),
+            None,
+            "a released record still names a deadline"
+        );
         backend.close().await.expect("close the gRPC server");
     }
 

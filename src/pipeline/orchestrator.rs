@@ -1508,7 +1508,7 @@ impl Orchestrator {
             }
         }
 
-        self.settle_dead_letters(dlq, dead_letters, dlq_deadline)
+        self.settle_dead_letters(transport, dlq, dead_letters, dlq_deadline)
             .await;
         // A Kafka consumer never re-reads a row it has read past, so every row
         // held for another attempt keeps the commit below it until it lands.
@@ -1551,20 +1551,44 @@ impl Orchestrator {
     /// Hand the DLQ rows only it can take, holding any it does not prove
     /// written.
     ///
-    /// A refused write is retried within the cycle. A row still not written
-    /// after it pauses intake where nothing re-delivers, and keeps the commit
-    /// below it on Kafka, until the DLQ takes it. A hold means the DLQ refused
-    /// the last attempt, so new rows join it for the next scheduled one. A row
-    /// no DLQ backend can ever hold, or any row with no working DLQ at all, is
-    /// dropped and counted: holding it would pin a Kafka commit for good.
+    /// Every sender whose records have all settled -- inserted this cycle, or
+    /// dropped here -- is answered before the write, so a DLQ that refuses
+    /// holds only the dead letters' own senders. A refused write is retried
+    /// until `cycle_deadline`, and on a push source until just before the
+    /// dead letters' senders are answered retryable
+    /// ([`held_retry_expiry`](Self::held_retry_expiry)).
     async fn settle_dead_letters(
         &mut self,
+        transport: &TransportBackend,
         dlq: Option<&Arc<Dlq>>,
         dead_letters: Vec<DlqEntry>,
-        expiry: tokio::time::Instant,
+        cycle_deadline: tokio::time::Instant,
     ) {
-        if dead_letters.is_empty() {
+        let kept = self.screen_dead_letters(dlq, dead_letters);
+        self.release_settled(transport).await;
+        let Some((dlq, dead_letters)) = kept else {
             return;
+        };
+        let expiry = if self.holds_answers {
+            self.held_retry_expiry(transport, &dead_letters, cycle_deadline)
+        } else {
+            cycle_deadline
+        };
+        self.place_or_hold(dlq, dead_letters, expiry).await;
+    }
+
+    /// Drop every dead letter no DLQ can ever hold -- all of them where no DLQ
+    /// works -- and return the working DLQ with the rest, if any.
+    ///
+    /// A dropped row is counted: holding it would pin a Kafka commit for good,
+    /// and a sender retrying it would fail the same way at every hop.
+    fn screen_dead_letters<'d>(
+        &mut self,
+        dlq: Option<&'d Arc<Dlq>>,
+        dead_letters: Vec<DlqEntry>,
+    ) -> Option<(&'d Arc<Dlq>, Vec<DlqEntry>)> {
+        if dead_letters.is_empty() {
+            return None;
         }
         let Some(dlq) = dlq.filter(|d| d.is_enabled()) else {
             static NO_DLQ_TS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -1575,12 +1599,56 @@ impl Orchestrator {
                 );
             }
             self.drop_dead_letters(&dead_letters, DROPPED_NO_DLQ);
-            return;
+            return None;
         };
-        let dead_letters = self.drop_refused(dlq, dead_letters);
-        if dead_letters.is_empty() {
-            return;
-        }
+        let kept = self.drop_refused(dlq, dead_letters);
+        (!kept.is_empty()).then_some((dlq, kept))
+    }
+
+    /// When a DLQ retry that holds the loop gives up on a push source:
+    /// [`HOLD_ANSWER_MARGIN`] before the earliest hold deadline among the dead
+    /// letters' senders, or among Pushes arriving now when none of them waits,
+    /// and never after `cycle_deadline`.
+    ///
+    /// Pushes queued behind the retry have later deadlines, so the margin is
+    /// their time to be received, flushed and answered once it ends. With
+    /// less than the margin left, the retry runs to the deadline itself.
+    fn held_retry_expiry(
+        &self,
+        transport: &TransportBackend,
+        dead_letters: &[DlqEntry],
+        cycle_deadline: tokio::time::Instant,
+    ) -> tokio::time::Instant {
+        let now = tokio::time::Instant::now();
+        let seqs: Vec<u64> = dead_letters
+            .iter()
+            .filter_map(|entry| entry.source.as_ref()?.offset)
+            .map(seq_of)
+            .collect();
+        let answer_by = transport.hold_deadline(&seqs).map_or_else(
+            || now + Duration::from_millis(self.config.grpc.max_hold_ms),
+            tokio::time::Instant::from_std,
+        );
+        let give_up = answer_by
+            .checked_sub(HOLD_ANSWER_MARGIN)
+            .filter(|at| *at > now)
+            .unwrap_or(answer_by);
+        give_up.min(cycle_deadline)
+    }
+
+    /// Write dead letters to the DLQ, retrying a refused write until `expiry`.
+    ///
+    /// Where a sender waits on them they are released on the outcome
+    /// ([`place_held`](Self::place_held)). Otherwise a row still not written
+    /// pauses intake where nothing re-delivers, and keeps the commit below it
+    /// on Kafka, until the DLQ takes it. A hold means the DLQ refused the last
+    /// attempt, so new rows join it for the next scheduled one.
+    async fn place_or_hold(
+        &mut self,
+        dlq: &Arc<Dlq>,
+        dead_letters: Vec<DlqEntry>,
+        expiry: tokio::time::Instant,
+    ) {
         if self.holds_answers {
             self.place_held(dlq, dead_letters, expiry).await;
             return;
@@ -1640,7 +1708,7 @@ impl Orchestrator {
         if batches.is_empty() {
             let dead_letters = self.take_queued_dead_letters();
             let dlq_deadline = tokio::time::Instant::now() + DLQ_ROUTE_DEADLINE;
-            self.settle_dead_letters(dlq, dead_letters, dlq_deadline)
+            self.settle_dead_letters(transport, dlq, dead_letters, dlq_deadline)
                 .await;
             self.unsettled.rearm();
         } else {
@@ -1825,8 +1893,7 @@ impl Orchestrator {
 
     /// Write dead letters a sender waits on, retrying a refused write: they
     /// release `Rejected` once the DLQ proves them written. Only a closed DLQ,
-    /// the cycle deadline or shutdown releases them `Errored`, so their
-    /// senders retry elsewhere.
+    /// `expiry` or shutdown releases them `Errored`, so their senders retry.
     async fn place_held(
         &mut self,
         dlq: &Arc<Dlq>,
@@ -2222,6 +2289,11 @@ const DLQ_ROUTE_DEADLINE: Duration = Duration::from_secs(30);
 /// How long a row whose sender waits on it sits in a buffer before it flushes.
 const EARLY_FLUSH_AGE: Duration = Duration::from_millis(200);
 
+/// Time a DLQ retry holding the loop leaves before a sender's hold deadline:
+/// enough for a Push queued behind it to be received, flushed at
+/// [`EARLY_FLUSH_AGE`] and inserted before its own hold runs out.
+const HOLD_ANSWER_MARGIN: Duration = Duration::from_secs(1);
+
 /// `reason` for rows dropped with no working DLQ, as scalo's pipeline names a
 /// dead letter it drops for want of one.
 const DROPPED_NO_DLQ: &str = "dead_letter";
@@ -2492,7 +2564,7 @@ enum Placement {
     Written,
     /// The DLQ's drain has exited, so no retry can land them.
     Closed,
-    /// The DLQ still refused at the cycle deadline or at shutdown.
+    /// The DLQ still refused when the retry's expiry passed, or at shutdown.
     GaveUp(String),
 }
 
@@ -2561,7 +2633,7 @@ async fn place_dead_letters(
         tokio::select! {
             biased;
             () = shutdown.cancelled() => return Placement::GaveUp(format!("{error}, and the loader is stopping")),
-            () = tokio::time::sleep_until(expiry) => return Placement::GaveUp(format!("{error}, still at the cycle deadline")),
+            () = tokio::time::sleep_until(expiry) => return Placement::GaveUp(format!("{error}, still when the retry expired")),
             () = tokio::time::sleep(wait) => {}
         }
     }
@@ -3025,9 +3097,7 @@ mod tests {
         let payloads: Vec<Arc<[u8]>> = (0..10).map(|_| Arc::from(&b"{}"[..])).collect();
         let dead_letters = rejected_entries(&payloads, &rejected_rows(10, "code 117"));
         let mut orchestrator = Orchestrator::new(Config::default());
-        orchestrator
-            .settle_dead_letters(Some(&dlq), dead_letters, in_30s())
-            .await;
+        settle(&mut orchestrator, Some(&dlq), dead_letters, in_30s()).await;
 
         assert_eq!(
             orchestrator.unsettled.rows(),
@@ -3044,6 +3114,19 @@ mod tests {
             "the commit passed rejected rows the DLQ refused: {to_commit:?}"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Settle `dead_letters` as a flush does, less answering the senders,
+    /// which needs a transport.
+    async fn settle(
+        orchestrator: &mut Orchestrator,
+        dlq: Option<&Arc<Dlq>>,
+        dead_letters: Vec<DlqEntry>,
+        expiry: tokio::time::Instant,
+    ) {
+        if let Some((dlq, kept)) = orchestrator.screen_dead_letters(dlq, dead_letters) {
+            orchestrator.place_or_hold(dlq, kept, expiry).await;
+        }
     }
 
     /// Place `dead_letters` with no shutdown in sight.
@@ -3125,9 +3208,7 @@ mod tests {
         let payloads: Vec<Arc<[u8]>> = vec![Arc::from(&b"{\"n\":1}"[..])];
         let dead_letters = rejected_entries(&payloads, &rejected_rows(1, "code 117"));
         let mut orchestrator = Orchestrator::new(Config::default());
-        orchestrator
-            .settle_dead_letters(Some(&degraded), dead_letters, in_30s())
-            .await;
+        settle(&mut orchestrator, Some(&degraded), dead_letters, in_30s()).await;
 
         assert_eq!(
             orchestrator.stats().messages_dlq,
@@ -3404,9 +3485,13 @@ mod tests {
             let recorder = crate::metrics::counting::CountingRecorder::default();
             let _local = metrics::set_default_local_recorder(&recorder);
             let started = std::time::Instant::now();
-            orchestrator
-                .settle_dead_letters(Some(&dlq), vec![dead_letter_for(41, 8_000)], in_30s())
-                .await;
+            settle(
+                &mut orchestrator,
+                Some(&dlq),
+                vec![dead_letter_for(41, 8_000)],
+                in_30s(),
+            )
+            .await;
 
             assert!(
                 started.elapsed() < Duration::from_secs(2),
@@ -3447,6 +3532,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_held_dlq_retry_gives_up_before_a_push_arriving_now_would_expire() {
+        let listening = Config {
+            transport: "grpc".to_string(),
+            grpc: crate::config::GrpcConfig {
+                listen: Some("127.0.0.1:0".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let transport = TransportBackend::from_config(&listening, None, None)
+            .await
+            .expect("gRPC backend binds on an ephemeral port");
+        // Nobody waits on seq 7, so the bound is a Push admitted now.
+        let dead_letters = vec![dead_letter_for(7, 16)];
+
+        // (max_hold_ms, expected give-up from now): the margin comes off a
+        // hold long enough to spare it, and a shorter hold runs out in full.
+        for (max_hold_ms, give_up_ms) in [(5_000, 4_000), (500, 500)] {
+            let mut config = Config::default();
+            config.grpc.max_hold_ms = max_hold_ms;
+            let orchestrator = Orchestrator::new(config);
+            let before = tokio::time::Instant::now();
+            let expiry = orchestrator.held_retry_expiry(&transport, &dead_letters, in_30s());
+            let after = tokio::time::Instant::now();
+            let give_up = Duration::from_millis(give_up_ms);
+            assert!(
+                expiry >= before + give_up && expiry <= after + give_up,
+                "a {max_hold_ms} ms hold gave up {:?} from now, not {give_up:?}",
+                expiry - before
+            );
+        }
+
+        let orchestrator = Orchestrator::new(Config::default());
+        let cycle_deadline = tokio::time::Instant::now() + Duration::from_millis(100);
+        assert_eq!(
+            orchestrator.held_retry_expiry(&transport, &dead_letters, cycle_deadline),
+            cycle_deadline,
+            "the retry outlived its flush cycle"
+        );
+        transport.close().await.expect("close the gRPC server");
+    }
+
+    #[tokio::test]
     async fn a_dlq_that_refuses_and_recovers_holds_the_rows_then_delivers_them() {
         for holds_answers in [false, true] {
             let dir = dlq_dir(if holds_answers {
@@ -3470,9 +3598,13 @@ mod tests {
 
             let recorder = crate::metrics::counting::CountingRecorder::default();
             let _local = metrics::set_default_local_recorder(&recorder);
-            orchestrator
-                .settle_dead_letters(Some(&dlq), vec![dead_letter_for(7, 16)], in_30s())
-                .await;
+            settle(
+                &mut orchestrator,
+                Some(&dlq),
+                vec![dead_letter_for(7, 16)],
+                in_30s(),
+            )
+            .await;
             restored.await.expect("restore task");
 
             assert!(
@@ -3987,13 +4119,13 @@ mod tests {
     #[tokio::test]
     async fn with_no_dlq_a_dead_letter_is_counted_lost_and_never_held() {
         let mut orchestrator = Orchestrator::new(Config::default());
-        orchestrator
-            .settle_dead_letters(
-                None,
-                vec![DlqEntry::new("loader", "processing", b"{}".to_vec())],
-                in_30s(),
-            )
-            .await;
+        settle(
+            &mut orchestrator,
+            None,
+            vec![DlqEntry::new("loader", "processing", b"{}".to_vec())],
+            in_30s(),
+        )
+        .await;
         assert!(
             orchestrator.unsettled.is_empty(),
             "a row with nowhere to go stalled intake"
@@ -4012,13 +4144,13 @@ mod tests {
             b"{}".to_vec(),
         )]);
 
-        orchestrator
-            .settle_dead_letters(
-                Some(&dlq),
-                vec![DlqEntry::new("loader", "processing", b"{}".to_vec())],
-                in_30s(),
-            )
-            .await;
+        settle(
+            &mut orchestrator,
+            Some(&dlq),
+            vec![DlqEntry::new("loader", "processing", b"{}".to_vec())],
+            in_30s(),
+        )
+        .await;
 
         assert_eq!(
             orchestrator.unsettled.rows(),
