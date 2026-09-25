@@ -25,8 +25,8 @@ use scalo::ScalingPressure;
 use scalo::SelfRegulationGovernor;
 use scalo::dlq::{Dlq, DlqEntry};
 use scalo::memory::{MemoryGuard, MemoryGuardConfig};
-use scalo::transport::DeliveryStatus;
 use scalo::transport::ack::{EffectiveGuarantee, SinkConfirmation};
+use scalo::transport::{DeadLetterReason, DeliveryStatus};
 
 use crate::Result;
 use crate::buffer::{BufferManager, FlushBatch, KafkaOffset};
@@ -1551,11 +1551,12 @@ impl Orchestrator {
     /// Hand the DLQ rows only it can take, holding any it does not prove
     /// written.
     ///
-    /// A held row pauses intake where nothing re-delivers, and keeps the
-    /// commit below it on Kafka, until the DLQ takes it. A hold means the DLQ
-    /// refused the last attempt, so new rows join it for the next scheduled
-    /// one. With no working DLQ a row can never be placed -- a configuration
-    /// fault -- so it is counted as lost.
+    /// A refused write is retried within the cycle. A row still not written
+    /// after it pauses intake where nothing re-delivers, and keeps the commit
+    /// below it on Kafka, until the DLQ takes it. A hold means the DLQ refused
+    /// the last attempt, so new rows join it for the next scheduled one. A row
+    /// no DLQ backend can ever hold, or any row with no working DLQ at all, is
+    /// dropped and counted: holding it would pin a Kafka commit for good.
     async fn settle_dead_letters(
         &mut self,
         dlq: Option<&Arc<Dlq>>,
@@ -1573,30 +1574,31 @@ impl Orchestrator {
                     "No working DLQ for rows only a DLQ can take -- rows lost, every one counted in dfe_loader_rows_lost_total (max 1 per 60s)"
                 );
             }
-            self.record_rows_lost(dead_letters.len());
-            // A row that can never insert is never answered as a failure: a
-            // retry would fail the same way at every hop.
             self.drop_dead_letters(&dead_letters, DROPPED_NO_DLQ);
             return;
         };
+        let dead_letters = self.drop_refused(dlq, dead_letters);
+        if dead_letters.is_empty() {
+            return;
+        }
         if self.holds_answers {
-            self.place_or_refuse(dlq, dead_letters, expiry).await;
+            self.place_held(dlq, dead_letters, expiry).await;
             return;
         }
         if self.unsettled.holds_dead_letters() {
             self.strand_dead_letters(dead_letters);
             return;
         }
-        match place_dead_letters(dlq, &dead_letters, expiry).await {
-            Ok(()) => {
-                self.stats.messages_dlq += dead_letters.len() as u64;
-                if let Some(ref m) = self.metrics {
-                    for _ in &dead_letters {
-                        m.record_dlq();
-                    }
-                }
+        match place_dead_letters(dlq, &dead_letters, expiry, &self.shutdown).await {
+            Placement::Written => self.count_placed(&dead_letters),
+            Placement::Closed => {
+                warn!(
+                    rows = dead_letters.len(),
+                    "The DLQ has shut down, holding rows only it can take -- their offsets stay uncommitted"
+                );
+                self.strand_dead_letters(dead_letters);
             }
-            Err(reason) => {
+            Placement::GaveUp(reason) => {
                 warn!(
                     rows = dead_letters.len(),
                     error = %reason,
@@ -1720,6 +1722,7 @@ impl Orchestrator {
                 "Rejected rows carry no payload to DLQ, and no upstream copy -- rows lost"
             );
             self.record_rows_lost(lost);
+            crate::metrics::count_dead_letters_dropped(DROPPED_NO_PAYLOAD, lost as u64);
         }
         if self.holds_answers {
             for row in rows {
@@ -1727,9 +1730,6 @@ impl Orchestrator {
                     self.acks
                         .settle(seq_of(offset.offset), DeliveryStatus::Dropped);
                 }
-            }
-            if let Some(ref m) = self.metrics {
-                m.record_rows_dropped(DROPPED_NO_PAYLOAD, rows.len() as u64);
             }
         }
     }
@@ -1765,14 +1765,52 @@ impl Orchestrator {
         }
     }
 
-    /// Settle dead letters no DLQ can take as dropped, counted under `reason`.
+    /// Drop dead letters no DLQ can take: counted lost and under `reason`,
+    /// and released `Dropped` to a sender waiting on them, since a retry
+    /// would fail the same way at every hop.
     fn drop_dead_letters(&mut self, dead_letters: &[DlqEntry], reason: &'static str) {
-        if !self.holds_answers {
-            return;
+        self.record_rows_lost(dead_letters.len());
+        crate::metrics::count_dead_letters_dropped(reason, dead_letters.len() as u64);
+        if self.holds_answers {
+            self.settle_dead_letters_as(dead_letters, DeliveryStatus::Dropped);
         }
-        self.settle_dead_letters_as(dead_letters, DeliveryStatus::Dropped);
+    }
+
+    /// Drop every dead letter no backend of `dlq` can ever hold, and return
+    /// the rest.
+    fn drop_refused(&mut self, dlq: &Dlq, dead_letters: Vec<DlqEntry>) -> Vec<DlqEntry> {
+        let mut kept = Vec::with_capacity(dead_letters.len());
+        let mut refused: Vec<(DlqEntry, DeadLetterReason)> = Vec::new();
+        for entry in dead_letters {
+            match dlq.refusal(&entry) {
+                Some(reason) => refused.push((entry, reason)),
+                None => kept.push(entry),
+            }
+        }
+        if refused.is_empty() {
+            return kept;
+        }
+        static REFUSED_TS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        if scalo::logger::log_debounced(&REFUSED_TS, 60_000) {
+            error!(
+                rows = refused.len(),
+                reason = %refused[0].1,
+                "No DLQ backend can hold these rows -- dropped, counted in pipeline_dead_letters_dropped_total and dfe_loader_rows_lost_total (max 1 per 60s)"
+            );
+        }
+        for (entry, reason) in refused {
+            self.drop_dead_letters(std::slice::from_ref(&entry), reason.as_str());
+        }
+        kept
+    }
+
+    /// Count dead letters the DLQ proved written.
+    fn count_placed(&mut self, dead_letters: &[DlqEntry]) {
+        self.stats.messages_dlq += dead_letters.len() as u64;
         if let Some(ref m) = self.metrics {
-            m.record_rows_dropped(reason, dead_letters.len() as u64);
+            for _ in dead_letters {
+                m.record_dlq();
+            }
         }
     }
 
@@ -1785,25 +1823,29 @@ impl Orchestrator {
         }
     }
 
-    /// Hand dead letters to the DLQ once: `Rejected` when it proves them
-    /// written, `Errored` when it does not, so their senders retry.
-    async fn place_or_refuse(
+    /// Write dead letters a sender waits on, retrying a refused write: they
+    /// release `Rejected` once the DLQ proves them written. Only a closed DLQ,
+    /// the cycle deadline or shutdown releases them `Errored`, so their
+    /// senders retry elsewhere.
+    async fn place_held(
         &mut self,
         dlq: &Arc<Dlq>,
         dead_letters: Vec<DlqEntry>,
         expiry: tokio::time::Instant,
     ) {
-        match place_dead_letters(dlq, &dead_letters, expiry).await {
-            Ok(()) => {
-                self.stats.messages_dlq += dead_letters.len() as u64;
-                if let Some(ref m) = self.metrics {
-                    for _ in &dead_letters {
-                        m.record_dlq();
-                    }
-                }
+        match place_dead_letters(dlq, &dead_letters, expiry, &self.shutdown).await {
+            Placement::Written => {
+                self.count_placed(&dead_letters);
                 self.settle_dead_letters_as(&dead_letters, DeliveryStatus::Rejected);
             }
-            Err(reason) => {
+            Placement::Closed => {
+                warn!(
+                    rows = dead_letters.len(),
+                    "The DLQ has shut down, answering the senders of rows only it can take to retry"
+                );
+                self.settle_dead_letters_as(&dead_letters, DeliveryStatus::Errored);
+            }
+            Placement::GaveUp(reason) => {
                 warn!(
                     rows = dead_letters.len(),
                     error = %reason,
@@ -2169,7 +2211,7 @@ const ABSENT_TABLE_TTL: Duration = Duration::from_secs(60);
 const ABSENT_TABLE_CAPACITY: usize = 1024;
 
 /// Total budget for handing a whole flush CYCLE's dead letters to the DLQ,
-/// including its confirmation that they were written.
+/// retries and its confirmation that they were written included.
 ///
 /// Backpressure is the point, but the `select!` loop is blocked meanwhile.
 /// scalo documents that backing off `recv` past `max.poll.interval.ms` (default
@@ -2180,8 +2222,9 @@ const DLQ_ROUTE_DEADLINE: Duration = Duration::from_secs(30);
 /// How long a row whose sender waits on it sits in a buffer before it flushes.
 const EARLY_FLUSH_AGE: Duration = Duration::from_millis(200);
 
-/// `reason` for rows that can never insert and had no working DLQ.
-const DROPPED_NO_DLQ: &str = "no_dlq";
+/// `reason` for rows dropped with no working DLQ, as scalo's pipeline names a
+/// dead letter it drops for want of one.
+const DROPPED_NO_DLQ: &str = "dead_letter";
 
 /// `reason` for rejected rows with no payload bytes for the DLQ.
 const DROPPED_NO_PAYLOAD: &str = "no_payload";
@@ -2442,22 +2485,91 @@ fn queue_rejected<'a>(
     unplaceable
 }
 
-/// Write every dead letter to the DLQ as one batch and prove it written.
+/// How handing a set of dead letters to the DLQ ended.
+#[derive(Debug, PartialEq, Eq)]
+enum Placement {
+    /// A backend holds every one.
+    Written,
+    /// The DLQ's drain has exited, so no retry can land them.
+    Closed,
+    /// The DLQ still refused at the cycle deadline or at shutdown.
+    GaveUp(String),
+}
+
+/// The waits between DLQ write attempts: 100 ms doubling to 1 s, before
+/// jitter.
+fn dlq_retry_schedule() -> <backon::ExponentialBuilder as backon::BackoffBuilder>::Backoff {
+    use backon::BackoffBuilder;
+
+    scalo::sink_stack::SinkStackConfig {
+        min_backoff_ms: 100,
+        max_backoff_ms: DLQ_RETRY_MAX_MS,
+        ..scalo::sink_stack::SinkStackConfig::default()
+    }
+    .backoff()
+    .without_max_times()
+    .build()
+}
+
+/// Longest wait between DLQ write attempts, before jitter.
+const DLQ_RETRY_MAX_MS: u64 = 1_000;
+
+/// Write every dead letter to the DLQ as one batch and prove it written,
+/// retrying a refused write with backoff until it lands, the DLQ closes,
+/// `expiry` passes, or `shutdown` fires.
 ///
-/// `Dlq::write_confirmed` answers for this batch alone, so another writer's
-/// refusal is never taken for this one. A refused set goes back whole, so a
-/// DLQ that wrote part of it holds duplicates after the retry, never a gap.
+/// The caller leaves out every entry `Dlq::refusal` names, which would fail
+/// every retry. `Dlq::write_confirmed` answers for this batch alone, so
+/// another writer's refusal is never taken for this one. A refused set goes
+/// back whole, so a DLQ that wrote part of it holds duplicates after the
+/// retry, never a gap.
 async fn place_dead_letters(
     dlq: &Dlq,
     dead_letters: &[DlqEntry],
     expiry: tokio::time::Instant,
-) -> std::result::Result<(), String> {
-    match tokio::time::timeout_at(expiry, dlq.write_confirmed(dead_letters.to_vec())).await {
-        Ok(Ok(())) => Ok(()),
-        Ok(Err(e)) => Err(format!("DLQ write failed: {e}")),
-        Err(_elapsed) => Err("DLQ write did not complete within the deadline".to_string()),
+    shutdown: &CancellationToken,
+) -> Placement {
+    let mut schedule = dlq_retry_schedule();
+    let mut failures = 0_u32;
+    loop {
+        let error =
+            match tokio::time::timeout_at(expiry, dlq.write_confirmed(dead_letters.to_vec())).await
+            {
+                Ok(Ok(())) => {
+                    if failures > 0 {
+                        info!(failures, "DLQ took the dead letters it had refused");
+                    }
+                    return Placement::Written;
+                }
+                Ok(Err(scalo::dlq::DlqError::Closed)) => return Placement::Closed,
+                Ok(Err(e)) => e.to_string(),
+                Err(_elapsed) => {
+                    return Placement::GaveUp(
+                        "DLQ write did not complete within the deadline".to_string(),
+                    );
+                }
+            };
+        failures = failures.saturating_add(1);
+        crate::metrics::count_retry(DLQ_STAGE);
+        if failures == 1 {
+            warn!(rows = dead_letters.len(), error = %error, "DLQ refused dead letters, retrying with backoff");
+        }
+        // The schedule is endless (`without_max_times`), so the fallback never runs.
+        let wait = schedule
+            .next()
+            .unwrap_or(Duration::from_millis(DLQ_RETRY_MAX_MS));
+        tokio::select! {
+            biased;
+            () = shutdown.cancelled() => return Placement::GaveUp(format!("{error}, and the loader is stopping")),
+            () = tokio::time::sleep_until(expiry) => return Placement::GaveUp(format!("{error}, still at the cycle deadline")),
+            () = tokio::time::sleep(wait) => {}
+        }
     }
 }
+
+/// The `stage` label a DLQ write retry is counted under, as scalo's pipeline
+/// names it.
+const DLQ_STAGE: &str = "dlq";
 
 /// How often a paused intake still runs pending-schema upkeep, so a buffer
 /// waiting on a schema drains once it resolves.
@@ -2884,9 +2996,11 @@ mod tests {
         let dead_letters =
             rejected_entries(&payloads, &rejected_rows(rows, "server error code 117"));
 
-        place_dead_letters(&dlq, &dead_letters, in_30s())
-            .await
-            .expect("a working DLQ takes every rejected row");
+        assert_eq!(
+            place(&dlq, &dead_letters, in_30s()).await,
+            Placement::Written,
+            "a working DLQ takes every rejected row"
+        );
 
         let spooled = spooled_lines(&dir);
         assert_eq!(
@@ -2932,19 +3046,45 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Place `dead_letters` with no shutdown in sight.
+    async fn place(
+        dlq: &Dlq,
+        dead_letters: &[DlqEntry],
+        expiry: tokio::time::Instant,
+    ) -> Placement {
+        place_dead_letters(dlq, dead_letters, expiry, &CancellationToken::new()).await
+    }
+
     #[tokio::test]
-    async fn a_wedged_dlq_gives_up_at_the_cycle_deadline() {
+    async fn a_dlq_that_keeps_refusing_gives_up_at_the_cycle_deadline() {
         // The budget is per flush CYCLE, so the caller hands in an absolute
-        // instant. One already past means no row may be taken as placed.
+        // instant: the write is retried until it, and no row is taken as placed.
         let dir = dlq_dir("deadline");
         let dlq = file_dlq(&dir);
-        dlq.shutdown().await.expect("stop the drain");
-
+        let service = break_the_writer(&dir);
         let payloads: Vec<Arc<[u8]>> = vec![Arc::from(&b"{}"[..])];
         let dead_letters = rejected_entries(&payloads, &rejected_rows(1, "code 117"));
 
-        let placed = place_dead_letters(&dlq, &dead_letters, tokio::time::Instant::now()).await;
-        assert!(placed.is_err(), "a DLQ past its deadline placed the row");
+        let recorder = crate::metrics::counting::CountingRecorder::default();
+        let _local = metrics::set_default_local_recorder(&recorder);
+        let started = std::time::Instant::now();
+        let placed = place(
+            &dlq,
+            &dead_letters,
+            tokio::time::Instant::now() + Duration::from_millis(800),
+        )
+        .await;
+
+        assert!(
+            matches!(placed, Placement::GaveUp(_)),
+            "a DLQ refusing past the deadline placed the row: {placed:?}"
+        );
+        assert!(started.elapsed() < Duration::from_secs(5), "gave up late");
+        assert!(
+            recorder.labelled(crate::metrics::RETRIES_TOTAL, "stage", "dlq") >= 1,
+            "a refused write was never retried"
+        );
+        let _ = std::fs::remove_file(&service);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -3027,9 +3167,11 @@ mod tests {
             (source.topic.as_deref(), source.partition, source.offset),
             (Some("dfe-events"), Some(3), Some(77))
         );
-        place_dead_letters(&dlq, &dead_letters, in_30s())
-            .await
-            .expect("a working DLQ takes the row");
+        assert_eq!(
+            place(&dlq, &dead_letters, in_30s()).await,
+            Placement::Written,
+            "a working DLQ takes the row"
+        );
 
         let spooled = spooled_lines(&dir);
         assert_eq!(spooled.len(), 1, "only the isolated row is DLQ'd");
@@ -3054,9 +3196,11 @@ mod tests {
             row_json: Some(br#"{"_raw":"{\"user\":\"kaz\"}"}"#.to_vec()),
         }];
 
-        place_dead_letters(&dlq, &rejected_entries(&payloads, &failed), in_30s())
-            .await
-            .expect("a working DLQ takes the row");
+        assert_eq!(
+            place(&dlq, &rejected_entries(&payloads, &failed), in_30s()).await,
+            Placement::Written,
+            "a working DLQ takes the row"
+        );
 
         let spooled = spooled_lines(&dir);
         assert_eq!(spooled.len(), 1);
@@ -3112,26 +3256,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dead_letters_a_broken_writer_loses_are_not_placed() {
-        let dir = dlq_dir("brokenwriter");
-        let dlq = file_dlq(&dir);
-        let service = break_the_writer(&dir);
-
-        let dead_letters = vec![DlqEntry::new(
-            "loader",
-            "clickhouse_permanent_reject",
-            b"{}".to_vec(),
-        )];
-        let placed = place_dead_letters(&dlq, &dead_letters, in_30s()).await;
-        assert!(
-            placed.is_err(),
-            "rows the writer could not write were taken as placed"
-        );
-        let _ = std::fs::remove_file(&service);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[tokio::test]
     async fn an_earlier_loss_is_not_charged_to_a_later_write() {
         // The drain loses a batch on its own tick while the writer is broken.
         // Once it is fixed, a new set of dead letters is written and confirmed
@@ -3158,9 +3282,11 @@ mod tests {
             "clickhouse_permanent_reject",
             b"{\"kept\":1}".to_vec(),
         )];
-        place_dead_letters(&dlq, &dead_letters, in_30s())
-            .await
-            .expect("a working DLQ takes rows written after an earlier loss");
+        assert_eq!(
+            place(&dlq, &dead_letters, in_30s()).await,
+            Placement::Written,
+            "a working DLQ takes rows written after an earlier loss"
+        );
         assert!(
             spooled_lines(&dir)
                 .iter()
@@ -3184,9 +3310,10 @@ mod tests {
             })
             .collect();
 
-        place_dead_letters(&dlq, &dead_letters, in_30s())
-            .await
-            .expect("a working DLQ takes them");
+        assert_eq!(
+            place(&dlq, &dead_letters, in_30s()).await,
+            Placement::Written
+        );
         assert_eq!(spooled_lines(&dir).len(), 3);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -3202,12 +3329,183 @@ mod tests {
             b"{}".to_vec(),
         )];
 
-        let placed = place_dead_letters(&dlq, &dead_letters, in_30s()).await;
-        assert!(
-            placed.is_err(),
+        let started = std::time::Instant::now();
+        assert_eq!(
+            place(&dlq, &dead_letters, in_30s()).await,
+            Placement::Closed,
             "a stopped DLQ was taken as a home for the rows"
         );
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "a closed DLQ was retried"
+        );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A DLQ whose only backend is Kafka with a `message.max.bytes` of
+    /// `ceiling`, dialling a port nothing listens on.
+    fn kafka_only_dlq(ceiling: i32) -> Arc<Dlq> {
+        let mut kafka = scalo::transport::KafkaConfig {
+            brokers: vec!["127.0.0.1:1".to_string()],
+            group: String::new(),
+            ..scalo::transport::KafkaConfig::default()
+        };
+        kafka.sizing.producer.message_max_bytes = Some(ceiling);
+        kafka.sizing.producer.idempotence = Some(false);
+        for (key, value) in [
+            ("statistics.interval.ms", "0"),
+            ("reconnect.backoff.max.ms", "100"),
+            ("log_level", "0"),
+        ] {
+            kafka
+                .sizing
+                .producer_librdkafka
+                .insert(key.to_string(), value.to_string());
+        }
+        let config = scalo::dlq::DlqConfig {
+            enabled: true,
+            mode: scalo::dlq::DlqMode::KafkaOnly,
+            file: scalo::dlq::FileDlqConfig {
+                enabled: false,
+                ..scalo::dlq::FileDlqConfig::default()
+            },
+            kafka: scalo::dlq::KafkaDlqConfig {
+                enabled: true,
+                send_timeout_ms: 300,
+                ..scalo::dlq::KafkaDlqConfig::default()
+            },
+            ..scalo::dlq::DlqConfig::default()
+        };
+        Arc::new(
+            Dlq::spawn(&config, "loader", Some(&kafka), CancellationToken::new())
+                .expect("spawn a Kafka-only DLQ"),
+        )
+    }
+
+    /// A dead letter for the gRPC record `seq`, with `bytes` of payload.
+    fn dead_letter_for(seq: i64, bytes: usize) -> DlqEntry {
+        DlqEntry::new("loader", "clickhouse_permanent_reject", vec![b'x'; bytes])
+            .with_source(scalo::dlq::DlqSource::kafka("main_land", 0, seq))
+    }
+
+    #[tokio::test]
+    async fn a_dead_letter_over_a_kafka_only_dlqs_ceiling_is_dropped_counted_and_not_retried() {
+        // 8 000 bytes fits a 10 000-byte ceiling raw, and not once base64
+        // grows it by a third: no retry can ever land it.
+        let dlq = kafka_only_dlq(10_000);
+        assert!(dlq.is_enabled(), "the Kafka backend built");
+        assert!(dlq.refusal(&dead_letter_for(41, 8_000)).is_some());
+
+        for holds_answers in [false, true] {
+            let mut orchestrator = Orchestrator::new(Config::default());
+            orchestrator.holds_answers = holds_answers;
+            orchestrator.acks.admit(41);
+
+            let recorder = crate::metrics::counting::CountingRecorder::default();
+            let _local = metrics::set_default_local_recorder(&recorder);
+            let started = std::time::Instant::now();
+            orchestrator
+                .settle_dead_letters(Some(&dlq), vec![dead_letter_for(41, 8_000)], in_30s())
+                .await;
+
+            assert!(
+                started.elapsed() < Duration::from_secs(2),
+                "the refused row held the cycle for {:?}",
+                started.elapsed()
+            );
+            assert_eq!(
+                recorder.labelled(
+                    crate::metrics::DEAD_LETTERS_DROPPED_TOTAL,
+                    "reason",
+                    "too_large"
+                ),
+                1,
+                "the dropped row was not counted (holds_answers {holds_answers})"
+            );
+            assert_eq!(
+                recorder.total(crate::metrics::RETRIES_TOTAL),
+                0,
+                "a row no retry can land was retried"
+            );
+            assert!(
+                orchestrator.unsettled.is_empty() && orchestrator.unsettled.offsets().is_empty(),
+                "the refused row was held, which pins a Kafka commit for good"
+            );
+            assert_eq!(orchestrator.stats().messages_dlq, 0);
+            let released = orchestrator.acks.take_settled();
+            if holds_answers {
+                assert_eq!(
+                    released,
+                    vec![(DeliveryStatus::Dropped, vec![41])],
+                    "the sender was not answered as a drop"
+                );
+            } else {
+                assert!(released.is_empty(), "nothing was admitted to release");
+            }
+        }
+        dlq.shutdown().await.expect("stop the DLQ");
+    }
+
+    #[tokio::test]
+    async fn a_dlq_that_refuses_and_recovers_holds_the_rows_then_delivers_them() {
+        for holds_answers in [false, true] {
+            let dir = dlq_dir(if holds_answers {
+                "recoverheld"
+            } else {
+                "recoverpull"
+            });
+            let dlq = file_dlq(&dir);
+            let service = break_the_writer(&dir);
+            let mut orchestrator = Orchestrator::new(Config::default());
+            orchestrator.holds_answers = holds_answers;
+            orchestrator.acks.admit(7);
+
+            // The writer comes back while the write is being retried.
+            let restore = service.clone();
+            let restored = tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(700)).await;
+                std::fs::remove_file(&restore).expect("remove the planted file");
+                std::fs::create_dir_all(&restore).expect("restore the DLQ directory");
+            });
+
+            let recorder = crate::metrics::counting::CountingRecorder::default();
+            let _local = metrics::set_default_local_recorder(&recorder);
+            orchestrator
+                .settle_dead_letters(Some(&dlq), vec![dead_letter_for(7, 16)], in_30s())
+                .await;
+            restored.await.expect("restore task");
+
+            assert!(
+                recorder.labelled(crate::metrics::RETRIES_TOTAL, "stage", "dlq") >= 1,
+                "the refused write was not retried (holds_answers {holds_answers})"
+            );
+            assert_eq!(
+                orchestrator.stats().messages_dlq,
+                1,
+                "the row was not written once the DLQ recovered"
+            );
+            assert!(
+                orchestrator.unsettled.is_empty(),
+                "a row the DLQ took was left held"
+            );
+            assert!(
+                spooled_lines(&dir)
+                    .iter()
+                    .any(|l| l.contains("clickhouse_permanent_reject")),
+                "the row is not on disk"
+            );
+            let released = orchestrator.acks.take_settled();
+            if holds_answers {
+                assert_eq!(
+                    released,
+                    vec![(DeliveryStatus::Rejected, vec![7])],
+                    "the sender was answered before the DLQ took the row, or not at all"
+                );
+            } else {
+                assert!(released.is_empty());
+            }
+            let _ = std::fs::remove_dir_all(&dir);
+        }
     }
 
     #[test]

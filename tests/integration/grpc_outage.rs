@@ -507,7 +507,8 @@ pub(super) fn set_file_size_soft_limit(soft: &str) {
 
 /// Push `ids` in the background, retrying each until the listener accepts it or
 /// `until` passes, while the DLQ refuses every write for [`DLQ_DOWN`]. Returns
-/// the ids accepted.
+/// the ids accepted, having checked none was answered OK before the DLQ took
+/// writes again.
 async fn push_while_the_dlq_refuses(
     client: GrpcTransport,
     ids: std::ops::Range<u64>,
@@ -520,14 +521,40 @@ async fn push_while_the_dlq_refuses(
     let unlimited = file_size_soft_limit();
     set_file_size_soft_limit("0");
 
+    let recovered = Arc::new(AtomicBool::new(false));
     let until = tokio::time::Instant::now() + DLQ_DOWN + LANDING_BUDGET;
-    let pushing = tokio::spawn(async move { push_ids(&client, ids, until, payload).await });
+    let pushing = {
+        let recovered = Arc::clone(&recovered);
+        tokio::spawn(async move {
+            let mut accepted = BTreeSet::new();
+            let mut early = Vec::new();
+            for id in ids {
+                if tokio::time::Instant::now() >= until {
+                    break;
+                }
+                let body = bytes::Bytes::from(payload(id));
+                let (ok, _) = push_until_accepted(&client, body, until).await;
+                if !ok {
+                    continue;
+                }
+                if !recovered.load(Ordering::SeqCst) {
+                    early.push(id);
+                }
+                accepted.insert(id);
+            }
+            (accepted, early)
+        })
+    };
     tokio::time::sleep(DLQ_DOWN).await;
+    // Marked before the limit lifts, so no answer to a write that could
+    // succeed is read as early.
+    recovered.store(true, Ordering::SeqCst);
     set_file_size_soft_limit(&unlimited);
-    let (accepted, refused) = pushing.await.expect("sender task");
+    let (accepted, early) = pushing.await.expect("sender task");
     assert!(
-        refused > 0,
-        "no sender was told to retry while the DLQ refused every write"
+        early.is_empty(),
+        "{} records were answered OK while the DLQ refused every write: {early:?}",
+        early.len()
     );
     accepted
 }
@@ -768,7 +795,11 @@ async fn a_row_that_can_never_insert_with_no_dlq_is_answered_as_a_drop() {
     )
     .await
     .expect("the Push was answered");
-    let dropped = counter_value(&manager, "rows_dropped_total", r#"reason="no_dlq""#);
+    let dropped = counter_value(
+        &manager,
+        "dead_letters_dropped_total",
+        r#"reason="dead_letter""#,
+    );
     let landed = landed_ids(&clickhouse, &table).await;
 
     shutdown.cancel();
@@ -784,7 +815,7 @@ async fn a_row_that_can_never_insert_with_no_dlq_is_answered_as_a_drop() {
     assert!(!landed.contains(&REJECTED_FROM));
     assert!(
         (dropped - 1.0).abs() < f64::EPSILON,
-        "the dropped row read as {dropped} in rows_dropped_total{{reason=\"no_dlq\"}}"
+        "the dropped row read as {dropped} in pipeline_dead_letters_dropped_total{{reason=\"dead_letter\"}}"
     );
 }
 
@@ -862,7 +893,7 @@ async fn no_acked_record_is_lost_when_shutdown_races_a_sender() {
 }
 
 /// A rejected row is answered only once the DLQ proves it written: while the
-/// DLQ refuses, its sender is told to retry.
+/// DLQ refuses, the loader holds the answer and retries the write.
 ///
 /// Needs process-per-test (nextest): the file size limit is process-wide.
 #[tokio::test]
