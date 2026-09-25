@@ -450,6 +450,7 @@ mod tests {
     use crate::column_meta::{ColumnDirectivesConfig, ColumnMetaCache};
     use crate::config::{CaptureMode, ComputedColumnsConfig, Config};
     use crate::kafka::KafkaMessage;
+    use crate::metrics::counting::counted;
     use crate::payload::{FormatDetector, FormatMode};
     use crate::pipeline::capture::CaptureOverrides;
     use crate::pipeline::enrichment::EnrichmentPipeline;
@@ -574,87 +575,6 @@ mod tests {
                 timestamp_ms: Some(1700000000000),
             }
         }
-    }
-
-    /// Counts one named counter, so a test asserts the value the processor
-    /// emitted rather than that a recorder was installed.
-    struct CountingRecorder {
-        name: &'static str,
-        hits: Arc<std::sync::atomic::AtomicU64>,
-    }
-
-    struct CountingHandle(Arc<std::sync::atomic::AtomicU64>);
-
-    impl metrics::CounterFn for CountingHandle {
-        fn increment(&self, value: u64) {
-            self.0
-                .fetch_add(value, std::sync::atomic::Ordering::Relaxed);
-        }
-
-        fn absolute(&self, value: u64) {
-            self.0.store(value, std::sync::atomic::Ordering::Relaxed);
-        }
-    }
-
-    impl metrics::Recorder for CountingRecorder {
-        fn describe_counter(
-            &self,
-            _: metrics::KeyName,
-            _: Option<metrics::Unit>,
-            _: metrics::SharedString,
-        ) {
-        }
-
-        fn describe_gauge(
-            &self,
-            _: metrics::KeyName,
-            _: Option<metrics::Unit>,
-            _: metrics::SharedString,
-        ) {
-        }
-
-        fn describe_histogram(
-            &self,
-            _: metrics::KeyName,
-            _: Option<metrics::Unit>,
-            _: metrics::SharedString,
-        ) {
-        }
-
-        fn register_counter(
-            &self,
-            key: &metrics::Key,
-            _: &metrics::Metadata<'_>,
-        ) -> metrics::Counter {
-            if key.name() == self.name {
-                metrics::Counter::from_arc(Arc::new(CountingHandle(Arc::clone(&self.hits))))
-            } else {
-                metrics::Counter::noop()
-            }
-        }
-
-        fn register_gauge(&self, _: &metrics::Key, _: &metrics::Metadata<'_>) -> metrics::Gauge {
-            metrics::Gauge::noop()
-        }
-
-        fn register_histogram(
-            &self,
-            _: &metrics::Key,
-            _: &metrics::Metadata<'_>,
-        ) -> metrics::Histogram {
-            metrics::Histogram::noop()
-        }
-    }
-
-    /// Run `f` with a thread-local recorder counting `name`.
-    fn counted(name: &'static str, f: impl FnOnce()) -> u64 {
-        let hits = Arc::new(std::sync::atomic::AtomicU64::new(0));
-        let recorder = CountingRecorder {
-            name,
-            hits: Arc::clone(&hits),
-        };
-        metrics::with_local_recorder(&recorder, f);
-        hits.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     // ========================================================================

@@ -297,9 +297,11 @@ impl Metrics {
     }
 
     /// Record a message received.
+    ///
+    /// `records_received_total` is counted through `ServiceMetrics` alone: the
+    /// app group's handle names the same series.
     pub fn record_received(&self) {
         self.messages_received.increment(1);
-        self.app.record_received(1);
         self.dfe.records_received(1);
         self.eps_counter.fetch_add(1, Ordering::Relaxed);
     }
@@ -577,6 +579,93 @@ impl ServerState {
     }
 }
 
+/// Counts one named counter across every label set, as a `sum()` over the name
+/// reads it, so a test asserts the value emitted rather than that a recorder
+/// was installed.
+#[cfg(test)]
+pub(crate) mod counting {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    struct CountingRecorder {
+        name: &'static str,
+        hits: Arc<AtomicU64>,
+    }
+
+    struct CountingHandle(Arc<AtomicU64>);
+
+    impl metrics::CounterFn for CountingHandle {
+        fn increment(&self, value: u64) {
+            self.0.fetch_add(value, Ordering::Relaxed);
+        }
+
+        fn absolute(&self, value: u64) {
+            self.0.store(value, Ordering::Relaxed);
+        }
+    }
+
+    impl metrics::Recorder for CountingRecorder {
+        fn describe_counter(
+            &self,
+            _: metrics::KeyName,
+            _: Option<metrics::Unit>,
+            _: metrics::SharedString,
+        ) {
+        }
+
+        fn describe_gauge(
+            &self,
+            _: metrics::KeyName,
+            _: Option<metrics::Unit>,
+            _: metrics::SharedString,
+        ) {
+        }
+
+        fn describe_histogram(
+            &self,
+            _: metrics::KeyName,
+            _: Option<metrics::Unit>,
+            _: metrics::SharedString,
+        ) {
+        }
+
+        fn register_counter(
+            &self,
+            key: &metrics::Key,
+            _: &metrics::Metadata<'_>,
+        ) -> metrics::Counter {
+            if key.name() == self.name {
+                metrics::Counter::from_arc(Arc::new(CountingHandle(Arc::clone(&self.hits))))
+            } else {
+                metrics::Counter::noop()
+            }
+        }
+
+        fn register_gauge(&self, _: &metrics::Key, _: &metrics::Metadata<'_>) -> metrics::Gauge {
+            metrics::Gauge::noop()
+        }
+
+        fn register_histogram(
+            &self,
+            _: &metrics::Key,
+            _: &metrics::Metadata<'_>,
+        ) -> metrics::Histogram {
+            metrics::Histogram::noop()
+        }
+    }
+
+    /// Run `f` with a thread-local recorder counting `name`.
+    pub(crate) fn counted(name: &'static str, f: impl FnOnce()) -> u64 {
+        let hits = Arc::new(AtomicU64::new(0));
+        let recorder = CountingRecorder {
+            name,
+            hits: Arc::clone(&hits),
+        };
+        metrics::with_local_recorder(&recorder, f);
+        hits.load(Ordering::Relaxed)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, OnceLock};
@@ -585,6 +674,7 @@ mod tests {
     use scalo::metrics::MetricsManager;
     use scalo::scaling::ScalingPressureConfig;
 
+    use super::counting::counted;
     use super::{Metrics, ServerState};
 
     /// Global MetricsManager — recorder can only be installed once per process.
@@ -759,6 +849,18 @@ mod tests {
     }
 
     // ---- Metrics record methods (exercise all paths, no panics) ----
+
+    #[test]
+    fn a_received_message_counts_once_in_records_received_total() {
+        let manager = MetricsManager::with_config(scalo::metrics::MetricsConfig::offline(""));
+        let hits = counted("records_received_total", || {
+            let m = Metrics::new(&manager);
+            for _ in 0..3 {
+                m.record_received();
+            }
+        });
+        assert_eq!(hits, 3, "three messages received read as three");
+    }
 
     #[test]
     fn metrics_record_received_increments() {
