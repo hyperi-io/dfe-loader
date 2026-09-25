@@ -277,9 +277,8 @@ impl Orchestrator {
                 .map_err(|e| crate::Error::ClickHouse(e.to_string()))?,
         );
 
-        // Build the insert client -- same transport as the query client.
-        // RowBinary (DynamicInsert) dispatches HTTP/TCP via insert_native_with_columns;
-        // JSONEachRow (InsertFormatted) is HTTP-only.
+        // Build the insert client -- same transport as the query client. Both
+        // formats insert over HTTP `insert_formatted_with`.
         let ch_client = crate::clickhouse::client_http::build_client(&ch_config)
             .map_err(|e| crate::Error::ClickHouse(e.to_string()))?;
 

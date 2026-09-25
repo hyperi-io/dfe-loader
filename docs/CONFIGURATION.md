@@ -44,7 +44,7 @@ file drives the loader's own weights and is reported as a mismatch at startup.
 
 | Setting | Values | Effect |
 |---------|--------|--------|
-| `clickhouse.transport` | `native` (default), `http` | TCP native protocol (port 9000/9440) vs HTTP (8123/8543) |
+| `clickhouse.protocol` | `http` (default), `native` | HTTP (8123/8543). `native` is refused at startup: the pinned client has no TCP row fetch, and the native insert sink waits on clickhouse-rs#15 |
 | `clickhouse.insert_format` | `row_binary` (default), `json_each_row` | binary (server skips JSON parsing) vs self-describing JSON |
 | `clickhouse.hosts` | list | multi-host failover (native pool round-robins, skips a refusing endpoint) |
 | `clickhouse.database` | string, `dfe` (default) | database the connection targets -- DDL, schema reflection, and any table name that arrives without a `db.` prefix |
@@ -54,18 +54,16 @@ file drives the loader's own weights and is reported as a mismatch at startup.
 Both are cascade-overridable like any other setting -- `LOADER_CLICKHOUSE_DATABASE`
 or `clickhouse.database` in yaml.
 
-The transport and format compose. The default `native + row_binary` is the
-fast path; `json_each_row` is the diagnostic fallback:
+The protocol and format compose. The default `http + row_binary` is the fast
+path; `json_each_row` is the diagnostic fallback:
 
-| `insert_format` | `transport = http` | `transport = native` |
-|-----------------|--------------------|----------------------|
-| `row_binary` (default) | `insert_formatted_with` FORMAT RowBinaryWithNamesAndTypes | `insert_native_with_columns` (`with_columns_tcp`) |
-| `json_each_row` | `insert_formatted_with` FORMAT JSONEachRow | **rejected at config-check** |
+| `insert_format` | `protocol = http` | `protocol = native` |
+|-----------------|-------------------|---------------------|
+| `row_binary` (default) | `insert_formatted_with` FORMAT RowBinaryWithNamesAndTypes | refused at startup |
+| `json_each_row` | `insert_formatted_with` FORMAT JSONEachRow | refused at startup |
 
-**Guarded combination:** `insert_format = json_each_row` with `transport =
-native` is rejected at `config-check`. JSONEachRow is sent over HTTP, and a
-native client has no HTTP insert endpoint for it. RowBinary works on both
-transports -- see [clickhouse/INSERT-FORMATS.md](clickhouse/INSERT-FORMATS.md).
+Both formats insert over HTTP -- see
+[clickhouse/INSERT-FORMATS.md](clickhouse/INSERT-FORMATS.md).
 
 ### Transport security (TLS, private CAs)
 

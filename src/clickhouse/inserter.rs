@@ -840,10 +840,8 @@ impl Inserter {
 
         let mut last_error = None;
         for attempt in 0..=self.max_retries {
-            // JSONEachRow uses the HTTP InsertFormatted path. On a TCP-only
-            // client this surfaces as a transport error at send() time (the
-            // client has no HTTP url); RowBinary is the default and works on
-            // both transports via insert_native_with_columns.
+            // HTTP only, like the RowBinary path: `clickhouse.protocol: native`
+            // is refused at startup, and the native sink waits on clickhouse-rs#15.
             let mut insert = self.ch_client.insert_formatted_with(sql.clone());
 
             // One INSERT carries one verdict, and which call surfaces it is an

@@ -233,6 +233,21 @@ impl ParsedType {
             return result;
         }
 
+        // Check for DateTime('timezone'): the timezone renders the value and
+        // leaves its UInt32 wire form unchanged.
+        if let Some(inner) = Self::extract_wrapper(&type_str, "DateTime") {
+            result.base = "DateTime".to_string();
+            result.tag = TypeTag::DateTime;
+            result.timezone = Some(
+                inner
+                    .trim()
+                    .trim_matches('\'')
+                    .trim_matches('"')
+                    .to_string(),
+            );
+            return result;
+        }
+
         // Check for FixedString(N)
         if let Some(inner) = Self::extract_wrapper(&type_str, "FixedString") {
             result.base = "FixedString".to_string();
@@ -538,6 +553,23 @@ mod tests {
         assert_eq!(t.base, "DateTime64");
         assert_eq!(t.precision, Some(6));
         assert_eq!(t.timezone, Some("UTC".to_string()));
+    }
+
+    #[test]
+    fn a_datetime_with_a_timezone_is_a_datetime() {
+        for (raw, timezone) in [
+            ("DateTime", None),
+            ("DateTime('UTC')", Some("UTC")),
+            (
+                "Nullable(DateTime('Australia/Sydney'))",
+                Some("Australia/Sydney"),
+            ),
+        ] {
+            let t = ParsedType::parse(raw);
+            assert_eq!(t.base, "DateTime", "{raw}");
+            assert_eq!(t.tag, TypeTag::DateTime, "{raw}");
+            assert_eq!(t.timezone.as_deref(), timezone, "{raw}");
+        }
     }
 
     #[test]

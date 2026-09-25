@@ -18,15 +18,16 @@
 //!
 //! # Sink abstraction
 //!
-//! The active sink is `Client::insert_formatted_with(... FORMAT
-//! RowBinaryWithNamesAndTypes)` (HTTP): a header naming each column and the
-//! type it was encoded for, then row-wise `encode()` bytes. FORMAT Native over HTTP (`InsertNative::with_columns`) mis-frames
-//! the block on this server and is tracked as clickhouse-rs#15.
+//! The only sink is `Client::insert_formatted_with(... FORMAT
+//! RowBinaryWithNamesAndTypes)` over HTTP: a header naming each column and the
+//! type it was encoded for, then row-wise `encode()` bytes. FORMAT Native over
+//! HTTP (`InsertNative::with_columns`) mis-frames the block on this server and
+//! is tracked as clickhouse-rs#15.
 //!
 //! The native/TCP sink (`insert_native_with_columns` -> `with_columns_tcp`,
-//! clickhouse-rs#14) is selected by transport once #15 lands; only the
-//! `ensure_sink` internals here change -- the encoder and the public
-//! `write_map` API are unaffected.
+//! clickhouse-rs#14) waits on #15 and is not wired; `clickhouse.protocol:
+//! native` is refused at startup. Only the `ensure_sink` internals here change
+//! when it lands -- the encoder and the public `write_map` API are unaffected.
 
 use std::sync::Arc;
 

@@ -21,16 +21,14 @@ here, on top of the upstream `Client`.
 | Module | Responsibility |
 |--------|----------------|
 | `parsed_type` | Parse a `system.columns` type string into a structured `ParsedType` (Nullable, LowCardinality, Array, Map, DateTime64, Decimal, Enum, ...) |
-| `encode` | `DynamicRow`: a `Map<String,Value>` + its `ColumnDef` schema. Two emission modes off the one schema -- row-wise `encode()` bytes (HTTP FORMAT RowBinaryWithNamesAndTypes) and per-column `Serialize` (native/TCP `with_columns_tcp`) |
+| `encode` | `DynamicRow`: a `Map<String,Value>` + its `ColumnDef` schema. Row-wise `encode()` bytes feed the HTTP FORMAT RowBinaryWithNamesAndTypes sink; the per-column `Serialize` mode is kept for the native/TCP sink that waits on clickhouse-rs#15 |
 | `schema` | Fetch a table's columns from `system.columns`; TTL cache with invalidation |
 | `insert` | `DynamicInsert`: lazy schema fetch, `write_map` / `write_map_with_raw`, schema-mismatch recovery |
 | `error` | `DynamicError` (`SchemaMismatch`, `UnsupportedType`, ...) |
 
 ## The seam
 
-`DynamicInsert` opens a sink on the first row, chosen by transport. The same
-`DynamicRow` (one `Map` + one `ColumnDef` schema) feeds either sink -- only the
-emission mode differs:
+`DynamicInsert` opens its sink on the first row. There is one sink today:
 
 - **HTTP** -> `Client::insert_formatted_with("INSERT ... FORMAT
   RowBinaryWithNamesAndTypes")`, fed a header of column names and the types
@@ -39,8 +37,10 @@ emission mode differs:
   framing.
 - **native/TCP** -> `Client::insert_native_with_columns(table, &columns)` ->
   `with_columns_tcp`, fed the per-column `Serialize` mode (the fork's
-  [hyperi-io/clickhouse-rs#14](https://github.com/hyperi-io/clickhouse-rs/issues/14)).
-  The native binary protocol always frames columnar blocks itself.
+  [hyperi-io/clickhouse-rs#14](https://github.com/hyperi-io/clickhouse-rs/issues/14)),
+  is NOT wired. It waits on
+  [hyperi-io/clickhouse-rs#15](https://github.com/hyperi-io/clickhouse-rs/issues/15),
+  and `clickhouse.protocol: native` is refused at startup until then.
 
 JSON columns (including `_json`) are written as a length-prefixed string; on the
 RowBinary path the loader sets `input_format_binary_read_json_as_string=1` so
@@ -54,14 +54,8 @@ flowchart LR
     M --> DR
     CD --> DR
     DR -->|encode() bytes| IFW["insert_formatted_with<br/>FORMAT RowBinaryWithNamesAndTypes (HTTP)"]
-    DR -->|per-column Serialize| INC["insert_native_with_columns<br/>with_columns_tcp (native, #14)"]
+    DR -.->|per-column Serialize, not wired| INC["insert_native_with_columns<br/>with_columns_tcp (waits on #15)"]
 ```
-
-> The HTTP RowBinary sink is the path verified live against the devex cluster.
-> The native/TCP sink rides `FORMAT Native`, whose block framing is fixed in the
-> fork via
-> [hyperi-io/clickhouse-rs#15](https://github.com/hyperi-io/clickhouse-rs/issues/15);
-> `DynamicInsert` selects the sink by `transport`.
 
 ## Schema-mismatch recovery
 
