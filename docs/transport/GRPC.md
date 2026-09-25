@@ -153,7 +153,7 @@ message Event {
     // Routing key (topic/table destination)
     string key = 1;
 
-    // Raw payload bytes (JSON or MsgPack)
+    // Raw payload bytes (JSON)
     bytes payload = 2;
 
     // Payload format hint (auto-detected if not set)
@@ -233,12 +233,11 @@ enum Compression {
 enum PayloadFormat {
     PAYLOAD_FORMAT_AUTO = 0;
     PAYLOAD_FORMAT_JSON = 1;
-    PAYLOAD_FORMAT_MSGPACK = 2;
 }
 
 enum ErrorCode {
     ERROR_CODE_UNSPECIFIED = 0;
-    ERROR_CODE_INVALID_PAYLOAD = 1;     // Can't parse JSON/MsgPack
+    ERROR_CODE_INVALID_PAYLOAD = 1;     // Not JSON, or JSON that does not parse
     ERROR_CODE_ROUTING_FAILED = 2;      // Can't determine destination
     ERROR_CODE_TRANSFORM_FAILED = 3;    // Transform error
     ERROR_CODE_INSERT_FAILED = 4;       // ClickHouse insert failed

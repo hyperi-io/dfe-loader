@@ -114,8 +114,6 @@ config:
     tables: []
     tls: null
   payload:
-    format: auto
-    mismatch_threshold: 10
     pipeline_mode: json_primary
   metrics:
     enabled: true

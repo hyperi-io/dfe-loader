@@ -1,30 +1,14 @@
 // SPDX-License-Identifier: BUSL-1.1
 // Copyright (c) 2026 HYPERI PTY LIMITED
 
-//! Payload format detection and parsing
-//!
-//! Auto-detects JSON vs `MessagePack` from raw bytes.
-//! Supports forced modes: Auto (default), `ForceJson`, `ForceMessagePack`.
+//! Payload parsing. JSON is the only payload format.
 
 pub mod parse;
 
-// Re-export from scalo with local type alias for backward compatibility
 pub use parse::{
-    has_ndjson_boundary, opens_json_array, parse_payload, split_json_array, split_ndjson,
+    has_ndjson_boundary, opens_json_array, opens_json_document, parse_payload, split_json_array,
+    split_ndjson,
 };
-pub use scalo::transport::{
-    DetectedFormat as PayloadFormat, FormatDetector, FormatMode, detect_format,
-};
-
-/// The name an operator reads for a payload format.
-#[must_use]
-pub fn format_name(format: &PayloadFormat) -> &'static str {
-    match format {
-        PayloadFormat::Json => "JSON",
-        PayloadFormat::MessagePack => "MessagePack",
-        PayloadFormat::Unknown => "unknown",
-    }
-}
 
 /// The first bytes of a payload, for naming it in a rejection reason.
 ///
@@ -91,12 +75,5 @@ mod tests {
     #[test]
     fn leading_bytes_of_an_empty_payload_say_so() {
         assert_eq!(LeadingBytes::of(b"").to_string(), "empty payload");
-    }
-
-    #[test]
-    fn format_names_are_what_operators_read() {
-        assert_eq!(format_name(&PayloadFormat::Json), "JSON");
-        assert_eq!(format_name(&PayloadFormat::MessagePack), "MessagePack");
-        assert_eq!(format_name(&PayloadFormat::Unknown), "unknown");
     }
 }

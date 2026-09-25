@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Config",
-  "description": "Main configuration for dfe-loader.\n\n## Hot-Reload Behaviour\n\n**Hot-reloaded (takes effect on next batch):**\n- `routing.*` — routing rules, table mapping, org routing\n- `timestamp_dq.*` — timestamp validation thresholds\n- `metadata.*` — common header injection, tags, _raw handling\n- `field_sanitization.*` — field name sanitisation rules\n- `buffer.flush_rows` / `buffer.flush_bytes` / `buffer.flush_age_secs`\n- `coercion.*` — type coercion config\n- `enrichment.ip_fields` — which fields to enrich\n- `field_mapping.*` — field mapping overrides\n\n**Requires pod restart (connections/state established at startup):**\n- `transport` — transport type (kafka/grpc) bound at startup\n- `kafka.*` — Kafka consumer created at startup\n- `grpc.*` — gRPC server binds at startup\n- `clickhouse.*` — HTTP client + `clickhouse::Client` created at startup\n- `payload.format` — format detection set at startup\n- `metrics.*` — HTTP metrics server binds at startup\n- `logging.*` — tracing subscriber installed at startup\n- `scaling.*` / `keda.*` — scaling pressure built at startup\n- `hot_reload.*` — watcher config set at startup\n- `schema.*` — schema cache created at startup\n- `geoip.*` — MMDB readers opened at startup\n- `computed_columns.*` — computed column cache built at startup\n- `column_directives.*` — column directive cache built at startup",
+  "description": "Main configuration for dfe-loader.\n\n## Hot-Reload Behaviour\n\n**Hot-reloaded (takes effect on next batch):**\n- `routing.*` — routing rules, table mapping, org routing\n- `timestamp_dq.*` — timestamp validation thresholds\n- `metadata.*` — common header injection, tags, _raw handling\n- `field_sanitization.*` — field name sanitisation rules\n- `buffer.flush_rows` / `buffer.flush_bytes` / `buffer.flush_age_secs`\n- `coercion.*` — type coercion config\n- `enrichment.ip_fields` — which fields to enrich\n- `field_mapping.*` — field mapping overrides\n\n**Requires pod restart (connections/state established at startup):**\n- `transport` — transport type (kafka/grpc) bound at startup\n- `kafka.*` — Kafka consumer created at startup\n- `grpc.*` — gRPC server binds at startup\n- `clickhouse.*` — HTTP client + `clickhouse::Client` created at startup\n- `payload.pipeline_mode` — pipeline path chosen at startup\n- `metrics.*` — HTTP metrics server binds at startup\n- `logging.*` — tracing subscriber installed at startup\n- `scaling.*` / `keda.*` — scaling pressure built at startup\n- `hot_reload.*` — watcher config set at startup\n- `schema.*` — schema cache created at startup\n- `geoip.*` — MMDB readers opened at startup\n- `computed_columns.*` — computed column cache built at startup\n- `column_directives.*` — column directive cache built at startup",
   "type": "object",
   "properties": {
     "transport": {
@@ -64,11 +64,9 @@
       }
     },
     "payload": {
-      "description": "Payload format detection. **Restart required.**",
+      "description": "Payload pipeline mode. **Restart required.**",
       "$ref": "#/$defs/PayloadConfig",
       "default": {
-        "format": "auto",
-        "mismatch_threshold": 10,
         "pipeline_mode": "json_primary"
       }
     },
@@ -734,19 +732,6 @@
     "PayloadConfig": {
       "type": "object",
       "properties": {
-        "format": {
-          "description": "Format mode: \"auto\" (default), \"json\", \"messagepack\"/\"msgpack\"",
-          "type": "string",
-          "default": "auto"
-        },
-        "mismatch_threshold": {
-          "description": "Mismatch threshold before auto-reset (auto mode only)",
-          "type": "integer",
-          "format": "uint8",
-          "minimum": 0,
-          "maximum": 255,
-          "default": 10
-        },
         "pipeline_mode": {
           "description": "Pipeline processing mode.\n\n- `\"json_primary\"` (default): Schema-guided SIMD extraction + zero-copy `_json` splice.\n  Only schema-matching columns are extracted; everything else is captured via `_json`.\n  Requires schema resolution before per-column extraction works; messages arriving\n  before schema is resolved fall back to the legacy path.\n\n- `\"legacy_flatten\"`: Existing full-flatten + transform path. All fields are promoted\n  to the top level; `_json` is injected as a UTF-8 string copy of the raw payload.",
           "type": "string",

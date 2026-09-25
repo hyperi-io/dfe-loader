@@ -42,7 +42,7 @@ pub use super::pipeline::*;
 /// - `kafka.*` — Kafka consumer created at startup
 /// - `grpc.*` — gRPC server binds at startup
 /// - `clickhouse.*` — HTTP client + `clickhouse::Client` created at startup
-/// - `payload.format` — format detection set at startup
+/// - `payload.pipeline_mode` — pipeline path chosen at startup
 /// - `metrics.*` — HTTP metrics server binds at startup
 /// - `logging.*` — tracing subscriber installed at startup
 /// - `scaling.*` / `keda.*` — scaling pressure built at startup
@@ -65,7 +65,7 @@ pub struct Config {
     pub grpc: GrpcConfig,
     /// `ClickHouse` connection config. **Restart required.**
     pub clickhouse: ClickHouseConfig,
-    /// Payload format detection. **Restart required.**
+    /// Payload pipeline mode. **Restart required.**
     pub payload: PayloadConfig,
     /// Metrics server config. **Restart required.**
     pub metrics: MetricsConfig,

@@ -20,7 +20,7 @@ description: |-
   - `kafka.*` — Kafka consumer created at startup
   - `grpc.*` — gRPC server binds at startup
   - `clickhouse.*` — HTTP client + `clickhouse::Client` created at startup
-  - `payload.format` — format detection set at startup
+  - `payload.pipeline_mode` — pipeline path chosen at startup
   - `metrics.*` — HTTP metrics server binds at startup
   - `logging.*` — tracing subscriber installed at startup
   - `scaling.*` / `keda.*` — scaling pressure built at startup
@@ -79,11 +79,9 @@ properties:
       tables: []
       tls: null
   payload:
-    description: Payload format detection. **Restart required.**
+    description: Payload pipeline mode. **Restart required.**
     $ref: '#/$defs/PayloadConfig'
     default:
-      format: auto
-      mismatch_threshold: 10
       pipeline_mode: json_primary
   metrics:
     description: Metrics server config. **Restart required.**
@@ -663,17 +661,6 @@ $defs:
   PayloadConfig:
     type: object
     properties:
-      format:
-        description: 'Format mode: "auto" (default), "json", "messagepack"/"msgpack"'
-        type: string
-        default: auto
-      mismatch_threshold:
-        description: Mismatch threshold before auto-reset (auto mode only)
-        type: integer
-        format: uint8
-        minimum: 0
-        maximum: 255
-        default: 10
       pipeline_mode:
         description: |-
           Pipeline processing mode.

@@ -11,7 +11,6 @@ use serde_json::json;
 
 use dfe_loader::buffer::BufferManager;
 use dfe_loader::config::{BufferConfig, DlqConfig, RoutingConfig};
-use dfe_loader::payload::{FormatDetector, FormatMode};
 use dfe_loader::routing::Router;
 use dfe_loader::transform::Transformer;
 
@@ -121,29 +120,6 @@ async fn test_routing_and_buffer() {
 
     assert_eq!(buffer_manager.pending_rows(), 3);
     assert_eq!(buffer_manager.stats().table_count, 3);
-}
-
-#[tokio::test]
-#[ignore = "requires infrastructure"]
-async fn test_format_detection() {
-    // Test payload format detection
-    let detector = FormatDetector::with_mode(FormatMode::Auto);
-
-    // JSON payload
-    let json_payload = br#"{"event": "test"}"#;
-    let result = detector.check_and_detect(json_payload);
-    assert!(result.is_ok());
-    assert_eq!(result.unwrap(), dfe_loader::payload::PayloadFormat::Json);
-
-    // Force JSON mode
-    let json_detector = FormatDetector::with_mode(FormatMode::ForceJson);
-    let result = json_detector.check_and_detect(json_payload);
-    assert!(result.is_ok());
-
-    // Force JSON mode should reject msgpack-looking bytes
-    let msgpack_like = &[0x82, 0xa4, b't', b'e', b's', b't']; // fixmap
-    let result = json_detector.check_and_detect(msgpack_like);
-    assert!(result.is_err()); // Should be Err because it's not JSON
 }
 
 #[tokio::test]

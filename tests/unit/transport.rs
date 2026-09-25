@@ -13,7 +13,7 @@ use dfe_loader::config::{
     BufferConfig, FieldSanitizationConfig, MetadataConfig, RoutingConfig, TimestampDqConfig,
 };
 use dfe_loader::kafka::MemoryTransportAdapter;
-use dfe_loader::payload::{FormatDetector, FormatMode};
+use dfe_loader::payload::opens_json_document;
 use dfe_loader::routing::{RouteResult, Router};
 use dfe_loader::transform::Transformer;
 
@@ -111,7 +111,7 @@ async fn test_memory_adapter_close() {
 }
 
 // ============================================================================
-// Message Processing Tests (Format Detection + Routing + Transform)
+// Message Processing Tests (JSON Gate + Routing + Transform)
 // ============================================================================
 
 #[tokio::test]
@@ -138,10 +138,7 @@ async fn test_json_message_processing() {
 
     let msg = &messages[0];
 
-    // Verify format detection
-    let format_detector = FormatDetector::with_mode(FormatMode::Auto);
-    let format = format_detector.check_and_detect(&msg.payload).unwrap();
-    assert!(matches!(format, dfe_loader::payload::PayloadFormat::Json));
+    assert!(opens_json_document(&msg.payload));
 
     // Parse the payload
     let value: serde_json::Value = sonic_rs::from_slice(&msg.payload).unwrap();

@@ -10,7 +10,7 @@
 
 # Pipeline parallelisation
 
-The hot path is a per-message loop. Most of that work -- format detect, parse,
+The hot path is a per-message loop. Most of that work -- JSON gate, parse,
 route, transform, CEL, enrichment -- is pure `&self` computation with no shared
 mutable state, so it parallelises cleanly across a worker pool. The part that
 mutates state -- buffer push, schema-cache marking, stats, DLQ routing -- stays
@@ -38,7 +38,7 @@ dropped before the coordinator (mutable borrows) is created.
 flowchart TB
     RECV["transport.recv(batch)"]
     subgraph PAR["PARALLEL -- rayon via AdaptiveWorkerPool"]
-        MP["MessageProcessor.process(&self, msg)<br/>format detect, parse, route<br/>transform, field mapping, CEL<br/>enrichment (in-memory lookups)"]
+        MP["MessageProcessor.process(&self, msg)<br/>JSON gate, parse, route<br/>transform, field mapping, CEL<br/>enrichment (in-memory lookups)"]
     end
     RES["Vec&lt;Result&lt;ProcessedMessage&gt;&gt;"]
     subgraph SEQ["SEQUENTIAL -- BatchCoordinator"]

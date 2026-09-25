@@ -38,13 +38,15 @@ dfe-loader reads records off Kafka or a direct gRPC listener, works out which Cl
 
 | Stage | What happens |
 |-------|--------------|
-| Parse | JSON or MessagePack, auto-detected. SIMD parse, payload kept as `Arc<[u8]>` |
+| Parse | JSON only. SIMD parse, payload kept as `Arc<[u8]>`. A record that is not JSON is dead-lettered |
 | Route | `db.table` from configured fields, resolved BEFORE flattening |
 | Promote | Schema read from `system.columns`, matching fields become typed columns, the rest stays in `_json` |
 | Enrich | Optional GeoIP, reputation and risk columns |
 | Buffer | Per-table, flushed on row count, byte size or age |
 | Insert | RowBinary by default, so ClickHouse skips JSON parsing. JSONEachRow is the fallback |
 | Commit | Kafka offsets commit once per flush cycle, never past a row not yet in ClickHouse or the DLQ -- at-least-once |
+
+JSON is the only payload format. MessagePack, supported in DFE/XDR 2.0 and 2.1, is deprecated in DFE 2.2 and no longer accepted: the JSON path (SIMD parsing with sonic-rs, zstd on the wire) is fast enough that MessagePack gave no CPU saving.
 
 Failures degrade rather than stall: a batch with a bad row is binary-split so only the bad rows are dead-lettered, a batch whose insert fails is held and retried with backoff while the commit stays below it, and a schema drift error invalidates the cached schema and retries.
 

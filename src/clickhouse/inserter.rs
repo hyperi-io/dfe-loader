@@ -238,8 +238,8 @@ fn is_salvageable(err: &crate::Error) -> bool {
 /// The bytes a permanently rejected row must carry to the DLQ.
 ///
 /// `raw_payloads[i]` is empty for every capture mode that keeps no raw bytes:
-/// `raw_only` and `extracted_only`, the whole `legacy_flatten` path, and any
-/// `MessagePack` payload. DLQ'ing an empty entry for those and then committing
+/// `raw_only` and `extracted_only`, and the whole `legacy_flatten` path.
+/// DLQ'ing an empty entry for those and then committing
 /// the offset loses the event from `ClickHouse`, the DLQ and Kafka at once, so
 /// fall back to the promoted row -- under `raw_only` it still holds the payload
 /// as `_raw`, under `legacy_flatten` full capture as `_json`.
@@ -1727,7 +1727,7 @@ mod tests {
 
     #[test]
     fn a_row_with_no_raw_payload_carries_its_own_bytes() {
-        // raw_only, extracted_only, legacy_flatten and MessagePack all leave
+        // raw_only, extracted_only and legacy_flatten all leave
         // raw_payloads[i] empty. Without the fallback the DLQ entry is empty
         // and the offset commits over the top of it.
         let mut row = Map::new();

@@ -20,7 +20,7 @@ time. The tail batches per table and inserts.
 flowchart LR
     M["bytes (Kafka/gRPC/Memory)"]
     S["split batched messages"]
-    P["parse + format detect"]
+    P["JSON parse"]
     R["route -> db.table"]
     X["extract header + schema columns"]
     C["coerce (delta only)"]
@@ -58,14 +58,17 @@ batch that reaches the next stage unsplit is refused by shape and named as
 such, rather than coming back as a ClickHouse encode error on an empty column
 or as a parse error about trailing characters.
 
-## 1. Parse and detect format
+## 1. Parse
 
-The payload is sniffed on its first byte: `{`/`[` is JSON (parsed with
-sonic-rs, SIMD), otherwise MessagePack (rmp-serde). The parse is zero-copy where
-it can be -- the original bytes are retained as `Arc<[u8]>` so the full payload
-can be written as `_raw` or `_json` later without re-serialising. A payload that
-parses as neither, or is forced to one format and is the other, is rejected to
-the DLQ.
+A payload must open a JSON object or array (`{` or `[` after any leading
+whitespace) and is parsed with sonic-rs (SIMD). The parse is zero-copy where it
+can be -- the original bytes are retained as `Arc<[u8]>` so the full payload can
+be written as `_raw` or `_json` later without re-serialising. Anything else is
+dead-lettered as `payload is not JSON` with its first 8 bytes in hex, and a
+payload that opens like JSON but does not parse is dead-lettered with the parse
+error.
+
+JSON is the only payload format. MessagePack, supported in DFE/XDR 2.0 and 2.1, is deprecated in DFE 2.2 and no longer accepted: the JSON path (SIMD parsing with sonic-rs, zstd on the wire) is fast enough that MessagePack gave no CPU saving.
 
 ## 2. Route
 

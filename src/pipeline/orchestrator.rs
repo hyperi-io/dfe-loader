@@ -39,7 +39,6 @@ use crate::config::{Config, SharedConfig};
 use crate::kafka::transport::ReceivedBatch;
 use crate::kafka::{TransportAdapter, TransportBackend};
 use crate::metrics::Metrics;
-use crate::payload::{FormatDetector, FormatMode};
 use crate::routing::Router;
 use crate::transform::Transformer;
 use crate::transform::{ComputedColumnCache, FieldMappingCache, HeaderExtractor, MappingBuilder};
@@ -424,11 +423,6 @@ impl Orchestrator {
 
         let extractor = HeaderExtractor::new(&self.config.metadata, &self.config.routing);
 
-        // Determine format mode from config
-        let format_mode =
-            FormatMode::parse(&self.config.payload.format).unwrap_or(FormatMode::Auto);
-        let format_detector = FormatDetector::with_mode(format_mode);
-
         let mut buffer_manager = BufferManager::new(&self.config.buffer);
 
         // Pending-schema buffer — holds messages whose table schema is not yet cached.
@@ -510,7 +504,6 @@ impl Orchestrator {
         const RECV_BATCH_SIZE: usize = 100;
 
         info!(
-            format_mode = ?format_mode,
             flush_rows = self.config.buffer.flush_rows,
             flush_bytes = self.config.buffer.flush_bytes,
             flush_secs = self.config.buffer.flush_age_secs,
@@ -1023,7 +1016,6 @@ impl Orchestrator {
                                 router: &router,
                                 transformer: &transformer,
                                 extractor: &extractor,
-                                format_detector: &format_detector,
                                 json_primary_mode,
                                 enrichment: &enrichment,
                                 schema_cache: &schema_cache,
@@ -2019,7 +2011,7 @@ fn memory_guard_config(config: &Config) -> MemoryGuardConfig {
 //   grpc.*                — gRPC server binds at startup
 //   transport             — transport type bound at startup
 //   clickhouse.*          — HTTP client + clickhouse::Client created at startup
-//   payload.format        — format detection set at startup
+//   payload.pipeline_mode — pipeline path chosen at startup
 //   metrics.*             — HTTP metrics server binds at startup
 //   logging.*             — tracing subscriber installed at startup
 //   scaling.* / keda.*    — scaling pressure built at startup
@@ -2665,8 +2657,8 @@ async fn next_intake(
 ///
 /// `raw_payloads[i]` is empty for every capture mode that keeps no raw bytes --
 /// `raw_only` (which this repo's own guidance recommends for high-cardinality
-/// tables), `extracted_only`, the whole `legacy_flatten` path, and any
-/// `MessagePack` payload. DLQ'ing an empty entry for those and committing the
+/// tables), `extracted_only`, and the whole `legacy_flatten` path. DLQ'ing an
+/// empty entry for those and committing the
 /// offset drops the event from `ClickHouse`, the DLQ and Kafka at once, so the
 /// inserter attaches the serialised promoted row, which still carries the
 /// payload as `_raw` or `_json`.
@@ -3296,9 +3288,9 @@ mod tests {
 
     #[test]
     fn an_empty_raw_slot_falls_back_to_the_promoted_row() {
-        // raw_payloads[i] is empty under raw_only, extracted_only, the whole
-        // legacy_flatten path and any MessagePack payload. The promoted row
-        // still holds the bytes as _raw or _json.
+        // raw_payloads[i] is empty under raw_only, extracted_only and the whole
+        // legacy_flatten path. The promoted row still holds the bytes as _raw
+        // or _json.
         let row_bytes = br#"{"_raw":"{\"user\":\"kaz\"}"}"#.to_vec();
         let failed = FailedRow {
             row_index: 0,
