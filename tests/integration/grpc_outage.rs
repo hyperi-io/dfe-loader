@@ -129,7 +129,7 @@ impl OutageProxy {
     }
 }
 
-fn random_port() -> u16 {
+pub(super) fn random_port() -> u16 {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
     let port = listener.local_addr().expect("local addr").port();
     drop(listener);
@@ -143,7 +143,7 @@ fn id_payload(id: u64) -> String {
 
 /// Push each id until the listener accepts it or `until` passes, returning the
 /// ids accepted and how many pushes the listener refused as backpressure.
-async fn push_ids(
+pub(super) async fn push_ids(
     client: &GrpcTransport,
     ids: std::ops::Range<u64>,
     until: tokio::time::Instant,
@@ -272,7 +272,7 @@ pub(super) fn query_client(clickhouse: &str) -> ClickHouseQueryClient {
 }
 
 /// A gRPC-transport loader writing to `default.{table}` through `clickhouse`.
-fn grpc_loader(listen_port: u16, clickhouse: String, table: &str) -> Config {
+pub(super) fn grpc_loader(listen_port: u16, clickhouse: String, table: &str) -> Config {
     let mut config = Config::default();
     config.transport = "grpc".to_string();
     config.grpc.listen = Some(format!("127.0.0.1:{listen_port}"));
@@ -301,7 +301,7 @@ pub(super) fn with_file_dlq(config: &mut Config, dir: &Path) {
 }
 
 /// Run the orchestrator and connect a gRPC client to its listener.
-async fn start_loader(
+pub(super) async fn start_loader(
     config: Config,
     listen_port: u16,
 ) -> (CancellationToken, JoinHandle<()>, GrpcTransport) {
@@ -319,7 +319,7 @@ async fn start_loader(
 }
 
 /// Push one record and wait for it to land: the loader is running from here.
-async fn wait_for_loader(client: &GrpcTransport, clickhouse: &str, table: &str) {
+pub(super) async fn wait_for_loader(client: &GrpcTransport, clickhouse: &str, table: &str) {
     let settle = tokio::time::Instant::now() + Duration::from_secs(60);
     let (first, _) = push_ids(client, 0..1, settle, id_payload).await;
     assert_eq!(first.len(), 1, "the listener refused the first record");
@@ -328,7 +328,7 @@ async fn wait_for_loader(client: &GrpcTransport, clickhouse: &str, table: &str) 
 }
 
 /// Decode standard-alphabet base64, the encoding the file DLQ gives a payload.
-fn decode_base64(text: &str) -> Option<Vec<u8>> {
+pub(super) fn decode_base64(text: &str) -> Option<Vec<u8>> {
     let mut out = Vec::with_capacity(text.len() * 3 / 4);
     let mut acc = 0_u32;
     let mut bits = 0_u32;

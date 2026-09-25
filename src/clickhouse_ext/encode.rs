@@ -57,6 +57,7 @@ use serde_json::{Map, Value};
 
 use super::error::DynamicError;
 use super::parsed_type::{ParsedType, TypeTag};
+use crate::payload::depth::{MAX_PARSE_DEPTH, json_depth_within};
 
 use clickhouse::_priv::RowKind;
 use clickhouse::Row;
@@ -499,8 +500,13 @@ fn json_shape(value: &Value) -> JsonShape {
 
 /// Whether the text is one complete JSON value and nothing after it.
 /// `IgnoredAny` validates the syntax without building a document.
+///
+/// The text can be a string field of the record, whose brackets the intake
+/// depth check does not count, and `IgnoredAny` recurses once per level with
+/// no limit, so text nested too deeply is kept as the string it is.
 fn is_whole_json(text: &str) -> bool {
-    sonic_rs::from_str::<serde::de::IgnoredAny>(text).is_ok()
+    json_depth_within(text.as_bytes(), MAX_PARSE_DEPTH)
+        && sonic_rs::from_str::<serde::de::IgnoredAny>(text).is_ok()
 }
 
 /// Render a value as the JSON text a `ClickHouse` JSON column accepts.
@@ -1819,6 +1825,52 @@ mod tests {
     #[test]
     fn json_object_text_with_trailing_content_is_wrapped_under_value() {
         assert_json_text(json!(r#"{"a":1} tail"#), r#"{"value":"{\"a\":1} tail"}"#);
+    }
+
+    fn nested_text(open: &str, close: &str, depth: usize) -> String {
+        format!("{}1{}", open.repeat(depth), close.repeat(depth))
+    }
+
+    /// Run `test` on a thread with `stack` bytes of stack, and fail unless it returns.
+    fn on_stack(stack: usize, test: impl FnOnce() + Send + 'static) {
+        std::thread::Builder::new()
+            .stack_size(stack)
+            .spawn(test)
+            .expect("spawn the encoder thread")
+            .join()
+            .expect("the encoder thread must return");
+    }
+
+    #[test]
+    fn json_text_nested_past_the_parse_bound_is_kept_as_a_string() {
+        // A string field's brackets are not counted at intake, so the encoder
+        // meets this text on a 2 MiB worker stack.
+        on_stack(2 * 1024 * 1024, || {
+            for depth in [20_000, 100_000] {
+                for text in [
+                    nested_text("[", "]", depth),
+                    nested_text("{\"a\":", "}", depth),
+                ] {
+                    let wrapped = json!({ "value": text });
+                    assert_shaped(json!(text), wrapped.clone());
+                    assert_json_text(json!(text), &wrapped.to_string());
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn json_text_at_the_parse_bound_is_json_and_one_over_is_a_string() {
+        // 64 levels of sonic-rs recursion costs about 3.5 MiB of stack in a
+        // debug build against about 12 KiB in release.
+        on_stack(16 * 1024 * 1024, || {
+            let at = nested_text("[", "]", 64);
+            let parsed: Value = serde_json::from_str(&at).expect("64 levels is JSON");
+            assert_shaped(json!(at), json!({ "list": parsed }));
+
+            let over = nested_text("[", "]", 65);
+            assert_shaped(json!(over), json!({ "value": over }));
+        });
     }
 
     // ------------------------------------------------------------------
