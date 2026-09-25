@@ -31,8 +31,10 @@ required-features = ["pgo-driver"]
 tokio = { version = ">=1.53.1, <2", features = ["full"] }
 tokio-util = { version = ">=0.7.19, <0.8", features = ["rt"] }
 
-# Shared library with transport abstraction
-scalo = { version = ">=2.12.8, <3", features = ["config-schema", "transport-kafka", "transport-grpc", "dlq-kafka", "config", "config-reload", "deployment", "version-check", "scaling", "cli-service", "top", "logger", "metrics", "service-metrics", "expression", "memory", "worker-batch", "governor", "secrets", "sink-stack"] }
+# Shared library with transport abstraction. The floor admits the unreleased git
+# build the [patch.crates-io] entry below points at, and returns to >=2.13.0
+# with the patch.
+scalo = { version = ">=2.12.0, <3", features = ["config-schema", "transport-kafka", "transport-grpc", "dlq-kafka", "config", "config-reload", "deployment", "version-check", "scaling", "cli-service", "top", "logger", "metrics", "service-metrics", "expression", "memory", "worker-batch", "governor", "secrets", "sink-stack"] }
 
 # Steps scalo's jittered retry schedule (sink_stack backoff). Range MUST track
 # scalo's: BackoffBuilder only applies to the ExponentialBuilder scalo returns.
@@ -319,6 +321,10 @@ map_unwrap_or = "allow"
 # Pinned to the hyperi-port/06d-tcp-tls-new branch tip for a reproducible
 # build (a sha, not a floating branch ref).
 clickhouse = { git = "https://github.com/hyperi-io/clickhouse-rs.git", rev = "6f9acd9694acc9c596ff687c908aa215af100887" }
+# Temporary: the source acknowledgement API (scalo::transport::ack) until scalo
+# 2.13.0 is on crates.io. Removed, with the floor above raised to >=2.13.0,
+# before this branch merges.
+scalo = { git = "https://github.com/hyperi-io/scalo-rs", branch = "fix/grpc-held-acks-armed" }
 #
 # To revert: comment out or remove the [patch.crates-io] section above.
 # =============================================================================

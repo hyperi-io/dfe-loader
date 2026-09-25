@@ -212,8 +212,10 @@ async fn close_is_ok() {
     transport.close().await.expect("close should succeed");
 }
 
+/// A record queued before close() is still received, and recv reports the
+/// transport closed once nothing is left.
 #[tokio::test]
-async fn recv_after_close_is_empty() {
+async fn recv_after_close_drains_then_reports_closed() {
     let transport = MemoryTransportAdapter::new("close-recv-topic");
     transport
         .inject(b"data".to_vec())
@@ -222,12 +224,19 @@ async fn recv_after_close_is_empty() {
 
     transport.close().await.expect("close");
 
-    // After close, recv returns empty (not an error)
-    let messages = transport.recv(10).await.unwrap_or_default();
-    assert!(
-        messages.is_empty(),
-        "recv after close should return empty, got {} messages",
+    let messages = transport
+        .recv(10)
+        .await
+        .expect("the record queued before close()");
+    assert_eq!(
+        messages.len(),
+        1,
+        "recv after close returned {} of the 1 record queued before it",
         messages.len()
+    );
+    assert!(
+        transport.recv(10).await.is_err(),
+        "recv after the drain must report the transport closed"
     );
 }
 
