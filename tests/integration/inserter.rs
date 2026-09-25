@@ -86,7 +86,7 @@ async fn test_inserter_basic_insert() {
 
 /// config -> ACTION: a MULTI-ROW RowBinary batch must be accepted by a real
 /// ClickHouse. A successful end() (the server returns 200 after parsing the
-/// RowBinary body) proves the dynamic encoder + the FORMAT RowBinary insert
+/// RowBinary body) proves the dynamic encoder + the FORMAT RowBinaryWithNamesAndTypes insert
 /// path actually land data -- the offline byte tests cannot.
 ///
 /// RowBinary goes over HTTP. The TCP/native dynamic insert would use the

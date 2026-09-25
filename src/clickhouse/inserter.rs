@@ -685,12 +685,27 @@ impl Inserter {
                         "RowBinary insert: {e}"
                     )));
                 }
-                // The table changed under the rows, so the retry encodes
-                // against it as it is now.
+                // The table changed under the rows: drift, so the retry
+                // encodes against the table as it is now.
                 if self.refresh_on_error {
                     self.dynamic_schema_cache.invalidate(&format!("{db}.{tbl}"));
                     self.drop_cached_schema(table);
                 }
+                last_error = Some(crate::Error::ClickHouse(format!("RowBinary insert: {e}")));
+                if attempt < self.max_retries {
+                    let delay = self.backoff_delay(attempt);
+                    warn!(
+                        table = %table,
+                        attempt,
+                        error = %e,
+                        delay_ms = delay.as_millis(),
+                        refresh_on_error = self.refresh_on_error,
+                        "Table changed under the rows, retrying against its current schema"
+                    );
+                    sleep(delay).await;
+                    continue;
+                }
+                break;
             }
             match outcome {
                 Ok(count) => {

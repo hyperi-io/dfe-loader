@@ -74,7 +74,7 @@ flowchart LR
         end
     end
     subgraph fork["clickhouse::Client (patched)"]
-        IFW["insert_formatted_with<br/>FORMAT RowBinary | JSONEachRow (HTTP)"]
+        IFW["insert_formatted_with<br/>FORMAT RowBinaryWithNamesAndTypes | JSONEachRow (HTTP)"]
         INC["insert_native_with_columns<br/>with_columns_tcp (native/TCP)"]
     end
 
@@ -87,7 +87,7 @@ flowchart LR
 ```
 
 The encoder has two emission modes off the same `ColumnDef` schema: row-wise
-`encode()` bytes for the HTTP `FORMAT RowBinary` sink, and per-column
+`encode()` bytes for the HTTP `FORMAT RowBinaryWithNamesAndTypes` sink, and per-column
 `Serialize` for the native/TCP `with_columns_tcp` sink. `clickhouse_ext` uses
 only the fork's stable public surface (`Client`, `insert_formatted_with`,
 `insert_native_with_columns`, `row`/`rowbinary` primitives), so it is unaffected
@@ -101,7 +101,7 @@ flowchart TB
     F{"insert_format?"}
     T{"transport?"}
     RB["DynamicInsert.write_map(s)"]
-    HTTP["Client.insert_formatted_with<br/>FORMAT RowBinary (HTTP)"]
+    HTTP["Client.insert_formatted_with<br/>FORMAT RowBinaryWithNamesAndTypes (HTTP)"]
     TCP["Client.insert_native_with_columns<br/>with_columns_tcp (native/TCP, fork #14)"]
     JE["Client.insert_formatted_with<br/>FORMAT JSONEachRow (HTTP)"]
     SM{"SchemaMismatch?"}
@@ -117,8 +117,9 @@ flowchart TB
     SM -->|no| OK["offsets join the flush cycle's one commit"]
 ```
 
-The RowBinary path splits by transport: HTTP ships row-wise `FORMAT RowBinary`
-through `insert_formatted_with`; native/TCP ships per-column blocks through
+The RowBinary path splits by transport: HTTP ships row-wise `FORMAT
+RowBinaryWithNamesAndTypes` through `insert_formatted_with`, whose header lets
+the server refuse bytes encoded for a column type the table no longer has; native/TCP ships per-column blocks through
 `insert_native_with_columns` (`with_columns_tcp`). `json_each_row + native` is
 rejected at config-check -- JSONEachRow goes over HTTP, and a native client has
 no HTTP insert endpoint for it. RowBinary is the portable default, valid on both

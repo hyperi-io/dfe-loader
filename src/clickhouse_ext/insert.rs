@@ -18,9 +18,9 @@
 //!
 //! # Sink abstraction
 //!
-//! The active sink is `Client::insert_formatted_with(... FORMAT RowBinary)`
-//! (HTTP), fed row-wise `encode()` bytes -- the path proven against the live
-//! cluster. FORMAT Native over HTTP (`InsertNative::with_columns`) mis-frames
+//! The active sink is `Client::insert_formatted_with(... FORMAT
+//! RowBinaryWithNamesAndTypes)` (HTTP): a header naming each column and the
+//! type it was encoded for, then row-wise `encode()` bytes. FORMAT Native over HTTP (`InsertNative::with_columns`) mis-frames
 //! the block on this server and is tracked as clickhouse-rs#15.
 //!
 //! The native/TCP sink (`insert_native_with_columns` -> `with_columns_tcp`,
@@ -43,6 +43,43 @@ use super::schema::{DynamicSchema, DynamicSchemaCache, fetch_dynamic_schema};
 /// columns on the wire.
 const JSON_AS_STRING_SETTING: &str = "input_format_binary_read_json_as_string";
 
+/// Settings that make the server check the insert header's column names and
+/// types against the table and refuse a mismatch (code 117), pinned on so a
+/// user profile cannot turn the check off.
+const HEADER_CHECK_SETTINGS: [&str; 2] = [
+    "input_format_with_names_use_header",
+    "input_format_with_types_use_header",
+];
+
+/// Append `value` as the unsigned LEB128 varint `RowBinary` lengths use.
+fn write_varint(out: &mut Vec<u8>, mut value: usize) {
+    loop {
+        let byte = (value & 0x7f) as u8;
+        value >>= 7;
+        if value == 0 {
+            out.push(byte);
+            return;
+        }
+        out.push(byte | 0x80);
+    }
+}
+
+/// The `RowBinaryWithNamesAndTypes` header for `columns`: the column count,
+/// then each name, then each type as `system.columns` reported it.
+fn names_and_types_header(columns: &[ColumnDef]) -> Vec<u8> {
+    let mut header = Vec::new();
+    write_varint(&mut header, columns.len());
+    for text in columns
+        .iter()
+        .map(|c| c.name.as_str())
+        .chain(columns.iter().map(|c| c.type_string.as_str()))
+    {
+        write_varint(&mut header, text.len());
+        header.extend_from_slice(text.as_bytes());
+    }
+    header
+}
+
 /// Backtick-quote a SQL identifier, doubling any internal backticks.
 fn escape_ident(name: &str) -> String {
     format!("`{}`", name.replace('`', "``"))
@@ -62,7 +99,8 @@ pub struct DynamicInsert {
     schema: Option<DynamicSchema>,
     /// Resolved column subset for the active INSERT (fixed from the first row).
     insert_columns: Option<Vec<ColumnDef>>,
-    /// The active sink (HTTP `FORMAT RowBinary`), created lazily on first write.
+    /// The active sink (HTTP `FORMAT RowBinaryWithNamesAndTypes`), created
+    /// lazily on first write.
     sink: Option<clickhouse::insert_formatted::BufInsertFormatted>,
     rows_written: u64,
     /// Whether a schema-mismatch error at `end` drops the cached schema.
@@ -150,25 +188,28 @@ impl DynamicInsert {
                 message: "no columns to insert for this row".to_string(),
             });
         }
-        // Stream encode()'d rows into `INSERT ... FORMAT RowBinary`. The server
-        // parses RowBinary row-wise directly -- the proven pre-migration path.
-        // (FORMAT Native, via InsertNative's columnar transpose, is rejected by
-        // the server here; tracked as a fork issue. RowBinary is HTTP-side.)
+        // Bytes encoded against a stale schema can parse as other rows, so the
+        // header names the types they were encoded for and the server refuses
+        // a mismatch. (FORMAT Native is rejected here; tracked as a fork issue.)
         let cols_sql = columns
             .iter()
             .map(|c| escape_ident(&c.name))
             .collect::<Vec<_>>()
             .join(", ");
         let sql = format!(
-            "INSERT INTO {}.{} ({cols_sql}) FORMAT RowBinary",
+            "INSERT INTO {}.{} ({cols_sql}) FORMAT RowBinaryWithNamesAndTypes",
             escape_ident(&self.database),
             escape_ident(&self.table),
         );
         let mut client = self.client.clone();
+        for setting in HEADER_CHECK_SETTINGS {
+            client = client.with_setting(setting, "1");
+        }
         if schema.has_json_columns() {
             client = client.with_setting(JSON_AS_STRING_SETTING, "1");
         }
-        let sink = client.insert_formatted_with(sql).buffered();
+        let mut sink = client.insert_formatted_with(sql).buffered();
+        sink.write_buffered(&names_and_types_header(&columns));
 
         self.sink = Some(sink);
         self.insert_columns = Some(columns);
@@ -366,6 +407,28 @@ mod tests {
         let names: Vec<&str> = cols.iter().map(|c| c.name.as_str()).collect();
         // id, name present; _json required (no default); _uuid omitted (default, absent)
         assert_eq!(names, vec!["id", "name", "_json"]);
+    }
+
+    #[test]
+    fn the_header_carries_each_name_then_each_type_as_varint_strings() {
+        let columns = vec![
+            ColumnDef::with_default_kind("id", "UInt64", ""),
+            ColumnDef::with_default_kind("_json", "JSON(max_dynamic_paths = 2048)", ""),
+        ];
+        let mut expected = vec![2, 2];
+        expected.extend_from_slice(b"id");
+        expected.push(5);
+        expected.extend_from_slice(b"_json");
+        expected.push(6);
+        expected.extend_from_slice(b"UInt64");
+        expected.push(30);
+        expected.extend_from_slice(b"JSON(max_dynamic_paths = 2048)");
+        assert_eq!(names_and_types_header(&columns), expected);
+
+        // A length past 127 takes a second varint byte.
+        let mut long = Vec::new();
+        write_varint(&mut long, 300);
+        assert_eq!(long, vec![0xac, 0x02]);
     }
 
     #[test]

@@ -21,7 +21,7 @@ here, on top of the upstream `Client`.
 | Module | Responsibility |
 |--------|----------------|
 | `parsed_type` | Parse a `system.columns` type string into a structured `ParsedType` (Nullable, LowCardinality, Array, Map, DateTime64, Decimal, Enum, ...) |
-| `encode` | `DynamicRow`: a `Map<String,Value>` + its `ColumnDef` schema. Two emission modes off the one schema -- row-wise `encode()` bytes (HTTP FORMAT RowBinary) and per-column `Serialize` (native/TCP `with_columns_tcp`) |
+| `encode` | `DynamicRow`: a `Map<String,Value>` + its `ColumnDef` schema. Two emission modes off the one schema -- row-wise `encode()` bytes (HTTP FORMAT RowBinaryWithNamesAndTypes) and per-column `Serialize` (native/TCP `with_columns_tcp`) |
 | `schema` | Fetch a table's columns from `system.columns`; TTL cache with invalidation |
 | `insert` | `DynamicInsert`: lazy schema fetch, `write_map` / `write_map_with_raw`, schema-mismatch recovery |
 | `error` | `DynamicError` (`SchemaMismatch`, `UnsupportedType`, ...) |
@@ -32,9 +32,10 @@ here, on top of the upstream `Client`.
 `DynamicRow` (one `Map` + one `ColumnDef` schema) feeds either sink -- only the
 emission mode differs:
 
-- **HTTP** -> `Client::insert_formatted_with("INSERT ... FORMAT RowBinary")`,
-  fed row-wise `encode()` bytes. The proven path: ClickHouse parses RowBinary
-  directly, row by row, so the loader never relies on server-side block
+- **HTTP** -> `Client::insert_formatted_with("INSERT ... FORMAT
+  RowBinaryWithNamesAndTypes")`, fed a header of column names and the types
+  they were encoded for, then row-wise `encode()` bytes. ClickHouse parses the
+  rows directly, row by row, so the loader never relies on server-side block
   framing.
 - **native/TCP** -> `Client::insert_native_with_columns(table, &columns)` ->
   `with_columns_tcp`, fed the per-column `Serialize` mode (the fork's
@@ -52,7 +53,7 @@ flowchart LR
     DR["DynamicRow"]
     M --> DR
     CD --> DR
-    DR -->|encode() bytes| IFW["insert_formatted_with<br/>FORMAT RowBinary (HTTP)"]
+    DR -->|encode() bytes| IFW["insert_formatted_with<br/>FORMAT RowBinaryWithNamesAndTypes (HTTP)"]
     DR -->|per-column Serialize| INC["insert_native_with_columns<br/>with_columns_tcp (native, #14)"]
 ```
 
@@ -68,7 +69,9 @@ flowchart LR
 insert with a drift signal (`TYPE_MISMATCH`, `NO_SUCH_COLUMN`, `CANNOT_PARSE`,
 code 117, ...), it surfaces `DynamicError::SchemaMismatch`; the `Inserter`
 invalidates the cache so the next attempt re-fetches and re-encodes against the
-current schema.
+current schema. A column whose type changed is caught by the header: the server
+refuses bytes encoded for the old type (code 117) instead of reading them as
+other rows. See [INSERT-FORMATS.md](INSERT-FORMATS.md#when-the-schema-drifts).
 
 ## Consuming the fork
 

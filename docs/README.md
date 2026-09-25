@@ -58,7 +58,7 @@ flowchart TB
 
     subgraph Sink["ClickHouse insert (clickhouse_ext::DynamicInsert)"]
         CE["DynamicRow encoder<br/>Map + schema -> binary"]
-        HTTP["HTTP: insert_formatted_with<br/>FORMAT RowBinary"]
+        HTTP["HTTP: insert_formatted_with<br/>FORMAT RowBinaryWithNamesAndTypes"]
         TCP["native/TCP: insert_native_with_columns<br/>with_columns_tcp"]
         JF["HTTP: insert_formatted_with<br/>FORMAT JSONEachRow (fallback)"]
     end

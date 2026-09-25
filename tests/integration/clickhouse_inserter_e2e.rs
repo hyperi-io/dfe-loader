@@ -1015,13 +1015,29 @@ async fn a_row_the_server_refuses_against_a_current_schema_is_salvaged_not_retri
     assert_eq!(count, 4);
 }
 
-/// A column's type changed under the cached schema: the server refuses bytes
-/// encoded for the old type, but the table no longer matches them, so the
-/// insert re-reads the schema and lands instead of dead-lettering the row.
+/// One `(id, v)` row read back.
+#[derive(clickhouse::Row, serde::Deserialize, Debug, PartialEq)]
+struct IdAndV {
+    id: u64,
+    v: u16,
+}
+
+/// A failed query's code and message, read from `system.query_log`.
+#[derive(clickhouse::Row, serde::Deserialize, Debug)]
+struct QueryException {
+    exception_code: i32,
+    exception: String,
+}
+
+/// Ten rows encoded for `v UInt8` are 90 bytes, which a table since widened to
+/// `v UInt16` reads as nine whole rows of 10. The server must refuse them for
+/// the type they were encoded for, the retry must encode for the new type, and
+/// only the ten rows as sent may land.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_refusal_after_a_type_change_re_reads_the_schema_and_lands() {
+async fn a_batch_encoded_for_an_old_column_type_is_refused_then_lands_as_sent() {
     let (_infra, client, ch) = spin_up(test_name!()).await;
-    let table = unique_table_name("tc_type_change");
+    let reader = ch.clone();
+    let table = unique_table_name("tc_type_change_batch");
     client
         .execute(&format!(
             "CREATE TABLE {table} (id UInt64, v UInt8) ENGINE = MergeTree() ORDER BY id"
@@ -1030,9 +1046,12 @@ async fn a_refusal_after_a_type_change_re_reads_the_schema_and_lands() {
         .expect("create table");
     let inserter = Inserter::new(client.clone(), ch, fast_fail_config())
         .with_insert_format(InsertFormat::RowBinary);
-    let row = |id: u64| vec![json!({ "id": id, "v": 5 }).as_object().unwrap().clone()];
+    let rows = |ids: std::ops::Range<u64>| -> Vec<Map<String, Value>> {
+        ids.map(|id| json!({ "id": id, "v": 5 }).as_object().unwrap().clone())
+            .collect()
+    };
     inserter
-        .insert_rows(&table, &row(1), &[])
+        .insert_rows(&table, &rows(0..1), &[])
         .await
         .expect("insert against the original schema");
 
@@ -1041,20 +1060,34 @@ async fn a_refusal_after_a_type_change_re_reads_the_schema_and_lands() {
         .await
         .expect("widen the column");
 
-    // One row, so the one-byte value leaves the server short of its read.
-    let first = inserter.insert_rows(&table, &row(2), &[]).await;
-    assert!(
-        matches!(first, Err(dfe_loader::Error::ClickHouse(_))),
-        "bytes encoded for the old type were not refused as retryable: {first:?}"
-    );
-    inserter
-        .insert_rows(&table, &row(2), &[])
+    let second = inserter.insert_rows(&table, &rows(10..20), &[]).await;
+    let stored: Vec<IdAndV> = reader
+        .query(&format!("SELECT id, v FROM {table} ORDER BY id"))
+        .fetch_all::<IdAndV>()
         .await
-        .expect("the retry re-reads the schema and lands");
-    let count = client.query_count(&table, None).await.expect("count");
-    assert_eq!(
-        count, 2,
-        "the row written against the old type never landed"
+        .expect("read back");
+    client
+        .execute("SYSTEM FLUSH LOGS")
+        .await
+        .expect("flush the query log");
+    let refused: Vec<QueryException> = reader
+        .query(
+            "SELECT exception_code, exception FROM system.query_log \
+             WHERE type = 'ExceptionWhileProcessing' AND query LIKE ?",
+        )
+        .bind(format!("INSERT INTO %{table}%"))
+        .fetch_all::<QueryException>()
+        .await
+        .expect("read the query log");
+
+    assert_eq!(second.ok(), Some(10), "the retry did not land the batch");
+    let expected: Vec<IdAndV> = (0..1).chain(10..20).map(|id| IdAndV { id, v: 5 }).collect();
+    assert_eq!(stored, expected, "the table holds rows nobody sent");
+    assert!(
+        refused
+            .iter()
+            .any(|q| q.exception_code == 117 && q.exception.contains("must be UInt16, not UInt8")),
+        "the server never refused the bytes encoded for UInt8: {refused:?}"
     );
 }
 

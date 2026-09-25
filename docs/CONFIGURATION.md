@@ -59,7 +59,7 @@ fast path; `json_each_row` is the diagnostic fallback:
 
 | `insert_format` | `transport = http` | `transport = native` |
 |-----------------|--------------------|----------------------|
-| `row_binary` (default) | `insert_formatted_with` FORMAT RowBinary | `insert_native_with_columns` (`with_columns_tcp`) |
+| `row_binary` (default) | `insert_formatted_with` FORMAT RowBinaryWithNamesAndTypes | `insert_native_with_columns` (`with_columns_tcp`) |
 | `json_each_row` | `insert_formatted_with` FORMAT JSONEachRow | **rejected at config-check** |
 
 **Guarded combination:** `insert_format = json_each_row` with `transport =

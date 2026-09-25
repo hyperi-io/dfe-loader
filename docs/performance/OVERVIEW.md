@@ -182,7 +182,7 @@ dfe-loader writes to ClickHouse through the HyperI fork of `clickhouse-rs`
 (tag-pinned via `[patch.crates-io]`), with the dynamic RowBinary layer in
 `src/clickhouse_ext/`. The default path is RowBinary via `DynamicInsert`
 (schema-reflected typed encoding -- ClickHouse skips JSON parsing). On HTTP this
-goes through `Client::insert_formatted_with` (`FORMAT RowBinary`); on native/TCP
+goes through `Client::insert_formatted_with` (`FORMAT RowBinaryWithNamesAndTypes`); on native/TCP
 through `Client::insert_native_with_columns`. Set
 `insert_format = "json_each_row"` to fall back to `FORMAT JSONEachRow` over HTTP
 via `Client::insert_formatted_with`. Tuning below applies to both formats.
