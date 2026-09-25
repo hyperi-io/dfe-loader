@@ -324,7 +324,7 @@ clickhouse = { git = "https://github.com/hyperi-io/clickhouse-rs.git", rev = "6f
 # Temporary: the source acknowledgement API (scalo::transport::ack) until scalo
 # 2.13.0 is on crates.io. Removed, with the floor above raised to >=2.13.0,
 # before this branch merges.
-scalo = { git = "https://github.com/hyperi-io/scalo-rs", branch = "fix/grpc-held-acks-armed" }
+scalo = { git = "https://github.com/hyperi-io/scalo-rs", branch = "fix/at-least-once" }
 #
 # To revert: comment out or remove the [patch.crates-io] section above.
 # =============================================================================

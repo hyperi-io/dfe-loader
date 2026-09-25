@@ -2169,7 +2169,7 @@ const ABSENT_TABLE_TTL: Duration = Duration::from_secs(60);
 const ABSENT_TABLE_CAPACITY: usize = 1024;
 
 /// Total budget for handing a whole flush CYCLE's dead letters to the DLQ,
-/// including the durability barrier at the end of it.
+/// including its confirmation that they were written.
 ///
 /// Backpressure is the point, but the `select!` loop is blocked meanwhile.
 /// scalo documents that backing off `recv` past `max.poll.interval.ms` (default
@@ -2442,47 +2442,21 @@ fn queue_rejected<'a>(
     unplaceable
 }
 
-/// Wait for the DLQ to write everything queued so far, and confirm it dropped
-/// nothing since the count read as `dropped_before`.
+/// Write every dead letter to the DLQ as one batch and prove it written.
 ///
-/// `Dlq::flush` reports only the batch its drain holds at the barrier; a batch
-/// the drain already wrote and lost shows in `dropped()` alone.
-async fn dlq_barrier(
-    dlq: &Dlq,
-    dropped_before: u64,
-    expiry: tokio::time::Instant,
-) -> std::result::Result<(), String> {
-    match tokio::time::timeout_at(expiry, dlq.flush()).await {
-        Ok(Ok(())) => {}
-        Ok(Err(e)) => return Err(format!("DLQ flush failed: {e}")),
-        Err(_elapsed) => return Err("DLQ flush did not complete within the deadline".to_string()),
-    }
-    match dlq.dropped().saturating_sub(dropped_before) {
-        0 => Ok(()),
-        dropped => Err(format!("DLQ dropped {dropped} entries")),
-    }
-}
-
-/// Queue every dead letter on the DLQ and prove them written.
-///
-/// A refused set goes back whole, so a DLQ that wrote part of it holds
-/// duplicates after the retry, never a gap.
+/// `Dlq::write_confirmed` answers for this batch alone, so another writer's
+/// refusal is never taken for this one. A refused set goes back whole, so a
+/// DLQ that wrote part of it holds duplicates after the retry, never a gap.
 async fn place_dead_letters(
     dlq: &Dlq,
     dead_letters: &[DlqEntry],
     expiry: tokio::time::Instant,
 ) -> std::result::Result<(), String> {
-    let dropped_before = dlq.dropped();
-    for entry in dead_letters {
-        match tokio::time::timeout_at(expiry, dlq.send(entry.clone())).await {
-            Ok(Ok(())) => {}
-            Ok(Err(e)) => return Err(format!("DLQ send failed: {e}")),
-            Err(_elapsed) => {
-                return Err("DLQ send did not complete within the deadline".to_string());
-            }
-        }
+    match tokio::time::timeout_at(expiry, dlq.write_confirmed(dead_letters.to_vec())).await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(e)) => Err(format!("DLQ write failed: {e}")),
+        Err(_elapsed) => Err("DLQ write did not complete within the deadline".to_string()),
     }
-    dlq_barrier(dlq, dropped_before, expiry).await
 }
 
 /// How often a paused intake still runs pending-schema upkeep, so a buffer
@@ -2845,7 +2819,7 @@ mod tests {
     }
 
     /// A REAL file-backed DLQ. No broker, no mock: the entries land as NDJSON,
-    /// which is what makes the `flush` durability barrier checkable.
+    /// which is what makes a confirmed write checkable.
     fn file_dlq(dir: &std::path::Path) -> Arc<Dlq> {
         let config = scalo::dlq::DlqConfig {
             enabled: true,
@@ -3129,39 +3103,70 @@ mod tests {
         assert!(rejected_entries(&empty, &[nothing]).is_empty());
     }
 
-    #[tokio::test]
-    async fn a_barrier_over_an_entry_the_drain_lost_is_not_proof_it_was_written() {
-        // The drain writes on its own tick as well as at a barrier, and loses
-        // a batch every backend refuses; only dropped() records that loss.
-        let dir = dlq_dir("barrierdrop");
-        let dlq = file_dlq(&dir);
-        let dropped_before = dlq.dropped();
-
-        // The service directory becomes a regular file, so every write fails.
+    /// The service directory as a regular file, so every write to it fails.
+    fn break_the_writer(dir: &std::path::Path) -> std::path::PathBuf {
         let service = dir.join("loader");
         std::fs::remove_dir_all(&service).expect("remove the DLQ directory");
         std::fs::write(&service, b"not a directory").expect("plant a file");
+        service
+    }
+
+    #[tokio::test]
+    async fn dead_letters_a_broken_writer_loses_are_not_placed() {
+        let dir = dlq_dir("brokenwriter");
+        let dlq = file_dlq(&dir);
+        let service = break_the_writer(&dir);
+
+        let dead_letters = vec![DlqEntry::new(
+            "loader",
+            "clickhouse_permanent_reject",
+            b"{}".to_vec(),
+        )];
+        let placed = place_dead_letters(&dlq, &dead_letters, in_30s()).await;
+        assert!(
+            placed.is_err(),
+            "rows the writer could not write were taken as placed"
+        );
+        let _ = std::fs::remove_file(&service);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn an_earlier_loss_is_not_charged_to_a_later_write() {
+        // The drain loses a batch on its own tick while the writer is broken.
+        // Once it is fixed, a new set of dead letters is written and confirmed
+        // on its own outcome, not refused for the loss before it.
+        let dir = dlq_dir("earlierloss");
+        let dlq = file_dlq(&dir);
+        let service = break_the_writer(&dir);
 
         dlq.send(DlqEntry::new(
             "loader",
             "clickhouse_permanent_reject",
-            b"{}".to_vec(),
+            b"{\"lost\":1}".to_vec(),
         ))
         .await
         .expect("queued");
         // Well past the drain's flush interval, so its tick writes the entry.
         tokio::time::sleep(Duration::from_millis(500)).await;
-        assert!(
-            dlq.dropped() > dropped_before,
-            "the broken writer lost nothing"
-        );
+        assert!(dlq.dropped() > 0, "the broken writer lost nothing");
 
-        let barrier = dlq_barrier(&dlq, dropped_before, in_30s()).await;
+        std::fs::remove_file(&service).expect("remove the planted file");
+        std::fs::create_dir_all(&service).expect("restore the DLQ directory");
+        let dead_letters = vec![DlqEntry::new(
+            "loader",
+            "clickhouse_permanent_reject",
+            b"{\"kept\":1}".to_vec(),
+        )];
+        place_dead_letters(&dlq, &dead_letters, in_30s())
+            .await
+            .expect("a working DLQ takes rows written after an earlier loss");
         assert!(
-            barrier.is_err(),
-            "a barrier after the drain lost an entry proved it written"
+            spooled_lines(&dir)
+                .iter()
+                .any(|l| l.contains("clickhouse_permanent_reject")),
+            "the confirmed entry is not on disk"
         );
-        let _ = std::fs::remove_file(&service);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
