@@ -589,6 +589,13 @@ fn supported_type_cases() -> Vec<TypeCase> {
         ),
         case("Enum8('a' = 1, 'b' = 2)", json!("b"), TEXT, "b"),
         case("Enum16('x' = 1000, 'y' = 2000)", json!("y"), TEXT, "y"),
+        case("Enum8('a' = 1, 'b' = 2)", json!(2), TEXT, "b"),
+        case(
+            "Nullable(Enum8('on' = 1, 'off' = 2))",
+            json!("off"),
+            OR_NULL,
+            "off",
+        ),
         case("Array(String)", json!(["a", "b"]), TEXT, "['a','b']"),
         case("Array(UInt32)", json!([1, 2, 3]), TEXT, "[1,2,3]"),
         case("Array(Nullable(Int64))", json!([1, null]), TEXT, "[1,NULL]"),

@@ -72,7 +72,7 @@ See [clickhouse/INSERT-FORMATS.md](clickhouse/INSERT-FORMATS.md).
 Config changes are picked up live. Fields that only affect the running pipeline
 (buffer thresholds, capture modes, enrichment toggles, routing rules) apply
 immediately. Fields baked into a connection or client at build time
-(`clickhouse.transport`, ClickHouse URL/hosts, `insert_format`, TLS settings,
+(`clickhouse.protocol`, ClickHouse URL/hosts, `insert_format`, TLS settings,
 Kafka connection) are restart-required: the reloader logs a warning naming the
 field and keeps the running value rather than applying a half-change. See
 [CONFIGURATION.md](CONFIGURATION.md#hot-reload).

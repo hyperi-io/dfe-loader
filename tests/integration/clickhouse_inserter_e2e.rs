@@ -1073,6 +1073,84 @@ async fn a_row_refused_with_an_unlisted_code_is_salvaged_not_retried() {
     assert_eq!(client.query_count(&table, None).await.expect("count"), 5);
 }
 
+/// One enum value read back as its number.
+#[derive(clickhouse::Row, serde::Deserialize)]
+struct EnumValue {
+    v: i8,
+}
+
+/// ClickHouse stores an enum number no member declares when it arrives as
+/// RowBinary, so the loader refuses it: the row carrying it is dead-lettered
+/// with the reason, the rows around it land, and no undeclared value is
+/// stored. The column is named like a network fault, which must not hold the
+/// batch.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_enum_value_no_member_declares_is_dead_lettered_not_stored() {
+    let (_infra, client, ch) = spin_up(test_name!()).await;
+    let reader = ch.clone();
+    let table = unique_table_name("tc_enum_range");
+    client
+        .execute(&format!(
+            "CREATE TABLE {table} (id UInt64, timeout_kind Enum8('a' = 1, 'b' = 2), \
+             state Nullable(Enum8('on' = 1, 'off' = 2))) ENGINE = MergeTree() ORDER BY id"
+        ))
+        .await
+        .expect("create table");
+    let inserter = Inserter::new(client.clone(), ch, InserterConfig::default())
+        .with_insert_format(InsertFormat::RowBinary);
+    let rows: Vec<Map<String, Value>> = (0..6u64)
+        .map(|id| {
+            let kind = match id {
+                2 => json!(7),
+                4 => json!("b"),
+                _ => json!(1),
+            };
+            json!({ "id": id, "timeout_kind": kind, "state": "off" })
+                .as_object()
+                .unwrap()
+                .clone()
+        })
+        .collect();
+
+    let result = inserter
+        .insert_with_salvage(FlushBatch {
+            table: CompactString::from(table.as_str()),
+            rows,
+            offsets: Vec::new(),
+            raw_payloads: Vec::new(),
+        })
+        .await;
+    let stored: Vec<EnumValue> = reader
+        .query(&format!(
+            "SELECT toInt8(timeout_kind) AS v FROM {table} ORDER BY id"
+        ))
+        .fetch_all()
+        .await
+        .expect("read back");
+
+    assert!(
+        result.is_settled(),
+        "the refused row held the batch: {:?}",
+        result.disposition
+    );
+    assert_eq!(result.failed.len(), 1, "failed: {:?}", result.failed);
+    assert_eq!(result.failed[0].row_index, 2);
+    assert!(
+        result.failed[0]
+            .reason
+            .contains("enum value is not one of the column's members"),
+        "the reason does not say why: {}",
+        result.failed[0].reason
+    );
+    assert_eq!(result.inserted, 5, "the good rows did not land");
+    let values: Vec<i8> = stored.iter().map(|row| row.v).collect();
+    assert_eq!(
+        values,
+        vec![1, 1, 1, 2, 1],
+        "an undeclared value was stored"
+    );
+}
+
 /// One INSERT spanning more partitions than `max_partitions_per_insert_block`
 /// (default 100) draws `TOO_MANY_PARTS` on every retry of the same batch, so
 /// it is split, and every row lands with none dead-lettered.

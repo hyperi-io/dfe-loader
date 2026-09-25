@@ -134,9 +134,10 @@ pub fn is_max_dynamic_paths_error(err: &str) -> bool {
 
 /// Classify a dynamic-insert (`RowBinary` encode) failure, transient first.
 ///
-/// Permanent means one thing only: this payload can never encode. A message
-/// naming a network or resource fault is never a verdict on the payload, so
-/// it is tested before the variant is.
+/// Permanent means one thing only: this payload can never encode. An encoding
+/// message naming a network or resource fault is never a verdict on the
+/// payload, so it is tested first -- the message alone, never the column name
+/// beside it, which is the customer's (`timeout_ms`, `connection_id`).
 ///
 /// Of the variants, only
 /// [`EncodingError`](crate::clickhouse_ext::DynamicError::EncodingError) is a
@@ -155,11 +156,14 @@ pub fn is_max_dynamic_paths_error(err: &str) -> bool {
 pub fn classify_dynamic_error(err: &crate::clickhouse_ext::DynamicError) -> ErrorCategory {
     use crate::clickhouse_ext::DynamicError;
 
-    if classify_from_message(&err.to_string()) == ErrorCategory::Transient {
-        return ErrorCategory::Transient;
-    }
     match err {
-        DynamicError::EncodingError { .. } => ErrorCategory::Data,
+        DynamicError::EncodingError { message, .. } => {
+            if classify_from_message(message) == ErrorCategory::Transient {
+                ErrorCategory::Transient
+            } else {
+                ErrorCategory::Data
+            }
+        }
         DynamicError::SchemaFetch { .. }
         | DynamicError::UnsupportedType { .. }
         | DynamicError::EmptySchema { .. }
@@ -591,6 +595,21 @@ mod tests {
             message: "connection reset by peer".to_string(),
         };
         assert_eq!(classify_dynamic_error(&err), ErrorCategory::Transient);
+    }
+
+    #[test]
+    fn a_column_named_like_a_network_fault_does_not_hold_its_bad_rows() {
+        for column in ["timeout_ms", "connection_id", "socket_state"] {
+            let err = DynamicError::EncodingError {
+                column: column.to_string(),
+                message: "enum value is not one of the column's members".to_string(),
+            };
+            assert_eq!(
+                classify_dynamic_error(&err),
+                ErrorCategory::Data,
+                "{column}"
+            );
+        }
     }
 
     #[test]
