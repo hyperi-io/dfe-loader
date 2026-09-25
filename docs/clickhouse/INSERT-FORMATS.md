@@ -112,7 +112,7 @@ invalidated so the next attempt re-fetches from `system.columns` and re-encodes.
 A non-drift error (network, auth) is returned as-is. See
 [SCHEMA-CACHE.md](SCHEMA-CACHE.md).
 
-The same codes come back for a row the server can never accept, so a refusal against a table unchanged since the rows were encoded is the rows' own: salvage dead-letters the bad row and the rest land.
+The same codes come back for a row the server can never accept, so the server's code decides, never the words beside it: a code on the retry list holds the batch, and any other refusal against a table unchanged since the rows were encoded is the rows' own, so salvage dead-letters the bad row and the rest land. The list and the reason for each group are in [SCHEMA-CACHE.md](SCHEMA-CACHE.md#mismatch-recovery).
 
 A type change is caught before any row is read. RowBinary is positional, so bytes encoded for a column's old type can parse as other rows: ten rows written for `UInt8` are 90 bytes, which a `UInt16` column reads as nine whole rows of garbage, with no error. The header carries the type each column was encoded for, and with `input_format_with_types_use_header=1` (the default, and pinned on the insert with `input_format_with_names_use_header`) the server refuses a mismatch with code 117 ("Type of 'v' must be UInt16, not UInt8"). That refusal against a changed table takes the drift path above. The header costs one column count plus each name and type string once per INSERT, 235 bytes for a 10-column landing table.
 

@@ -47,8 +47,8 @@ use crate::buffer::{FlushBatch, KafkaOffset};
 use crate::clickhouse::client_http::escape_identifier;
 use crate::clickhouse::config::InsertFormat;
 use crate::clickhouse::error::{
-    ErrorCategory, classify_dynamic_error, classify_insert_end_error, classify_json_insert_error,
-    is_payload_refusal, is_schema_drift_error,
+    ErrorCategory, classify_dynamic_error, classify_json_insert_error, is_schema_drift_error,
+    retries, server_code,
 };
 use crate::clickhouse::{ClickHouseQueryClient, SchemaCache};
 use crate::clickhouse_ext::{ColumnDef, json_shaping_changes, shape_json_for_type};
@@ -666,48 +666,7 @@ impl Inserter {
             }
 
             let encoded_against = insert.take_schema();
-            let outcome = insert.end().await;
-            if let Err(e) = &outcome
-                && is_payload_refusal(&e.to_string())
-            {
-                // A refusal of the bytes against the table as it still stands
-                // is the rows' own: no re-fetch can change the server's verdict.
-                if self
-                    .schema_unchanged(db, tbl, encoded_against.as_ref())
-                    .await
-                {
-                    debug!(
-                        table = %table,
-                        error = %e,
-                        "Server refused the rows against a current schema, returning for salvage"
-                    );
-                    return Err(crate::Error::ClickHousePermanent(format!(
-                        "RowBinary insert: {e}"
-                    )));
-                }
-                // The table changed under the rows: drift, so the retry
-                // encodes against the table as it is now.
-                if self.refresh_on_error {
-                    self.dynamic_schema_cache.invalidate(&format!("{db}.{tbl}"));
-                    self.drop_cached_schema(table);
-                }
-                last_error = Some(crate::Error::ClickHouse(format!("RowBinary insert: {e}")));
-                if attempt < self.max_retries {
-                    let delay = self.backoff_delay(attempt);
-                    warn!(
-                        table = %table,
-                        attempt,
-                        error = %e,
-                        delay_ms = delay.as_millis(),
-                        refresh_on_error = self.refresh_on_error,
-                        "Table changed under the rows, retrying against its current schema"
-                    );
-                    sleep(delay).await;
-                    continue;
-                }
-                break;
-            }
-            match outcome {
+            let e = match insert.end().await {
                 Ok(count) => {
                     debug!(
                         table = %table,
@@ -717,64 +676,62 @@ impl Inserter {
                     );
                     return Ok(count as usize);
                 }
-                Err(crate::clickhouse_ext::DynamicError::SchemaMismatch { .. }) => {
-                    // Invalidate loader's schema cache alongside the fork's
-                    if self.refresh_on_error {
-                        self.drop_cached_schema(table);
-                    }
-                    if attempt < self.max_retries {
-                        let delay = self.backoff_delay(attempt);
-                        warn!(
-                            table = %table,
-                            attempt,
-                            delay_ms = delay.as_millis(),
-                            refresh_on_error = self.refresh_on_error,
-                            "Schema mismatch on end(), retrying"
-                        );
-                        sleep(delay).await;
-                        last_error = Some(crate::Error::ClickHouse(
-                            "Schema mismatch on flush".to_string(),
-                        ));
-                        continue;
-                    }
-                    last_error = Some(crate::Error::ClickHouse(
-                        "Schema mismatch after max retries".to_string(),
-                    ));
+                Err(e) => e,
+            };
+            let message = format!("RowBinary insert: {e}");
+            // The server's code decides, never the rows a refusal echoes back.
+            match server_code(&message) {
+                Some(code) if retries(code, &message) => {
+                    return Err(crate::Error::ClickHouse(message));
                 }
-                Err(e) => {
-                    let message = format!("RowBinary insert: {e}");
-                    if is_schema_drift_error(&e.to_string()) {
-                        // end() consumed the DynamicInsert, so the encoder's entry
-                        // is dropped by the key DynamicInsert caches it under.
-                        if self.refresh_on_error {
-                            self.dynamic_schema_cache.invalidate(&format!("{db}.{tbl}"));
-                            self.drop_cached_schema(table);
-                        }
-                        if attempt < self.max_retries {
-                            let delay = self.backoff_delay(attempt);
-                            warn!(
-                                table = %table,
-                                attempt,
-                                error = %e,
-                                delay_ms = delay.as_millis(),
-                                refresh_on_error = self.refresh_on_error,
-                                "Schema drift on end(), retrying"
-                            );
-                            sleep(delay).await;
-                            last_error = Some(crate::Error::ClickHouse(message));
-                            continue;
-                        }
-                        last_error = Some(crate::Error::ClickHouse(message));
-                        break;
-                    }
-                    // Permanent means the payload can never encode. Drift was
-                    // ruled out above, so the message classification decides.
-                    return Err(match classify_insert_end_error(&message) {
-                        ErrorCategory::Data => crate::Error::ClickHousePermanent(message),
-                        _ => crate::Error::ClickHouse(message),
-                    });
+                // A refusal against the table as it still stands is the rows'
+                // own: no re-fetch can change the server's verdict.
+                Some(_)
+                    if self
+                        .schema_unchanged(db, tbl, encoded_against.as_ref())
+                        .await =>
+                {
+                    debug!(
+                        table = %table,
+                        error = %e,
+                        "Server refused the rows against a current schema, returning for salvage"
+                    );
+                    return Err(crate::Error::ClickHousePermanent(message));
                 }
+                Some(_) => {}
+                // No code: nothing was decided about the rows, and only the
+                // client's own drift wording is worth an encode against a
+                // fresh schema.
+                None if !matches!(
+                    e,
+                    crate::clickhouse_ext::DynamicError::SchemaMismatch { .. }
+                ) && !is_schema_drift_error(&message) =>
+                {
+                    return Err(crate::Error::ClickHouse(message));
+                }
+                None => {}
             }
+            // The table changed under the rows: drift, so the retry encodes
+            // against the table as it is now.
+            if self.refresh_on_error {
+                self.dynamic_schema_cache.invalidate(&format!("{db}.{tbl}"));
+                self.drop_cached_schema(table);
+            }
+            last_error = Some(crate::Error::ClickHouse(message));
+            if attempt < self.max_retries {
+                let delay = self.backoff_delay(attempt);
+                warn!(
+                    table = %table,
+                    attempt,
+                    error = %e,
+                    delay_ms = delay.as_millis(),
+                    refresh_on_error = self.refresh_on_error,
+                    "Table changed under the rows, retrying against its current schema"
+                );
+                sleep(delay).await;
+                continue;
+            }
+            break;
         }
 
         Err(last_error.unwrap_or_else(|| crate::Error::Buffer("Max retries exceeded".into())))

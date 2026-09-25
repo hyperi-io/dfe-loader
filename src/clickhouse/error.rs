@@ -132,27 +132,6 @@ pub fn is_max_dynamic_paths_error(err: &str) -> bool {
         || (err.contains("LOGICAL_ERROR") && err.contains("dynamic path"))
 }
 
-/// Classify a failure returned by `insert.end()`.
-///
-/// Drift is checked FIRST and always wins. DFE promotes JSON paths to columns
-/// at runtime, so an `ALTER` landing mid-flush is normal operation, and the
-/// wording a server picks for it overlaps the data-error patterns -- "cannot
-/// parse", "type mismatch", "incorrect data" all appear in both. Reading one
-/// of those as a permanent verdict destroys a batch the next schema fetch
-/// would have encoded correctly, so drift withholds the offsets and comes
-/// back instead.
-///
-/// A refusal carrying a payload-rejection code ([`is_payload_refusal`]) gets
-/// here only when the inserter's re-read of the schema found the table changed
-/// or could not read it. An unchanged table makes it the rows' own first.
-#[must_use]
-pub fn classify_insert_end_error(msg: &str) -> ErrorCategory {
-    if is_schema_drift_error(msg) {
-        return ErrorCategory::Transient;
-    }
-    classify_from_message(msg)
-}
-
 /// Classify a dynamic-insert (`RowBinary` encode) failure, transient first.
 ///
 /// Permanent means one thing only: this payload can never encode. A message
@@ -188,29 +167,96 @@ pub fn classify_dynamic_error(err: &crate::clickhouse_ext::DynamicError) -> Erro
     }
 }
 
-/// `ClickHouse` error codes that mean "I read your bytes and cannot accept
-/// them". Every one is deterministic for a given payload -- the same bytes
-/// fail the same way on every redelivery, so retrying wedges the partition.
+/// `ClickHouse` error codes an insert is retried on: the rows are not at fault,
+/// and the same rows land once the condition clears. Any OTHER code the server
+/// returns is a refusal of the rows -- dead-lettered row by row after salvage,
+/// unless the table changed under them.
 ///
-/// Codes come from the server's `src/Common/ErrorCodes.cpp`. 27, 33 and 72 are
-/// observed against a live server on the `JSONEachRow` path, and 33 and 117 on
-/// the `RowBinary` path. The rest are the sibling failures the same readers
-/// raise for other column types.
-const PAYLOAD_REJECTION_CODES: &[i32] = &[
-    6,   // CANNOT_PARSE_TEXT
-    26,  // CANNOT_PARSE_QUOTED_STRING
-    27,  // CANNOT_PARSE_INPUT_ASSERTION_FAILED
-    33,  // CANNOT_READ_ALL_DATA -- a truncated row
-    38,  // CANNOT_PARSE_DATE
-    41,  // CANNOT_PARSE_DATETIME
-    53,  // TYPE_MISMATCH
-    69,  // ARGUMENT_OUT_OF_BOUND
-    72,  // CANNOT_PARSE_NUMBER
-    117, // INCORRECT_DATA
-    131, // TOO_LARGE_STRING_SIZE
-    407, // DECIMAL_OVERFLOW
-    469, // VIOLATED_CONSTRAINT
+/// Names from the server's `src/Common/ErrorCodes.cpp`, read out of the 26.3
+/// binary with `errorCodeToName`. A code missing here dead-letters rows a retry
+/// would have landed, so each group names why it clears.
+const RETRY_CODES: &[i32] = &[
+    // The server is busy, or short of a resource that frees up.
+    159, // TIMEOUT_EXCEEDED
+    160, // TOO_SLOW
+    173, // CANNOT_ALLOCATE_MEMORY
+    201, // QUOTA_EXCEEDED -- the quota interval resets
+    202, // TOO_MANY_SIMULTANEOUS_QUERIES
+    203, // NO_FREE_CONNECTION
+    236, // ABORTED -- a KILL or a server shutting down
+    241, // MEMORY_LIMIT_EXCEEDED
+    243, // NOT_ENOUGH_SPACE
+    252, // TOO_MANY_PARTS -- merges catch up; see `retries` for its other use
+    290, // LIMIT_EXCEEDED
+    364, // RECEIVED_ERROR_TOO_MANY_REQUESTS
+    384, // PART_IS_TEMPORARILY_LOCKED
+    394, // QUERY_WAS_CANCELLED
+    425, // SYSTEM_ERROR -- an OS resource such as open files
+    439, // CANNOT_SCHEDULE_TASK
+    473, // DEADLOCK_AVOIDED
+    574, // DISTRIBUTED_TOO_MANY_PENDING_BYTES
+    700, // USER_SESSION_LIMIT_EXCEEDED
+    735, // QUERY_WAS_CANCELLED_BY_CLIENT
+    738, // PART_IS_LOCKED
+    745, // SERVER_OVERLOADED
+    749, // TCP_CONNECTION_LIMIT_REACHED
+    762, // HTTP_CONNECTION_LIMIT_REACHED
+    // The network between the server and its peers, or the loader.
+    95,  // CANNOT_READ_FROM_SOCKET
+    96,  // CANNOT_WRITE_TO_SOCKET
+    209, // SOCKET_TIMEOUT
+    210, // NETWORK_ERROR
+    279, // ALL_CONNECTION_TRIES_FAILED
+    // Replication and Keeper: a replica goes read-only until Keeper is back.
+    225, // NO_ZOOKEEPER
+    242, // TABLE_IS_READ_ONLY
+    244, // UNEXPECTED_ZOOKEEPER_ERROR
+    254, // NO_ACTIVE_REPLICAS
+    285, // TOO_FEW_LIVE_REPLICAS
+    286, // UNSATISFIED_QUORUM_FOR_PREVIOUS_WRITE
+    289, // REPLICA_IS_NOT_IN_QUORUM
+    319, // UNKNOWN_STATUS_OF_INSERT
+    369, // ALL_REPLICAS_ARE_STALE
+    415, // ALL_REPLICAS_LOST
+    571, // DATABASE_REPLICATION_FAILED
+    659, // UNKNOWN_STATUS_OF_TRANSACTION
+    904, // TOO_MANY_UNAVAILABLE_SHARDS
+    999, // KEEPER_EXCEPTION
+    // An operator fix: true of every row, and the same rows land once fixed.
+    60,  // UNKNOWN_TABLE
+    81,  // UNKNOWN_DATABASE
+    164, // READONLY
+    192, // UNKNOWN_USER
+    193, // WRONG_PASSWORD
+    194, // REQUIRED_PASSWORD
+    195, // IP_ADDRESS_NOT_ALLOWED
+    291, // DATABASE_ACCESS_DENIED
+    497, // ACCESS_DENIED
+    516, // AUTHENTICATION_FAILED
+    673, // RESOURCE_ACCESS_DENIED
 ];
+
+/// Whether the server code `code` is one [`RETRY_CODES`] lists.
+#[must_use]
+pub fn is_retry_code(code: i32) -> bool {
+    RETRY_CODES.contains(&code)
+}
+
+/// `TOO_MANY_PARTS`, which the server also raises for one INSERT spanning more
+/// partitions than `max_partitions_per_insert_block`.
+const TOO_MANY_PARTS: i32 = 252;
+
+/// Whether a failure carrying the server code `code` and the server's own
+/// `message` leaves the rows retryable.
+///
+/// A batch over the partition limit is refused again on every retry and lands
+/// once salvage splits it, so that one `TOO_MANY_PARTS` is a refusal. Its
+/// wording is the server's fixed text and echoes no row.
+#[must_use]
+pub fn retries(code: i32, message: &str) -> bool {
+    is_retry_code(code)
+        && !(code == TOO_MANY_PARTS && message.contains("partitions for single INSERT block"))
+}
 
 /// Classify a `JSONEachRow` insert failure from the client's own error type.
 ///
@@ -224,22 +270,21 @@ const PAYLOAD_REJECTION_CODES: &[i32] = &[
 ///    "timeout" or "socket" reads as a transport fault under transient-first
 ///    and comes back forever, wedging the partition on one poison row.
 /// 2. **`JSONEachRow` is matched by column NAME, so no schema was held.** The
-///    drift-first rule that [`classify_insert_end_error`] applies to
-///    `RowBinary` is right there -- a positional encode against a stale schema
-///    really does surface as "cannot parse", and a re-fetch really does fix
-///    it. Here the loader encoded against nothing, so a re-fetch changes not
-///    one byte and withholding only defers the same rejection.
+///    `RowBinary` path re-reads the schema before taking a refusal as the
+///    rows' own, because a positional encode against a stale schema really
+///    is refused and a re-fetch really does fix it. Here the loader encoded
+///    against nothing, so a re-fetch changes not one byte.
 ///
 /// Unknown columns need no gate on this path: the server accepts and ignores
 /// them (`input_format_skip_unknown_fields` defaults on), so the window
 /// between promoting a JSON path and its `ALTER` landing never surfaces as an
 /// insert failure at all.
 ///
-/// Only the server's own verdict may send rows to the DLQ. Everything short of
-/// one -- an unrecognised code, an unreadable body, a transport fault -- falls
-/// through to the existing message patterns with `Data` downgraded out of
-/// them, so a string can still pick between fatal and transient (neither loses
-/// a row) but can never DLQ one.
+/// A server code decides: one that [`retries`] retries, any other is the
+/// server's refusal of the rows. Only a failure with no code -- a transport
+/// fault, an unreadable body -- falls through to the message patterns, with
+/// `Data` downgraded out of them, so a string can still pick between fatal
+/// and transient (neither loses a row) but can never DLQ one.
 #[must_use]
 pub fn classify_json_insert_error(err: &clickhouse::error::Error) -> ErrorCategory {
     use clickhouse::error::Error as ChError;
@@ -249,13 +294,12 @@ pub fn classify_json_insert_error(err: &clickhouse::error::Error) -> ErrorCatego
         return ErrorCategory::Transient;
     }
 
-    if let ChError::ServerException { code, .. } = err {
-        if ChError::is_retriable_code(*code) {
-            return ErrorCategory::Transient;
-        }
-        if PAYLOAD_REJECTION_CODES.contains(code) {
-            return ErrorCategory::Data;
-        }
+    if let ChError::ServerException { code, message, .. } = err {
+        return if retries(*code, message) {
+            ErrorCategory::Transient
+        } else {
+            ErrorCategory::Data
+        };
     }
 
     match classify_from_message(&err.to_string()) {
@@ -265,7 +309,9 @@ pub fn classify_json_insert_error(err: &clickhouse::error::Error) -> ErrorCatego
 }
 
 /// The server's exception code in a clickhouse-rs error's text, which reads
-/// `server error code {code}: {message}` wherever it is nested.
+/// `server error code {code}: {message}` wherever it is nested. The code
+/// precedes the message, so the first marker is the server's and not one a
+/// row echoed back inside the message.
 #[must_use]
 pub fn server_code(msg: &str) -> Option<i32> {
     const MARKER: &str = "server error code ";
@@ -274,17 +320,6 @@ pub fn server_code(msg: &str) -> Option<i32> {
         .find(|c: char| !c.is_ascii_digit())
         .unwrap_or(after.len());
     after[..end].parse().ok()
-}
-
-/// Whether a `RowBinary` refusal carries a code the server gives only for
-/// bytes it read and cannot accept.
-///
-/// Rows encoded against a stale schema draw the same codes, so this alone is
-/// not a verdict on the payload: the caller rules drift out by reading the
-/// table's schema again first.
-#[must_use]
-pub fn is_payload_refusal(msg: &str) -> bool {
-    server_code(msg).is_some_and(|code| PAYLOAD_REJECTION_CODES.contains(&code))
 }
 
 /// Classify error from HTTP response message.
@@ -559,59 +594,44 @@ mod tests {
     }
 
     #[test]
-    fn drift_wording_beats_the_data_patterns_on_end() {
-        // These three strings match BOTH is_schema_drift_error and the Data
-        // patterns. Drift self-heals on a re-fetch, so it must win.
-        for msg in [
-            "Cannot parse input: expected column source_ip",
-            "Type mismatch for column agent_type",
-            "DB::Exception: INCORRECT_DATA",
-            "Unknown column host_name",
-        ] {
-            assert_eq!(
-                classify_insert_end_error(msg),
-                ErrorCategory::Transient,
-                "drift must withhold offsets, not DLQ: {msg}"
-            );
-        }
-    }
-
-    #[test]
-    fn a_row_binary_refusal_is_read_by_the_code_wherever_it_is_nested() {
+    fn a_row_binary_failure_is_read_by_its_code_wherever_it_is_nested() {
         // What the RowBinary end() hands back for the overflow in a JSON
-        // column: the server names no exception, and the body echoes the row.
+        // column: the server names no exception, and the body echoes the row,
+        // including a marker of its own.
         let refusal = format!(
             "RowBinary insert: encoding error for column '': {}",
             server_exception(
                 117,
-                "Cannot parse JSON object here: {\"reason\":\"connection reset\",\"big\":123456789012345678901234567890}"
+                "Cannot parse JSON object here: {\"reason\":\"server error code 241\",\"big\":1}"
             )
         );
         assert_eq!(server_code(&refusal), Some(117));
-        assert!(is_payload_refusal(&refusal));
-        assert!(is_payload_refusal(
-            &server_exception(469, "Constraint `below_limit` violated").to_string()
-        ));
-
-        // An operator fix, a struggling server, or no code at all is no
-        // verdict on the rows, whatever the words.
-        for not_the_rows in [
-            server_exception(60, "Table default.events does not exist").to_string(),
-            server_exception(16, "No such column name in table").to_string(),
-            server_exception(241, "Memory limit exceeded: cannot parse").to_string(),
-            "bad response: Cannot parse input: INCORRECT_DATA".to_string(),
-        ] {
-            assert!(!is_payload_refusal(&not_the_rows), "{not_the_rows}");
-        }
+        assert_eq!(
+            server_code("bad response: Cannot parse input: INCORRECT_DATA"),
+            None
+        );
         assert_eq!(server_code("server error code : empty"), None);
     }
 
     #[test]
-    fn a_non_drift_data_rejection_stays_permanent_on_end() {
-        assert_eq!(
-            classify_insert_end_error("server error code 117: Cannot insert data into JSON column"),
-            ErrorCategory::Data
-        );
+    fn only_a_listed_code_leaves_the_rows_retryable() {
+        // The server was busy, short of memory or parts headroom, the network
+        // or Keeper failed, or an operator has to fix access or the table.
+        for retry in [159, 202, 209, 210, 241, 252, 242, 999, 60, 81, 497, 516] {
+            assert!(
+                is_retry_code(retry),
+                "code {retry} was refused as the rows'"
+            );
+        }
+        // CANNOT_CONVERT_TYPE, CANNOT_INSERT_NULL_IN_ORDINARY_COLUMN,
+        // UNKNOWN_ELEMENT_OF_ENUM, INCORRECT_DATA, VIOLATED_CONSTRAINT, a drift
+        // code and one no release has used: each refuses the rows.
+        for refused in [70, 349, 691, 117, 469, 16, 12_345] {
+            assert!(
+                !is_retry_code(refused),
+                "code {refused} would retry for ever"
+            );
+        }
     }
 
     // ========================================================================
@@ -655,6 +675,39 @@ mod tests {
             )),
             ErrorCategory::Data
         );
+    }
+
+    #[test]
+    fn too_many_partitions_in_one_insert_is_a_refusal_and_too_many_parts_is_not() {
+        assert!(retries(
+            252,
+            "Too many parts (300 with average size of 1.00 KiB)"
+        ));
+        assert!(!retries(
+            252,
+            "Too many partitions for single INSERT block (more than 100)."
+        ));
+        assert!(!retries(691, "Unknown element 'timeout' for enum"));
+    }
+
+    #[test]
+    fn an_unlisted_code_refuses_the_rows_whatever_the_words() {
+        // Codes a per-row data fault raises beyond the parse errors, one of
+        // them worded like a transport fault.
+        for err in [
+            server_exception(70, "Cannot convert type"),
+            server_exception(
+                349,
+                "Cannot insert NULL value into a column of type 'String' at: {\"detail\":\"timeout\"}",
+            ),
+            server_exception(691, "Unknown element 'z' for enum"),
+        ] {
+            assert_eq!(
+                classify_json_insert_error(&err),
+                ErrorCategory::Data,
+                "{err} would be retried for ever"
+            );
+        }
     }
 
     #[test]
@@ -748,11 +801,11 @@ mod tests {
             )),
             ErrorCategory::Fatal
         );
-        // An unrecognised server code keeps its retry budget rather than
-        // being declared a payload verdict on the strength of a code table.
+        // A server code no release has used yet is still the server's verdict:
+        // only the listed codes retry.
         assert_eq!(
             classify_json_insert_error(&server_exception(9999, "something new")),
-            ErrorCategory::Unknown
+            ErrorCategory::Data
         );
     }
 }
