@@ -3791,7 +3791,11 @@ mod tests {
     async fn a_too_deep_record_answers_its_sender_only_once_the_dlq_holds_it() {
         let deep = nested_object(crate::payload::depth::MAX_PARSE_DEPTH + 1);
         for holds_answers in [false, true] {
-            let dir = dlq_dir(if holds_answers { "deepheld" } else { "deeppull" });
+            let dir = dlq_dir(if holds_answers {
+                "deepheld"
+            } else {
+                "deeppull"
+            });
             let dlq = file_dlq(&dir);
             let mut orchestrator = Orchestrator::new(Config::default());
             orchestrator.holds_answers = holds_answers;
@@ -3801,10 +3805,8 @@ mod tests {
                 orchestrator.acks.admit(5);
             }
 
-            orchestrator.dead_letter_too_deep(vec![
-                msg_at(5, deep.as_bytes()),
-                msg_at(6, deep.as_bytes()),
-            ]);
+            orchestrator
+                .dead_letter_too_deep(vec![msg_at(5, deep.as_bytes()), msg_at(6, deep.as_bytes())]);
             orchestrator
                 .acks
                 .settle(seq_of(5), DeliveryStatus::Delivered);

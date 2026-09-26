@@ -206,12 +206,12 @@ const RETRY_CODES: &[i32] = &[
     749, // TCP_CONNECTION_LIMIT_REACHED
     762, // HTTP_CONNECTION_LIMIT_REACHED
     // The network between the server and its peers, or the loader.
-    95,  // CANNOT_READ_FROM_SOCKET
-    96,  // CANNOT_WRITE_TO_SOCKET
-    198, // DNS_ERROR
-    209, // SOCKET_TIMEOUT
-    210, // NETWORK_ERROR
-    279, // ALL_CONNECTION_TRIES_FAILED
+    95,   // CANNOT_READ_FROM_SOCKET
+    96,   // CANNOT_WRITE_TO_SOCKET
+    198,  // DNS_ERROR
+    209,  // SOCKET_TIMEOUT
+    210,  // NETWORK_ERROR
+    279,  // ALL_CONNECTION_TRIES_FAILED
     1000, // POCO_EXCEPTION -- any Poco library error the server did not wrap
     // Replication and Keeper: a replica goes read-only until Keeper is back.
     225, // NO_ZOOKEEPER
