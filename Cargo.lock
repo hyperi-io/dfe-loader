@@ -4244,7 +4244,7 @@ dependencies = [
 [[package]]
 name = "scalo"
 version = "2.12.0"
-source = "git+https://github.com/hyperi-io/scalo-rs?branch=fix%2Fat-least-once#fc1afa976905160b7bffe6fc5b1c5b545fffa9a4"
+source = "git+https://github.com/hyperi-io/scalo-rs?branch=fix%2Fzstd-default#0fd8aa54cbb83e3912421658fc015c21ebad9c74"
 dependencies = [
  "aes-gcm",
  "backon",

@@ -318,10 +318,10 @@ map_unwrap_or = "allow"
 # Pinned to the hyperi-port/06d-tcp-tls-new branch tip for a reproducible
 # build (a sha, not a floating branch ref).
 clickhouse = { git = "https://github.com/hyperi-io/clickhouse-rs.git", rev = "6f9acd9694acc9c596ff687c908aa215af100887" }
-# Temporary: the source acknowledgement API (scalo::transport::ack) until scalo
-# 2.13.0 is on crates.io. Removed, with the floor above raised to >=2.13.0,
-# before this branch merges.
-scalo = { git = "https://github.com/hyperi-io/scalo-rs", branch = "fix/at-least-once" }
+# Temporary: what scalo 2.13.0 ships -- the source acknowledgement API
+# (scalo::transport::ack) and the zstd default -- until it is on crates.io.
+# Removed, with the floor above raised to >=2.13.0, before this branch merges.
+scalo = { git = "https://github.com/hyperi-io/scalo-rs", branch = "fix/zstd-default" }
 #
 # To revert: comment out or remove the [patch.crates-io] section above.
 # =============================================================================
