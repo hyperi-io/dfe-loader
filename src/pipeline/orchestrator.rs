@@ -288,32 +288,7 @@ impl Orchestrator {
         // Schema cache is wired below (after creation) for drift-error invalidation.
         let mut inserter = build_inserter(&self.config, Arc::clone(&http_client), ch_client);
 
-        // DLQ (unified scalo module — cascade: Kafka primary, file fallback)
-        let dlq_config = self.config.routing.dlq.to_scalo_config();
-        let transport_kafka_config =
-            TransportAdapter::convert_config(&self.config.kafka, &self.config.routing.dlq);
-        let dlq: Option<Arc<Dlq>> = if dlq_config.enabled {
-            // Not the shutdown token: the final flush and the pending-schema
-            // drain still reach the DLQ after shutdown is signalled.
-            match Dlq::spawn(
-                &dlq_config,
-                "loader",
-                Some(&transport_kafka_config),
-                CancellationToken::new(),
-            ) {
-                Ok(d) => {
-                    info!(mode = ?dlq_config.mode, "DLQ enabled");
-                    Some(Arc::new(d))
-                }
-                Err(e) => {
-                    report_dlq_unavailable(&format!("the DLQ failed to start: {e}"));
-                    None
-                }
-            }
-        } else {
-            debug!("DLQ disabled by config");
-            None
-        };
+        let dlq = spawn_dlq(&self.config);
 
         // A DLQ whose backends all failed to build still spawns Ok: scalo hands
         // back a DISABLED Dlq, whose send() counts a drop and returns Ok. So
@@ -2348,6 +2323,55 @@ fn unplaced_offsets(
     offsets
 }
 
+/// The scalo DLQ config, and the Kafka client config its Kafka backend is
+/// built on.
+///
+/// The gRPC transport has no broker, so its DLQ gets no Kafka backend and no
+/// Kafka client config: dead letters go to the file backend. A Kafka backend
+/// there queues every entry for a broker the tier does not run, and scalo's
+/// cascade never hands a queued entry on to the file backend.
+fn dlq_backends(config: &Config) -> (scalo::dlq::DlqConfig, Option<scalo::transport::KafkaConfig>) {
+    let mut dlq = config.routing.dlq.to_scalo_config();
+    if config.is_direct() {
+        dlq.kafka.enabled = false;
+        return (dlq, None);
+    }
+    let kafka = TransportAdapter::convert_config(&config.kafka, &config.routing.dlq);
+    (dlq, Some(kafka))
+}
+
+/// Start the DLQ the config asks for, or `None` when it is disabled or fails
+/// to start.
+fn spawn_dlq(config: &Config) -> Option<Arc<Dlq>> {
+    let (dlq_config, kafka) = dlq_backends(config);
+    if !dlq_config.enabled {
+        debug!("DLQ disabled by config");
+        return None;
+    }
+    // Not the shutdown token: the final flush and the pending-schema drain
+    // still reach the DLQ after shutdown is signalled.
+    match Dlq::spawn(
+        &dlq_config,
+        "loader",
+        kafka.as_ref(),
+        CancellationToken::new(),
+    ) {
+        Ok(d) => {
+            info!(
+                mode = ?dlq_config.mode,
+                kafka_backend = dlq_config.kafka.enabled,
+                file_backend = dlq_config.file.enabled,
+                "DLQ enabled"
+            );
+            Some(Arc::new(d))
+        }
+        Err(e) => {
+            report_dlq_unavailable(&format!("the DLQ failed to start: {e}"));
+            None
+        }
+    }
+}
+
 /// Say at startup what a missing DLQ costs.
 fn report_dlq_unavailable(cause: &str) {
     error!(
@@ -3363,6 +3387,67 @@ mod tests {
             "a DLQ that keeps nothing was counted as taking the row"
         );
         assert_eq!(degraded.dropped(), 0, "nothing was handed to it to drop");
+    }
+
+    #[tokio::test]
+    async fn a_grpc_dead_letter_lands_in_the_file_dlq_and_no_kafka_client_is_built() {
+        // The gRPC tier runs no broker. A Kafka backend there queues every entry
+        // for a broker that is not ours, and scalo's cascade never hands a
+        // queued entry on to the file backend.
+        let dir = dlq_dir("grpc-file");
+        let mut config = Config {
+            transport: "grpc".to_string(),
+            ..Config::default()
+        };
+        config.routing.dlq.file_path = dir.to_string_lossy().into_owned();
+        assert!(config.is_direct());
+        assert_eq!(config.routing.dlq.mode, "cascade", "the shipped default");
+        assert!(config.routing.dlq.kafka_enabled, "the shipped default");
+
+        let (dlq_config, kafka) = dlq_backends(&config);
+        assert!(
+            kafka.is_none(),
+            "a Kafka client config reached Dlq::spawn on the gRPC transport"
+        );
+        assert!(
+            !dlq_config.kafka.enabled,
+            "the gRPC DLQ asked for a Kafka backend"
+        );
+        assert!(dlq_config.file.enabled);
+
+        let dlq = spawn_dlq(&config).expect("the gRPC DLQ starts");
+        assert!(dlq.is_enabled(), "the file backend built");
+
+        let payloads: Vec<Arc<[u8]>> = vec![Arc::from(&b"{\"n\":1}"[..])];
+        let dead_letters = rejected_entries(&payloads, &rejected_rows(1, "code 117"));
+        assert_eq!(
+            place(&dlq, &dead_letters, in_30s()).await,
+            Placement::Written,
+            "the gRPC DLQ refused a dead letter"
+        );
+
+        let spooled = spooled_lines(&dir);
+        assert_eq!(
+            spooled.len(),
+            1,
+            "the dead letter is not in the file DLQ: {spooled:?}"
+        );
+        assert!(spooled[0].contains("code 117"));
+        dlq.shutdown().await.expect("stop the DLQ");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_kafka_transport_keeps_its_kafka_dlq_backend() {
+        let config = Config::default();
+        assert!(!config.is_direct());
+
+        let (dlq_config, kafka) = dlq_backends(&config);
+        assert!(dlq_config.kafka.enabled);
+        assert!(
+            kafka.is_some(),
+            "the Kafka DLQ backend lost its client config"
+        );
     }
 
     #[tokio::test]
