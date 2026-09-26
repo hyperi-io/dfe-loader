@@ -22,7 +22,7 @@ use scalo::metrics::groups::{
     AppMetrics, BackpressureMetrics, BufferMetrics, ConsumerMetrics, EnrichmentMetrics,
     SchemaCacheMetrics, SinkMetrics,
 };
-use scalo::metrics::{MetricsManager, ServiceMetrics, TransportKind};
+use scalo::metrics::{MetricsManager, ServiceMetrics, TransportKind, ValidationFailureReason};
 
 /// Application metrics backed by scalo `MetricsManager`.
 ///
@@ -401,6 +401,13 @@ impl Metrics {
     /// nothing will deliver them again.
     pub fn record_rows_lost(&self, rows: u64) {
         self.rows_lost.increment(rows);
+    }
+
+    /// Count a message dead-lettered because it nests deeper than the parser can
+    /// take without exhausting its stack; a depth bound is scalo's `out_of_range`.
+    pub fn record_json_too_deep(&self) {
+        self.dfe
+            .validation_failure(ValidationFailureReason::OutOfRange);
     }
 
     /// Record a row DLQ'd because ClickHouse rejected it deterministically and

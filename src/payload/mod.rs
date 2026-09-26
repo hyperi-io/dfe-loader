@@ -6,6 +6,7 @@
 //! Auto-detects JSON vs `MessagePack` from raw bytes.
 //! Supports forced modes: Auto (default), `ForceJson`, `ForceMessagePack`.
 
+pub mod depth;
 pub mod parse;
 
 // Re-export from scalo with local type alias for backward compatibility
