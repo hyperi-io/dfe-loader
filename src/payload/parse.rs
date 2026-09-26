@@ -16,6 +16,7 @@ use sonic_rs::{JsonValueTrait, LazyValue, get_from_slice};
 
 use crate::Result;
 use crate::payload::LeadingBytes;
+use crate::payload::depth::{MAX_BATCH_DEPTH, json_depth_within};
 
 /// Parse a JSON payload into a `serde_json::Value`.
 ///
@@ -242,6 +243,10 @@ pub fn split_json_array(payload: &[u8]) -> Option<Vec<Vec<u8>>> {
     // The element iterator stops at the closing bracket without reading the
     // tail, so trailing bytes are rejected here rather than fanned out.
     if payload.iter().rfind(|b| !b.is_ascii_whitespace()) != Some(&b']') {
+        return None;
+    }
+    // Too deep to split stays whole, and the depth check after the split dead-letters it.
+    if !json_depth_within(payload, MAX_BATCH_DEPTH) {
         return None;
     }
 

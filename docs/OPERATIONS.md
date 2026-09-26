@@ -100,6 +100,8 @@ misses, unparseable payloads, and salvaged bad rows all land there with enough
 context to replay or inspect. DLQ and consumer errors are debounced in the logs
 so a burst does not flood.
 
+A JSON record nested deeper than 64 levels is dead-lettered as it arrives, before any stage parses it, with the reason `payload nesting exceeds the maximum parse depth of 64`, and counted on `validation_failures_total{reason="out_of_range"}`. A batch too deep to split goes to the DLQ whole. The bound is the one scalo's parse path uses.
+
 ## Memory pressure
 
 The loader runs under a cgroup-aware memory guard: it checks pressure before

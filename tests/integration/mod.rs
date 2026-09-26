@@ -24,6 +24,8 @@ mod geoip_download_e2e;
 mod grpc_outage;
 mod helm_contract;
 mod inserter;
+#[cfg(feature = "testcontainers")]
+mod json_depth;
 mod kafka;
 #[cfg(feature = "testcontainers")]
 mod kafka_offset_floor;

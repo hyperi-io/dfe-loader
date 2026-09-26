@@ -921,12 +921,14 @@ impl Orchestrator {
                             if self.commits_at_receipt {
                                 commit_offsets(&transport, &self.metrics, &received_offsets(&fresh)).await;
                             }
-                            self.stats.messages_received += fresh.len() as u64;
+                            let received = fresh.len() + fan.too_deep.len();
+                            self.stats.messages_received += received as u64;
                             if let Some(ref m) = self.metrics {
-                                for _ in 0..fresh.len() {
+                                for _ in 0..received {
                                     m.record_received();
                                 }
                             }
+                            self.dead_letter_too_deep(fan.too_deep);
                             let ready = pending_schema_buffer
                                 .take_ready(&schema_cache, &absent_tables);
                             if ready.is_empty() {
@@ -1676,6 +1678,27 @@ impl Orchestrator {
         self.memory_guard
             .add_bytes(super::unsettled::payload_bytes(&dead_letters));
         self.dead_letters.extend(dead_letters);
+    }
+
+    /// Dead-letter every record too deeply nested to parse, each counted and
+    /// carrying its reason.
+    fn dead_letter_too_deep(&mut self, too_deep: Vec<crate::kafka::KafkaMessage>) {
+        if too_deep.is_empty() {
+            return;
+        }
+        let reason = crate::payload::depth::too_deep_reason();
+        let dead_letters = too_deep
+            .into_iter()
+            .map(|msg| {
+                super::coordinator::record_dlq_routed("json_depth", &reason, &msg.location());
+                if let Some(ref m) = self.metrics {
+                    m.record_json_too_deep();
+                }
+                let source = scalo::dlq::DlqSource::kafka(&*msg.topic, msg.partition, msg.offset);
+                DlqEntry::new("loader", reason.clone(), msg.payload).with_source(source)
+            })
+            .collect();
+        self.queue_dead_letters(dead_letters);
     }
 
     /// Take every queued dead letter, releasing the bytes it was tracked under.
@@ -2684,6 +2707,8 @@ enum BatchShape {
 #[derive(Default)]
 struct FanOut {
     messages: Vec<crate::kafka::KafkaMessage>,
+    /// Records nested too deeply to parse, taken out before any stage reads them.
+    too_deep: Vec<crate::kafka::KafkaMessage>,
     /// Received messages that carried a batch of records as a JSON array.
     arrays: u64,
     /// Records those arrays expanded into.
@@ -2694,6 +2719,23 @@ struct FanOut {
     ndjson_records: u64,
 }
 
+/// Expand every batched message into one message per record, then take out
+/// every record nested too deeply to parse.
+///
+/// This is the first thing done to a received batch, and pre-route and the
+/// processor both hand a record to sonic-rs, which recurses once per nesting
+/// level with no limit of its own.
+fn fan_out_batched_records(batch: Vec<crate::kafka::KafkaMessage>) -> FanOut {
+    let mut fan = split_batched_records(batch);
+    fan.too_deep = fan
+        .messages
+        .extract_if(.., |msg| {
+            crate::payload::depth::nests_too_deep(&msg.payload)
+        })
+        .collect();
+    fan
+}
+
 /// Expand every message carrying several records into one message per record.
 ///
 /// Any producer can batch, in either wire shape, so the split belongs at the
@@ -2701,7 +2743,7 @@ struct FanOut {
 /// inherits its source message's topic, partition and offset, so a batch still
 /// commits as one unit and the memory guard counts the elements it will later
 /// release.
-fn fan_out_batched_records(batch: Vec<crate::kafka::KafkaMessage>) -> FanOut {
+fn split_batched_records(batch: Vec<crate::kafka::KafkaMessage>) -> FanOut {
     if !batch.iter().any(|m| {
         crate::payload::opens_json_array(&m.payload)
             || crate::payload::has_ndjson_boundary(&m.payload)
@@ -2926,6 +2968,112 @@ mod tests {
         assert_eq!((fan.arrays, fan.array_records), (1, 2));
         assert_eq!((fan.ndjson, fan.ndjson_records), (1, 3));
         assert_eq!(fan.messages.len(), 5);
+    }
+
+    // ---- nesting depth ----
+
+    /// The stack a Tokio worker thread gets by default.
+    const WORKER_STACK: usize = 2 * 1024 * 1024;
+
+    /// A stack that holds 64 levels of sonic-rs recursion, which costs about 56 KiB
+    /// a level in a debug build against under 200 bytes in release.
+    const BOUND_STACK: usize = if cfg!(debug_assertions) {
+        16 * 1024 * 1024
+    } else {
+        WORKER_STACK
+    };
+
+    /// Run `test` on a thread with `stack` bytes of stack, and fail unless it returns.
+    fn on_stack(stack: usize, test: impl FnOnce() + Send + 'static) {
+        std::thread::Builder::new()
+            .stack_size(stack)
+            .spawn(test)
+            .expect("spawn the intake thread")
+            .join()
+            .expect("the intake thread must return");
+    }
+
+    fn nested_array(depth: usize) -> String {
+        format!("{}1{}", "[".repeat(depth), "]".repeat(depth))
+    }
+
+    fn nested_object(depth: usize) -> String {
+        format!("{}1{}", "{\"a\":".repeat(depth), "}".repeat(depth))
+    }
+
+    /// Hand every record the intake keeps to pre-route, the first stage after it
+    /// that parses lazily.
+    fn pre_route(messages: &[crate::kafka::KafkaMessage]) {
+        for msg in messages {
+            let _ = scalo::worker::engine::pre_route::extract_routing_field(&msg.payload, "_table");
+        }
+    }
+
+    fn offsets(messages: &[crate::kafka::KafkaMessage]) -> Vec<i64> {
+        messages.iter().map(|m| m.offset).collect()
+    }
+
+    #[test]
+    fn a_deeply_nested_record_is_taken_out_before_any_stage_parses_it() {
+        on_stack(WORKER_STACK, || {
+            for depth in [20_000, 100_000] {
+                let object = nested_object(depth);
+                // A deep sibling ahead of the routing field, which pre-route walks past.
+                let sibling = format!(r#"{{"sibling":{},"_table":"events"}}"#, nested_array(depth));
+                let in_array = format!(r#"[{{"_table":"events"}},{}]"#, nested_object(depth));
+                let deep_line = nested_object(depth);
+                let in_ndjson = format!("{{\"n\":1}}\n{deep_line}");
+                let batch = vec![
+                    msg_at(1, br#"{"_table":"events","n":1}"#),
+                    msg_at(2, object.as_bytes()),
+                    msg_at(3, sibling.as_bytes()),
+                    msg_at(4, in_array.as_bytes()),
+                    msg_at(5, in_ndjson.as_bytes()),
+                ];
+
+                let fan = fan_out_batched_records(batch);
+                pre_route(&fan.messages);
+
+                // The array cannot be split without parsing its deep element, so
+                // it goes whole; the NDJSON split skips values iteratively, so
+                // only its deep line goes.
+                assert_eq!(offsets(&fan.messages), vec![1, 5], "depth {depth}");
+                assert_eq!(fan.messages[1].payload, br#"{"n":1}"#);
+                assert_eq!(offsets(&fan.too_deep), vec![2, 3, 4, 5], "depth {depth}");
+                let taken: Vec<&[u8]> = fan.too_deep.iter().map(|m| m.payload.as_slice()).collect();
+                assert_eq!(
+                    taken,
+                    vec![
+                        object.as_bytes(),
+                        sibling.as_bytes(),
+                        in_array.as_bytes(),
+                        deep_line.as_bytes(),
+                    ],
+                    "a record goes to the DLQ as it arrived"
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn the_bound_is_64_levels_per_record() {
+        on_stack(BOUND_STACK, || {
+            let at = nested_object(64);
+            let over = nested_object(65);
+            // The array around a batch is framing, not nesting in its records.
+            let batch_at = format!("[{at},{at}]");
+            let batch_over = format!("[{at},{over}]");
+            let fan = fan_out_batched_records(vec![
+                msg_at(1, at.as_bytes()),
+                msg_at(2, over.as_bytes()),
+                msg_at(3, batch_at.as_bytes()),
+                msg_at(4, batch_over.as_bytes()),
+            ]);
+
+            assert_eq!(offsets(&fan.messages), vec![1, 3, 3]);
+            assert_eq!(offsets(&fan.too_deep), vec![2, 4]);
+            pre_route(&fan.messages);
+        });
     }
 
     // CaptureOverrides tests moved to capture.rs

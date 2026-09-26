@@ -3,6 +3,7 @@
 
 //! Payload parsing. JSON is the only payload format.
 
+pub mod depth;
 pub mod parse;
 
 pub use parse::{
