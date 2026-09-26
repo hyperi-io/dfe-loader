@@ -208,9 +208,11 @@ const RETRY_CODES: &[i32] = &[
     // The network between the server and its peers, or the loader.
     95,  // CANNOT_READ_FROM_SOCKET
     96,  // CANNOT_WRITE_TO_SOCKET
+    198, // DNS_ERROR
     209, // SOCKET_TIMEOUT
     210, // NETWORK_ERROR
     279, // ALL_CONNECTION_TRIES_FAILED
+    1000, // POCO_EXCEPTION -- any Poco library error the server did not wrap
     // Replication and Keeper: a replica goes read-only until Keeper is back.
     225, // NO_ZOOKEEPER
     242, // TABLE_IS_READ_ONLY
@@ -222,10 +224,17 @@ const RETRY_CODES: &[i32] = &[
     319, // UNKNOWN_STATUS_OF_INSERT
     369, // ALL_REPLICAS_ARE_STALE
     415, // ALL_REPLICAS_LOST
+    416, // REPLICA_STATUS_CHANGED
+    529, // NOT_A_LEADER
     571, // DATABASE_REPLICATION_FAILED
     659, // UNKNOWN_STATUS_OF_TRANSACTION
+    733, // TABLE_IS_BEING_RESTARTED
     904, // TOO_MANY_UNAVAILABLE_SHARDS
     999, // KEEPER_EXCEPTION
+    // The disk or object store under the table.
+    204, // CANNOT_FSYNC
+    499, // S3_ERROR
+    500, // AZURE_BLOB_STORAGE_ERROR
     // An operator fix: true of every row, and the same rows land once fixed.
     60,  // UNKNOWN_TABLE
     81,  // UNKNOWN_DATABASE
@@ -665,6 +674,31 @@ mod tests {
             message: message.to_string(),
             stack_trace: None,
         }
+    }
+
+    #[test_case::test_case(198 ; "dns_error")]
+    #[test_case::test_case(204 ; "cannot_fsync")]
+    #[test_case::test_case(416 ; "replica_status_changed")]
+    #[test_case::test_case(499 ; "s3_error")]
+    #[test_case::test_case(500 ; "azure_blob_storage_error")]
+    #[test_case::test_case(529 ; "not_a_leader")]
+    #[test_case::test_case(733 ; "table_is_being_restarted")]
+    #[test_case::test_case(1000 ; "poco_exception")]
+    fn a_cluster_network_or_storage_fault_holds_the_batch_on_both_paths(code: i32) {
+        // Worded like a payload fault, so only the code can keep the rows.
+        let message = "Cannot parse input: incorrect data";
+        assert!(
+            is_retry_code(code),
+            "code {code} would dead-letter rows a retry lands"
+        );
+        let row_binary = format!("RowBinary insert: {}", server_exception(code, message));
+        assert_eq!(server_code(&row_binary), Some(code));
+        assert!(retries(code, &row_binary), "code {code} on RowBinary");
+        assert_eq!(
+            classify_json_insert_error(&server_exception(code, message)),
+            ErrorCategory::Transient,
+            "code {code} on JSONEachRow"
+        );
     }
 
     #[test]
