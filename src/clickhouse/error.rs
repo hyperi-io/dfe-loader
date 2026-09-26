@@ -249,7 +249,7 @@ const RETRY_CODES: &[i32] = &[
     673, // RESOURCE_ACCESS_DENIED
 ];
 
-/// Whether the server code `code` is one [`RETRY_CODES`] lists.
+/// Whether the server code `code` is on the private `RETRY_CODES` list.
 #[must_use]
 pub fn is_retry_code(code: i32) -> bool {
     RETRY_CODES.contains(&code)
