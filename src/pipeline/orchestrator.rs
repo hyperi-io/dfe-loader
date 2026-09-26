@@ -1682,6 +1682,10 @@ impl Orchestrator {
 
     /// Dead-letter every record too deeply nested to parse, each counted and
     /// carrying its reason.
+    ///
+    /// Where a sender waits on the record it is admitted first, so the DLQ's
+    /// outcome answers that sender and a sibling split from the same message
+    /// cannot answer it alone.
     fn dead_letter_too_deep(&mut self, too_deep: Vec<crate::kafka::KafkaMessage>) {
         if too_deep.is_empty() {
             return;
@@ -1690,6 +1694,10 @@ impl Orchestrator {
         let dead_letters = too_deep
             .into_iter()
             .map(|msg| {
+                // The ledger ignores a settle for a row it never admitted.
+                if self.holds_answers {
+                    self.acks.admit(seq_of(msg.offset));
+                }
                 super::coordinator::record_dlq_routed("json_depth", &reason, &msg.location());
                 if let Some(ref m) = self.metrics {
                     m.record_json_too_deep();
@@ -3774,6 +3782,60 @@ mod tests {
                 );
             } else {
                 assert!(released.is_empty());
+            }
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_too_deep_record_answers_its_sender_only_once_the_dlq_holds_it() {
+        let deep = nested_object(crate::payload::depth::MAX_PARSE_DEPTH + 1);
+        for holds_answers in [false, true] {
+            let dir = dlq_dir(if holds_answers { "deepheld" } else { "deeppull" });
+            let dlq = file_dlq(&dir);
+            let mut orchestrator = Orchestrator::new(Config::default());
+            orchestrator.holds_answers = holds_answers;
+            // Record 5 also carried a shallow sibling, which the intake admits
+            // on its own.
+            if holds_answers {
+                orchestrator.acks.admit(5);
+            }
+
+            orchestrator.dead_letter_too_deep(vec![
+                msg_at(5, deep.as_bytes()),
+                msg_at(6, deep.as_bytes()),
+            ]);
+            orchestrator
+                .acks
+                .settle(seq_of(5), DeliveryStatus::Delivered);
+            assert!(
+                orchestrator.acks.take_settled().is_empty(),
+                "a sender was answered before its deep record reached the DLQ (holds_answers {holds_answers})"
+            );
+
+            let queued = orchestrator.take_queued_dead_letters();
+            settle(&mut orchestrator, Some(&dlq), queued, in_30s()).await;
+
+            assert_eq!(orchestrator.stats().messages_dlq, 2);
+            let reason = crate::payload::depth::too_deep_reason();
+            assert_eq!(
+                spooled_lines(&dir)
+                    .iter()
+                    .filter(|l| l.contains(&reason))
+                    .count(),
+                2,
+                "each deep record is on disk with its reason"
+            );
+            let released = orchestrator.acks.take_settled();
+            if holds_answers {
+                assert_eq!(
+                    released,
+                    vec![(DeliveryStatus::Rejected, vec![5, 6])],
+                    "a sender waiting on a deep record was not answered on the DLQ's outcome"
+                );
+                assert_eq!(orchestrator.acks.open(), 0);
+            } else {
+                assert!(released.is_empty(), "nothing was admitted to release");
             }
             let _ = std::fs::remove_dir_all(&dir);
         }
