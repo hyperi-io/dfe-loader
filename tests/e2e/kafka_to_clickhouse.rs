@@ -118,7 +118,7 @@ fn make_client_config() -> ClientConfig {
 
 /// Returns a TLS config for the pipeline's `KafkaConfig` when the security
 /// protocol requires SSL. Uses the system trust store — no CA file needed
-/// when the `HyperI` `DevEx` Root CA is installed system-wide.
+/// when the cluster's root CA is installed system-wide.
 fn kafka_tls_from_env() -> Option<TlsConfig> {
     let kf = KafkaTestConfig::from_env();
     if kf.security_protocol.contains("SSL") {
@@ -462,7 +462,7 @@ async fn test_kafka_to_clickhouse_bulk_load() {
         shutdown.cancel();
     });
 
-    // 1 200 messages through the devex cluster should complete well within 20 s
+    // 1 200 messages through the remote cluster should complete well within 20 s
     match orchestrator.run().await {
         Ok(()) => eprintln!("Pipeline shut down cleanly"),
         Err(e) => eprintln!("Pipeline returned error: {e}"),

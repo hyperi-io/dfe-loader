@@ -42,9 +42,8 @@ configuration.
 
 ## Private / internal CAs
 
-Internal clusters behind a private CA (the HyperI devex cluster is one: HTTPS
-8543 and secure native 9440 behind the internal CA) are trusted by pointing the
-loader at the CA certificate:
+Internal clusters behind a private CA are trusted by pointing the loader at the
+CA certificate:
 
 | Setting | Effect |
 |---------|--------|
@@ -82,15 +81,15 @@ auditable path.
 
 Client-certificate (mTLS) auth is out of scope today.
 
-## Example: devex cluster
+## Example: private-CA cluster
 
 ```yaml
 clickhouse:
   transport: native        # secure native protocol
   tls: true                # 9440
-  tls_ca_file: /etc/hyperi/devex-ca.pem
+  tls_ca_file: /etc/dfe/internal-ca.pem
   hosts:
-    - clickhouse.devex.hyperi.io:9440
+    - clickhouse.example.internal:9440
 ```
 
 The same `tls_ca_file` works unchanged if you switch `transport` to `http`

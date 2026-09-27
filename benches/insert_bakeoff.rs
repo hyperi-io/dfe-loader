@@ -14,7 +14,7 @@
 //! **Requires a running `ClickHouse` instance.** Set env vars:
 //!
 //! ```bash
-//! CLICKHOUSE_HOST=clickhouse.devex.hyperi.io
+//! CLICKHOUSE_HOST=clickhouse.example.internal
 //! CLICKHOUSE_HTTP_PORT=8123
 //! CLICKHOUSE_USER=default
 //! CLICKHOUSE_PASSWORD=<password>

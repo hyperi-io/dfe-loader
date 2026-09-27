@@ -228,10 +228,9 @@ loader_insert_latency_seconds_bucket
 
 ### Git Commit Not Captured
 
-Ensure you're in a git repository:
+Ensure you're in a git repository, from the dfe-loader checkout:
 
 ```bash
-cd /projects/dfe-loader
 git status
 ```
 
