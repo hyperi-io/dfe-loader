@@ -58,11 +58,7 @@ jobs:
       bump: ${{ inputs.bump || 'auto' }}
       skip-optimize: ${{ inputs.skip-optimize || '' }}
       release-unoptimized: ${{ inputs.release-unoptimized || '' }}
-    # Least privilege: pass only the secrets rust-ci.yml actually consumes, not
-    # the whole repo secret store (`inherit`). All optional - unset ones resolve
-    # empty. Names are the org-level secret names (org is the SSoT). JFrog is
-    # deliberately omitted: the publish path moved to Harbor/DockerHub/GHCR and
-    # nothing in rust-ci.yml consumes JFROG_TOKEN (legacy, pending org cleanup).
+    # Least privilege: pass only the secrets rust-ci.yml consumes, never `inherit`.
     secrets:
       CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
       GITLEAKS_GH_ACTIONS_KEY: ${{ secrets.GITLEAKS_GH_ACTIONS_KEY }}

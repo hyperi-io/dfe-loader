@@ -72,14 +72,14 @@ Controlled by `TEST_MODE` in `.env` (or env var):
 
 ### Remote (default)
 
-Uses devex cluster from `.env`. Tests skip if endpoints unreachable.
+Uses the remote Kafka and ClickHouse named in `.env`. Tests skip if endpoints unreachable.
 
 ```bash
 TEST_MODE=remote cargo nextest run
 ```
 
-- ClickHouse: `clickhouse.devex.hyperi.io` (HTTPS/native TLS, 3-node cluster)
-- Kafka: `kafka.devex.hyperi.io` (SASL_SSL, SCRAM-SHA-512)
+- ClickHouse: a multi-node cluster over HTTPS or native TLS
+- Kafka: SASL_SSL with SCRAM-SHA-512
 - DDL uses `ON CLUSTER 'default'`
 
 ### Docker-local
@@ -88,7 +88,7 @@ Uses `dfe-docker` infra profile (single-node, no auth, no TLS).
 
 ```bash
 # Start infrastructure
-cd /projects/dfe-docker && docker compose --profile infra up -d
+cd ../dfe-docker && docker compose --profile infra up -d
 
 # Run tests
 TEST_MODE=docker cargo nextest run

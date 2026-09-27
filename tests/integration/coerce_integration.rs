@@ -9,7 +9,7 @@
 //!
 //! Uses the dual-mode test infrastructure:
 //! - `TEST_MODE=docker` → local Docker cluster (single-node)
-//! - `TEST_MODE=remote` (default) → devex cluster
+//! - `TEST_MODE=remote` (default) → remote cluster from `.env`
 //!
 //! Tests skip automatically when ClickHouse is not reachable.
 

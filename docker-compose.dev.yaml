@@ -1,5 +1,5 @@
 # Development docker-compose for local testing
-# Use when .env is not configured for external systems (k8s.tyrell.com.au)
+# Use when .env does not point at a remote Kafka and ClickHouse
 #
 # Usage:
 #   docker-compose -f docker-compose.dev.yaml up -d

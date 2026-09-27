@@ -3,7 +3,7 @@
 
 //! `ClickHouse` integration tests
 //!
-//! Tests run against k8s.tyrell.com.au cluster via .env settings
+//! Tests run against the ClickHouse cluster named in `.env`
 //! Uses HTTP client with `JSONEachRow` for all `ClickHouse` operations
 
 use serde_json::json;

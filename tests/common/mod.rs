@@ -4,7 +4,7 @@
 //! Shared test utilities and fixtures.
 //!
 //! Supports dual-mode testing via `TEST_MODE` env var:
-//! - `"remote"` (default): devex cluster endpoints from `.env`
+//! - `"remote"` (default): remote cluster endpoints from `.env`
 //! - `"docker"`: dfe-docker infra profile (localhost, no auth, no TLS)
 #![allow(dead_code)]
 
@@ -117,7 +117,7 @@ impl ClickHouseTestConfig {
     }
 
     /// Probe whether `ClickHouse` is actually responding (not just a TCP listener
-    /// on port 9000 — devex hosts often have *something* bound there that
+    /// on port 9000 — shared hosts often have *something* bound there that
     /// false-positives a plain TCP probe).
     ///
     /// Tries the HTTP/HTTPS `/ping` endpoint which returns `Ok.\n` for live
@@ -741,7 +741,7 @@ pub fn unique_table_name(prefix: &str) -> String {
 ///
 /// The `Inserter` resolves a bare table name to the `default` database
 /// (`parse_db_table`), while DDL run through the query client lands in the
-/// connection's configured database (`benchmark` on the devex cluster). Tests
+/// connection's configured database (`CLICKHOUSE_DATABASE`). Tests
 /// that create a table AND drive the `Inserter` against it must agree on the
 /// database, so they qualify the name with `ClickHouseTestConfig::database`.
 pub fn unique_qualified_table_name(prefix: &str) -> String {
