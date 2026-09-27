@@ -91,6 +91,8 @@ config:
     allow_insecure_transport: false
     librdkafka_overrides:
       statistics.interval.ms: '5000'
+    acknowledgements:
+      enabled: true
   grpc:
     listen: 0.0.0.0:6000
     recv_buffer_size: 10000
@@ -98,6 +100,9 @@ config:
     max_message_size: 16777216
     compression: false
     default_topic: main_land
+    acknowledgements:
+      enabled: true
+    max_hold_ms: 13500
   clickhouse:
     hosts:
     - localhost:8123
@@ -109,8 +114,6 @@ config:
     tables: []
     tls: null
   payload:
-    format: auto
-    mismatch_threshold: 10
     pipeline_mode: json_primary
   metrics:
     enabled: true

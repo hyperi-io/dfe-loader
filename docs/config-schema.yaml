@@ -20,7 +20,7 @@ description: |-
   - `kafka.*` — Kafka consumer created at startup
   - `grpc.*` — gRPC server binds at startup
   - `clickhouse.*` — HTTP client + `clickhouse::Client` created at startup
-  - `payload.format` — format detection set at startup
+  - `payload.pipeline_mode` — pipeline path chosen at startup
   - `metrics.*` — HTTP metrics server binds at startup
   - `logging.*` — tracing subscriber installed at startup
   - `scaling.*` / `keda.*` — scaling pressure built at startup
@@ -50,6 +50,8 @@ properties:
       allow_insecure_transport: false
       librdkafka_overrides:
         statistics.interval.ms: '5000'
+      acknowledgements:
+        enabled: true
   grpc:
     description: gRPC transport config. **Restart required.**
     $ref: '#/$defs/GrpcConfig'
@@ -60,6 +62,9 @@ properties:
       max_message_size: 16777216
       compression: false
       default_topic: main_land
+      acknowledgements:
+        enabled: true
+      max_hold_ms: 13500
   clickhouse:
     description: '`ClickHouse` connection config. **Restart required.**'
     $ref: '#/$defs/ClickHouseConfig'
@@ -74,11 +79,9 @@ properties:
       tables: []
       tls: null
   payload:
-    description: Payload format detection. **Restart required.**
+    description: Payload pipeline mode. **Restart required.**
     $ref: '#/$defs/PayloadConfig'
     default:
-      format: auto
-      mismatch_threshold: 10
       pipeline_mode: json_primary
   metrics:
     description: Metrics server config. **Restart required.**
@@ -379,6 +382,15 @@ $defs:
           type: string
         default:
           statistics.interval.ms: '5000'
+      acknowledgements:
+        description: |-
+          `enabled: true` (the default) commits an offset only once its row is in
+          `ClickHouse` or the DLQ, so a crash re-delivers it. `enabled: false`
+          commits each batch as it is received: a crash or a failed insert loses
+          what was committed.
+        $ref: '#/$defs/AcknowledgementsConfig'
+        default:
+          enabled: true
   SaslConfig:
     type: object
     properties:
@@ -492,6 +504,30 @@ $defs:
       skip_verify:
         type: boolean
         default: false
+  AcknowledgementsConfig:
+    description: |-
+      The `acknowledgements` section of an ack-capable transport.
+
+      With `enabled: true` (the default) a source releases its acknowledgement --
+      a Kafka offset commit, a gRPC or HTTP response -- only once every piece of
+      work built from the record has been delivered, dead-lettered with the DLQ's
+      confirmation, or dropped by policy. A failed delivery withholds it, so the
+      record is delivered again: duplicates are possible, loss is not.
+
+      With `enabled: false` the source acknowledges at receipt, before the record
+      is processed: a crash or a failed delivery loses what was acknowledged.
+
+      ```yaml
+      kafka:
+        acknowledgements:
+          enabled: true
+      ```
+    type: object
+    properties:
+      enabled:
+        description: Hold the source acknowledgement until every piece is delivered.
+        type: boolean
+        default: true
   GrpcConfig:
     description: |-
       gRPC transport configuration for receiving messages from dfe-receiver.
@@ -536,6 +572,26 @@ $defs:
           Used as the routing key when the sender doesn't set a topic.
         type: string
         default: main_land
+      acknowledgements:
+        description: |-
+          `enabled: true` (the default) answers a Push only once its rows are in
+          `ClickHouse`, dead-lettered with the DLQ's confirmation, or dropped. A
+          failed insert answers `UNAVAILABLE` and the sender retries.
+          `enabled: false` answers once the records are queued: a crash loses
+          what was answered.
+        $ref: '#/$defs/AcknowledgementsConfig'
+        default:
+          enabled: true
+      max_hold_ms:
+        description: |-
+          The longest a Push waits for its answer before it is told to retry, in
+          milliseconds. A sender's own deadline shortens it to leave a tenth of
+          that deadline, at least 1 s, for the answer to travel. Keep it below the
+          sender's send timeout and above the flush delay.
+        type: integer
+        format: uint64
+        minimum: 0
+        default: 13500
   ClickHouseConfig:
     type: object
     properties:
@@ -605,17 +661,6 @@ $defs:
   PayloadConfig:
     type: object
     properties:
-      format:
-        description: 'Format mode: "auto" (default), "json", "messagepack"/"msgpack"'
-        type: string
-        default: auto
-      mismatch_threshold:
-        description: Mismatch threshold before auto-reset (auto mode only)
-        type: integer
-        format: uint8
-        minimum: 0
-        maximum: 255
-        default: 10
       pipeline_mode:
         description: |-
           Pipeline processing mode.

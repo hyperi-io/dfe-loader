@@ -67,6 +67,19 @@ impl DynamicSchema {
         self.columns.iter().filter(|c| c.has_default)
     }
 
+    /// Whether `other` has the same columns, in the same order, with the same
+    /// types and defaults: two reads of `system.columns` agree exactly when
+    /// the table did not change between them.
+    #[must_use]
+    pub fn same_columns(&self, other: &DynamicSchema) -> bool {
+        self.columns.len() == other.columns.len()
+            && self.columns.iter().zip(&other.columns).all(|(a, b)| {
+                a.name == b.name
+                    && a.type_string == b.type_string
+                    && a.default_kind == b.default_kind
+            })
+    }
+
     /// Number of columns.
     #[must_use]
     pub fn len(&self) -> usize {
@@ -250,6 +263,28 @@ mod tests {
         assert!(schema.column("missing").is_none());
         assert_eq!(schema.required_columns().count(), 2);
         assert_eq!(schema.optional_columns().count(), 1);
+    }
+
+    #[test]
+    fn same_columns_changes_with_any_column_change() {
+        let schema = |cols: Vec<ColumnDef>| DynamicSchema::from_columns("db.t", cols);
+        let read = schema(vec![col("id", "UInt64", ""), col("v", "UInt8", "")]);
+        let again = schema(vec![col("id", "UInt64", ""), col("v", "UInt8", "")]);
+        assert!(read.same_columns(&again));
+
+        for changed in [
+            schema(vec![col("id", "UInt64", ""), col("v", "UInt16", "")]),
+            schema(vec![col("v", "UInt8", ""), col("id", "UInt64", "")]),
+            schema(vec![col("id", "UInt64", "")]),
+            schema(vec![
+                col("id", "UInt64", ""),
+                col("v", "UInt8", ""),
+                col("w", "String", ""),
+            ]),
+            schema(vec![col("id", "UInt64", ""), col("v", "UInt8", "DEFAULT")]),
+        ] {
+            assert!(!read.same_columns(&changed), "{:?}", changed.columns);
+        }
     }
 
     #[test]

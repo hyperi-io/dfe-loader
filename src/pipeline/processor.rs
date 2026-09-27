@@ -20,7 +20,7 @@ use crate::buffer::KafkaOffset;
 use crate::clickhouse::SharedSchemaCache;
 use crate::column_meta::ColumnMetaCache;
 use crate::config::{CaptureMode, Config};
-use crate::payload::{FormatDetector, LeadingBytes, PayloadFormat, detect_format};
+use crate::payload::{LeadingBytes, opens_json_document};
 use crate::routing::{RouteResult, Router, TableChoice};
 use crate::transform::{ComputedColumnCache, FieldMappingCache, HeaderExtractor, Transformer};
 
@@ -38,7 +38,6 @@ pub(crate) struct MessageProcessor<'a> {
     pub router: &'a Router,
     pub transformer: &'a Transformer,
     pub extractor: &'a HeaderExtractor,
-    pub format_detector: &'a FormatDetector,
     pub json_primary_mode: bool,
     pub enrichment: &'a EnrichmentPipeline,
     pub schema_cache: &'a SharedSchemaCache,
@@ -109,36 +108,13 @@ fn log_routing_field_absent(topic: &str, table: &str) {
     }
 }
 
-/// Name why the format detector refused `payload`, with its leading bytes.
-///
-/// The detector's `Err` carries only the format it wanted, which in a forced
-/// mode is the same for foreign bytes and for the other supported format, so
-/// the payload is detected again here to tell the two apart.
+/// Refuse `payload` as not JSON, naming its leading bytes.
 #[cold]
 #[inline(never)]
-fn format_rejection(payload: &[u8], expected: PayloadFormat) -> crate::Error {
-    let leading = LeadingBytes::of(payload);
-    match detect_format(payload) {
-        None => {
-            scalo::logger::security::input_validation_failure(
-                "format_check",
-                "unrecognised payload format",
-                None,
-            );
-            crate::Error::UnrecognisedFormat { leading }
-        }
-        Some(actual) => {
-            scalo::logger::security::input_validation_failure(
-                "format_check",
-                "payload format mismatch",
-                None,
-            );
-            crate::Error::FormatMismatch {
-                expected,
-                actual,
-                leading,
-            }
-        }
+fn not_json(payload: &[u8]) -> crate::Error {
+    scalo::logger::security::input_validation_failure("format_check", "payload is not JSON", None);
+    crate::Error::NotJson {
+        leading: LeadingBytes::of(payload),
     }
 }
 
@@ -149,8 +125,8 @@ impl MessageProcessor<'_> {
     /// Returns `ProcessedMessage` on success or an error for DLQ routing.
     ///
     /// Steps:
-    /// 1. Format detection
-    /// 2. Parse (sonic-rs JSON or rmp MessagePack)
+    /// 1. Refuse a payload that does not open a JSON object or array
+    /// 2. Parse (sonic-rs)
     /// 3. Route to table
     /// 4. Extract/transform (json_primary or legacy_flatten path)
     /// 5. Apply capture config (pure derivation, no cache mutation)
@@ -168,42 +144,28 @@ impl MessageProcessor<'_> {
             );
         }
 
-        // Step 1: Check/detect format
-        let format = match self.format_detector.check_and_detect(&msg.payload) {
-            Ok(fmt) => fmt,
-            Err(expected) => return Err(format_rejection(&msg.payload, expected)),
-        };
+        // Step 1: Refuse anything that is not JSON before the parser sees it
+        if !opens_json_document(&msg.payload) {
+            return Err(not_json(&msg.payload));
+        }
 
         // Step 2: Parse payload to JSON Value
-        let value: Value = match format {
-            PayloadFormat::Json => sonic_rs::from_slice(&msg.payload).map_err(|e| {
-                scalo::logger::security::input_validation_failure(
-                    "json_parse",
-                    "invalid JSON payload",
-                    None,
+        let value: Value = sonic_rs::from_slice(&msg.payload).map_err(|e| {
+            scalo::logger::security::input_validation_failure(
+                "json_parse",
+                "invalid JSON payload",
+                None,
+            );
+            // A batch the fan-out could not split reads as trailing
+            // characters, so the shape is named instead (#184).
+            if crate::payload::has_ndjson_boundary(&msg.payload) {
+                return crate::Error::Json(
+                    "payload holds more than one JSON record and did not split into whole records"
+                        .into(),
                 );
-                // A batch the fan-out could not split reads as trailing
-                // characters, so the shape is named instead (#184).
-                if crate::payload::has_ndjson_boundary(&msg.payload) {
-                    return crate::Error::Json(
-                        "payload holds more than one JSON record and did not split into whole records"
-                            .into(),
-                    );
-                }
-                crate::Error::Json(format!("JSON parse error: {e}"))
-            })?,
-            PayloadFormat::MessagePack => rmp_serde::from_slice(&msg.payload).map_err(|e| {
-                scalo::logger::security::input_validation_failure(
-                    "msgpack_parse",
-                    "invalid MessagePack payload",
-                    None,
-                );
-                crate::Error::Json(format!("MessagePack parse error: {e}"))
-            })?,
-            PayloadFormat::Unknown => {
-                return Err(format_rejection(&msg.payload, PayloadFormat::Unknown));
             }
-        };
+            crate::Error::Json(format!("JSON parse error: {e}"))
+        })?;
 
         // An array the fan-out left alone is not a batch of records, and the
         // capture would hand it to a per-row JSON column, so it is named here
@@ -257,13 +219,13 @@ impl MessageProcessor<'_> {
         // json_primary path: HeaderExtractor SIMD scan + zero-copy _json.
         // Legacy fallback: full flatten + Transformer path.
 
-        // json_primary + JSON: a schema cache miss is NOT a silent transformer
+        // json_primary: a schema cache miss is NOT a silent transformer
         // fallback. Return SchemaPending so the coordinator buffers the message
         // until the background resolver populates the schema (#36). The extractor
         // is the only path that applies @renamed directives; the transformer path
-        // below would drop them, NULLing the renamed columns. MessagePack and
-        // legacy_flatten still use the transformer path.
-        let extractor_schema = if self.json_primary_mode && format == PayloadFormat::Json {
+        // below would drop them, NULLing the renamed columns. legacy_flatten
+        // still uses the transformer path.
+        let extractor_schema = if self.json_primary_mode {
             match self.schema_cache.get(&table) {
                 Some(schema) => Some(schema),
                 None => return Err(crate::Error::SchemaPending { table }),
@@ -451,7 +413,6 @@ mod tests {
     use crate::config::{CaptureMode, ComputedColumnsConfig, Config};
     use crate::kafka::KafkaMessage;
     use crate::metrics::counting::counted;
-    use crate::payload::{FormatDetector, FormatMode};
     use crate::pipeline::capture::CaptureOverrides;
     use crate::pipeline::enrichment::EnrichmentPipeline;
     use crate::routing::Router;
@@ -465,7 +426,6 @@ mod tests {
         router: Router,
         transformer: Transformer,
         extractor: HeaderExtractor,
-        format_detector: FormatDetector,
         enrichment: EnrichmentPipeline,
         schema_cache: Arc<SchemaCache>,
         col_meta_cache: ColumnMetaCache,
@@ -488,7 +448,6 @@ mod tests {
                 &config.field_sanitization,
             );
             let extractor = HeaderExtractor::new(&config.metadata, &config.routing);
-            let format_detector = FormatDetector::new();
             let enrichment = EnrichmentPipeline {
                 ip_fields: config.enrichment.ip_fields.clone(),
                 geoip: None,
@@ -509,7 +468,6 @@ mod tests {
                 router,
                 transformer,
                 extractor,
-                format_detector,
                 enrichment,
                 schema_cache,
                 col_meta_cache,
@@ -529,7 +487,6 @@ mod tests {
                 router: &self.router,
                 transformer: &self.transformer,
                 extractor: &self.extractor,
-                format_detector: &self.format_detector,
                 json_primary_mode: false, // legacy path for unit tests (no schema)
                 enrichment: &self.enrichment,
                 schema_cache: &self.schema_cache,
@@ -548,7 +505,6 @@ mod tests {
                 router: &self.router,
                 transformer: &self.transformer,
                 extractor: &self.extractor,
-                format_detector: &self.format_detector,
                 json_primary_mode: true,
                 enrichment: &self.enrichment,
                 schema_cache: &self.schema_cache,
@@ -644,7 +600,7 @@ mod tests {
             .expect("Empty payload should fail")
             .to_string();
         assert!(
-            reason.contains("unrecognised payload format") && reason.contains("empty payload"),
+            reason.contains("payload is not JSON") && reason.contains("empty payload"),
             "an empty record must say it was empty, got: {reason}"
         );
     }
@@ -656,7 +612,7 @@ mod tests {
     ];
 
     #[test]
-    fn unrecognised_payload_reason_names_the_case_and_leading_bytes() {
+    fn a_binary_record_is_refused_as_not_json_with_its_leading_bytes() {
         let harness = TestHarness::new();
         let proc = harness.processor();
 
@@ -664,14 +620,11 @@ mod tests {
             .process(&harness.make_msg(CRUISE_CONTROL_RECORD))
             .err()
             .expect("a binary record must be rejected");
-        assert!(
-            matches!(err, crate::Error::UnrecognisedFormat { .. }),
-            "got {err:?}"
-        );
+        assert!(matches!(err, crate::Error::NotJson { .. }), "got {err:?}");
         let reason = err.to_string();
 
         assert!(
-            reason.contains("unrecognised payload format"),
+            reason.contains("payload is not JSON"),
             "reason must name the case, got: {reason}"
         );
         assert!(
@@ -684,65 +637,77 @@ mod tests {
         );
     }
 
+    /// `{"event_category": "x"}` as a MessagePack map: fixmap(1), fixstr(14)
+    /// "event_category", fixstr(1) "x".
+    const MESSAGEPACK_RECORD: &[u8] = b"\x81\xaeevent_category\xa1x";
+
     #[test]
-    fn msgpack_after_json_in_auto_mode_names_the_mismatch() {
+    fn a_messagepack_record_is_dead_lettered_as_not_json() {
+        use scalo::memory::{MemoryGuard, MemoryGuardConfig};
+
+        use crate::buffer::BufferManager;
+        use crate::pipeline::coordinator::BatchCoordinator;
+        use crate::pipeline::pending_schema::{OnFull, PendingSchemaBuffer, PendingSchemaConfig};
+
         let harness = TestHarness::new();
         let proc = harness.processor();
-        let record = json!({"event_category": "x"});
+        let msg = harness.make_msg(MESSAGEPACK_RECORD);
 
-        let first = serde_json::to_vec(&record).expect("serialize");
-        assert!(
-            proc.process(&harness.make_msg(&first)).is_ok(),
-            "the first JSON record locks auto mode to JSON"
-        );
-
-        // fixmap(1), then fixstr(14) "event_category"
-        let msgpack = rmp_serde::to_vec(&record).expect("msgpack serialize");
         let err = proc
-            .process(&harness.make_msg(&msgpack))
+            .process(&msg)
             .err()
-            .expect("MessagePack after a JSON lock must be rejected");
-        assert!(
-            matches!(
-                err,
-                crate::Error::FormatMismatch {
-                    expected: crate::payload::PayloadFormat::Json,
-                    actual: crate::payload::PayloadFormat::MessagePack,
-                    ..
-                }
-            ),
-            "got {err:?}"
-        );
+            .expect("a MessagePack record must be refused, never loaded");
+        assert!(matches!(err, crate::Error::NotJson { .. }), "got {err:?}");
         let reason = err.to_string();
-
         assert!(
-            reason.contains("payload format mismatch: expected JSON, got MessagePack"),
-            "reason must name the lock and what arrived, got: {reason}"
+            reason.contains("payload is not JSON, leading bytes 81 ae 65 76 65 6e 74 5f"),
+            "reason must name the refusal and the first 8 bytes, got: {reason}"
         );
-        assert!(
-            reason.contains("81 ae 65 76 65 6e 74 5f"),
-            "reason must carry the first 8 bytes as hex, got: {reason}"
+
+        // The refusal takes the path every permanent failure takes: one dead
+        // letter with the reason and the original bytes, one error counted,
+        // nothing buffered for ClickHouse.
+        let guard = MemoryGuard::new(MemoryGuardConfig {
+            limit_bytes: 1_073_741_824,
+            ..Default::default()
+        });
+        let mut buffer_manager = BufferManager::new(&harness.config.buffer);
+        let mut capture_overrides = CaptureOverrides::new(&harness.config.metadata);
+        let mut field_mapping_cache = None;
+        let mut computed_column_cache = ComputedColumnCache::new(ComputedColumnsConfig::default());
+        let mut pending = PendingSchemaBuffer::new(PendingSchemaConfig {
+            max_per_table: 100,
+            max_total: 1000,
+            max_age: std::time::Duration::from_secs(30),
+            on_full: OnFull::DeadLetter,
+        });
+        let outcome = BatchCoordinator {
+            buffer_manager: &mut buffer_manager,
+            capture_overrides: &mut capture_overrides,
+            field_mapping_cache: &mut field_mapping_cache,
+            computed_column_cache: &mut computed_column_cache,
+            metrics: &None,
+            memory_guard: &guard,
+            pending_schema: &mut pending,
+        }
+        .apply_results(vec![Err(err)], std::slice::from_ref(&msg));
+
+        assert_eq!(outcome.errors, 1, "the refusal is counted");
+        assert_eq!(outcome.processed, 0, "the record was loaded");
+        assert_eq!(outcome.pending, 0, "the record waits on a schema");
+        assert_eq!(outcome.dead_letters.len(), 1);
+        assert_eq!(outcome.dead_letters[0].reason, reason);
+        assert_eq!(
+            outcome.dead_letters[0].payload, MESSAGEPACK_RECORD,
+            "the DLQ keeps the bytes that arrived"
         );
-    }
+        assert_eq!(buffer_manager.stats().pending_rows, 0);
 
-    #[test]
-    fn forced_json_calls_a_binary_record_unrecognised_not_a_mismatch() {
-        let harness = TestHarness::new();
-        let json_detector = FormatDetector::with_mode(FormatMode::ForceJson);
-        let proc = MessageProcessor {
-            format_detector: &json_detector,
-            ..harness.processor()
-        };
-
-        let reason = proc
-            .process(&harness.make_msg(CRUISE_CONTROL_RECORD))
-            .err()
-            .expect("forced JSON must reject a binary record")
-            .to_string();
-
+        // No format lock: the next JSON record on the same processor loads.
+        let json = serde_json::to_vec(&json!({"event_category": "x"})).expect("serialize");
         assert!(
-            reason.contains("unrecognised payload format") && !reason.contains("mismatch"),
-            "a forced mode must not call unknown bytes a mismatch, got: {reason}"
+            proc.process(&harness.make_msg(&json)).is_ok(),
+            "a refused record changed how the next JSON record is handled"
         );
     }
 
@@ -1185,88 +1150,6 @@ mod tests {
     }
 
     // ========================================================================
-    // MessagePack format
-    // ========================================================================
-
-    #[test]
-    fn process_valid_msgpack() {
-        let harness = TestHarness::new();
-        let proc = harness.processor();
-
-        let value = json!({"event_category": "network", "count": 5});
-        let payload = rmp_serde::to_vec(&value).expect("msgpack serialize");
-        let msg = harness.make_msg(&payload);
-
-        let result = proc.process(&msg);
-        assert!(
-            result.is_ok(),
-            "MessagePack processing should succeed: {:?}",
-            result.err()
-        );
-    }
-
-    #[test]
-    fn process_forced_json_rejects_msgpack() {
-        let mut config = Config::default();
-        config.payload.format = "json".to_string();
-
-        let router = Router::with_metadata(&config.routing, &config.metadata);
-        let transformer = Transformer::new(
-            &config.timestamp_dq,
-            &config.metadata,
-            &config.field_sanitization,
-        );
-        let extractor = HeaderExtractor::new(&config.metadata, &config.routing);
-        let format_detector = FormatDetector::with_mode(FormatMode::ForceJson);
-        let enrichment = EnrichmentPipeline {
-            ip_fields: vec![],
-            geoip: None,
-            reputation: None,
-            risk: None,
-        };
-        let schema_cache = Arc::new(SchemaCache::new(300));
-        let col_meta_cache = ColumnMetaCache::new(ColumnDirectivesConfig::default());
-        let computed_column_cache = ComputedColumnCache::new(ComputedColumnsConfig::default());
-        let capture_overrides = CaptureOverrides::new(&config.metadata);
-        let absent_tables =
-            crate::pipeline::types::AbsentTables::new(std::time::Duration::from_secs(60), 16);
-
-        let proc = MessageProcessor {
-            config: &config,
-            router: &router,
-            transformer: &transformer,
-            extractor: &extractor,
-            format_detector: &format_detector,
-            json_primary_mode: false,
-            enrichment: &enrichment,
-            schema_cache: &schema_cache,
-            col_meta_cache: &col_meta_cache,
-            field_mapping_cache: None,
-            computed_column_cache: &computed_column_cache,
-            capture_overrides: &capture_overrides,
-            absent_tables: &absent_tables,
-            default_table: "dfe.main",
-        };
-
-        let value = json!({"event_category": "test"});
-        let payload = rmp_serde::to_vec(&value).expect("msgpack serialize");
-        let msg = KafkaMessage {
-            payload,
-            topic: Arc::from("test-events"),
-            partition: 0,
-            offset: 1,
-            key: None,
-            timestamp_ms: None,
-        };
-
-        let result = proc.process(&msg);
-        assert!(
-            result.is_err(),
-            "ForceJson mode should reject MessagePack payload"
-        );
-    }
-
-    // ========================================================================
     // Complex payloads
     // ========================================================================
 
@@ -1456,8 +1339,7 @@ mod tests {
             Err(e) => {
                 let em = format!("{e}");
                 assert!(
-                    matches!(e, crate::Error::UnrecognisedFormat { .. })
-                        && em.contains("unrecognised payload format"),
+                    matches!(e, crate::Error::NotJson { .. }) && em.contains("payload is not JSON"),
                     "Error should indicate a format problem for DLQ routing: {em}"
                 );
             }
@@ -1719,51 +1601,6 @@ mod tests {
             assert_eq!(processed.kafka_offset.partition, partition);
             assert_eq!(processed.kafka_offset.offset, offset);
         }
-    }
-
-    // ========================================================================
-    // MessagePack payloads (strict format mode)
-    // ========================================================================
-
-    #[test]
-    fn process_msgpack_with_strict_format_check_rejects_json() {
-        // If FormatDetector is forced to MessagePack but the payload is JSON,
-        // format detection should reject it.
-        // Use a forced-MessagePack detector directly.
-        let harness = TestHarness::new();
-        let msgpack_detector = FormatDetector::with_mode(FormatMode::ForceMessagePack);
-
-        let processor = MessageProcessor {
-            config: &harness.config,
-            router: &harness.router,
-            transformer: &harness.transformer,
-            extractor: &harness.extractor,
-            format_detector: &msgpack_detector,
-            json_primary_mode: false,
-            enrichment: &harness.enrichment,
-            schema_cache: &harness.schema_cache,
-            col_meta_cache: &harness.col_meta_cache,
-            field_mapping_cache: None,
-            computed_column_cache: &harness.computed_column_cache,
-            capture_overrides: &harness.capture_overrides,
-            absent_tables: &harness.absent_tables,
-            default_table: &harness.default_table,
-        };
-
-        let payload = serde_json::to_vec(&json!({"event_category": "x"})).expect("serialize");
-        let msg = harness.make_msg(&payload);
-
-        let result = processor.process(&msg);
-        // Strict format mode should fail fast on format mismatch
-        assert!(
-            result.is_err(),
-            "JSON payload with strict msgpack format should error"
-        );
-        let reason = result.err().expect("checked above").to_string();
-        assert!(
-            reason.contains("payload format mismatch: expected MessagePack, got JSON"),
-            "reason must name the forced format and what arrived, got: {reason}"
-        );
     }
 
     // ========================================================================

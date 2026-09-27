@@ -25,7 +25,7 @@ the hyperi-port migration), and [pipeline/](pipeline/) for the hot path.
 
 | You give it | It handles | You don't write |
 |-------------|------------|-----------------|
-| A Kafka/gRPC/Memory topic | JSON + MessagePack auto-detect, SIMD parse (sonic-rs), zero-copy `Arc<[u8]>` | A consumer, a parser, a format sniffer |
+| A Kafka/gRPC/Memory topic | JSON parse (sonic-rs, SIMD), zero-copy `Arc<[u8]>`, anything not JSON dead-lettered | A consumer, a parser, an input gate |
 | A routing rule (`db_fields`/`table_fields`) | Pre-flatten routing to `db.table`, dot-notation nested access, DLQ on miss | A router, a dispatch table |
 | A ClickHouse table | Schema reflected from `system.columns`, fields promoted to typed columns, the rest kept in `_json` | A schema mapping, an ORM, a migration |
 | `insert_format` (default RowBinary) | Dynamic `Map<String,Value>` -> RowBinary over the unified `Client` (HTTP or TCP); JSONEachRow fallback | A serialiser, a type encoder, a wire format |
@@ -48,7 +48,7 @@ flowchart TB
     end
 
     subgraph Hot["Hot path (per message)"]
-        P["Parse + format detect<br/>sonic-rs / rmp-serde -> Arc[u8]"]
+        P["JSON parse<br/>sonic-rs -> Arc[u8]"]
         R["Route (pre-flatten)<br/>db.table"]
         X["Extract<br/>header + schema-promoted cols"]
         C["Coerce (delta only)<br/>epoch / ISO / UUID / IPv4"]
@@ -58,8 +58,7 @@ flowchart TB
 
     subgraph Sink["ClickHouse insert (clickhouse_ext::DynamicInsert)"]
         CE["DynamicRow encoder<br/>Map + schema -> binary"]
-        HTTP["HTTP: insert_formatted_with<br/>FORMAT RowBinary"]
-        TCP["native/TCP: insert_native_with_columns<br/>with_columns_tcp"]
+        HTTP["HTTP: insert_formatted_with<br/>FORMAT RowBinaryWithNamesAndTypes"]
         JF["HTTP: insert_formatted_with<br/>FORMAT JSONEachRow (fallback)"]
     end
 
@@ -68,8 +67,7 @@ flowchart TB
 
     K & G & M --> P --> R --> X --> C --> E --> B
     B -->|RowBinary default| CE
-    CE -->|transport=http| HTTP --> CH
-    CE -->|transport=native| TCP --> CH
+    CE --> HTTP --> CH
     B -->|insert_format=json_each_row| JF --> CH
     B -.salvaged bad rows.-> DLQ
     CH -.success.-> Commit["One Kafka commit per flush cycle"]

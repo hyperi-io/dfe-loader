@@ -3,27 +3,124 @@
 
 //! Data types integration tests
 //!
-//! Tests for various `ClickHouse` data types via `JSONEachRow` inserts.
-//! Includes coercion tests: verify that the Coercer correctly
+//! Tests for various `ClickHouse` data types via `JSONEachRow` inserts, and
+//! every column type the dynamic encoder supports through the `RowBinary`
+//! insert path. Includes coercion tests: verify that the Coercer correctly
 //! transforms ambiguous input values before they reach `ClickHouse`.
+//!
+//! Each test runs against the `ClickHouse` the environment configures when one
+//! answers, else a testcontainer of its own.
 
 #![allow(clippy::approx_constant)]
 
-use serde_json::json;
+use std::sync::Arc;
 
-use crate::common::{create_http_test_client, drop_http_test_table, unique_table_name};
-use crate::skip_if_no_clickhouse;
+use serde_json::{Map, Value, json};
+
+use dfe_loader::clickhouse::config::{ClickHouseConfig, InsertFormat, Transport};
+use dfe_loader::clickhouse::{ClickHouseQueryClient, Inserter, InserterConfig};
+
+use crate::common::containers::TestInfrastructure;
+use crate::common::{
+    ClickHouseTestConfig, TestMode, create_http_test_client, on_cluster_clause, unique_table_name,
+};
+use crate::test_name;
+
+/// The `ClickHouse` a datatypes test runs against.
+struct Target {
+    client: Arc<ClickHouseQueryClient>,
+    url: String,
+    user: String,
+    password: String,
+    database: String,
+    on_cluster: &'static str,
+    /// Holds the testcontainer, when there is one, for the test's lifetime.
+    _infra: Option<TestInfrastructure>,
+}
+
+impl Target {
+    /// The configured external `ClickHouse` when one is named and answers,
+    /// else a testcontainer. In CI a missing Docker daemon fails the test
+    /// instead of skipping it.
+    async fn new(test: &str) -> Self {
+        let ch = ClickHouseTestConfig::from_env();
+        let configured =
+            TestMode::detect() == TestMode::Docker || std::env::var_os("CLICKHOUSE_HOST").is_some();
+        if configured && ch.is_reachable() {
+            let client = create_http_test_client().expect("a client for the configured ClickHouse");
+            return Self {
+                client: Arc::new(client),
+                url: ch.http_url(),
+                user: ch.user,
+                password: ch.password,
+                database: ch.database,
+                on_cluster: on_cluster_clause(),
+                _infra: None,
+            };
+        }
+
+        let infra = TestInfrastructure::new(test, true, false).await;
+        let container = infra.clickhouse.as_ref().expect("ClickHouse container");
+        let host = container
+            .get_host()
+            .await
+            .expect("container host")
+            .to_string();
+        let port = container
+            .get_host_port_ipv4(8123)
+            .await
+            .expect("HTTP port mapping");
+        let client = ClickHouseQueryClient::new(&ClickHouseConfig {
+            hosts: vec![format!("{host}:{port}")],
+            transport: Transport::Http,
+            database: "default".to_string(),
+            username: "default".to_string(),
+            password: String::new(),
+            tls: false,
+            ..Default::default()
+        })
+        .expect("a client for the ClickHouse container");
+        for _ in 0..50 {
+            if client.health_check().await.is_ok() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+        Self {
+            client: Arc::new(client),
+            url: format!("http://{host}:{port}"),
+            user: "default".to_string(),
+            password: String::new(),
+            database: "default".to_string(),
+            on_cluster: "",
+            _infra: Some(infra),
+        }
+    }
+
+    /// A clickhouse-rs client for the same server, for inserts and reads.
+    fn rs_client(&self) -> clickhouse::Client {
+        clickhouse::Client::default()
+            .with_url(&self.url)
+            .with_user(&self.user)
+            .with_password(&self.password)
+            .with_database(&self.database)
+    }
+
+    /// Drop `table`, on the cluster where there is one.
+    async fn drop(&self, table: &str) {
+        let _ = self
+            .client
+            .execute(&format!("DROP TABLE IF EXISTS {table}{}", self.on_cluster))
+            .await;
+    }
+}
 
 #[tokio::test]
 async fn test_integer_types() {
-    skip_if_no_clickhouse!();
-
-    let client = match create_http_test_client() {
-        Some(c) => c,
-        None => return,
-    };
+    let target = Target::new(test_name!()).await;
+    let client = &target.client;
     let table_name = unique_table_name("test_integers");
-    let oc = crate::common::on_cluster_clause();
+    let oc = target.on_cluster;
 
     let ddl = format!(
         "CREATE TABLE {table_name}{oc} (
@@ -50,19 +147,15 @@ async fn test_integer_types() {
     assert_eq!(result.unwrap(), 3);
 
     eprintln!("✓ Integer types insert succeeded");
-    drop_http_test_table(&client, &table_name).await;
+    target.drop(&table_name).await;
 }
 
 #[tokio::test]
 async fn test_float_types() {
-    skip_if_no_clickhouse!();
-
-    let client = match create_http_test_client() {
-        Some(c) => c,
-        None => return,
-    };
+    let target = Target::new(test_name!()).await;
+    let client = &target.client;
     let table_name = unique_table_name("test_floats");
-    let oc = crate::common::on_cluster_clause();
+    let oc = target.on_cluster;
 
     let ddl = format!(
         "CREATE TABLE {table_name}{oc} (
@@ -92,19 +185,15 @@ async fn test_float_types() {
     assert_eq!(result.unwrap(), 3);
 
     eprintln!("✓ Float types insert succeeded");
-    drop_http_test_table(&client, &table_name).await;
+    target.drop(&table_name).await;
 }
 
 #[tokio::test]
 async fn test_string_types() {
-    skip_if_no_clickhouse!();
-
-    let client = match create_http_test_client() {
-        Some(c) => c,
-        None => return,
-    };
+    let target = Target::new(test_name!()).await;
+    let client = &target.client;
     let table_name = unique_table_name("test_strings");
-    let oc = crate::common::on_cluster_clause();
+    let oc = target.on_cluster;
 
     let ddl = format!(
         "CREATE TABLE {table_name}{oc} (
@@ -134,19 +223,15 @@ async fn test_string_types() {
     assert_eq!(result.unwrap(), 3);
 
     eprintln!("✓ String types insert succeeded");
-    drop_http_test_table(&client, &table_name).await;
+    target.drop(&table_name).await;
 }
 
 #[tokio::test]
 async fn test_datetime_types() {
-    skip_if_no_clickhouse!();
-
-    let client = match create_http_test_client() {
-        Some(c) => c,
-        None => return,
-    };
+    let target = Target::new(test_name!()).await;
+    let client = &target.client;
     let table_name = unique_table_name("test_datetime");
-    let oc = crate::common::on_cluster_clause();
+    let oc = target.on_cluster;
 
     let ddl = format!(
         "CREATE TABLE {table_name}{oc} (
@@ -183,19 +268,15 @@ async fn test_datetime_types() {
     assert_eq!(result.unwrap(), 3);
 
     eprintln!("✓ DateTime types insert succeeded");
-    drop_http_test_table(&client, &table_name).await;
+    target.drop(&table_name).await;
 }
 
 #[tokio::test]
 async fn test_boolean_type() {
-    skip_if_no_clickhouse!();
-
-    let client = match create_http_test_client() {
-        Some(c) => c,
-        None => return,
-    };
+    let target = Target::new(test_name!()).await;
+    let client = &target.client;
     let table_name = unique_table_name("test_bool");
-    let oc = crate::common::on_cluster_clause();
+    let oc = target.on_cluster;
 
     let ddl = format!(
         "CREATE TABLE {table_name}{oc} (
@@ -216,19 +297,15 @@ async fn test_boolean_type() {
     assert_eq!(result.unwrap(), 4);
 
     eprintln!("✓ Boolean type insert succeeded");
-    drop_http_test_table(&client, &table_name).await;
+    target.drop(&table_name).await;
 }
 
 #[tokio::test]
 async fn test_nullable_types() {
-    skip_if_no_clickhouse!();
-
-    let client = match create_http_test_client() {
-        Some(c) => c,
-        None => return,
-    };
+    let target = Target::new(test_name!()).await;
+    let client = &target.client;
     let table_name = unique_table_name("test_nullable");
-    let oc = crate::common::on_cluster_clause();
+    let oc = target.on_cluster;
 
     let ddl = format!(
         "CREATE TABLE {table_name}{oc} (
@@ -268,19 +345,15 @@ async fn test_nullable_types() {
     assert_eq!(result.unwrap(), 5);
 
     eprintln!("✓ Nullable types insert succeeded");
-    drop_http_test_table(&client, &table_name).await;
+    target.drop(&table_name).await;
 }
 
 #[tokio::test]
 async fn test_low_cardinality_type() {
-    skip_if_no_clickhouse!();
-
-    let client = match create_http_test_client() {
-        Some(c) => c,
-        None => return,
-    };
+    let target = Target::new(test_name!()).await;
+    let client = &target.client;
     let table_name = unique_table_name("test_lowcard");
-    let oc = crate::common::on_cluster_clause();
+    let oc = target.on_cluster;
 
     let ddl = format!(
         "CREATE TABLE {table_name}{oc} (
@@ -313,19 +386,15 @@ async fn test_low_cardinality_type() {
     assert_eq!(result.unwrap(), 10);
 
     eprintln!("✓ LowCardinality type insert succeeded");
-    drop_http_test_table(&client, &table_name).await;
+    target.drop(&table_name).await;
 }
 
 #[tokio::test]
 async fn test_realistic_event_table() {
-    skip_if_no_clickhouse!();
-
-    let client = match create_http_test_client() {
-        Some(c) => c,
-        None => return,
-    };
+    let target = Target::new(test_name!()).await;
+    let client = &target.client;
     let table_name = unique_table_name("test_events");
-    let oc = crate::common::on_cluster_clause();
+    let oc = target.on_cluster;
 
     let ddl = format!(
         "CREATE TABLE {table_name}{oc} (
@@ -387,7 +456,317 @@ async fn test_realistic_event_table() {
         count as f64 / elapsed.as_secs_f64()
     );
 
-    drop_http_test_table(&client, &table_name).await;
+    target.drop(&table_name).await;
+}
+
+// ============================================================================
+// Every supported column type through the RowBinary insert path
+// ============================================================================
+
+/// One column type sent through the `RowBinary` insert: the value sent, the
+/// SQL expression over `v` that reads it back as text, and the text expected.
+struct TypeCase {
+    ty: &'static str,
+    value: Value,
+    read: &'static str,
+    expected: &'static str,
+}
+
+/// A value read back as text.
+#[derive(clickhouse::Row, serde::Deserialize)]
+struct Text {
+    s: String,
+}
+
+fn case(ty: &'static str, value: Value, read: &'static str, expected: &'static str) -> TypeCase {
+    TypeCase {
+        ty,
+        value,
+        read,
+        expected,
+    }
+}
+
+/// Every column type the dynamic encoder writes, with a value and how it reads
+/// back. 1790416800 is 2026-09-26 10:00:00 UTC.
+fn supported_type_cases() -> Vec<TypeCase> {
+    const TEXT: &str = "toString(v)";
+    const OR_NULL: &str = "ifNull(toString(v), 'NULL')";
+    vec![
+        case("String", json!("hello"), TEXT, "hello"),
+        case("FixedString(5)", json!("abc"), "hex(v)", "6162630000"),
+        case("UInt8", json!(255), TEXT, "255"),
+        case("UInt16", json!(65535), TEXT, "65535"),
+        case("UInt32", json!(4_294_967_295_u64), TEXT, "4294967295"),
+        case("UInt64", json!(u64::MAX), TEXT, "18446744073709551615"),
+        case(
+            "UInt128",
+            json!("340282366920938463463374607431768211455"),
+            TEXT,
+            "340282366920938463463374607431768211455",
+        ),
+        case("UInt256", json!(5), TEXT, "5"),
+        case("Int8", json!(-128), TEXT, "-128"),
+        case("Int16", json!(-32768), TEXT, "-32768"),
+        case("Int32", json!(-2_147_483_648_i64), TEXT, "-2147483648"),
+        case("Int64", json!(i64::MIN), TEXT, "-9223372036854775808"),
+        case(
+            "Int128",
+            json!("-170141183460469231731687303715884105728"),
+            TEXT,
+            "-170141183460469231731687303715884105728",
+        ),
+        case("Int256", json!(-5), TEXT, "-5"),
+        case("Float32", json!(1.5), TEXT, "1.5"),
+        case(
+            "Float64",
+            json!(3.141592653589793),
+            TEXT,
+            "3.141592653589793",
+        ),
+        case("Bool", json!(true), TEXT, "true"),
+        case("Date", json!("2026-09-26"), TEXT, "2026-09-26"),
+        case("Date32", json!("1960-01-01"), TEXT, "1960-01-01"),
+        case(
+            "DateTime",
+            json!(1_790_416_800),
+            "toString(toUnixTimestamp(v))",
+            "1790416800",
+        ),
+        case(
+            "DateTime('UTC')",
+            json!("2026-09-26 10:00:00"),
+            TEXT,
+            "2026-09-26 10:00:00",
+        ),
+        case(
+            "Nullable(DateTime('UTC'))",
+            json!(1_790_416_800),
+            OR_NULL,
+            "2026-09-26 10:00:00",
+        ),
+        case(
+            "DateTime('Australia/Sydney')",
+            json!(1_790_416_800),
+            "toString(toUnixTimestamp(v))",
+            "1790416800",
+        ),
+        case(
+            "DateTime64(3)",
+            json!(1_790_416_800_123_i64),
+            "toString(toUnixTimestamp64Milli(v))",
+            "1790416800123",
+        ),
+        case(
+            "DateTime64(6, 'UTC')",
+            json!("2026-09-26 10:00:00.123456"),
+            TEXT,
+            "2026-09-26 10:00:00.123456",
+        ),
+        case(
+            "DateTime64(3, 'Australia/Sydney')",
+            json!(1_790_416_800_123_i64),
+            "toString(toUnixTimestamp64Milli(v))",
+            "1790416800123",
+        ),
+        case("Decimal(9, 2)", json!(123.45), TEXT, "123.45"),
+        case("Decimal(18, 4)", json!(12345.6789), TEXT, "12345.6789"),
+        case("Decimal(38, 6)", json!(1.5), TEXT, "1.5"),
+        case("Decimal(76, 10)", json!(2.5), TEXT, "2.5"),
+        case(
+            "UUID",
+            json!("550e8400-e29b-41d4-a716-446655440000"),
+            TEXT,
+            "550e8400-e29b-41d4-a716-446655440000",
+        ),
+        case("IPv4", json!("192.168.1.1"), TEXT, "192.168.1.1"),
+        case("IPv6", json!("2001:db8::1"), TEXT, "2001:db8::1"),
+        case(
+            "Nullable(IPv6)",
+            json!("10.0.0.1"),
+            OR_NULL,
+            "::ffff:10.0.0.1",
+        ),
+        case("Enum8('a' = 1, 'b' = 2)", json!("b"), TEXT, "b"),
+        case("Enum16('x' = 1000, 'y' = 2000)", json!("y"), TEXT, "y"),
+        case("Enum8('a' = 1, 'b' = 2)", json!(2), TEXT, "b"),
+        case(
+            "Nullable(Enum8('on' = 1, 'off' = 2))",
+            json!("off"),
+            OR_NULL,
+            "off",
+        ),
+        case("Array(String)", json!(["a", "b"]), TEXT, "['a','b']"),
+        case("Array(UInt32)", json!([1, 2, 3]), TEXT, "[1,2,3]"),
+        case("Array(Nullable(Int64))", json!([1, null]), TEXT, "[1,NULL]"),
+        case(
+            "Map(String, UInt64)",
+            json!({"a": 1, "b": 2}),
+            TEXT,
+            "{'a':1,'b':2}",
+        ),
+        case(
+            "Map(LowCardinality(String), String)",
+            json!({"k": "v"}),
+            TEXT,
+            "{'k':'v'}",
+        ),
+        case("LowCardinality(String)", json!("x"), TEXT, "x"),
+        case(
+            "LowCardinality(Nullable(String))",
+            Value::Null,
+            OR_NULL,
+            "NULL",
+        ),
+        case("Nullable(String)", Value::Null, OR_NULL, "NULL"),
+        case("Nullable(Int64)", json!(7), OR_NULL, "7"),
+        case(
+            "Nullable(DateTime64(3, 'UTC'))",
+            json!(1_790_416_800_123_i64),
+            "toString(toUnixTimestamp64Milli(assumeNotNull(v)))",
+            "1790416800123",
+        ),
+        case(
+            "JSON",
+            json!({"a": 1, "b": "x"}),
+            TEXT,
+            r#"{"a":1,"b":"x"}"#,
+        ),
+        case(
+            "JSON(max_dynamic_paths = 2048)",
+            json!({"a": 1}),
+            TEXT,
+            r#"{"a":1}"#,
+        ),
+    ]
+}
+
+/// Each supported column type lands through the `RowBinaryWithNamesAndTypes`
+/// header and reads back as sent. A type whose `system.columns` string the
+/// server did not accept back in the header would fail here with code 117.
+#[tokio::test]
+async fn every_supported_column_type_lands_through_the_row_binary_header() {
+    let target = Target::new(test_name!()).await;
+    let reader = target.rs_client();
+    let inserter = Inserter::new(
+        Arc::clone(&target.client),
+        target.rs_client(),
+        InserterConfig {
+            max_retries: 1,
+            base_retry_delay_ms: 10,
+            max_retry_delay_ms: 100,
+            ..InserterConfig::default()
+        },
+    )
+    .with_insert_format(InsertFormat::RowBinary);
+
+    let mut failures = Vec::new();
+    for (index, case) in supported_type_cases().into_iter().enumerate() {
+        let table = format!(
+            "{}.{}",
+            target.database,
+            unique_table_name(&format!("rb_type_{index}"))
+        );
+        let outcome = async {
+            target
+                .client
+                .execute(&format!(
+                    "CREATE TABLE {table}{} (id UInt64, v {}) ENGINE = MergeTree() ORDER BY id",
+                    target.on_cluster, case.ty
+                ))
+                .await
+                .map_err(|e| format!("create: {e}"))?;
+            let mut row = Map::new();
+            row.insert("id".to_string(), json!(1));
+            row.insert("v".to_string(), case.value.clone());
+            inserter
+                .insert_rows(&table, &[row], &[])
+                .await
+                .map_err(|e| format!("insert: {e}"))?;
+            let read: Vec<Text> = reader
+                .query(&format!("SELECT {} AS s FROM {table}", case.read))
+                .fetch_all()
+                .await
+                .map_err(|e| format!("read: {e}"))?;
+            match read.as_slice() {
+                [only] if only.s == case.expected => Ok(()),
+                [only] => Err(format!(
+                    "read back {:?}, expected {:?}",
+                    only.s, case.expected
+                )),
+                rows => Err(format!("{} rows landed", rows.len())),
+            }
+        }
+        .await;
+        match &outcome {
+            Ok(()) => eprintln!("ROWBINARY TYPE {}: PASS", case.ty),
+            Err(e) => eprintln!("ROWBINARY TYPE {}: FAIL {e}", case.ty),
+        }
+        if let Err(e) = outcome {
+            failures.push(format!("{}: {e}", case.ty));
+        }
+        target.drop(&table).await;
+    }
+    assert!(
+        failures.is_empty(),
+        "{} column types failed through the RowBinary header:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}
+
+/// A column type the encoder has no writer for is refused before anything is
+/// sent, never written as some other type's bytes.
+#[tokio::test]
+async fn an_unsupported_column_type_is_refused_before_it_is_sent() {
+    let target = Target::new(test_name!()).await;
+    let inserter = Inserter::new(
+        Arc::clone(&target.client),
+        target.rs_client(),
+        InserterConfig {
+            max_retries: 0,
+            ..InserterConfig::default()
+        },
+    )
+    .with_insert_format(InsertFormat::RowBinary);
+
+    for (index, (ty, value)) in [
+        ("Tuple(String, UInt8)", json!(["a", 1])),
+        ("Point", json!([1.0, 2.0])),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let table = format!(
+            "{}.{}",
+            target.database,
+            unique_table_name(&format!("rb_unsupported_{index}"))
+        );
+        target
+            .client
+            .execute(&format!(
+                "CREATE TABLE {table}{} (id UInt64, v {ty}) ENGINE = MergeTree() ORDER BY id",
+                target.on_cluster
+            ))
+            .await
+            .expect("create table");
+        let mut row = Map::new();
+        row.insert("id".to_string(), json!(1));
+        row.insert("v".to_string(), value);
+        let outcome = inserter.insert_rows(&table, &[row], &[]).await;
+        eprintln!("ROWBINARY TYPE {ty}: {outcome:?}");
+        let count = target
+            .client
+            .query_count(&table, None)
+            .await
+            .expect("count");
+        target.drop(&table).await;
+        assert!(
+            matches!(&outcome, Err(e) if e.to_string().contains("unsupported type")),
+            "{ty} was not refused as unsupported: {outcome:?}"
+        );
+        assert_eq!(count, 0, "{ty} wrote a row");
+    }
 }
 
 // ============================================================================
@@ -408,14 +787,10 @@ fn default_coercer() -> dfe_loader::transform::Coercer {
 
 #[tokio::test]
 async fn test_coerce_datetime64_from_epoch_ms() {
-    skip_if_no_clickhouse!();
-
-    let client = match create_http_test_client() {
-        Some(c) => c,
-        None => return,
-    };
+    let target = Target::new(test_name!()).await;
+    let client = &target.client;
     let table_name = unique_table_name("test_coerce_dt64_epoch");
-    let oc = crate::common::on_cluster_clause();
+    let oc = target.on_cluster;
 
     let ddl = format!(
         "CREATE TABLE {table_name}{oc} (
@@ -446,19 +821,15 @@ async fn test_coerce_datetime64_from_epoch_ms() {
     assert_eq!(result.unwrap(), 1);
 
     eprintln!("✓ DateTime64 from epoch ms coercion succeeded");
-    drop_http_test_table(&client, &table_name).await;
+    target.drop(&table_name).await;
 }
 
 #[tokio::test]
 async fn test_coerce_datetime64_from_iso_string() {
-    skip_if_no_clickhouse!();
-
-    let client = match create_http_test_client() {
-        Some(c) => c,
-        None => return,
-    };
+    let target = Target::new(test_name!()).await;
+    let client = &target.client;
     let table_name = unique_table_name("test_coerce_dt64_iso");
-    let oc = crate::common::on_cluster_clause();
+    let oc = target.on_cluster;
 
     let ddl = format!(
         "CREATE TABLE {table_name}{oc} (
@@ -491,19 +862,15 @@ async fn test_coerce_datetime64_from_iso_string() {
     assert_eq!(result.unwrap(), 1);
 
     eprintln!("✓ DateTime64 from ISO string coercion succeeded");
-    drop_http_test_table(&client, &table_name).await;
+    target.drop(&table_name).await;
 }
 
 #[tokio::test]
 async fn test_coerce_bool_from_string() {
-    skip_if_no_clickhouse!();
-
-    let client = match create_http_test_client() {
-        Some(c) => c,
-        None => return,
-    };
+    let target = Target::new(test_name!()).await;
+    let client = &target.client;
     let table_name = unique_table_name("test_coerce_bool_str");
-    let oc = crate::common::on_cluster_clause();
+    let oc = target.on_cluster;
 
     let ddl = format!(
         "CREATE TABLE {table_name}{oc} (
@@ -550,19 +917,15 @@ async fn test_coerce_bool_from_string() {
     assert_eq!(result.unwrap(), string_trues.len() + string_falses.len());
 
     eprintln!("✓ Bool from string coercion succeeded");
-    drop_http_test_table(&client, &table_name).await;
+    target.drop(&table_name).await;
 }
 
 #[tokio::test]
 async fn test_coerce_bool_from_int() {
-    skip_if_no_clickhouse!();
-
-    let client = match create_http_test_client() {
-        Some(c) => c,
-        None => return,
-    };
+    let target = Target::new(test_name!()).await;
+    let client = &target.client;
     let table_name = unique_table_name("test_coerce_bool_int");
-    let oc = crate::common::on_cluster_clause();
+    let oc = target.on_cluster;
 
     let ddl = format!(
         "CREATE TABLE {table_name}{oc} (
@@ -601,19 +964,15 @@ async fn test_coerce_bool_from_int() {
     assert_eq!(result.unwrap(), cases.len());
 
     eprintln!("✓ Bool from int coercion succeeded");
-    drop_http_test_table(&client, &table_name).await;
+    target.drop(&table_name).await;
 }
 
 #[tokio::test]
 async fn test_coerce_uuid_normalisation() {
-    skip_if_no_clickhouse!();
-
-    let client = match create_http_test_client() {
-        Some(c) => c,
-        None => return,
-    };
+    let target = Target::new(test_name!()).await;
+    let client = &target.client;
     let table_name = unique_table_name("test_coerce_uuid");
-    let oc = crate::common::on_cluster_clause();
+    let oc = target.on_cluster;
 
     let ddl = format!(
         "CREATE TABLE {table_name}{oc} (
@@ -647,19 +1006,15 @@ async fn test_coerce_uuid_normalisation() {
     assert_eq!(result.unwrap(), 1);
 
     eprintln!("✓ UUID normalisation coercion succeeded");
-    drop_http_test_table(&client, &table_name).await;
+    target.drop(&table_name).await;
 }
 
 #[tokio::test]
 async fn test_coerce_ipv4_from_integer() {
-    skip_if_no_clickhouse!();
-
-    let client = match create_http_test_client() {
-        Some(c) => c,
-        None => return,
-    };
+    let target = Target::new(test_name!()).await;
+    let client = &target.client;
     let table_name = unique_table_name("test_coerce_ipv4");
-    let oc = crate::common::on_cluster_clause();
+    let oc = target.on_cluster;
 
     let ddl = format!(
         "CREATE TABLE {table_name}{oc} (
@@ -694,19 +1049,15 @@ async fn test_coerce_ipv4_from_integer() {
     assert_eq!(result.unwrap(), 1);
 
     eprintln!("✓ IPv4 from integer coercion succeeded");
-    drop_http_test_table(&client, &table_name).await;
+    target.drop(&table_name).await;
 }
 
 #[tokio::test]
 async fn test_coerce_null_non_nullable_defaults_to_empty() {
-    skip_if_no_clickhouse!();
-
-    let client = match create_http_test_client() {
-        Some(c) => c,
-        None => return,
-    };
+    let target = Target::new(test_name!()).await;
+    let client = &target.client;
     let table_name = unique_table_name("test_coerce_null_nonnullable");
-    let oc = crate::common::on_cluster_clause();
+    let oc = target.on_cluster;
 
     let ddl = format!(
         "CREATE TABLE {table_name}{oc} (
@@ -746,19 +1097,15 @@ async fn test_coerce_null_non_nullable_defaults_to_empty() {
     assert_eq!(result.unwrap(), 1);
 
     eprintln!("✓ Null → non-nullable default coercion succeeded");
-    drop_http_test_table(&client, &table_name).await;
+    target.drop(&table_name).await;
 }
 
 #[tokio::test]
 async fn test_coerce_array_datetime64_from_epoch_ms() {
-    skip_if_no_clickhouse!();
-
-    let client = match create_http_test_client() {
-        Some(c) => c,
-        None => return,
-    };
+    let target = Target::new(test_name!()).await;
+    let client = &target.client;
     let table_name = unique_table_name("test_coerce_arr_dt64");
-    let oc = crate::common::on_cluster_clause();
+    let oc = target.on_cluster;
 
     let ddl = format!(
         "CREATE TABLE {table_name}{oc} (
@@ -802,30 +1149,22 @@ async fn test_coerce_array_datetime64_from_epoch_ms() {
     assert_eq!(result.unwrap(), 1);
 
     eprintln!("✓ Array(DateTime64) from epoch ms coercion succeeded");
-    drop_http_test_table(&client, &table_name).await;
+    target.drop(&table_name).await;
 }
 
 #[tokio::test]
 async fn test_coerce_json_column_accepts_string_and_object() {
-    skip_if_no_clickhouse!();
-
-    let client = match create_http_test_client() {
-        Some(c) => c,
-        None => return,
-    };
+    let target = Target::new(test_name!()).await;
+    let client = &target.client;
     let table_name = unique_table_name("test_coerce_json_col");
-    let oc = crate::common::on_cluster_clause();
+    let oc = target.on_cluster;
 
-    // JSON type requires ClickHouse 25.3+; skip gracefully on older versions
     let ddl = format!(
         "CREATE TABLE {table_name}{oc} (
             data JSON
         ) ENGINE = MergeTree() ORDER BY tuple()"
     );
-    if client.execute(&ddl).await.is_err() {
-        eprintln!("Skipping test_coerce_json_column: JSON type not supported on this server");
-        return;
-    }
+    client.execute(&ddl).await.expect("Failed to create table");
 
     let schema = client
         .fetch_table_schema(&table_name)
@@ -862,5 +1201,5 @@ async fn test_coerce_json_column_accepts_string_and_object() {
     assert_eq!(result.unwrap(), 2);
 
     eprintln!("✓ JSON column coercion (object + string) succeeded");
-    drop_http_test_table(&client, &table_name).await;
+    target.drop(&table_name).await;
 }

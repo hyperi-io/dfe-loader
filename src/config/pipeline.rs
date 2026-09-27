@@ -19,10 +19,6 @@ fn default_true() -> bool {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct PayloadConfig {
-    /// Format mode: "auto" (default), "json", "messagepack"/"msgpack"
-    pub format: String,
-    /// Mismatch threshold before auto-reset (auto mode only)
-    pub mismatch_threshold: u8,
     /// Pipeline processing mode.
     ///
     /// - `"json_primary"` (default): Schema-guided SIMD extraction + zero-copy `_json` splice.
@@ -38,8 +34,6 @@ pub struct PayloadConfig {
 impl Default for PayloadConfig {
     fn default() -> Self {
         Self {
-            format: "auto".to_string(),
-            mismatch_threshold: 10,
             pipeline_mode: "json_primary".to_string(),
         }
     }
@@ -1444,9 +1438,17 @@ mod tests {
     #[test]
     fn payload_config_default_values() {
         let cfg = PayloadConfig::default();
-        assert_eq!(cfg.format, "auto");
-        assert_eq!(cfg.mismatch_threshold, 10);
         assert_eq!(cfg.pipeline_mode, "json_primary");
+    }
+
+    #[test]
+    fn payload_config_from_an_older_render_still_loads() {
+        // An engine render from before JSON-only still carries the format keys.
+        let cfg: PayloadConfig = serde_json::from_str(
+            r#"{"format": "auto", "mismatch_threshold": 10, "pipeline_mode": "legacy_flatten"}"#,
+        )
+        .expect("removed keys are ignored, not refused");
+        assert_eq!(cfg.pipeline_mode, "legacy_flatten");
     }
 
     #[test]

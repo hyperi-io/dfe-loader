@@ -24,6 +24,24 @@ use scalo::metrics::groups::{
 };
 use scalo::metrics::{MetricsManager, ServiceMetrics, TransportKind, ValidationFailureReason};
 
+/// Dead letters dropped with nowhere to go, by `reason`: scalo's pipeline
+/// counter, which `ServiceMetrics` registers.
+pub const DEAD_LETTERS_DROPPED_TOTAL: &str = "pipeline_dead_letters_dropped_total";
+
+/// Steps retried after a transient failure, by `stage`: scalo's pipeline
+/// counter, which `ServiceMetrics` registers.
+pub const RETRIES_TOTAL: &str = "pipeline_retries_total";
+
+/// Count `rows` dead letters dropped because of `reason`.
+pub fn count_dead_letters_dropped(reason: &'static str, rows: u64) {
+    metrics::counter!(DEAD_LETTERS_DROPPED_TOTAL, "reason" => reason).increment(rows);
+}
+
+/// Count one retry of the step `stage` after a transient failure.
+pub fn count_retry(stage: &'static str) {
+    metrics::counter!(RETRIES_TOTAL, "stage" => stage).increment(1);
+}
+
 /// Application metrics backed by scalo `MetricsManager`.
 ///
 /// Registers metrics at three layers:
@@ -307,12 +325,14 @@ impl Metrics {
     }
 
     /// Record a message processed for a table.
+    ///
+    /// Buffered, not delivered: `records_delivered_total` is counted by
+    /// [`record_flush`](Self::record_flush) once `ClickHouse` has the rows.
     pub fn record_processed(&self, table: &str) {
         self.messages_processed.increment(1);
         self.app.record_processed(1);
         metrics::counter!("loader_messages_by_table_total", "table" => table.to_string())
             .increment(1);
-        self.dfe.records_delivered(1);
     }
 
     /// Record a message sent to DLQ.
@@ -322,10 +342,11 @@ impl Metrics {
         self.dfe.records_dlq(1);
     }
 
-    /// Record a batch flush.
+    /// Record a batch flush that inserted `rows` into `ClickHouse`.
     pub fn record_flush(&self, rows: usize, latency_secs: f64) {
         self.batches_flushed.increment(1);
         self.rows_inserted.increment(rows as u64);
+        self.dfe.records_delivered(rows as u64);
         self.insert_latency.record(latency_secs);
         self.sink.record_duration("clickhouse", latency_secs);
         self.dfe.transport_sent(TransportKind::Http, rows as u64);
@@ -352,21 +373,6 @@ impl Metrics {
     /// Set the in-flight concurrent insert count (inserter queue/concurrency depth).
     pub fn set_inserter_inflight(&self, inflight: u64) {
         self.ch_inserter_inflight.set(inflight as f64);
-    }
-
-    /// Record a batch flush for a specific table.
-    pub fn record_flush_table(&self, table: &str, rows: usize, latency_secs: f64) {
-        self.batches_flushed.increment(1);
-        self.rows_inserted.increment(rows as u64);
-        self.insert_latency.record(latency_secs);
-        metrics::histogram!(
-            "loader_insert_latency_by_table_seconds",
-            "table" => table.to_string()
-        )
-        .record(latency_secs);
-        self.sink.record_duration("clickhouse", latency_secs);
-        self.dfe.transport_sent(TransportKind::Http, rows as u64);
-        self.dfe.transport_send_duration("clickhouse", latency_secs);
     }
 
     /// Record an insert error.
@@ -586,17 +592,43 @@ impl ServerState {
     }
 }
 
-/// Counts one named counter across every label set, as a `sum()` over the name
-/// reads it, so a test asserts the value emitted rather than that a recorder
-/// was installed.
+/// Counts every counter by name and labels, so a test asserts the value
+/// emitted rather than that a recorder was installed.
 #[cfg(test)]
 pub(crate) mod counting {
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{Arc, Mutex};
 
-    struct CountingRecorder {
-        name: &'static str,
-        hits: Arc<AtomicU64>,
+    /// Every counter registered with it, and what each has counted.
+    #[derive(Default)]
+    pub(crate) struct CountingRecorder {
+        counters: Mutex<Vec<(metrics::Key, Arc<AtomicU64>)>>,
+    }
+
+    impl CountingRecorder {
+        /// The sum over every label set of the counter `name`, as a `sum()`
+        /// over the name reads it.
+        pub(crate) fn total(&self, name: &str) -> u64 {
+            self.sum(|key| key.name() == name)
+        }
+
+        /// The counter `name` summed over the label sets carrying
+        /// `label=value`.
+        pub(crate) fn labelled(&self, name: &str, label: &str, value: &str) -> u64 {
+            self.sum(|key| {
+                key.name() == name && key.labels().any(|l| l.key() == label && l.value() == value)
+            })
+        }
+
+        fn sum(&self, matches: impl Fn(&metrics::Key) -> bool) -> u64 {
+            self.counters
+                .lock()
+                .expect("counter lock")
+                .iter()
+                .filter(|(key, _)| matches(key))
+                .map(|(_, hits)| hits.load(Ordering::Relaxed))
+                .sum()
+        }
     }
 
     struct CountingHandle(Arc<AtomicU64>);
@@ -641,11 +673,17 @@ pub(crate) mod counting {
             key: &metrics::Key,
             _: &metrics::Metadata<'_>,
         ) -> metrics::Counter {
-            if key.name() == self.name {
-                metrics::Counter::from_arc(Arc::new(CountingHandle(Arc::clone(&self.hits))))
-            } else {
-                metrics::Counter::noop()
-            }
+            let mut counters = self.counters.lock().expect("counter lock");
+            let known = counters
+                .iter()
+                .find(|(k, _)| k == key)
+                .map(|(_, hits)| Arc::clone(hits));
+            let hits = known.unwrap_or_else(|| {
+                let hits = Arc::new(AtomicU64::new(0));
+                counters.push((key.clone(), Arc::clone(&hits)));
+                hits
+            });
+            metrics::Counter::from_arc(Arc::new(CountingHandle(hits)))
         }
 
         fn register_gauge(&self, _: &metrics::Key, _: &metrics::Metadata<'_>) -> metrics::Gauge {
@@ -661,15 +699,12 @@ pub(crate) mod counting {
         }
     }
 
-    /// Run `f` with a thread-local recorder counting `name`.
+    /// Run `f` with a thread-local recorder and return what it counted in
+    /// `name`.
     pub(crate) fn counted(name: &'static str, f: impl FnOnce()) -> u64 {
-        let hits = Arc::new(AtomicU64::new(0));
-        let recorder = CountingRecorder {
-            name,
-            hits: Arc::clone(&hits),
-        };
+        let recorder = CountingRecorder::default();
         metrics::with_local_recorder(&recorder, f);
-        hits.load(Ordering::Relaxed)
+        recorder.total(name)
     }
 }
 
@@ -730,6 +765,8 @@ mod tests {
             "dfe_loader_pending_schema_expired_total",
             "dfe_loader_pending_schema_messages",
             "dfe_loader_rows_lost_total",
+            "pipeline_dead_letters_dropped_total",
+            "pipeline_retries_total",
             "dfe_loader_schema_prewarm_retries_total",
             "dfe_loader_schema_prewarm_failed_tables",
             "dfe_loader_header_pass_skipped_total",
@@ -870,6 +907,35 @@ mod tests {
     }
 
     #[test]
+    fn records_count_as_delivered_at_the_insert_not_at_the_buffer() {
+        let manager = MetricsManager::with_config(scalo::metrics::MetricsConfig::offline(""));
+        let buffered = counted("records_delivered_total", || {
+            let m = Metrics::new(&manager);
+            m.record_processed("dfe.events");
+            m.record_processed("dfe.events");
+        });
+        assert_eq!(buffered, 0, "a buffered row is not delivered yet");
+
+        let inserted = counted("records_delivered_total", || {
+            Metrics::new(&manager).record_flush(5, 0.01);
+        });
+        assert_eq!(inserted, 5, "five rows inserted read as five delivered");
+    }
+
+    #[test]
+    fn dropped_dead_letters_are_counted_under_their_reason() {
+        let recorder = super::counting::CountingRecorder::default();
+        metrics::with_local_recorder(&recorder, || {
+            super::count_dead_letters_dropped("dead_letter", 3);
+            super::count_dead_letters_dropped("too_large", 1);
+        });
+        let name = super::DEAD_LETTERS_DROPPED_TOTAL;
+        assert_eq!(recorder.total(name), 4);
+        assert_eq!(recorder.labelled(name, "reason", "too_large"), 1);
+        assert_eq!(recorder.labelled(name, "reason", "dead_letter"), 3);
+    }
+
+    #[test]
     fn metrics_record_received_increments() {
         let m = test_metrics();
         // Should not panic — exercises counter + eps_counter
@@ -902,13 +968,6 @@ mod tests {
     fn metrics_record_flush_large_batch() {
         let m = test_metrics();
         m.record_flush(1_000_000, 2.5);
-    }
-
-    #[test]
-    fn metrics_record_flush_table() {
-        let m = test_metrics();
-        m.record_flush_table("dfe.events", 500, 0.042);
-        m.record_flush_table("dfe.events", 0, 0.0); // zero rows
     }
 
     #[test]

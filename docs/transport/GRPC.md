@@ -58,18 +58,13 @@ flowchart LR
 6. **K8s native** -- standard gRPC health protocol, Service discovery.
 7. **v1/v2 evolution** -- v1 proto includes mesh-ready fields (unused); v2
    activates them.
-8. **Held, never dropped** -- the ACK means the loader now holds the only copy.
-   When a ClickHouse insert fails the loader keeps the batch, stops pulling
-   from the listener, and inserts it again on scalo's jittered exponential
-   schedule, capped at `buffer.flush_age_secs` before jitter. The listener's
-   queue (`grpc.recv_buffer_size`) fills and Push answers `RESOURCE_EXHAUSTED`,
-   which dfe-receiver holds and re-sends. Intake resumes once the batch lands.
-   A loader stopped while it holds a batch loses that batch: this path keeps
-   no disk copy.
+8. **Answered on delivery** -- with `grpc.acknowledgements.enabled` (the default) the listener answers a Push only once every row built from it is in ClickHouse, in the DLQ with the DLQ's confirmation, or dropped. A failed insert answers `UNAVAILABLE` and the sender retries from its own copy. Rows whose sender waits on them flush at 200 ms rather than `buffer.flush_age_secs`. A Push still unanswered after `grpc.max_hold_ms` (13.5 s, shortened by the sender's own deadline) is answered `UNAVAILABLE` as well, and its rows may still land, so the retry can write them twice.
 
-   Rows ClickHouse rejects for good go to the DLQ, and the loader holds them the same way until the DLQ proves them written -- a flush barrier that passes with entries dropped since does not count. Records that fail processing (unparseable, unroutable, a pre-route reject) take the same path at the next flush, and a shutdown hands every one of them to the DLQ before the DLQ closes. With no working DLQ those rows can never be placed: the loader logs the loss at `error` and counts every row in `dfe_loader_rows_lost_total`.
+   Rows ClickHouse rejects for good go to the DLQ, and their Push is answered once the DLQ confirms that write on its own (`Dlq::write_confirmed`), so another writer's loss never counts for or against it. Every Push whose rows have all landed is answered before that write, so a DLQ that refuses holds only the senders of the rows it must take. A refused write is retried with jittered backoff (100 ms to 1 s, each retry counted in `pipeline_retries_total{stage="dlq"}`) while those Pushes stay held and intake stops. The retry ends 1 s before the earliest of their hold deadlines, which leaves a Push queued behind it time to land within its own hold, and they are answered `UNAVAILABLE`. A DLQ that has shut down, or the loader's own shutdown, answers them `UNAVAILABLE` at once. Records that fail processing (unparseable, unroutable, a pre-route reject) take the same path. A row no DLQ backend can ever hold is answered as a drop, since a retry would fail the same way at every hop. That is a row with no working DLQ at all (`reason="dead_letter"`), or one larger than the ceiling of a Kafka-only DLQ once written with its base64 payload (`reason="too_large"`). The loader logs it at `error` and counts it in `pipeline_dead_letters_dropped_total{reason}` and `dfe_loader_rows_lost_total`.
 
-   A message whose table schema is not cached yet waits in the pending-schema buffer. On gRPC a full buffer (`schema.pending_max_per_table`, `schema.pending_max_total`) stops intake instead of shedding to the DLQ -- the loader logs the tables holding it at `warn`, and logs at `info` when intake resumes -- and a message past `schema.pending_max_age_secs` goes to the DLQ under the same hold, or keeps waiting for its schema when there is no working DLQ.
+   A message whose table schema is not cached yet waits in the pending-schema buffer. On gRPC a full buffer (`schema.pending_max_per_table`, `schema.pending_max_total`) stops intake instead of shedding to the DLQ -- the loader logs the tables holding it at `warn`, and logs at `info` when intake resumes -- and a message past `schema.pending_max_age_secs` is answered `UNAVAILABLE` for its sender to retry.
+
+   With `grpc.acknowledgements.enabled: false` a Push is answered once queued and the loader holds the only copy: a failed insert or a refused DLQ write is held and retried on scalo's jittered schedule while intake stops, and a loader stopped while it holds a batch loses it.
 
    Under memory pressure the self-regulation governor makes the listener answer Push with `UNAVAILABLE` before the loader admits another record.
 
@@ -158,7 +153,7 @@ message Event {
     // Routing key (topic/table destination)
     string key = 1;
 
-    // Raw payload bytes (JSON or MsgPack)
+    // Raw payload bytes (JSON)
     bytes payload = 2;
 
     // Payload format hint (auto-detected if not set)
@@ -238,12 +233,11 @@ enum Compression {
 enum PayloadFormat {
     PAYLOAD_FORMAT_AUTO = 0;
     PAYLOAD_FORMAT_JSON = 1;
-    PAYLOAD_FORMAT_MSGPACK = 2;
 }
 
 enum ErrorCode {
     ERROR_CODE_UNSPECIFIED = 0;
-    ERROR_CODE_INVALID_PAYLOAD = 1;     // Can't parse JSON/MsgPack
+    ERROR_CODE_INVALID_PAYLOAD = 1;     // Not JSON, or JSON that does not parse
     ERROR_CODE_ROUTING_FAILED = 2;      // Can't determine destination
     ERROR_CODE_TRANSFORM_FAILED = 3;    // Transform error
     ERROR_CODE_INSERT_FAILED = 4;       // ClickHouse insert failed

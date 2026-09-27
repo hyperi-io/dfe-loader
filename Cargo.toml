@@ -31,8 +31,9 @@ required-features = ["pgo-driver"]
 tokio = { version = ">=1.53.1, <2", features = ["full"] }
 tokio-util = { version = ">=0.7.19, <0.8", features = ["rt"] }
 
-# Shared library with transport abstraction
-scalo = { version = ">=2.12.8, <3", features = ["config-schema", "transport-kafka", "transport-grpc", "dlq-kafka", "config", "config-reload", "deployment", "version-check", "scaling", "cli-service", "top", "logger", "metrics", "service-metrics", "expression", "memory", "worker-batch", "governor", "secrets", "sink-stack"] }
+# Shared library with transport abstraction. The floor is the first release with
+# scalo::transport::ack and the public scalo::parse_guard.
+scalo = { version = ">=2.13.0, <3", features = ["config-schema", "transport-kafka", "transport-grpc", "dlq-kafka", "config", "config-reload", "deployment", "version-check", "scaling", "cli-service", "top", "logger", "metrics", "service-metrics", "expression", "memory", "worker-batch", "governor", "secrets", "sink-stack"] }
 
 # Steps scalo's jittered retry schedule (sink_stack backoff). Range MUST track
 # scalo's: BackoffBuilder only applies to the ExponentialBuilder scalo returns.
@@ -51,14 +52,10 @@ cel = { version = ">=0.13, <0.14", features = ["json"] }
 
 # JSON parsing (SIMD-accelerated)
 sonic-rs = ">=0.5.10, <0.6"
-wide = ">=1.7.1, <2"  # Safe SIMD byte compares for the JSON depth guard
 serde = { version = ">=1.0.229, <2", features = ["derive"] }
 serde_json = ">=1.0.151, <2"  # Fallback for complex cases
 serde_yaml_ng = ">=0.10, <0.11"  # YAML remap file parsing (maintained serde_yaml fork)
 csv = ">=1.4.0, <2"  # CSV remap file parsing (ecs-mapper format compatible)
-
-# MessagePack parsing
-rmp-serde = ">=1.3.1, <2"
 
 # Configuration
 figment = { version = ">=0.10.19, <0.11", features = ["env"] }

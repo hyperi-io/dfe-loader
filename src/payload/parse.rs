@@ -1,9 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 // Copyright (c) 2026 HYPERI PTY LIMITED
 
-//! Payload parsing with auto-detection
-//!
-//! Parses JSON or `MessagePack` into a common Value type.
+//! JSON payload parsing.
 //!
 //! ## On-Demand Field Access
 //!
@@ -17,24 +15,36 @@
 use sonic_rs::{JsonValueTrait, LazyValue, get_from_slice};
 
 use crate::Result;
+use crate::payload::LeadingBytes;
 use crate::payload::depth::{MAX_BATCH_DEPTH, json_depth_within};
-use crate::payload::{PayloadFormat, detect_format};
 
-/// Parse a payload into a `serde_json::Value`.
+/// Parse a JSON payload into a `serde_json::Value`.
 ///
-/// Auto-detects format (JSON or `MessagePack`) and parses accordingly.
-/// Both formats are normalized to `serde_json::Value` for downstream processing.
+/// # Errors
+///
+/// [`crate::Error::NotJson`] when the payload does not open a JSON object or
+/// array, [`crate::Error::Json`] when it does but does not parse.
 #[inline]
 pub fn parse_payload(payload: &[u8]) -> Result<serde_json::Value> {
-    let format = detect_format(payload).ok_or_else(|| {
-        crate::Error::Json("Unable to detect payload format (expected JSON or MessagePack)".into())
-    })?;
-
-    match format {
-        PayloadFormat::Json => parse_json(payload),
-        PayloadFormat::MessagePack => parse_msgpack(payload),
-        PayloadFormat::Unknown => Err(crate::Error::Json("Unknown payload format".into())),
+    if !opens_json_document(payload) {
+        return Err(crate::Error::NotJson {
+            leading: LeadingBytes::of(payload),
+        });
     }
+    parse_json(payload)
+}
+
+/// True when the first non-whitespace byte opens a JSON object or array.
+///
+/// The gate every record passes before a parse, so bytes in any other
+/// encoding are refused by name rather than reported as a parse error.
+#[inline]
+#[must_use]
+pub fn opens_json_document(payload: &[u8]) -> bool {
+    payload
+        .iter()
+        .find(|b| !b.is_ascii_whitespace())
+        .is_some_and(|b| matches!(b, b'{' | b'['))
 }
 
 /// Parse JSON using sonic-rs (SIMD-accelerated)
@@ -47,13 +57,6 @@ fn parse_json(payload: &[u8]) -> Result<serde_json::Value> {
     // This is efficient because sonic_rs::from_slice can deserialize into any
     // type implementing serde::Deserialize, including serde_json::Value
     sonic_rs::from_slice(payload).map_err(|e| crate::Error::Json(format!("JSON parse error: {e}")))
-}
-
-/// Parse `MessagePack` using rmp-serde
-#[inline]
-fn parse_msgpack(payload: &[u8]) -> Result<serde_json::Value> {
-    rmp_serde::from_slice(payload)
-        .map_err(|e| crate::Error::Json(format!("MessagePack parse error: {e}")))
 }
 
 /// On-demand field extraction from JSON without full DOM parse.
@@ -341,16 +344,6 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_msgpack() {
-        // MessagePack: {"key": "value"}
-        // fixmap(1) + fixstr(3) "key" + fixstr(5) "value"
-        let payload = rmp_serde::to_vec(&serde_json::json!({"key": "value"})).unwrap();
-        let value = parse_payload(&payload).unwrap();
-
-        assert_eq!(value["key"], "value");
-    }
-
-    #[test]
     fn test_extract_field_json() {
         let payload = br#"{"event_category": "api", "user": "test"}"#;
         assert_eq!(
@@ -372,8 +365,31 @@ mod tests {
 
     #[test]
     fn test_parse_invalid() {
-        let payload = b"not valid json or msgpack";
+        let payload = b"not valid json";
         assert!(parse_payload(payload).is_err());
+    }
+
+    #[test]
+    fn only_an_object_or_array_opens_a_json_document() {
+        assert!(opens_json_document(br#"{"a": 1}"#));
+        assert!(opens_json_document(b"[1]"));
+        assert!(
+            opens_json_document(b"  \n\t{\"a\": 1}"),
+            "leading whitespace does not hide the object"
+        );
+        for refused in [
+            b"".as_slice(),
+            b"   \n\t  ",
+            b"42",
+            br#""text""#,
+            b"null",
+            b"\x00\x00\x02",
+        ] {
+            assert!(
+                !opens_json_document(refused),
+                "{refused:?} must not pass the JSON gate"
+            );
+        }
     }
 
     #[test]
@@ -455,21 +471,22 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_msgpack_invalid_bytes_errors() {
-        // Truncated MessagePack — will fail to parse
-        let payload = &[0x81u8, 0xa3]; // fixmap(1) + fixstr(3) + no content
-        let result = parse_payload(payload);
-        // May succeed if detector doesn't recognize as MessagePack — then fails as JSON
-        // Or fails as invalid MessagePack — either way, Err
-        assert!(result.is_err());
+    fn test_parse_binary_bytes_is_not_json() {
+        let err = parse_payload(b"\x00\x00\x02\x00").unwrap_err();
+        assert!(matches!(err, crate::Error::NotJson { .. }), "got {err:?}");
+        assert!(
+            err.to_string()
+                .contains("payload is not JSON, leading bytes 00 00 02 00"),
+            "got: {err}"
+        );
     }
 
     #[test]
     fn test_parse_empty_payload_errors() {
-        let result = parse_payload(b"");
+        let err = parse_payload(b"").unwrap_err();
         assert!(
-            result.is_err(),
-            "empty payload should fail format detection"
+            matches!(err, crate::Error::NotJson { .. }),
+            "empty payload should fail the JSON gate, got {err:?}"
         );
     }
 
@@ -548,20 +565,6 @@ mod tests {
         let payload = r#"{"city": "Zürich"}"#.as_bytes();
         let result = extract_field_json(payload, "city");
         assert_eq!(result, Some("Zürich".to_string()));
-    }
-
-    #[test]
-    fn test_parse_msgpack_valid_nested() {
-        let original = serde_json::json!({
-            "outer": {
-                "inner": {
-                    "deep": 42
-                }
-            }
-        });
-        let payload = rmp_serde::to_vec(&original).unwrap();
-        let value = parse_payload(&payload).unwrap();
-        assert_eq!(value["outer"]["inner"]["deep"], 42);
     }
 
     #[test]

@@ -15,17 +15,18 @@ dfe-loader has two knobs for how rows reach ClickHouse: `clickhouse.protocol`
 encoded). The default `http + row_binary` is the fast path; `json_each_row` is
 a deliberate fallback. `protocol: native` is rejected at startup -- the pinned
 client has no TCP row fetch, so the schema query behind every insert stalls
-([#115](https://github.com/hyperi-io/dfe-loader/issues/115)) -- so the native
-column below is what the code supports, not a configuration you can reach
-today.
+([#115](https://github.com/hyperi-io/dfe-loader/issues/115)) -- and the native
+column below is the planned shape, not code: the native/TCP insert sink is not
+wired and waits on
+[clickhouse-rs#15](https://github.com/hyperi-io/clickhouse-rs/issues/15).
 
 ```mermaid
 flowchart TB
     ROW["Buffered rows<br/>Map&lt;String,Value&gt; + raw _json"]
     F{"insert_format"}
     T{"protocol"}
-    RBH["insert_formatted_with<br/>FORMAT RowBinary (HTTP)"]
-    RBT["insert_native_with_columns<br/>with_columns_tcp (native)"]
+    RBH["insert_formatted_with<br/>FORMAT RowBinaryWithNamesAndTypes (HTTP)"]
+    RBT["insert_native_with_columns<br/>with_columns_tcp (not wired, #15)"]
     JE["insert_formatted_with<br/>FORMAT JSONEachRow (HTTP)"]
     REJ["config-check rejects<br/>at validate()"]
     CH[("ClickHouse")]
@@ -42,7 +43,7 @@ flowchart TB
 
 | `insert_format` | `protocol = http` | `protocol = native` |
 |-----------------|--------------------|----------------------|
-| `row_binary` (default) | `FORMAT RowBinary` via `insert_formatted_with` | `with_columns_tcp` via `insert_native_with_columns` |
+| `row_binary` (default) | `FORMAT RowBinaryWithNamesAndTypes` via `insert_formatted_with` | rejected at startup; `with_columns_tcp` via `insert_native_with_columns` once clickhouse-rs#15 lands |
 | `json_each_row` | `FORMAT JSONEachRow` via `insert_formatted_with` | rejected at `config-check` |
 
 The rejection is deliberate and surfaced early: JSONEachRow is an HTTP body
@@ -69,14 +70,14 @@ the throughput choice.
 
 The dynamic encoder (`clickhouse_ext::encode`) turns one
 `Map<String, Value>` plus its reflected `ColumnDef` schema into bytes. It has
-two emission modes off the same schema, picked by transport:
+two emission modes off the same schema, and only the first is wired:
 
 - **HTTP** -- row-wise `encode()` bytes, streamed into an
-  `INSERT INTO db.table (cols) FORMAT RowBinary` statement opened with
-  `Client::insert_formatted_with(...).buffered()`. ClickHouse parses RowBinary
-  one row at a time, so the loader never depends on server-side block framing.
-  This is the path verified live against the devex cluster.
-- **native/TCP** -- per-column `Serialize`, handed to
+  `INSERT INTO db.table (cols) FORMAT RowBinaryWithNamesAndTypes` statement
+  opened with `Client::insert_formatted_with(...).buffered()`, behind a header
+  naming each column and the type it was encoded for. ClickHouse parses the
+  rows one at a time, so the loader never depends on server-side block framing.
+- **native/TCP** (not wired) -- per-column `Serialize`, for
   `Client::insert_native_with_columns(table, &columns)` which dispatches to
   `with_columns_tcp`. The native binary protocol frames its own columnar
   blocks. See
@@ -85,7 +86,7 @@ two emission modes off the same schema, picked by transport:
   [#15](https://github.com/hyperi-io/clickhouse-rs/issues/15) for the FORMAT
   Native block-framing fix.
 
-Either way the column subset is fixed from the first row of the batch: every
+The column subset is fixed from the first row of the batch: every
 column present in the row, every raw-passthrough column (e.g. `_json`), and
 every column without a server-side default. Columns that have a default and are
 not supplied are omitted, so ClickHouse fills them (`_uuid`,
@@ -110,6 +111,10 @@ error: a drift signal (`TYPE_MISMATCH`, `NO_SUCH_COLUMN`, `CANNOT_PARSE`, code
 invalidated so the next attempt re-fetches from `system.columns` and re-encodes.
 A non-drift error (network, auth) is returned as-is. See
 [SCHEMA-CACHE.md](SCHEMA-CACHE.md).
+
+The same codes come back for a row the server can never accept, so the server's code decides, never the words beside it: a code on the retry list holds the batch, and any other refusal against a table unchanged since the rows were encoded is the rows' own, so salvage dead-letters the bad row and the rest land. The list and the reason for each group are in [SCHEMA-CACHE.md](SCHEMA-CACHE.md#mismatch-recovery).
+
+A type change is caught before any row is read. RowBinary is positional, so bytes encoded for a column's old type can parse as other rows: ten rows written for `UInt8` are 90 bytes, which a `UInt16` column reads as nine whole rows of garbage, with no error. The header carries the type each column was encoded for, and with `input_format_with_types_use_header=1` (the default, and pinned on the insert with `input_format_with_names_use_header`) the server refuses a mismatch with code 117 ("Type of 'v' must be UInt16, not UInt8"). That refusal against a changed table takes the drift path above. The header costs one column count plus each name and type string once per INSERT, 235 bytes for a 10-column landing table.
 
 ## Configuring it
 

@@ -9,7 +9,7 @@ use serde_json::json;
 
 use dfe_loader::buffer::BufferManager;
 use dfe_loader::config::{BufferConfig, DlqConfig, RoutingConfig};
-use dfe_loader::payload::{FormatDetector, FormatMode};
+use dfe_loader::payload::parse_payload;
 use dfe_loader::routing::{RouteResult, Router};
 use dfe_loader::transform::Transformer;
 
@@ -28,8 +28,6 @@ fn skip_if_no_clickhouse() -> bool {
 
 #[test]
 fn test_error_invalid_json() {
-    let detector = FormatDetector::with_mode(FormatMode::ForceJson);
-
     let invalid_payloads = vec![
         b"not json at all".as_slice(),
         b"{incomplete".as_slice(),
@@ -40,31 +38,12 @@ fn test_error_invalid_json() {
     ];
 
     for payload in invalid_payloads {
-        let result = detector.check_and_detect(payload);
-        match result {
-            Ok(_) => {
-                let parse_result = sonic_rs::from_slice::<serde_json::Value>(payload);
-                if parse_result.is_err() {
-                    eprintln!("Parse error (expected): {:?}", parse_result.err().unwrap());
-                }
-            }
-            Err(e) => {
-                eprintln!("Format detection error (expected): {e:?}");
-            }
-        }
+        assert!(
+            parse_payload(payload).is_err(),
+            "{:?} must be refused, not loaded",
+            String::from_utf8_lossy(payload)
+        );
     }
-}
-
-#[test]
-fn test_error_msgpack_when_json_forced() {
-    let detector = FormatDetector::with_mode(FormatMode::ForceJson);
-
-    let msgpack_bytes: &[u8] = &[
-        0x82, 0xa4, b't', b'e', b's', b't', 0xa5, b'v', b'a', b'l', b'u', b'e',
-    ];
-
-    let result = detector.check_and_detect(msgpack_bytes);
-    assert!(result.is_err(), "Should reject msgpack when JSON is forced");
 }
 
 #[test]

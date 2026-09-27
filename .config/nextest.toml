@@ -12,7 +12,7 @@
 containers = { max-threads = 2 }
 
 [[profile.default.overrides]]
-filter = 'test(/kafka_transport_e2e::/) or test(/clickhouse_inserter_e2e::/) or test(/kafka_offset_floor::/) or test(/grpc_outage::/) or test(/container_hygiene::/)'
+filter = 'test(/kafka_transport_e2e::/) or test(/clickhouse_inserter_e2e::/) or test(/kafka_offset_floor::/) or test(/grpc_outage::/) or test(/container_hygiene::/) or test(/json_depth::/)'
 test-group = 'containers'
 
 [profile.default]

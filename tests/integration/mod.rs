@@ -13,6 +13,7 @@ mod config_reachability;
 // poll loop it sits after cannot express that as an assert.
 #[allow(clippy::panic)]
 mod container_hygiene;
+#[cfg(feature = "testcontainers")]
 mod datatypes;
 mod deployment;
 mod dlq;

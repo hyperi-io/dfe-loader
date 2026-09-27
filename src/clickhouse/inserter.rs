@@ -47,8 +47,8 @@ use crate::buffer::{FlushBatch, KafkaOffset};
 use crate::clickhouse::client_http::escape_identifier;
 use crate::clickhouse::config::InsertFormat;
 use crate::clickhouse::error::{
-    ErrorCategory, classify_dynamic_error, classify_insert_end_error, classify_json_insert_error,
-    is_schema_drift_error,
+    ErrorCategory, classify_dynamic_error, classify_json_insert_error, is_schema_drift_error,
+    retries, server_code,
 };
 use crate::clickhouse::{ClickHouseQueryClient, SchemaCache};
 use crate::clickhouse_ext::{ColumnDef, json_shaping_changes, shape_json_for_type};
@@ -238,8 +238,8 @@ fn is_salvageable(err: &crate::Error) -> bool {
 /// The bytes a permanently rejected row must carry to the DLQ.
 ///
 /// `raw_payloads[i]` is empty for every capture mode that keeps no raw bytes:
-/// `raw_only` and `extracted_only`, the whole `legacy_flatten` path, and any
-/// `MessagePack` payload. DLQ'ing an empty entry for those and then committing
+/// `raw_only` and `extracted_only`, and the whole `legacy_flatten` path.
+/// DLQ'ing an empty entry for those and then committing
 /// the offset loses the event from `ClickHouse`, the DLQ and Kafka at once, so
 /// fall back to the promoted row -- under `raw_only` it still holds the payload
 /// as `_raw`, under `legacy_flatten` full capture as `_json`.
@@ -475,6 +475,23 @@ impl Inserter {
             .collect()
     }
 
+    /// Whether `table`'s columns, read from `ClickHouse` now, are the ones in
+    /// `encoded_against`. A read that fails, or no schema to compare, is not
+    /// proof, so answers `false`.
+    async fn schema_unchanged(
+        &self,
+        db: &str,
+        tbl: &str,
+        encoded_against: Option<&crate::clickhouse_ext::DynamicSchema>,
+    ) -> bool {
+        let Some(encoded_against) = encoded_against else {
+            return false;
+        };
+        crate::clickhouse_ext::fetch_dynamic_schema(&self.ch_client, db, tbl)
+            .await
+            .is_ok_and(|now| now.same_columns(encoded_against))
+    }
+
     /// Calculate backoff delay for a given attempt.
     fn backoff_delay(&self, attempt: u32) -> Duration {
         calc_backoff(self.base_retry_delay_ms, attempt, self.max_retry_delay_ms)
@@ -648,7 +665,8 @@ impl Inserter {
                 break;
             }
 
-            match insert.end().await {
+            let encoded_against = insert.take_schema();
+            let e = match insert.end().await {
                 Ok(count) => {
                     debug!(
                         table = %table,
@@ -658,64 +676,62 @@ impl Inserter {
                     );
                     return Ok(count as usize);
                 }
-                Err(crate::clickhouse_ext::DynamicError::SchemaMismatch { .. }) => {
-                    // Invalidate loader's schema cache alongside the fork's
-                    if self.refresh_on_error {
-                        self.drop_cached_schema(table);
-                    }
-                    if attempt < self.max_retries {
-                        let delay = self.backoff_delay(attempt);
-                        warn!(
-                            table = %table,
-                            attempt,
-                            delay_ms = delay.as_millis(),
-                            refresh_on_error = self.refresh_on_error,
-                            "Schema mismatch on end(), retrying"
-                        );
-                        sleep(delay).await;
-                        last_error = Some(crate::Error::ClickHouse(
-                            "Schema mismatch on flush".to_string(),
-                        ));
-                        continue;
-                    }
-                    last_error = Some(crate::Error::ClickHouse(
-                        "Schema mismatch after max retries".to_string(),
-                    ));
+                Err(e) => e,
+            };
+            let message = format!("RowBinary insert: {e}");
+            // The server's code decides, never the rows a refusal echoes back.
+            match server_code(&message) {
+                Some(code) if retries(code, &message) => {
+                    return Err(crate::Error::ClickHouse(message));
                 }
-                Err(e) => {
-                    let message = format!("RowBinary insert: {e}");
-                    if is_schema_drift_error(&e.to_string()) {
-                        // end() consumed the DynamicInsert, so the encoder's entry
-                        // is dropped by the key DynamicInsert caches it under.
-                        if self.refresh_on_error {
-                            self.dynamic_schema_cache.invalidate(&format!("{db}.{tbl}"));
-                            self.drop_cached_schema(table);
-                        }
-                        if attempt < self.max_retries {
-                            let delay = self.backoff_delay(attempt);
-                            warn!(
-                                table = %table,
-                                attempt,
-                                error = %e,
-                                delay_ms = delay.as_millis(),
-                                refresh_on_error = self.refresh_on_error,
-                                "Schema drift on end(), retrying"
-                            );
-                            sleep(delay).await;
-                            last_error = Some(crate::Error::ClickHouse(message));
-                            continue;
-                        }
-                        last_error = Some(crate::Error::ClickHouse(message));
-                        break;
-                    }
-                    // Permanent means the payload can never encode. Drift was
-                    // ruled out above, so the message classification decides.
-                    return Err(match classify_insert_end_error(&message) {
-                        ErrorCategory::Data => crate::Error::ClickHousePermanent(message),
-                        _ => crate::Error::ClickHouse(message),
-                    });
+                // A refusal against the table as it still stands is the rows'
+                // own: no re-fetch can change the server's verdict.
+                Some(_)
+                    if self
+                        .schema_unchanged(db, tbl, encoded_against.as_ref())
+                        .await =>
+                {
+                    debug!(
+                        table = %table,
+                        error = %e,
+                        "Server refused the rows against a current schema, returning for salvage"
+                    );
+                    return Err(crate::Error::ClickHousePermanent(message));
                 }
+                Some(_) => {}
+                // No code: nothing was decided about the rows, and only the
+                // client's own drift wording is worth an encode against a
+                // fresh schema.
+                None if !matches!(
+                    e,
+                    crate::clickhouse_ext::DynamicError::SchemaMismatch { .. }
+                ) && !is_schema_drift_error(&message) =>
+                {
+                    return Err(crate::Error::ClickHouse(message));
+                }
+                None => {}
             }
+            // The table changed under the rows: drift, so the retry encodes
+            // against the table as it is now.
+            if self.refresh_on_error {
+                self.dynamic_schema_cache.invalidate(&format!("{db}.{tbl}"));
+                self.drop_cached_schema(table);
+            }
+            last_error = Some(crate::Error::ClickHouse(message));
+            if attempt < self.max_retries {
+                let delay = self.backoff_delay(attempt);
+                warn!(
+                    table = %table,
+                    attempt,
+                    error = %e,
+                    delay_ms = delay.as_millis(),
+                    refresh_on_error = self.refresh_on_error,
+                    "Table changed under the rows, retrying against its current schema"
+                );
+                sleep(delay).await;
+                continue;
+            }
+            break;
         }
 
         Err(last_error.unwrap_or_else(|| crate::Error::Buffer("Max retries exceeded".into())))
@@ -781,10 +797,8 @@ impl Inserter {
 
         let mut last_error = None;
         for attempt in 0..=self.max_retries {
-            // JSONEachRow uses the HTTP InsertFormatted path. On a TCP-only
-            // client this surfaces as a transport error at send() time (the
-            // client has no HTTP url); RowBinary is the default and works on
-            // both transports via insert_native_with_columns.
+            // HTTP only, like the RowBinary path: `clickhouse.protocol: native`
+            // is refused at startup, and the native sink waits on clickhouse-rs#15.
             let mut insert = self.ch_client.insert_formatted_with(sql.clone());
 
             // One INSERT carries one verdict, and which call surfaces it is an
@@ -1713,7 +1727,7 @@ mod tests {
 
     #[test]
     fn a_row_with_no_raw_payload_carries_its_own_bytes() {
-        // raw_only, extracted_only, legacy_flatten and MessagePack all leave
+        // raw_only, extracted_only and legacy_flatten all leave
         // raw_payloads[i] empty. Without the fallback the DLQ entry is empty
         // and the offset commits over the top of it.
         let mut row = Map::new();

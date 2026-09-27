@@ -15,8 +15,8 @@ layers win. Every setting has a safe default, so an empty config boots.
 
 ```mermaid
 flowchart TB
-    CLI["1. CLI args (--clickhouse.transport=native)"]
-    ENV["2. ENV (LOADER_CLICKHOUSE_TRANSPORT=native)"]
+    CLI["1. CLI args (--clickhouse.protocol=http)"]
+    ENV["2. ENV (DFE_LOADER_CLICKHOUSE__PROTOCOL=http)"]
     DOTENV["3. .env (gitignored)"]
     ENVYAML["4. settings.{env}.yaml"]
     YAML["5. settings.yaml"]
@@ -26,7 +26,7 @@ flowchart TB
     CLI --> ENV --> DOTENV --> ENVYAML --> YAML --> DEF --> LIB --> HARD
 ```
 
-ENV names are auto-derived: `clickhouse.transport` -> `LOADER_CLICKHOUSE_TRANSPORT`.
+ENV names are auto-derived: `clickhouse.protocol` -> `DFE_LOADER_CLICKHOUSE__PROTOCOL` (a double underscore for each level of nesting).
 
 The scaling gate (`scaling.enabled`, `scaling.memory_gate_threshold`) is read by
 scalo's own cascade, which discovers `defaults.yaml` / `settings.yaml` but never
@@ -44,28 +44,26 @@ file drives the loader's own weights and is reported as a mismatch at startup.
 
 | Setting | Values | Effect |
 |---------|--------|--------|
-| `clickhouse.transport` | `native` (default), `http` | TCP native protocol (port 9000/9440) vs HTTP (8123/8543) |
+| `clickhouse.protocol` | `http` (default), `native` | HTTP (8123/8543). `native` is refused at startup: the pinned client has no TCP row fetch, and the native insert sink waits on clickhouse-rs#15 |
 | `clickhouse.insert_format` | `row_binary` (default), `json_each_row` | binary (server skips JSON parsing) vs self-describing JSON |
 | `clickhouse.hosts` | list | multi-host failover (native pool round-robins, skips a refusing endpoint) |
 | `clickhouse.database` | string, `dfe` (default) | database the connection targets -- DDL, schema reflection, and any table name that arrives without a `db.` prefix |
 
 `clickhouse.database` is the CONNECTION database and is separate from
 `routing.default_db` (also `dfe`), which is the database a routed row lands in.
-Both are cascade-overridable like any other setting -- `LOADER_CLICKHOUSE_DATABASE`
+Both are cascade-overridable like any other setting -- `DFE_LOADER_CLICKHOUSE__DATABASE`
 or `clickhouse.database` in yaml.
 
-The transport and format compose. The default `native + row_binary` is the
-fast path; `json_each_row` is the diagnostic fallback:
+The protocol and format compose. The default `http + row_binary` is the fast
+path; `json_each_row` is the diagnostic fallback:
 
-| `insert_format` | `transport = http` | `transport = native` |
-|-----------------|--------------------|----------------------|
-| `row_binary` (default) | `insert_formatted_with` FORMAT RowBinary | `insert_native_with_columns` (`with_columns_tcp`) |
-| `json_each_row` | `insert_formatted_with` FORMAT JSONEachRow | **rejected at config-check** |
+| `insert_format` | `protocol = http` | `protocol = native` |
+|-----------------|-------------------|---------------------|
+| `row_binary` (default) | `insert_formatted_with` FORMAT RowBinaryWithNamesAndTypes | refused at startup |
+| `json_each_row` | `insert_formatted_with` FORMAT JSONEachRow | refused at startup |
 
-**Guarded combination:** `insert_format = json_each_row` with `transport =
-native` is rejected at `config-check`. JSONEachRow is sent over HTTP, and a
-native client has no HTTP insert endpoint for it. RowBinary works on both
-transports -- see [clickhouse/INSERT-FORMATS.md](clickhouse/INSERT-FORMATS.md).
+Both formats insert over HTTP -- see
+[clickhouse/INSERT-FORMATS.md](clickhouse/INSERT-FORMATS.md).
 
 ### Transport security (TLS, private CAs)
 
@@ -118,7 +116,7 @@ Insert retry, batch salvage and insert concurrency are not settings. Every build
 Config hot-reloads on change. Some fields are safe to apply live; some require a
 restart and are logged as a warning rather than silently applied:
 
-- **Restart-required:** `clickhouse.transport`, ClickHouse URL/hosts,
+- **Restart-required:** `clickhouse.protocol`, ClickHouse URL/hosts,
   `clickhouse.insert_format`, TLS settings (`tls`, `tls_ca_file`,
   `tls_ca_exclusive`), Kafka connection -- all of these are baked into the
   `Client` at build time.

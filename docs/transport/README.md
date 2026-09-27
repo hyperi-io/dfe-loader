@@ -14,8 +14,9 @@ The transports themselves -- Kafka, gRPC and Memory -- are provided by
 scalo. The loader does not implement them; it consumes the scalo
 `Transport` trait and feeds whatever arrives into its parse stage, then on
 through routing, extraction and the per-table insert path. Whichever transport
-delivers a message, the bytes converge on the same hot path: detect format,
-parse, route to `db.table`, promote schema columns, and buffer for insert.
+delivers a message, the bytes converge on the same hot path: refuse anything
+not JSON, parse, route to `db.table`, promote schema columns, and buffer for
+insert.
 
 ```mermaid
 flowchart LR
@@ -24,7 +25,7 @@ flowchart LR
         G["gRPC"]
         M["Memory"]
     end
-    P["Parse + format detect<br/>(loader hot path)"]
+    P["JSON parse<br/>(loader hot path)"]
     REST["route -> extract -> buffer -> insert"]
 
     K --> P

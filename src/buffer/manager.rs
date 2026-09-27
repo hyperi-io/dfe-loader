@@ -16,7 +16,7 @@
 //! `JSONEachRow` format when thresholds are reached.
 
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use compact_str::CompactString;
 use rustc_hash::FxHashMap;
@@ -266,9 +266,24 @@ impl BufferManager {
 
     /// Flush all buffers (for shutdown)
     pub fn flush_all(&mut self) -> Vec<FlushBatch> {
-        let mut flush_batches = Vec::with_capacity(self.buffers.len());
+        self.take_matching(|_| true)
+    }
 
+    /// Take every buffer not flushed for at least `age`, whatever its size.
+    ///
+    /// Rows whose sender is waiting on them go at this shorter age rather than
+    /// `flush_age_secs`, so the sender is not held for a batch to fill.
+    pub fn take_older_than(&mut self, age: Duration) -> Vec<FlushBatch> {
+        self.take_matching(|buffer| buffer.created_at.elapsed() >= age)
+    }
+
+    /// Take every non-empty buffer `take` selects.
+    fn take_matching(&mut self, take: impl Fn(&TableBuffer) -> bool) -> Vec<FlushBatch> {
+        let mut flush_batches = Vec::new();
         for (table, buffer) in &mut self.buffers {
+            if !take(buffer) {
+                continue;
+            }
             if let Some((rows, offsets, raw_payloads)) = buffer.build() {
                 flush_batches.push(FlushBatch {
                     table: CompactString::from(table.as_str()),
@@ -278,7 +293,6 @@ impl BufferManager {
                 });
             }
         }
-
         flush_batches
     }
 
@@ -465,6 +479,33 @@ mod tests {
         assert_eq!(batches.len(), 2);
 
         assert_eq!(manager.pending_rows(), 0);
+    }
+
+    #[test]
+    fn an_early_take_leaves_buffers_younger_than_its_age() {
+        let mut manager = BufferManager::new(&test_config());
+        let row = || json!({"id": 1}).as_object().unwrap().clone();
+        manager.push("db.old", row(), None, None);
+        std::thread::sleep(Duration::from_millis(60));
+        manager.push("db.young", row(), None, None);
+
+        let batches = manager.take_older_than(Duration::from_millis(50));
+        let tables: Vec<&str> = batches.iter().map(|b| b.table.as_str()).collect();
+        assert_eq!(
+            tables,
+            ["db.old"],
+            "one row, far under flush_rows, still goes"
+        );
+        assert!(
+            manager.get_ready_for_flush().is_empty(),
+            "neither buffer is due by the configured thresholds"
+        );
+        assert_eq!(manager.pending_rows(), 1, "the young buffer keeps its row");
+        assert_eq!(manager.take_older_than(Duration::ZERO).len(), 1);
+        assert!(
+            manager.take_older_than(Duration::ZERO).is_empty(),
+            "an empty buffer yields no batch"
+        );
     }
 
     #[test]

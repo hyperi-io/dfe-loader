@@ -951,6 +951,368 @@ async fn a_drift_error_keeps_the_cached_schema_when_refresh_on_error_is_off() {
     assert_eq!(count, 3, "nothing lands after the drop");
 }
 
+/// A batch whose third row holds an integer no `ClickHouse` integer type holds,
+/// in the JSON column the server parses: code 117 against an unchanged table
+/// is the row's own, so salvage isolates it and the rest land at once. The
+/// echoed row reads like a network fault, and that must not matter.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_row_the_server_refuses_against_a_current_schema_is_salvaged_not_retried() {
+    let (_infra, client, ch) = spin_up(test_name!()).await;
+    let table = unique_table_name("tc_data_refusal");
+    client
+        .execute(&format!(
+            "CREATE TABLE {table} (id UInt64, _json JSON(max_dynamic_paths=2048)) \
+             ENGINE = MergeTree() ORDER BY id"
+        ))
+        .await
+        .expect("create table");
+    let inserter = Inserter::new(client.clone(), ch, InserterConfig::default())
+        .with_insert_format(InsertFormat::RowBinary);
+
+    let rows: Vec<Map<String, Value>> = (0..5u64)
+        .map(|id| json!({ "id": id }).as_object().unwrap().clone())
+        .collect();
+    let raw_payloads: Vec<Arc<[u8]>> = (0..5u64)
+        .map(|id| {
+            let body = if id == 2 {
+                format!(
+                    r#"{{"id":{id},"detail":"timeout: connection reset by peer","big":123456789012345678901234567890}}"#
+                )
+            } else {
+                format!(r#"{{"id":{id}}}"#)
+            };
+            Arc::from(body.into_bytes().as_slice())
+        })
+        .collect();
+
+    let started = std::time::Instant::now();
+    let result = inserter
+        .insert_with_salvage(FlushBatch {
+            table: CompactString::from(table.as_str()),
+            rows,
+            offsets: Vec::new(),
+            raw_payloads,
+        })
+        .await;
+
+    assert!(
+        result.is_settled(),
+        "a refusal of the row's data was held for retry: {:?}",
+        result.disposition
+    );
+    assert_eq!(result.inserted, 4, "the good rows did not land");
+    assert_eq!(result.failed.len(), 1, "failed: {:?}", result.failed);
+    assert_eq!(result.failed[0].row_index, 2);
+    assert!(
+        result.failed[0].reason.contains("117"),
+        "the reason does not carry the server's code: {}",
+        result.failed[0].reason
+    );
+    // The default five retries with backoff take about 3 s per failing insert.
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "the refusal was retried as drift: {:?}",
+        started.elapsed()
+    );
+    let count = client.query_count(&table, None).await.expect("count");
+    assert_eq!(count, 4);
+}
+
+/// A server code no list names refuses the row, whatever the server wrote
+/// beside it: an enum member the type lacks draws 691, and its message echoes
+/// "timeout", which the old message matcher took for a network fault.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_row_refused_with_an_unlisted_code_is_salvaged_not_retried() {
+    let (_infra, client, ch) = spin_up(test_name!()).await;
+    let table = unique_table_name("tc_unlisted_code");
+    client
+        .execute(&format!(
+            "CREATE TABLE {table} (id UInt64, e Enum8('a' = 1, 'b' = 2)) \
+             ENGINE = MergeTree() ORDER BY id"
+        ))
+        .await
+        .expect("create table");
+    let inserter = Inserter::new(client.clone(), ch, InserterConfig::default())
+        .with_insert_format(InsertFormat::JsonEachRow);
+    let rows: Vec<Map<String, Value>> = (0..6u64)
+        .map(|id| {
+            let e = if id == 2 { "timeout" } else { "a" };
+            json!({ "id": id, "e": e }).as_object().unwrap().clone()
+        })
+        .collect();
+
+    let started = std::time::Instant::now();
+    let result = inserter
+        .insert_with_salvage(FlushBatch {
+            table: CompactString::from(table.as_str()),
+            rows,
+            offsets: Vec::new(),
+            raw_payloads: Vec::new(),
+        })
+        .await;
+
+    assert!(
+        result.is_settled(),
+        "the refused row was held for retry: {:?}",
+        result.disposition
+    );
+    assert_eq!(result.inserted, 5, "the good rows did not land");
+    assert_eq!(result.failed.len(), 1, "failed: {:?}", result.failed);
+    assert_eq!(result.failed[0].row_index, 2);
+    assert!(
+        result.failed[0].reason.contains("691"),
+        "the reason does not carry the server's code: {}",
+        result.failed[0].reason
+    );
+    // The default five retries with backoff take about 3 s per failing insert.
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "the refusal was retried: {:?}",
+        started.elapsed()
+    );
+    assert_eq!(client.query_count(&table, None).await.expect("count"), 5);
+}
+
+/// One enum value read back as its number.
+#[derive(clickhouse::Row, serde::Deserialize)]
+struct EnumValue {
+    v: i8,
+}
+
+/// ClickHouse stores an enum number no member declares when it arrives as
+/// RowBinary, so the loader refuses it: the row carrying it is dead-lettered
+/// with the reason, the rows around it land, and no undeclared value is
+/// stored. The column is named like a network fault, which must not hold the
+/// batch.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_enum_value_no_member_declares_is_dead_lettered_not_stored() {
+    let (_infra, client, ch) = spin_up(test_name!()).await;
+    let reader = ch.clone();
+    let table = unique_table_name("tc_enum_range");
+    client
+        .execute(&format!(
+            "CREATE TABLE {table} (id UInt64, timeout_kind Enum8('a' = 1, 'b' = 2), \
+             state Nullable(Enum8('on' = 1, 'off' = 2))) ENGINE = MergeTree() ORDER BY id"
+        ))
+        .await
+        .expect("create table");
+    let inserter = Inserter::new(client.clone(), ch, InserterConfig::default())
+        .with_insert_format(InsertFormat::RowBinary);
+    let rows: Vec<Map<String, Value>> = (0..6u64)
+        .map(|id| {
+            let kind = match id {
+                2 => json!(7),
+                4 => json!("b"),
+                _ => json!(1),
+            };
+            json!({ "id": id, "timeout_kind": kind, "state": "off" })
+                .as_object()
+                .unwrap()
+                .clone()
+        })
+        .collect();
+
+    let result = inserter
+        .insert_with_salvage(FlushBatch {
+            table: CompactString::from(table.as_str()),
+            rows,
+            offsets: Vec::new(),
+            raw_payloads: Vec::new(),
+        })
+        .await;
+    let stored: Vec<EnumValue> = reader
+        .query(&format!(
+            "SELECT toInt8(timeout_kind) AS v FROM {table} ORDER BY id"
+        ))
+        .fetch_all()
+        .await
+        .expect("read back");
+
+    assert!(
+        result.is_settled(),
+        "the refused row held the batch: {:?}",
+        result.disposition
+    );
+    assert_eq!(result.failed.len(), 1, "failed: {:?}", result.failed);
+    assert_eq!(result.failed[0].row_index, 2);
+    assert!(
+        result.failed[0]
+            .reason
+            .contains("enum value is not one of the column's members"),
+        "the reason does not say why: {}",
+        result.failed[0].reason
+    );
+    assert_eq!(result.inserted, 5, "the good rows did not land");
+    let values: Vec<i8> = stored.iter().map(|row| row.v).collect();
+    assert_eq!(
+        values,
+        vec![1, 1, 1, 2, 1],
+        "an undeclared value was stored"
+    );
+}
+
+/// One INSERT spanning more partitions than `max_partitions_per_insert_block`
+/// (default 100) draws `TOO_MANY_PARTS` on every retry of the same batch, so
+/// it is split, and every row lands with none dead-lettered.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_batch_over_the_partition_limit_is_split_not_held() {
+    let (_infra, client, ch) = spin_up(test_name!()).await;
+    let table = unique_table_name("tc_partition_limit");
+    client
+        .execute(&format!(
+            "CREATE TABLE {table} (id UInt64) ENGINE = MergeTree() PARTITION BY id ORDER BY id"
+        ))
+        .await
+        .expect("create table");
+    let inserter = Inserter::new(client.clone(), ch, InserterConfig::default())
+        .with_insert_format(InsertFormat::RowBinary);
+
+    let result = inserter
+        .insert_with_salvage(FlushBatch {
+            table: CompactString::from(table.as_str()),
+            rows: (0..150u64)
+                .map(|id| json!({ "id": id }).as_object().unwrap().clone())
+                .collect(),
+            offsets: Vec::new(),
+            raw_payloads: Vec::new(),
+        })
+        .await;
+
+    assert!(
+        result.is_settled(),
+        "a batch over the partition limit was held: {:?}",
+        result.disposition
+    );
+    assert!(
+        result.failed.is_empty(),
+        "rows were dead-lettered: {:?}",
+        result.failed
+    );
+    assert_eq!(result.inserted, 150);
+    assert_eq!(client.query_count(&table, None).await.expect("count"), 150);
+}
+
+/// A code on the retry list holds the batch: nothing is dead-lettered and
+/// nothing lands while the table refuses more parts (252).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_row_refused_with_a_retry_code_is_held_not_dead_lettered() {
+    let (_infra, client, ch) = spin_up(test_name!()).await;
+    let table = unique_table_name("tc_too_many_parts");
+    client
+        .execute(&format!(
+            "CREATE TABLE {table} (id UInt64) ENGINE = MergeTree() ORDER BY id \
+             SETTINGS parts_to_throw_insert = 1"
+        ))
+        .await
+        .expect("create table");
+    client
+        .execute(&format!("SYSTEM STOP MERGES {table}"))
+        .await
+        .expect("stop merges");
+    let inserter = Inserter::new(client.clone(), ch, InserterConfig::default())
+        .with_insert_format(InsertFormat::RowBinary);
+    let batch = |ids: std::ops::Range<u64>| FlushBatch {
+        table: CompactString::from(table.as_str()),
+        rows: ids
+            .map(|id| json!({ "id": id }).as_object().unwrap().clone())
+            .collect(),
+        offsets: Vec::new(),
+        raw_payloads: Vec::new(),
+    };
+    let first = inserter.insert_with_salvage(batch(0..1)).await;
+    assert_eq!(first.inserted, 1, "the first part did not land");
+
+    let result = inserter.insert_with_salvage(batch(1..4)).await;
+
+    assert!(
+        matches!(&result.disposition, dfe_loader::clickhouse::BatchDisposition::Retry(reason) if reason.contains("252")),
+        "too many parts did not hold the batch: {:?}",
+        result.disposition
+    );
+    assert!(
+        result.failed.is_empty(),
+        "rows were dead-lettered: {:?}",
+        result.failed
+    );
+    assert_eq!(client.query_count(&table, None).await.expect("count"), 1);
+}
+
+/// One `(id, v)` row read back.
+#[derive(clickhouse::Row, serde::Deserialize, Debug, PartialEq)]
+struct IdAndV {
+    id: u64,
+    v: u16,
+}
+
+/// A failed query's code and message, read from `system.query_log`.
+#[derive(clickhouse::Row, serde::Deserialize, Debug)]
+struct QueryException {
+    exception_code: i32,
+    exception: String,
+}
+
+/// Ten rows encoded for `v UInt8` are 90 bytes, which a table since widened to
+/// `v UInt16` reads as nine whole rows of 10. The server must refuse them for
+/// the type they were encoded for, the retry must encode for the new type, and
+/// only the ten rows as sent may land.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_batch_encoded_for_an_old_column_type_is_refused_then_lands_as_sent() {
+    let (_infra, client, ch) = spin_up(test_name!()).await;
+    let reader = ch.clone();
+    let table = unique_table_name("tc_type_change_batch");
+    client
+        .execute(&format!(
+            "CREATE TABLE {table} (id UInt64, v UInt8) ENGINE = MergeTree() ORDER BY id"
+        ))
+        .await
+        .expect("create table");
+    let inserter = Inserter::new(client.clone(), ch, fast_fail_config())
+        .with_insert_format(InsertFormat::RowBinary);
+    let rows = |ids: std::ops::Range<u64>| -> Vec<Map<String, Value>> {
+        ids.map(|id| json!({ "id": id, "v": 5 }).as_object().unwrap().clone())
+            .collect()
+    };
+    inserter
+        .insert_rows(&table, &rows(0..1), &[])
+        .await
+        .expect("insert against the original schema");
+
+    client
+        .execute(&format!("ALTER TABLE {table} MODIFY COLUMN v UInt16"))
+        .await
+        .expect("widen the column");
+
+    let second = inserter.insert_rows(&table, &rows(10..20), &[]).await;
+    let stored: Vec<IdAndV> = reader
+        .query(&format!("SELECT id, v FROM {table} ORDER BY id"))
+        .fetch_all::<IdAndV>()
+        .await
+        .expect("read back");
+    client
+        .execute("SYSTEM FLUSH LOGS")
+        .await
+        .expect("flush the query log");
+    let refused: Vec<QueryException> = reader
+        .query(
+            "SELECT exception_code, exception FROM system.query_log \
+             WHERE type = 'ExceptionWhileProcessing' AND query LIKE ?",
+        )
+        .bind(format!("INSERT INTO %{table}%"))
+        .fetch_all::<QueryException>()
+        .await
+        .expect("read the query log");
+
+    assert_eq!(second.ok(), Some(10), "the retry did not land the batch");
+    let expected: Vec<IdAndV> = (0..1).chain(10..20).map(|id| IdAndV { id, v: 5 }).collect();
+    assert_eq!(stored, expected, "the table holds rows nobody sent");
+    assert!(
+        refused
+            .iter()
+            .any(|q| q.exception_code == 117 && q.exception.contains("must be UInt16, not UInt8")),
+        "the server never refused the bytes encoded for UInt8: {refused:?}"
+    );
+}
+
 // ============================================================================
 // Inserter: empty batch is a no-op
 // ============================================================================

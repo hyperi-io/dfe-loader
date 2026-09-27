@@ -1035,41 +1035,75 @@ fn civil_days_from_epoch(year: i32, month: u32, day: u32) -> i64 {
 // Enum
 // ---------------------------------------------------------------------------
 
-/// Resolve an enum value to its signed discriminant. A numeric value is used
-/// directly; a string is mapped via the `Enum8(...)` / `Enum16(...)` member
-/// list parsed from the type string.
+/// Resolve an enum value to the discriminant of one of the column's declared
+/// members. A number (or numeric string) must be a member's value and a
+/// string a member's name: ClickHouse stores any other value it is sent as
+/// RowBinary, so an undeclared one is refused here as a data error.
+///
+/// The messages name neither the value nor the members, which are customer
+/// data and must not be read by the error classifier.
 fn enum_discriminant(value: &Value, type_str: &str, col: &str) -> Result<i64, DynamicError> {
-    match value {
-        Value::Number(_) | Value::Bool(_) => as_i64(value, col),
-        Value::String(s) => {
-            // A numeric string is treated as the discriminant directly.
-            if let Ok(n) = s.trim().parse::<i64>() {
-                return Ok(n);
+    let members = enum_members(type_str);
+    let discriminant = match value {
+        Value::Number(_) | Value::Bool(_) => as_i64(value, col)?,
+        Value::String(s) => match s.trim().parse::<i64>() {
+            Ok(n) => n,
+            Err(_) => {
+                return members
+                    .iter()
+                    .find(|(label, _)| label == s)
+                    .map(|&(_, n)| n)
+                    .ok_or_else(|| enc_err(col, "enum string not found in type definition"));
             }
-            enum_member_value(type_str, s)
-                .ok_or_else(|| enc_err(col, "enum string not found in type definition"))
-        }
-        _ => Err(enc_err(col, "expected enum value")),
+        },
+        _ => return Err(enc_err(col, "expected enum value")),
+    };
+    if members.iter().any(|&(_, n)| n == discriminant) {
+        Ok(discriminant)
+    } else {
+        Err(enc_err(
+            col,
+            "enum value is not one of the column's members",
+        ))
     }
 }
 
-/// Look up `name` in an `Enum8(...)`/`Enum16(...)` definition, returning its
-/// integer discriminant. Members look like `'name' = 1` separated by commas.
-fn enum_member_value(type_str: &str, name: &str) -> Option<i64> {
-    let open = type_str.find('(')?;
-    let close = type_str.rfind(')')?;
-    if open >= close {
-        return None;
-    }
-    let inner = &type_str[open + 1..close];
-    for member in inner.split(',') {
-        let (label, num) = member.split_once('=')?;
-        let label = label.trim().trim_matches('\'').trim_matches('"');
-        if label == name {
-            return num.trim().parse::<i64>().ok();
+/// The members of the `Enum8(...)` / `Enum16(...)` in `type_str`, wrapped or
+/// not (`Nullable(Enum8(...))`), as `(name, value)`. Members read
+/// `'name' = 1`, with `\'` and `\\` escapes inside the quotes.
+fn enum_members(type_str: &str) -> Vec<(String, i64)> {
+    let Some(start) = ["Enum8(", "Enum16("]
+        .iter()
+        .find_map(|head| type_str.find(head).map(|at| at + head.len()))
+    else {
+        return Vec::new();
+    };
+    let mut members = Vec::new();
+    let mut chars = type_str[start..].chars().peekable();
+    loop {
+        while chars.next_if(|c| c.is_whitespace() || *c == ',').is_some() {}
+        if chars.next() != Some('\'') {
+            return members;
+        }
+        let mut name = String::new();
+        loop {
+            match chars.next() {
+                Some('\\') => name.extend(chars.next()),
+                Some('\'') => break,
+                Some(c) => name.push(c),
+                None => return members,
+            }
+        }
+        while chars.next_if(|c| c.is_whitespace() || *c == '=').is_some() {}
+        let mut digits = String::new();
+        while let Some(c) = chars.next_if(|c| c.is_ascii_digit() || *c == '-') {
+            digits.push(c);
+        }
+        match digits.parse() {
+            Ok(value) => members.push((name, value)),
+            Err(_) => return members,
         }
     }
-    None
 }
 
 // ---------------------------------------------------------------------------
@@ -1612,6 +1646,42 @@ mod tests {
             matches!(e, DynamicError::EncodingError { .. }),
             "got: {e:?}"
         );
+    }
+
+    #[test]
+    fn a_number_no_member_holds_is_refused_not_stored() {
+        // ClickHouse stores an undeclared value it is sent as RowBinary.
+        for value in [json!(7), json!("7"), json!(0), json!(true)] {
+            let e = enc_err_of(json!({ "e": value }), &[("e", "Enum8('a' = 2, 'b' = 3)")]);
+            assert!(
+                e.to_string().contains("not one of the column's members"),
+                "{value} was encoded: {e:?}"
+            );
+        }
+        assert_eq!(
+            enc(json!({"e": -1}), &[("e", "Enum8('neg' = -1, 'pos' = 1)")]),
+            (-1i8).to_le_bytes()
+        );
+    }
+
+    #[test]
+    fn enum_members_are_read_inside_a_wrapper_and_through_escapes() {
+        assert_eq!(
+            enc(
+                json!({"e": "b"}),
+                &[("e", "Nullable(Enum8('a' = 1, 'b' = 2))")]
+            ),
+            vec![0, 2]
+        );
+        assert_eq!(
+            enum_members(r"Enum16('it\'s' = 1000, 'a,b' = -2, 'x = y' = 3)"),
+            vec![
+                ("it's".to_string(), 1000),
+                ("a,b".to_string(), -2),
+                ("x = y".to_string(), 3)
+            ]
+        );
+        assert!(enum_members("String").is_empty());
     }
 
     // ---- Nullable ----

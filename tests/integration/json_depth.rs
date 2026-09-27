@@ -19,7 +19,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use super::grpc_outage::{
-    clickhouse_address, decode_base64, grpc_loader, push_ids, query_client, random_port,
+    clickhouse_address, decode_base64, free_port, grpc_loader, push_ids, query_client,
     start_loader, wait_for_loader, wait_landed, with_file_dlq,
 };
 use crate::common::containers::TestInfrastructure;
@@ -104,7 +104,7 @@ async fn run(test: &'static str) {
         .expect("create table");
 
     let dlq_dir = tempfile::tempdir().expect("DLQ spool directory");
-    let listen_port = random_port();
+    let listen_port = free_port();
     let mut config = grpc_loader(listen_port, clickhouse.clone(), &table);
     with_file_dlq(&mut config, dlq_dir.path());
     let (shutdown, loader, client) = start_loader(config, listen_port).await;

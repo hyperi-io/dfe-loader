@@ -38,6 +38,12 @@ kafka:
   librdkafka_overrides:
     statistics.interval.ms: "5000"
 
+  # enabled: true (default) commits an offset only once its row is in ClickHouse
+  # or the DLQ. false commits each batch as it is received, so a crash or a
+  # failed insert loses what was committed.
+  acknowledgements:
+    enabled: true
+
   # SASL authentication (optional). A username or password implies enabled:true.
   # oauthbearer, aws_msk_iam and any unrecognised mechanism are startup errors.
   # sasl:
@@ -52,6 +58,15 @@ kafka:
   #   cert_file: /certs/client.pem     # For mTLS
   #   key_file: /certs/client-key.pem  # For mTLS
   #   skip_verify: false
+
+# Direct Push listener, used with `transport: grpc`.
+# grpc:
+#   listen: "0.0.0.0:6000"
+#   # enabled: true (default) answers each Push only once its rows are in
+#   # ClickHouse or the DLQ. A failure answers UNAVAILABLE and the sender retries.
+#   acknowledgements:
+#     enabled: true
+#   max_hold_ms: 13500   # longest a Push waits for its answer
 
 clickhouse:
   hosts:

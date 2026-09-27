@@ -305,9 +305,9 @@ impl ClickHouseConfig {
         // time. Reject it at config time so `config-check` catches it.
         if self.transport == Transport::Native && self.insert_format == InsertFormat::JsonEachRow {
             return Err(
-                "insert_format 'json_each_row' requires transport 'http' (JSONEachRow is \
-                 sent over HTTP). Set transport = 'http', or use insert_format = 'rowbinary' \
-                 which works on both transports."
+                "insert_format 'json_each_row' requires protocol 'http' (JSONEachRow is \
+                 sent over HTTP). Set protocol = 'http': no insert format runs over \
+                 'native' until the native sink lands (clickhouse-rs#15)."
                     .to_string(),
             );
         }
@@ -632,7 +632,10 @@ mod tests {
         };
         let err = config.validate().unwrap_err();
         assert!(err.contains("json_each_row"), "message: {err}");
-        assert!(err.contains("http"), "message: {err}");
-        assert!(err.contains("rowbinary"), "message: {err}");
+        assert!(err.contains("protocol = 'http'"), "message: {err}");
+        // RowBinary does not run over native either, so the message must not
+        // offer it as the way out.
+        assert!(!err.contains("rowbinary"), "message: {err}");
+        assert!(err.contains("clickhouse-rs#15"), "message: {err}");
     }
 }

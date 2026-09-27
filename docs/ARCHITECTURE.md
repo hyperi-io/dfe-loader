@@ -74,55 +74,52 @@ flowchart LR
         end
     end
     subgraph fork["clickhouse::Client (patched)"]
-        IFW["insert_formatted_with<br/>FORMAT RowBinary | JSONEachRow (HTTP)"]
-        INC["insert_native_with_columns<br/>with_columns_tcp (native/TCP)"]
+        IFW["insert_formatted_with<br/>FORMAT RowBinaryWithNamesAndTypes | JSONEachRow (HTTP)"]
+        INC["insert_native_with_columns<br/>with_columns_tcp (waits on #15)"]
     end
 
     INS --> DI
     DI --> ENC --> PT
     DI --> SCH
-    DI -->|RowBinary + transport=http| IFW
-    DI -->|RowBinary + transport=native| INC
+    DI -->|RowBinary| IFW
+    DI -.->|not wired| INC
     INS -->|JSONEachRow fallback| IFW
 ```
 
-The encoder has two emission modes off the same `ColumnDef` schema: row-wise
-`encode()` bytes for the HTTP `FORMAT RowBinary` sink, and per-column
-`Serialize` for the native/TCP `with_columns_tcp` sink. `clickhouse_ext` uses
-only the fork's stable public surface (`Client`, `insert_formatted_with`,
-`insert_native_with_columns`, `row`/`rowbinary` primitives), so it is unaffected
-by the fork's routine cascade re-pushes. See
-[clickhouse/CLICKHOUSE-EXT.md](clickhouse/CLICKHOUSE-EXT.md).
+Every insert goes over HTTP `insert_formatted_with`: row-wise `encode()` bytes
+behind a `FORMAT RowBinaryWithNamesAndTypes` header, or `JSONEachRow`. The
+encoder also has a per-column `Serialize` mode for the native/TCP
+`with_columns_tcp` sink, which is not wired: it waits on
+[clickhouse-rs#15](https://github.com/hyperi-io/clickhouse-rs/issues/15), and
+`clickhouse.protocol: native` is refused at startup. `clickhouse_ext` uses only
+the fork's stable public surface (`Client`, `insert_formatted_with`,
+`row`/`rowbinary` primitives), so it is unaffected by the fork's routine cascade
+re-pushes. See [clickhouse/CLICKHOUSE-EXT.md](clickhouse/CLICKHOUSE-EXT.md).
 
 ## Insert dispatch
 
 ```mermaid
 flowchart TB
     F{"insert_format?"}
-    T{"transport?"}
     RB["DynamicInsert.write_map(s)"]
-    HTTP["Client.insert_formatted_with<br/>FORMAT RowBinary (HTTP)"]
-    TCP["Client.insert_native_with_columns<br/>with_columns_tcp (native/TCP, fork #14)"]
+    HTTP["Client.insert_formatted_with<br/>FORMAT RowBinaryWithNamesAndTypes (HTTP)"]
     JE["Client.insert_formatted_with<br/>FORMAT JSONEachRow (HTTP)"]
     SM{"SchemaMismatch?"}
     REC["invalidate schema cache<br/>re-fetch + retry"]
 
-    F -->|row_binary default| RB
-    RB --> T
-    T -->|native| TCP
-    T -->|http| HTTP
+    F -->|row_binary default| RB --> HTTP
     F -->|json_each_row| JE
-    HTTP & TCP --> SM
+    HTTP --> SM
     SM -->|yes| REC --> RB
     SM -->|no| OK["offsets join the flush cycle's one commit"]
 ```
 
-The RowBinary path splits by transport: HTTP ships row-wise `FORMAT RowBinary`
-through `insert_formatted_with`; native/TCP ships per-column blocks through
-`insert_native_with_columns` (`with_columns_tcp`). `json_each_row + native` is
-rejected at config-check -- JSONEachRow goes over HTTP, and a native client has
-no HTTP insert endpoint for it. RowBinary is the portable default, valid on both
-transports.
+The RowBinary path ships row-wise `FORMAT RowBinaryWithNamesAndTypes` through
+`insert_formatted_with`, whose header lets the server refuse bytes encoded for
+a column type the table no longer has. Both formats go over HTTP:
+`clickhouse.protocol: native` is refused at startup, and the native/TCP sink
+(`insert_native_with_columns`, `with_columns_tcp`) waits on
+[clickhouse-rs#15](https://github.com/hyperi-io/clickhouse-rs/issues/15).
 
 ## Capture modes
 
@@ -148,7 +145,7 @@ the full payload is kept.
   it. A failed insert never sends its batch to the DLQ.
 - **Schema-cache recovery** -- on `SchemaMismatch` (e.g. `ALTER ... ADD COLUMN`),
   invalidate and re-fetch, then retry.
-- **One commit per flush cycle** -- offsets commit once per cycle, and on each partition stop below the lowest offset not placed yet. A failed batch or a dead letter the DLQ refused is held and retried with jittered backoff, and holds its partition's commit until it lands. A held batch whose table ClickHouse has since reported absent is retried against the default table.
+- **One commit per flush cycle** -- offsets commit once per cycle, and on each partition stop below the lowest offset not placed yet. A failed batch or a dead letter the DLQ refused is held and retried with jittered backoff, and holds its partition's commit until it lands. A dead letter no DLQ backend can ever hold is dropped and counted instead (`pipeline_dead_letters_dropped_total{reason}`). A held batch whose table ClickHouse has since reported absent is retried against the default table.
 
 ## Source of truth
 

@@ -15,7 +15,6 @@ use dfe_loader::config::{
     TimestampDqConfig,
 };
 use dfe_loader::metrics::Metrics;
-use dfe_loader::payload::{FormatDetector, FormatMode};
 use dfe_loader::routing::{RouteResult, Router};
 use dfe_loader::transform::Transformer;
 use scalo::metrics::MetricsManager;
@@ -88,7 +87,6 @@ async fn test_full_pipeline_e2e() {
         &FieldSanitizationConfig::default(),
         &routing_config,
     );
-    let format_detector = FormatDetector::with_mode(FormatMode::Auto);
 
     let mut buffer_manager = BufferManager::new(&BufferConfig {
         flush_rows: 100,
@@ -126,7 +124,6 @@ async fn test_full_pipeline_e2e() {
     for (idx, msg) in messages.iter().enumerate() {
         let payload = serde_json::to_vec(msg).unwrap();
 
-        let _format = format_detector.check_and_detect(&payload).unwrap();
         let parsed: serde_json::Value = sonic_rs::from_slice(&payload).unwrap();
 
         let destination = match router.route_value(&parsed) {
@@ -452,23 +449,6 @@ async fn test_pipeline_metrics() {
     // Reaching here means metrics recording did not panic
 
     eprintln!("✓ Metrics tracking test passed");
-}
-
-#[tokio::test]
-#[ignore = "requires infrastructure"]
-async fn test_pipeline_format_detection() {
-    let detector = FormatDetector::with_mode(FormatMode::Auto);
-
-    let json_payload = br#"{"event": "test", "id": 1}"#;
-    let format = detector.check_and_detect(json_payload).unwrap();
-    assert_eq!(format, dfe_loader::payload::PayloadFormat::Json);
-
-    let json_only_detector = FormatDetector::with_mode(FormatMode::ForceJson);
-    let msgpack_bytes = &[0x82, 0xa4, b't', b'e', b's', b't'];
-    let result = json_only_detector.check_and_detect(msgpack_bytes);
-    assert!(result.is_err());
-
-    eprintln!("✓ Format detection test passed");
 }
 
 #[tokio::test]

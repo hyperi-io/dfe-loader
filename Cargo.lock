@@ -1171,7 +1171,6 @@ dependencies = [
  "regex",
  "reqwest 0.12.28",
  "reqwest 0.13.5",
- "rmp-serde",
  "rustc-hash",
  "scalo",
  "schemars 1.2.2",
@@ -1193,7 +1192,6 @@ dependencies = [
  "tokio-util",
  "tracing",
  "uuid",
- "wide",
 ]
 
 [[package]]
@@ -4097,16 +4095,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rmp-serde"
-version = "1.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "72f81bee8c8ef9b577d1681a70ebbc962c232461e397b22c208c43c04b67a155"
-dependencies = [
- "rmp",
- "serde",
-]
-
-[[package]]
 name = "rmpv"
 version = "1.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4264,9 +4252,9 @@ dependencies = [
 
 [[package]]
 name = "scalo"
-version = "2.12.10"
+version = "2.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "92684375e5d05b039885743081182efc1c5d491de5c1f542690b66a48a1e3d33"
+checksum = "cce445668f2f9ca2d64ec96f3b16aa901ceba43560a6753b3babed02295aa1ba"
 dependencies = [
  "aes-gcm",
  "backon",
@@ -4282,6 +4270,7 @@ dependencies = [
  "file-rotate",
  "governor",
  "hkdf",
+ "hyper-util",
  "memchr",
  "metrics",
  "metrics-exporter-opentelemetry",
@@ -4322,6 +4311,7 @@ dependencies = [
  "tracing-subscriber",
  "tracing-throttle",
  "uuid",
+ "wide",
 ]
 
 [[package]]
