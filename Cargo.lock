@@ -1192,7 +1192,6 @@ dependencies = [
  "tokio-util",
  "tracing",
  "uuid",
- "wide",
 ]
 
 [[package]]
@@ -4253,8 +4252,9 @@ dependencies = [
 
 [[package]]
 name = "scalo"
-version = "2.12.0"
-source = "git+https://github.com/hyperi-io/scalo-rs?branch=fix%2Fzstd-default#0fd8aa54cbb83e3912421658fc015c21ebad9c74"
+version = "2.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cce445668f2f9ca2d64ec96f3b16aa901ceba43560a6753b3babed02295aa1ba"
 dependencies = [
  "aes-gcm",
  "backon",
@@ -4311,6 +4311,7 @@ dependencies = [
  "tracing-subscriber",
  "tracing-throttle",
  "uuid",
+ "wide",
 ]
 
 [[package]]
