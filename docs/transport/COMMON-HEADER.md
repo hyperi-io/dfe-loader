@@ -150,7 +150,7 @@ SETTINGS index_granularity = 8192
 
 1. `timestamp` field in source data.
 2. `@timestamp` field (common in log formats).
-3. `event_time` field.
+3. `_timestamp` field.
 4. Fallback to `now()` if all missing/invalid.
 
 **Validation:**
