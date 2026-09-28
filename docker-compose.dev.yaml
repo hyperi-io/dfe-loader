@@ -14,7 +14,7 @@ services:
     # Matches CLICKHOUSE_TAG in tests/common/containers.rs and dfe-infra's
     # services.clickhouse-version. The 26.3 minor was a moving tag: every
     # rebuild of it changed the server without changing the pin.
-    image: clickhouse/clickhouse-server:26.3.17.56@sha256:422be85ae7344058369cdd366ac0efea9daa8428b55c9cf50258e83a7d12fcb3
+    image: clickhouse/clickhouse-server:26.3.32.14@sha256:456063a689194186633bb3db0862283068f4c2ee538852d3aaffa7eb66f1f841
     container_name: clickhouse-dev
     ports:
       - "9000:9000"   # Native protocol
