@@ -17,7 +17,7 @@ governs the two payload-retention columns.
 
 | Mode | `_json` | `_raw` | Use |
 |------|---------|--------|-----|
-| `full` (default) | full payload (JSON) | extracted from `raw_source_fields` | path queries plus text search |
+| `full` (default) | full payload (JSON) | the record's own raw field, else NULL | path queries plus text search |
 | `raw_only` | NULL | full source payload (String) | save ClickHouse CPU, no JSON-type overhead |
 | `extracted_only` | NULL | NULL | promoted columns only |
 
@@ -25,6 +25,8 @@ governs the two payload-retention columns.
 as a native ClickHouse JSON value (path-based queries). `_raw` is the original
 bytes as received (the tailed log line, DB row, or raw syslog). A table can keep
 one, both, or neither.
+
+Under `full`, `_raw` is filled only when the source provides raw data: a raw line the receiver captured, or a field an `@renamed` directive (or `metadata.raw_source_fields`) names. A JSON record with no such field is kept once, in `_json`, and `_raw` stays NULL.
 
 ## Precedence
 
@@ -53,7 +55,7 @@ A capture mode is only worth anything if the row that lands matches it. The
 processor tests assert the observable action, not just that the config parsed
 (`src/pipeline/processor.rs`):
 
-- `full` -> the written row has `_json` populated.
+- `full` -> the written row has `_json` populated, and `_raw` only when the record carried a raw field of its own.
 - `raw_only` -> the written row has `_raw` = the full payload and `_json` NULL.
 - `extracted_only` -> the written row has neither `_json` nor `_raw`; only the
   promoted columns.
