@@ -54,7 +54,7 @@ wins over a COMMENT -- the exact resolution order is in
 | `@computed:expr` | `computed:` | CEL expression producing the value |
 | `@coerce:category` | `coerce:` | Override the type category for coercion |
 
-The authoring directives -- `@source`, `@captured`, `@generated` -- are consumed
+The authoring directives -- `@source`, `@generated` -- are consumed
 by the applier when it generates the DDL, not by the loader. See
 [DDL-DIRECTIVES.md](../clickhouse/DDL-DIRECTIVES.md) for the whole expression
 language.

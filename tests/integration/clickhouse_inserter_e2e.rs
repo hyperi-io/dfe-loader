@@ -1653,7 +1653,7 @@ struct CommonHeader {
 }
 
 /// The per-source table dfe-engine builds: the timeseries header profile
-/// verbatim (types, `@source` / `@captured` comments and all) plus two columns
+/// verbatim (types, `@source` comments and all) plus two columns
 /// off the filebeat meta schema. Hyphenated, because a source name is DNS-1123
 /// and the table takes it verbatim.
 async fn create_per_source_table(client: &ClickHouseQueryClient, table: &str) {
@@ -1665,8 +1665,8 @@ async fn create_per_source_table(client: &ClickHouseQueryClient, table: &str) {
             `_uuid` Nullable(UUID) DEFAULT generateUUIDv7() COMMENT '@generated: generateUUIDv7() - Time-ordered unique event identifier',
             `_org_id` LowCardinality(String) COMMENT '@source: org_id - Tenant/organisation identifier',
             `_source` LowCardinality(Nullable(String)) COMMENT '@source: first(_source) | topic_name - Data source label',
-            `_raw` Nullable(String) COMMENT '@captured: raw_payload - Original event payload as text',
-            `_json` JSON(max_dynamic_paths = 2048) COMMENT '@captured: raw_payload as JSON - Original event payload as structured JSON',
+            `_raw` Nullable(String) COMMENT 'Original event payload as text, when capture_mode writes one',
+            `_json` JSON(max_dynamic_paths = 2048) COMMENT 'Original event payload as structured JSON, when capture_mode writes one',
             `_tags` JSON COMMENT '@source: first(tags/_tags/meta/metadata.tags) - Event metadata tags',
             `message` String COMMENT '@source: message - Log line content',
             `source_ip` Nullable(IPv6) COMMENT '@source: source.ip - Source address (ECS source.ip)'

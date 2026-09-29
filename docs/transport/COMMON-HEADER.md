@@ -335,7 +335,7 @@ per-table, and DDL levels. See `metadata.capture_mode` in config.
 | Nullable | Yes |
 | Default | None |
 | Codec | `ZSTD(3)` |
-| Source | `@captured: raw_payload as JSON` |
+| Source | not a directive -- see Capture modes above |
 
 **Purpose:** Complete Kafka message as native ClickHouse JSON type for structured
 path-based queries.
@@ -748,7 +748,7 @@ Using the DDL Expression Language (see [../clickhouse/DDL-DIRECTIVES.md](../clic
 | `_uuid` | `@generated: generateUUIDv7()` | DB generates on insert |
 | `_org_id` | `@source: org_id` | Required from source |
 | `_raw` | `@source: first(raw/_raw)` | The source's own raw data, never a JSON payload `_json` holds |
-| `_json` | `@captured: raw_payload as JSON` | Pre-transform as JSON |
+| `_json` | not a directive | Populated by capture_mode, not by a column expression |
 | `_tags` | `@source: first(tags/_tags/meta/metadata.tags)` | First match wins |
 
 ### When the header pass promotes nothing
