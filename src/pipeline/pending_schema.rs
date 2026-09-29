@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 
 use rustc_hash::FxHashMap;
 
-use crate::buffer::KafkaOffset;
+use crate::buffer::{KafkaOffset, Purged};
 use crate::clickhouse::SchemaCache;
 use crate::kafka::KafkaMessage;
 
@@ -292,6 +292,38 @@ impl PendingSchemaBuffer {
         self.total_count = 0;
         self.last_requested_at.clear();
         out
+    }
+
+    /// Remove every message read from `topic`/`partition`, evictions not yet
+    /// collected included, adding each to `purged`.
+    pub fn purge_partition(&mut self, topic: &str, partition: i32, purged: &mut Purged) {
+        let from = |msg: &KafkaMessage| msg.partition == partition && &*msg.topic == topic;
+        let mut emptied = Vec::new();
+        for (table, queue) in &mut self.per_table {
+            let before = queue.len();
+            queue.retain(|p| {
+                if from(&p.msg) {
+                    purged.record(p.msg.offset, p.msg.payload.len());
+                    return false;
+                }
+                true
+            });
+            self.total_count -= before - queue.len();
+            if queue.is_empty() {
+                emptied.push(table.clone());
+            }
+        }
+        for table in emptied {
+            self.per_table.remove(&table);
+            self.last_requested_at.remove(&table);
+        }
+        self.evicted.retain(|(msg, _)| {
+            if from(msg) {
+                purged.record(msg.offset, msg.payload.len());
+                return false;
+            }
+            true
+        });
     }
 
     /// Tables still pending whose last resolution request is older than
@@ -695,6 +727,69 @@ mod tests {
         cache.insert("dfe.t1".into(), dummy_schema("dfe.t1"));
         assert_eq!(buf.take_ready(&cache, &no_absent_tables()).len(), 1);
         assert!(buf.lowest_offsets().is_empty());
+    }
+
+    #[test]
+    fn purge_partition_takes_the_partitions_messages_from_every_table() {
+        let mut buf = PendingSchemaBuffer::new(PendingSchemaConfig {
+            max_per_table: 100,
+            max_total: 100,
+            ..small_cfg()
+        });
+        buf.enqueue("dfe.a".into(), msg_at("t", 0, 40)).unwrap();
+        buf.enqueue("dfe.a".into(), msg_at("t", 1, 41)).unwrap();
+        buf.enqueue("dfe.b".into(), msg_at("t", 0, 42)).unwrap();
+        buf.enqueue("dfe.c".into(), msg_at("u", 0, 43)).unwrap();
+
+        let mut purged = Purged::default();
+        buf.purge_partition("t", 0, &mut purged);
+
+        assert_eq!(purged.records(), 2);
+        assert_eq!(purged.bytes, 2, "one byte of payload each");
+        assert_eq!(buf.len(), 2);
+        assert_eq!(buf.len_per_table("dfe.a"), 1);
+        assert_eq!(buf.len_per_table("dfe.b"), 0);
+        assert_eq!(
+            floors(&buf),
+            vec![("t".to_string(), 1, 41), ("u".to_string(), 0, 43)]
+        );
+    }
+
+    #[test]
+    fn purge_partition_takes_an_eviction_not_yet_collected() {
+        let mut buf = PendingSchemaBuffer::new(PendingSchemaConfig {
+            max_per_table: 100,
+            max_total: 1,
+            ..small_cfg()
+        });
+        buf.enqueue("dfe.a".into(), msg_at("t", 0, 5)).unwrap();
+        // The global cap evicts offset 5 into the queue `expire` drains.
+        buf.enqueue("dfe.b".into(), msg_at("t", 1, 9)).unwrap();
+
+        let mut purged = Purged::default();
+        buf.purge_partition("t", 0, &mut purged);
+
+        assert_eq!(purged.records(), 1);
+        assert!(
+            buf.expire(Instant::now()).is_empty(),
+            "a purged eviction still went to the DLQ"
+        );
+        assert_eq!(floors(&buf), vec![("t".to_string(), 1, 9)]);
+    }
+
+    #[test]
+    fn a_table_purged_empty_asks_for_its_schema_again() {
+        let mut buf = PendingSchemaBuffer::new(small_cfg());
+        buf.enqueue("dfe.a".into(), msg_at("t", 0, 5)).unwrap();
+
+        let mut purged = Purged::default();
+        buf.purge_partition("t", 0, &mut purged);
+        assert_eq!(buf.len(), 0);
+        assert!(!buf.is_full());
+        assert_eq!(
+            buf.enqueue("dfe.a".into(), msg_at("t", 1, 6)).unwrap(),
+            EnqueueOutcome::NeedsResolution
+        );
     }
 
     #[test]

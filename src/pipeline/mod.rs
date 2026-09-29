@@ -12,6 +12,7 @@ pub(crate) mod acks;
 pub mod capture;
 pub mod coordinator;
 pub mod enrichment;
+pub(crate) mod leases;
 pub mod orchestrator;
 pub(crate) mod pending_schema;
 pub mod processor;

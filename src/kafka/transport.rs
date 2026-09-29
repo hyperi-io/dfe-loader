@@ -27,6 +27,7 @@ use crate::config::{DlqConfig, KafkaConfig};
 use scalo::SelfRegulationGovernor;
 use scalo::memory::MemoryGuard;
 use scalo::transport::filter::FilteredDlqEntry;
+use scalo::transport::kafka::PartitionLease;
 use scalo::transport::{
     AckControl, DeliveryStatus, GrpcConfig as TransportGrpcConfig, GrpcToken, GrpcTransport,
     KafkaConfig as TransportKafkaConfig, KafkaToken, KafkaTransport, TransportBase, TransportError,
@@ -52,6 +53,17 @@ pub struct ReceivedBatch {
     pub messages: Vec<KafkaMessage>,
     /// Inbound-filter DLQ entries carried forward from the transport.
     pub dlq_entries: Vec<FilteredDlqEntry>,
+    /// The lease each Kafka partition in the batch was read under, one entry
+    /// per partition. Empty for gRPC, which leases nothing.
+    pub leases: Vec<PartitionRead>,
+}
+
+/// A partition a received batch holds records of, and the lease they were
+/// read under: `None` when this consumer no longer holds the partition.
+pub struct PartitionRead {
+    pub topic: Arc<str>,
+    pub partition: i32,
+    pub lease: Option<PartitionLease>,
 }
 
 /// Adapter that wraps scalo `KafkaTransport` for local use.
@@ -183,12 +195,30 @@ impl TransportAdapter {
     /// relies on for at-least-once commit. The payload `Bytes` is moved into the
     /// `KafkaMessage` (one copy out of the shared arena). Inbound-filter DLQ
     /// entries are surfaced for the caller to route onward (no silent drop).
+    ///
+    /// Each partition's lease is taken here, before the next receive can serve
+    /// a rebalance: every record of a partition in the batch was read under the
+    /// lease the partition has when the batch arrives.
     pub async fn recv(&self, max: usize) -> Result<ReceivedBatch> {
         let batch = self
             .transport
             .recv(max)
             .await
             .map_err(|e| crate::Error::Kafka(format!("Recv error: {e}")))?;
+
+        let mut leases: Vec<PartitionRead> = Vec::new();
+        for token in &batch.commit_tokens {
+            let seen = leases
+                .iter()
+                .any(|read| read.partition == token.partition && read.topic == token.topic);
+            if !seen {
+                leases.push(PartitionRead {
+                    lease: self.transport.lease(&token.topic, token.partition),
+                    topic: Arc::clone(&token.topic),
+                    partition: token.partition,
+                });
+            }
+        }
 
         // `records[i]` corresponds to `commit_tokens[i]` (the transport builds
         // both in the same order from each Kafka record). Zip them back into the
@@ -235,7 +265,18 @@ impl TransportAdapter {
         Ok(ReceivedBatch {
             messages,
             dlq_entries: batch.dlq_entries,
+            leases,
         })
+    }
+
+    /// Whether `lease` is still this consumer's claim on `topic`/`partition`.
+    pub fn holds(&self, topic: &str, partition: i32, lease: PartitionLease) -> bool {
+        self.transport.holds(topic, partition, lease)
+    }
+
+    /// Count `records` discarded because the lease they were read under ended.
+    pub fn discarded_after_revoke(&self, records: u64) {
+        self.transport.discarded_after_revoke(records);
     }
 
     /// Commit offsets for processed messages.
@@ -414,6 +455,7 @@ impl GrpcTransportAdapter {
         Ok(ReceivedBatch {
             messages,
             dlq_entries: batch.dlq_entries,
+            leases: Vec::new(),
         })
     }
 
@@ -661,6 +703,24 @@ impl TransportBackend {
         match self {
             Self::Kafka(a) => a.recv(max).await,
             Self::Grpc(a) => a.recv(max).await,
+        }
+    }
+
+    /// Whether `lease` still stands on `topic`/`partition`. Always for gRPC,
+    /// which leases nothing.
+    pub fn holds(&self, topic: &str, partition: i32, lease: PartitionLease) -> bool {
+        match self {
+            Self::Kafka(a) => a.holds(topic, partition, lease),
+            Self::Grpc(_) => true,
+        }
+    }
+
+    /// Count `records` discarded because the lease they were read under ended
+    /// (a no-op for gRPC).
+    pub fn discarded_after_revoke(&self, records: u64) {
+        match self {
+            Self::Kafka(a) => a.discarded_after_revoke(records),
+            Self::Grpc(_) => {}
         }
     }
 

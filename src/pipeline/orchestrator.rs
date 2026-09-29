@@ -26,17 +26,18 @@ use scalo::SelfRegulationGovernor;
 use scalo::dlq::{Dlq, DlqEntry};
 use scalo::memory::{MemoryGuard, MemoryGuardConfig};
 use scalo::transport::ack::{EffectiveGuarantee, SinkConfirmation};
+use scalo::transport::kafka::PartitionLease;
 use scalo::transport::{DeadLetterReason, DeliveryStatus};
 
 use crate::Result;
-use crate::buffer::{BufferManager, FlushBatch, KafkaOffset};
+use crate::buffer::{BufferManager, FlushBatch, KafkaOffset, Purged};
 use crate::clickhouse::{
     BatchDisposition, ClickHouseError, ClickHouseQueryClient, FailedRow, Inserter, InserterConfig,
     SchemaCache, SharedSchemaCache,
 };
 use crate::column_meta::{ColumnMetaCache, parse_directives};
 use crate::config::{Config, SharedConfig};
-use crate::kafka::transport::ReceivedBatch;
+use crate::kafka::transport::{PartitionRead, ReceivedBatch};
 use crate::kafka::{TransportAdapter, TransportBackend};
 use crate::metrics::Metrics;
 use crate::routing::Router;
@@ -61,9 +62,10 @@ pub struct PipelineStats {
 use super::acks::AckLedger;
 use super::capture::CaptureOverrides;
 use super::enrichment::EnrichmentPipeline;
-use super::pending_schema::{ExpireReason, OnFull, PendingSchemaConfig};
+use super::leases::Leases;
+use super::pending_schema::{ExpireReason, OnFull, PendingSchemaBuffer, PendingSchemaConfig};
 use super::types::{SchemaResolution, TableResolutionResult};
-use super::unsettled::{Held, Unsettled};
+use super::unsettled::{Held, Unsettled, purge_dead_letters};
 
 /// Orchestrates the Kafka → `ClickHouse` pipeline
 pub struct Orchestrator {
@@ -108,6 +110,10 @@ pub struct Orchestrator {
     /// Whether Kafka offsets are committed as they are received
     /// (`kafka.acknowledgements.enabled: false`), set when `run` starts.
     commits_at_receipt: bool,
+    /// The lease each Kafka partition's rows in memory were read under, kept
+    /// only where a revoked partition is read again: committed at receipt, the
+    /// rows are its only copy.
+    leases: Leases<PartitionLease>,
 }
 
 /// A hold whose attempts are never further apart than the flush interval,
@@ -142,6 +148,7 @@ impl Orchestrator {
             acks: AckLedger::default(),
             holds_answers: false,
             commits_at_receipt: false,
+            leases: Leases::default(),
         }
     }
 
@@ -170,6 +177,7 @@ impl Orchestrator {
             acks: AckLedger::default(),
             holds_answers: false,
             commits_at_receipt: false,
+            leases: Leases::default(),
         }
     }
 
@@ -672,7 +680,7 @@ impl Orchestrator {
                     let batches = buffer_manager.get_ready_for_flush();
                     // Read after the take, so it names only what stayed behind.
                     let still_held = unplaced_offsets(&buffer_manager, &pending_schema_buffer);
-                    self.flush_or_settle(&inserter, &transport, dlq.as_ref(), batches, still_held).await;
+                    self.flush_or_settle(&inserter, &transport, dlq.as_ref(), batches, still_held, &mut buffer_manager, &mut pending_schema_buffer).await;
                 }
 
                 // Held work goes back to ClickHouse or the DLQ on the backoff schedule.
@@ -680,7 +688,7 @@ impl Orchestrator {
                     let held = self.take_unsettled_for(&absent_tables, &default_table);
                     self.queue_dead_letters(held.dead_letters);
                     let still_held = unplaced_offsets(&buffer_manager, &pending_schema_buffer);
-                    self.flush_or_settle(&inserter, &transport, dlq.as_ref(), held.batches, still_held).await;
+                    self.flush_or_settle(&inserter, &transport, dlq.as_ref(), held.batches, still_held, &mut buffer_manager, &mut pending_schema_buffer).await;
                 }
 
                 // Apply schema resolution results from background resolver.
@@ -788,7 +796,7 @@ impl Orchestrator {
                     if transport.held_records() > 0 {
                         let batches = buffer_manager.take_older_than(EARLY_FLUSH_AGE);
                         let still_held = unplaced_offsets(&buffer_manager, &pending_schema_buffer);
-                        self.flush_or_settle(&inserter, &transport, dlq.as_ref(), batches, still_held).await;
+                        self.flush_or_settle(&inserter, &transport, dlq.as_ref(), batches, still_held, &mut buffer_manager, &mut pending_schema_buffer).await;
                     }
                 }
 
@@ -820,7 +828,17 @@ impl Orchestrator {
                                 .map(|entry| DlqEntry::new("loader", entry.reason, entry.payload))
                                 .collect();
                             self.queue_dead_letters(filtered);
-                            Ok(batch.messages)
+                            let mut messages = batch.messages;
+                            if redelivers {
+                                self.adopt_leases(
+                                    &transport,
+                                    batch.leases,
+                                    &mut messages,
+                                    &mut buffer_manager,
+                                    &mut pending_schema_buffer,
+                                );
+                            }
+                            Ok(messages)
                         }
                         Err(e) => Err(e),
                     };
@@ -1157,7 +1175,7 @@ impl Orchestrator {
                             if !batches.is_empty() {
                                 // Read after the take, so it names only what stayed behind.
                                 let still_held = unplaced_offsets(&buffer_manager, &pending_schema_buffer);
-                                self.flush_batches_transport(&inserter, &transport, dlq.as_ref(), batches, still_held).await;
+                                self.flush_batches_transport(&inserter, &transport, dlq.as_ref(), batches, still_held, &mut buffer_manager, &mut pending_schema_buffer).await;
                             }
                         }
                         // A drain continues past an empty batch, since a gRPC
@@ -1205,6 +1223,8 @@ impl Orchestrator {
             dlq.as_ref(),
             final_batches,
             Vec::new(),
+            &mut buffer_manager,
+            &mut pending_schema_buffer,
         )
         .await;
         self.release_settled(&transport).await;
@@ -1274,16 +1294,22 @@ impl Orchestrator {
     /// DLQ in the same cycle, before the commit. A batch whose insert failed and
     /// a dead letter the DLQ refused are held in `unsettled` for another attempt,
     /// and every held row bounds this commit and each one after it until it lands.
+    ///
+    /// Before anything is written, every row of a partition whose lease has
+    /// ended is discarded from `batches`, `buffers`, `pending` and the holds.
     async fn flush_batches_transport(
         &mut self,
         inserter: &Inserter,
         transport: &TransportBackend,
         dlq: Option<&Arc<Dlq>>,
-        batches: Vec<FlushBatch>,
+        mut batches: Vec<FlushBatch>,
         still_held: Vec<KafkaOffset>,
+        buffers: &mut BufferManager,
+        pending: &mut PendingSchemaBuffer,
     ) {
         use std::time::Instant;
 
+        self.discard_revoked(transport, &mut batches, buffers, pending);
         let batch_count = batches.len();
         let total_rows: usize = batches.iter().map(|b| b.rows.len()).sum();
 
@@ -1699,19 +1725,120 @@ impl Orchestrator {
         inserter: &Inserter,
         transport: &TransportBackend,
         dlq: Option<&Arc<Dlq>>,
-        batches: Vec<FlushBatch>,
+        mut batches: Vec<FlushBatch>,
         still_held: Vec<KafkaOffset>,
+        buffers: &mut BufferManager,
+        pending: &mut PendingSchemaBuffer,
     ) {
         if batches.is_empty() {
+            self.discard_revoked(transport, &mut batches, buffers, pending);
             let dead_letters = self.take_queued_dead_letters();
             let dlq_deadline = tokio::time::Instant::now() + DLQ_ROUTE_DEADLINE;
             self.settle_dead_letters(transport, dlq, dead_letters, dlq_deadline)
                 .await;
             self.unsettled.rearm();
         } else {
-            self.flush_batches_transport(inserter, transport, dlq, batches, still_held)
-                .await;
+            self.flush_batches_transport(
+                inserter, transport, dlq, batches, still_held, buffers, pending,
+            )
+            .await;
         }
+    }
+
+    /// Take in the leases a received batch was read under, before any of its
+    /// records reaches a buffer.
+    ///
+    /// A partition now under a new lease has its rows from the old one
+    /// discarded, and records of a partition this consumer no longer holds
+    /// are dropped from `messages`: the partition's next owner reads both
+    /// again from the committed offset.
+    fn adopt_leases(
+        &mut self,
+        transport: &TransportBackend,
+        leases: Vec<PartitionRead>,
+        messages: &mut Vec<crate::kafka::KafkaMessage>,
+        buffers: &mut BufferManager,
+        pending: &mut PendingSchemaBuffer,
+    ) {
+        for read in leases {
+            if self.leases.observe(&read.topic, read.partition, read.lease) {
+                let purged =
+                    self.purge_partition(&read.topic, read.partition, &mut [], buffers, pending);
+                report_discarded(transport, &read.topic, read.partition, purged.records());
+            }
+            if read.lease.is_none() {
+                let mut dropped = Purged::default();
+                messages.retain(|msg| {
+                    if msg.partition == read.partition && msg.topic == read.topic {
+                        dropped.record(msg.offset, 0);
+                        return false;
+                    }
+                    true
+                });
+                report_discarded(transport, &read.topic, read.partition, dropped.records());
+            }
+        }
+    }
+
+    /// Discard every row of a partition whose lease a revoke has ended, from
+    /// `batches` about to be written and everywhere else this process holds
+    /// one.
+    fn discard_revoked(
+        &mut self,
+        transport: &TransportBackend,
+        batches: &mut Vec<FlushBatch>,
+        buffers: &mut BufferManager,
+        pending: &mut PendingSchemaBuffer,
+    ) {
+        if self.leases.is_empty() {
+            return;
+        }
+        let ended = self
+            .leases
+            .take_ended(|topic, partition, lease| transport.holds(topic, partition, lease));
+        for (topic, partition) in ended {
+            let records = self.discard_partition(&topic, partition, batches, buffers, pending);
+            report_discarded(transport, &topic, partition, records);
+        }
+    }
+
+    /// Discard every row of `topic`/`partition` from `batches` and everywhere
+    /// else this process holds one, returning how many records they came from.
+    fn discard_partition(
+        &mut self,
+        topic: &str,
+        partition: i32,
+        batches: &mut Vec<FlushBatch>,
+        buffers: &mut BufferManager,
+        pending: &mut PendingSchemaBuffer,
+    ) -> u64 {
+        let purged = self.purge_partition(topic, partition, batches, buffers, pending);
+        batches.retain(|batch| !batch.rows.is_empty());
+        purged.records()
+    }
+
+    /// Remove every row read from `topic`/`partition` -- in `batches`, the
+    /// buffers, the pending-schema buffer, the holds and the queued dead
+    /// letters -- and release the bytes the memory guard tracked for them.
+    fn purge_partition(
+        &mut self,
+        topic: &str,
+        partition: i32,
+        batches: &mut [FlushBatch],
+        buffers: &mut BufferManager,
+        pending: &mut PendingSchemaBuffer,
+    ) -> Purged {
+        let mut purged = Purged::default();
+        for batch in batches.iter_mut() {
+            batch.purge_partition(topic, partition, &mut purged);
+        }
+        buffers.purge_partition(topic, partition, &mut purged);
+        pending.purge_partition(topic, partition, &mut purged);
+        self.unsettled
+            .purge_partition(topic, partition, &mut purged);
+        purge_dead_letters(&mut self.dead_letters, topic, partition, &mut purged);
+        self.memory_guard.release(purged.bytes);
+        purged
     }
 
     /// Hold dead letters for another attempt, tracking their bytes until they
@@ -2496,6 +2623,21 @@ async fn commit_offsets(
         }
         Err(e) => error!(error = %e, "Failed to commit Kafka offsets"),
     }
+}
+
+/// Count and log `records` of `topic`/`partition` discarded because the lease
+/// they were read under ended.
+fn report_discarded(transport: &TransportBackend, topic: &str, partition: i32, records: u64) {
+    if records == 0 {
+        return;
+    }
+    info!(
+        topic,
+        partition,
+        records,
+        "Partition lease ended, discarding its records in memory -- its next owner reads them again from the committed offset"
+    );
+    transport.discarded_after_revoke(records);
 }
 
 /// Human-readable DLQ reason string for an expired / evicted / shutdown-drained
@@ -4543,5 +4685,175 @@ mod tests {
             "should cancel quickly"
         );
         assert!(!report.failed.is_empty());
+    }
+
+    // ---- a partition whose lease ended is discarded before any write ----
+
+    /// Payload each read row carries, so the memory guard tracks four bytes of it.
+    const READ_PAYLOAD: &[u8] = b"abcd";
+
+    /// Push one row read from `dfe-events`/`partition` at `off`.
+    fn read_row(m: &mut BufferManager, table: &str, partition: i32, off: i64) {
+        m.push(
+            table,
+            serde_json::Map::new(),
+            Some(offset("dfe-events", partition, off)),
+            Some(Arc::from(READ_PAYLOAD)),
+        );
+    }
+
+    /// A dead letter read from `dfe-events`/`partition` at `off`.
+    fn read_dead_letter(partition: i32, off: i64) -> DlqEntry {
+        DlqEntry::new("loader", "processing", READ_PAYLOAD.to_vec())
+            .with_source(scalo::dlq::DlqSource::kafka("dfe-events", partition, off))
+    }
+
+    fn offsets_of(batches: &[FlushBatch]) -> Vec<(i32, i64)> {
+        let mut out: Vec<(i32, i64)> = batches
+            .iter()
+            .flat_map(|b| &b.offsets)
+            .map(|o| (o.partition, o.offset))
+            .collect();
+        out.sort_unstable();
+        out
+    }
+
+    #[test]
+    fn a_revoked_partition_is_discarded_from_every_place_that_holds_its_rows() {
+        let mut orchestrator = Orchestrator::new(Config::default());
+        let before = orchestrator.memory_guard().reserved_bytes();
+
+        // Taken from the buffers for this flush: partition 0 at 1 and 11, 1 at 2.
+        let mut taken = staged_buffers();
+        read_row(&mut taken, "dfe.foo", 0, 1);
+        read_row(&mut taken, "dfe.foo", 1, 2);
+        read_row(&mut taken, "dfe.qux", 0, 11);
+        let mut batches = taken.flush_all();
+        // Still buffering.
+        let mut buffers = staged_buffers();
+        read_row(&mut buffers, "dfe.bar", 0, 3);
+        read_row(&mut buffers, "dfe.bar", 1, 4);
+        // Waiting on a schema: partition 0 at 5, a two-byte payload.
+        let mut pending = waiting_on_a_schema(0, 5);
+        // A batch whose insert failed, held for another attempt.
+        let mut failed = staged_buffers();
+        read_row(&mut failed, "dfe.baz", 0, 6);
+        read_row(&mut failed, "dfe.baz", 1, 7);
+        for batch in failed.flush_all() {
+            orchestrator.unsettled.hold(batch);
+        }
+        // Rows counted on receipt: 4 in this flush, 2 buffered, 1 pending, 2 held.
+        orchestrator
+            .memory_guard
+            .add_bytes(4 * 3 + 4 * 2 + 2 + 4 * 2);
+        // A dead letter the DLQ refused, and two still queued.
+        orchestrator.strand_dead_letters(vec![read_dead_letter(0, 8)]);
+        orchestrator.queue_dead_letters(vec![read_dead_letter(0, 9), read_dead_letter(1, 10)]);
+
+        let records = orchestrator.discard_partition(
+            "dfe-events",
+            0,
+            &mut batches,
+            &mut buffers,
+            &mut pending,
+        );
+
+        assert_eq!(records, 7, "offsets 1, 11, 3, 5, 6, 8 and 9");
+        assert_eq!(
+            offsets_of(&batches),
+            [(1, 2)],
+            "only the other partition's row is written"
+        );
+        assert_eq!(
+            batches.len(),
+            1,
+            "a batch the discard emptied is not written"
+        );
+        assert_eq!(offsets_of(&buffers.flush_all()), [(1, 4)]);
+        assert_eq!(pending.len(), 0);
+        let floors: Vec<(i32, i64)> = orchestrator
+            .unsettled
+            .offsets()
+            .into_iter()
+            .map(|o| (o.partition, o.offset))
+            .collect();
+        assert_eq!(floors, [(1, 7)], "the held batch keeps only its other row");
+        assert!(!orchestrator.unsettled.holds_dead_letters());
+        let queued = orchestrator.take_queued_dead_letters();
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].source.as_ref().and_then(|s| s.offset), Some(10));
+        assert_eq!(
+            orchestrator.memory_guard().reserved_bytes(),
+            before + 4 * 3,
+            "only the other partition's rows in the flush, the buffer and the hold are still tracked"
+        );
+    }
+
+    #[test]
+    fn a_discard_of_a_partition_nothing_holds_changes_nothing() {
+        let mut orchestrator = Orchestrator::new(Config::default());
+        let mut taken = staged_buffers();
+        read_row(&mut taken, "dfe.foo", 1, 2);
+        let mut batches = taken.flush_all();
+        let mut buffers = staged_buffers();
+        let mut pending = waiting_on_a_schema(1, 5);
+
+        let records = orchestrator.discard_partition(
+            "dfe-events",
+            0,
+            &mut batches,
+            &mut buffers,
+            &mut pending,
+        );
+
+        assert_eq!(records, 0);
+        assert_eq!(offsets_of(&batches), [(1, 2)]);
+        assert_eq!(pending.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn records_of_a_partition_no_longer_held_never_reach_a_buffer() {
+        let config = Config {
+            transport: "grpc".to_string(),
+            grpc: crate::config::GrpcConfig {
+                listen: Some("127.0.0.1:0".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let transport = TransportBackend::from_config(&config, None, None)
+            .await
+            .expect("gRPC backend binds on an ephemeral port");
+        let mut orchestrator = Orchestrator::new(Config::default());
+        let message = |partition: i32, off: i64| crate::kafka::KafkaMessage {
+            payload: READ_PAYLOAD.to_vec(),
+            topic: Arc::from("dfe-events"),
+            partition,
+            offset: off,
+            key: None,
+            timestamp_ms: None,
+        };
+        let mut messages = vec![message(0, 1), message(1, 2), message(0, 3)];
+        let lost = PartitionRead {
+            topic: Arc::from("dfe-events"),
+            partition: 0,
+            lease: None,
+        };
+
+        orchestrator.adopt_leases(
+            &transport,
+            vec![lost],
+            &mut messages,
+            &mut staged_buffers(),
+            &mut waiting_on_a_schema(1, 5),
+        );
+
+        let kept: Vec<(i32, i64)> = messages.iter().map(|m| (m.partition, m.offset)).collect();
+        assert_eq!(kept, [(1, 2)]);
+        assert!(
+            orchestrator.leases.is_empty(),
+            "no lease to check at the flush"
+        );
+        transport.close().await.expect("close the gRPC server");
     }
 }

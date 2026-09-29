@@ -155,7 +155,7 @@ async fn read_request_line(stream: &mut TcpStream, head: &mut Vec<u8>) -> Option
 }
 
 /// The Kafka container's bootstrap address, once the broker serves consumers.
-async fn kafka_bootstrap(infra: &TestInfrastructure) -> String {
+pub(super) async fn kafka_bootstrap(infra: &TestInfrastructure) -> String {
     let container = infra.kafka.as_ref().expect("Kafka container");
     let host = container.get_host().await.expect("container host");
     let port = container
@@ -169,7 +169,7 @@ async fn kafka_bootstrap(infra: &TestInfrastructure) -> String {
 
 /// A Kafka-transport loader reading `topic` as `group` and writing to
 /// `default.{table}` through `clickhouse`.
-fn kafka_loader(
+pub(super) fn kafka_loader(
     bootstrap: &str,
     topic: &str,
     group: &str,

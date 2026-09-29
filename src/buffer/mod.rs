@@ -27,7 +27,7 @@
 pub mod manager;
 pub mod pool;
 
-pub use manager::{BufferManager, BufferStats, FlushBatch, KafkaOffset};
+pub use manager::{BufferManager, BufferStats, FlushBatch, KafkaOffset, Purged};
 pub use pool::{
     BufferPools, BufferPoolsStats, MapPool, ObjectPool, OffsetsPool, PoolConfig, PoolStats,
     Poolable, Pooled, PooledMap, PooledOffsets, PooledString, StringPool,

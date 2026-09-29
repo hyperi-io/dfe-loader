@@ -93,6 +93,12 @@ The insert tail is built to degrade, not stall:
   re-encodes. Any server code outside the retry list (a busy server, the network, Keeper, the disk or object store under the table, or an operator fix such as a missing table or grant) is a refusal of the rows: against a table that has not changed it is the row's own data, never drift, so salvage dead-letters that row and the rest of the batch lands. See [clickhouse/SCHEMA-CACHE.md](clickhouse/SCHEMA-CACHE.md).
 - **One commit per flush cycle** -- Kafka offsets commit once per cycle, after the inserts and the DLQ hand-over. On each partition the commit stops below the lowest offset not placed yet: a buffered row, a row waiting on its schema, a failed batch, or a dead letter the DLQ refused. The loader holds a failed batch or refused dead letter and retries it with jittered backoff until it lands. A dead letter no DLQ backend can ever hold -- one over a Kafka-only DLQ's `message.max.bytes` once its payload is base64'd -- is dropped and counted in `pipeline_dead_letters_dropped_total{reason="too_large"}` instead, so it never holds a commit for good. A held batch whose table ClickHouse has since reported absent is retried against the default table, where new records for that table already go. The loader only learns a table was dropped when it next re-reads that table's schema, so until then the affected partition's commit stays below the held batch -- up to about `schema.cache_ttl_secs` (default 300 s) plus the 60 s schema refresh interval. Rows above the floor re-deliver as duplicates after a restart (at-least-once).
 
+## Rebalances
+
+A roll starts the new pod while the old one still buffers rows, and the rebalance hands some of the old pod's partitions to the new one, which reads them again from the committed offset. Before every write the loader checks the lease each partition's rows were read under. A partition whose lease has ended has its rows discarded -- from the buffers, the pending-schema buffer, the holds and the dead letters -- so only the new owner writes them. Each discarded record counts in `transport_revoke_discarded_total{stage="buffer"}`.
+
+With `kafka.acknowledgements.enabled: false` offsets commit at receipt, so the buffered rows are their only copy and nothing is discarded.
+
 ## DLQ
 
 Dead-lettered messages go to the DLQ (Kafka primary, file fallback). Routing

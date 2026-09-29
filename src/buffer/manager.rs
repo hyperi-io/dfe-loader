@@ -19,7 +19,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use compact_str::CompactString;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use serde_json::{Map, Value};
 use tracing::debug;
 
@@ -58,6 +58,70 @@ impl KafkaOffset {
             offset,
         }
     }
+
+    /// Whether this offset was read from `topic`/`partition`.
+    #[inline]
+    pub fn is_from(&self, topic: &str, partition: i32) -> bool {
+        self.partition == partition && &*self.topic == topic
+    }
+}
+
+/// What purging one partition took out of the places that hold its rows.
+#[derive(Debug, Default)]
+pub struct Purged {
+    /// Offsets of the records the rows came from: a record split into several
+    /// rows counts once.
+    offsets: FxHashSet<i64>,
+    /// Payload bytes the memory guard tracked for the removed rows.
+    pub bytes: u64,
+}
+
+impl Purged {
+    /// Count one removed row of the record at `offset`, holding `bytes` of
+    /// tracked payload.
+    pub fn record(&mut self, offset: i64, bytes: usize) {
+        self.offsets.insert(offset);
+        self.bytes += bytes as u64;
+    }
+
+    /// Records the removed rows came from.
+    pub fn records(&self) -> u64 {
+        self.offsets.len() as u64
+    }
+}
+
+/// Remove every row read from `topic`/`partition`, keeping `rows`, `offsets`
+/// and `raw` aligned by index.
+fn purge_rows(
+    rows: &mut Vec<Map<String, Value>>,
+    offsets: &mut Vec<KafkaOffset>,
+    raw: &mut Vec<Arc<[u8]>>,
+    topic: &str,
+    partition: i32,
+    purged: &mut Purged,
+) {
+    // A row pushed without an offset names no partition, and leaves `offsets`
+    // shorter than `rows`, so no index lines them up.
+    if offsets.len() != rows.len() || raw.len() != rows.len() {
+        return;
+    }
+    if !offsets.iter().any(|off| off.is_from(topic, partition)) {
+        return;
+    }
+    let mut kept = 0;
+    for i in 0..rows.len() {
+        if offsets[i].is_from(topic, partition) {
+            purged.record(offsets[i].offset, raw[i].len());
+            continue;
+        }
+        rows.swap(kept, i);
+        offsets.swap(kept, i);
+        raw.swap(kept, i);
+        kept += 1;
+    }
+    rows.truncate(kept);
+    offsets.truncate(kept);
+    raw.truncate(kept);
 }
 
 /// Data ready to be flushed to `ClickHouse` (`JSONEachRow`).
@@ -78,6 +142,20 @@ pub struct FlushBatch {
     pub offsets: Vec<KafkaOffset>,
     /// Raw payload bytes (JSON) parallel to rows — spliced as `_json` at flush time
     pub raw_payloads: Vec<Arc<[u8]>>,
+}
+
+impl FlushBatch {
+    /// Remove every row read from `topic`/`partition`, adding each to `purged`.
+    pub fn purge_partition(&mut self, topic: &str, partition: i32, purged: &mut Purged) {
+        purge_rows(
+            &mut self.rows,
+            &mut self.offsets,
+            &mut self.raw_payloads,
+            topic,
+            partition,
+            purged,
+        );
+    }
 }
 
 /// Per-table buffer tracking pending rows, raw payloads, and Kafka offsets
@@ -144,6 +222,17 @@ impl TableBuffer {
 
     fn is_empty(&self) -> bool {
         self.rows.is_empty()
+    }
+
+    fn purge_partition(&mut self, topic: &str, partition: i32, purged: &mut Purged) {
+        purge_rows(
+            &mut self.rows,
+            &mut self.offsets,
+            &mut self.raw_payloads,
+            topic,
+            partition,
+            purged,
+        );
     }
 }
 
@@ -350,6 +439,14 @@ impl BufferManager {
             }
         }
         lowest.into_values().cloned().collect()
+    }
+
+    /// Remove every buffered row read from `topic`/`partition`, from whichever
+    /// table buffers it, adding each to `purged`.
+    pub fn purge_partition(&mut self, topic: &str, partition: i32, purged: &mut Purged) {
+        for buffer in self.buffers.values_mut() {
+            buffer.purge_partition(topic, partition, purged);
+        }
     }
 
     /// Get total pending row count
@@ -947,6 +1044,153 @@ mod tests {
             None,
         );
         assert!(m.lowest_pending_offsets().is_empty());
+    }
+
+    // ========================================================================
+    // purge_partition -- a revoked partition's rows leave every buffer
+    // ========================================================================
+
+    /// Push one row of `payload` read from `topic`/`partition` at `offset`.
+    fn push_read(m: &mut BufferManager, table: &str, at: (&str, i32, i64), payload: &[u8]) {
+        let (topic, partition, offset) = at;
+        m.push(
+            table,
+            json!({"offset": offset}).as_object().unwrap().clone(),
+            Some(KafkaOffset::new(topic, partition, offset)),
+            Some(Arc::from(payload)),
+        );
+    }
+
+    #[test]
+    fn purge_partition_takes_the_partitions_rows_from_every_table() {
+        let mut m = BufferManager::new(&test_config());
+        push_read(&mut m, "db.a", ("t", 0, 10), b"a10");
+        push_read(&mut m, "db.a", ("t", 1, 20), b"a20");
+        push_read(&mut m, "db.b", ("t", 0, 11), b"b11xx");
+        push_read(&mut m, "db.b", ("u", 0, 30), b"b30");
+
+        let mut purged = Purged::default();
+        m.purge_partition("t", 0, &mut purged);
+
+        assert_eq!(purged.records(), 2);
+        assert_eq!(
+            purged.bytes,
+            3 + 5,
+            "the tracked payload bytes of both rows"
+        );
+        assert_eq!(m.pending_rows(), 2);
+        let mut kept: Vec<(String, i32, i64)> = m
+            .flush_all()
+            .into_iter()
+            .flat_map(|batch| batch.offsets)
+            .map(|o| (o.topic.to_string(), o.partition, o.offset))
+            .collect();
+        kept.sort_unstable();
+        assert_eq!(
+            kept,
+            vec![("t".to_string(), 1, 20), ("u".to_string(), 0, 30)],
+            "another partition of the topic, and the same partition of another topic, stay"
+        );
+    }
+
+    #[test]
+    fn purge_partition_keeps_rows_offsets_and_payloads_in_line() {
+        let mut m = BufferManager::new(&test_config());
+        for (partition, offset) in [(0, 1), (1, 2), (0, 3), (1, 4), (1, 5), (0, 6)] {
+            push_read(&mut m, "db.a", ("t", partition, offset), &[offset as u8]);
+        }
+
+        let mut purged = Purged::default();
+        m.purge_partition("t", 0, &mut purged);
+        assert_eq!(purged.records(), 3);
+
+        let batch = m.flush_all().pop().expect("the kept rows");
+        let offsets: Vec<i64> = batch.offsets.iter().map(|o| o.offset).collect();
+        assert_eq!(offsets, [2, 4, 5], "the kept rows keep their order");
+        for ((row, offset), raw) in batch
+            .rows
+            .iter()
+            .zip(&batch.offsets)
+            .zip(&batch.raw_payloads)
+        {
+            assert_eq!(
+                row["offset"], offset.offset,
+                "a row moved away from its offset"
+            );
+            assert_eq!(
+                **raw,
+                [offset.offset as u8],
+                "a payload moved away from its row"
+            );
+        }
+    }
+
+    #[test]
+    fn purge_partition_counts_a_split_record_once() {
+        // One record fanned out into rows shares its offset.
+        let mut m = BufferManager::new(&test_config());
+        push_read(&mut m, "db.a", ("t", 0, 7), b"first");
+        push_read(&mut m, "db.b", ("t", 0, 7), b"second");
+
+        let mut purged = Purged::default();
+        m.purge_partition("t", 0, &mut purged);
+        assert_eq!(purged.records(), 1);
+        assert_eq!(purged.bytes, 11);
+        assert_eq!(m.pending_rows(), 0);
+    }
+
+    #[test]
+    fn purge_partition_of_a_partition_with_nothing_buffered_changes_nothing() {
+        let mut m = BufferManager::new(&test_config());
+        push_read(&mut m, "db.a", ("t", 1, 20), b"a20");
+
+        let mut purged = Purged::default();
+        m.purge_partition("t", 0, &mut purged);
+        assert_eq!(purged.records(), 0);
+        assert_eq!(purged.bytes, 0);
+        assert_eq!(m.pending_rows(), 1);
+    }
+
+    #[test]
+    fn purge_partition_leaves_rows_pushed_without_an_offset() {
+        let mut m = BufferManager::new(&test_config());
+        m.push(
+            "db.a",
+            json!({"id": 1}).as_object().unwrap().clone(),
+            None,
+            None,
+        );
+
+        let mut purged = Purged::default();
+        m.purge_partition("t", 0, &mut purged);
+        assert_eq!(purged.records(), 0);
+        assert_eq!(m.pending_rows(), 1);
+    }
+
+    #[test]
+    fn a_flush_batch_purge_drops_only_the_partitions_rows() {
+        let mut batch = FlushBatch {
+            table: CompactString::from("db.a"),
+            rows: vec![Map::new(), Map::new(), Map::new()],
+            offsets: vec![
+                KafkaOffset::new("t", 0, 1),
+                KafkaOffset::new("t", 2, 2),
+                KafkaOffset::new("t", 0, 3),
+            ],
+            raw_payloads: vec![
+                Arc::from(&b"aa"[..]),
+                Arc::from(&b"b"[..]),
+                Arc::from(&b"ccc"[..]),
+            ],
+        };
+
+        let mut purged = Purged::default();
+        batch.purge_partition("t", 0, &mut purged);
+        assert_eq!(purged.records(), 2);
+        assert_eq!(purged.bytes, 5);
+        assert_eq!(batch.rows.len(), 1);
+        assert_eq!(batch.offsets[0].offset, 2);
+        assert_eq!(&*batch.raw_payloads[0], b"b");
     }
 
     #[test]
