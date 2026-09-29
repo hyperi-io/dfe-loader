@@ -44,6 +44,7 @@ flowchart TB
 > table that governs CI build optimisation behaviour.
 >
 > The rest of this document remains relevant for:
+>
 > - Understanding *why* each optimisation matters (the CI just automates them)
 > - Local profiling / one-off performance investigation
 > - Runtime tuning (batch sizes, concurrent inserts -- NOT build-time concerns)

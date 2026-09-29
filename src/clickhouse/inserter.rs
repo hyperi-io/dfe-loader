@@ -875,6 +875,7 @@ impl Inserter {
         let mut rows = batch.rows;
         let offsets = batch.offsets;
         let raw_payloads = batch.raw_payloads;
+        let reserved = batch.reserved;
         let num_rows = rows.len();
 
         // Apply schema-driven coercion if configured. Done once here --
@@ -935,6 +936,7 @@ impl Inserter {
                         rows,
                         offsets,
                         raw_payloads,
+                        reserved,
                     });
                 }
 
@@ -984,6 +986,7 @@ impl Inserter {
                 rows,
                 offsets,
                 raw_payloads,
+                reserved,
             }),
             None => InsertResult::with_failures(salvage.inserted, salvage.failed),
         }

@@ -25,7 +25,12 @@ use tracing::debug;
 
 use crate::config::BufferConfig;
 
-type BufferBuildResult = (Vec<Map<String, Value>>, Vec<KafkaOffset>, Vec<Arc<[u8]>>);
+type BufferBuildResult = (
+    Vec<Map<String, Value>>,
+    Vec<KafkaOffset>,
+    Vec<Arc<[u8]>>,
+    Vec<u64>,
+);
 
 /// Kafka offset metadata for at-least-once delivery.
 ///
@@ -79,9 +84,9 @@ pub struct Purged {
 impl Purged {
     /// Count one removed row of the record at `offset`, holding `bytes` of
     /// tracked payload.
-    pub fn record(&mut self, offset: i64, bytes: usize) {
+    pub fn record(&mut self, offset: i64, bytes: u64) {
         self.offsets.insert(offset);
-        self.bytes += bytes as u64;
+        self.bytes += bytes;
     }
 
     /// Records the removed rows came from.
@@ -90,38 +95,48 @@ impl Purged {
     }
 }
 
-/// Remove every row read from `topic`/`partition`, keeping `rows`, `offsets`
-/// and `raw` aligned by index.
-fn purge_rows(
-    rows: &mut Vec<Map<String, Value>>,
-    offsets: &mut Vec<KafkaOffset>,
-    raw: &mut Vec<Arc<[u8]>>,
-    topic: &str,
-    partition: i32,
-    purged: &mut Purged,
-) {
+/// The per-row columns a buffer and a flush batch keep aligned by index.
+struct RowColumns<'a> {
+    rows: &'a mut Vec<Map<String, Value>>,
+    offsets: &'a mut Vec<KafkaOffset>,
+    raw: &'a mut Vec<Arc<[u8]>>,
+    reserved: &'a mut Vec<u64>,
+}
+
+/// Remove every row read from `topic`/`partition`, keeping the columns
+/// aligned by index and adding each row's reservation to `purged`.
+fn purge_rows(columns: RowColumns<'_>, topic: &str, partition: i32, purged: &mut Purged) {
+    let RowColumns {
+        rows,
+        offsets,
+        raw,
+        reserved,
+    } = columns;
     // A row pushed without an offset names no partition, and leaves `offsets`
     // shorter than `rows`, so no index lines them up.
-    if offsets.len() != rows.len() || raw.len() != rows.len() {
+    let len = rows.len();
+    if offsets.len() != len || raw.len() != len || reserved.len() != len {
         return;
     }
     if !offsets.iter().any(|off| off.is_from(topic, partition)) {
         return;
     }
     let mut kept = 0;
-    for i in 0..rows.len() {
+    for i in 0..len {
         if offsets[i].is_from(topic, partition) {
-            purged.record(offsets[i].offset, raw[i].len());
+            purged.record(offsets[i].offset, reserved[i]);
             continue;
         }
         rows.swap(kept, i);
         offsets.swap(kept, i);
         raw.swap(kept, i);
+        reserved.swap(kept, i);
         kept += 1;
     }
     rows.truncate(kept);
     offsets.truncate(kept);
     raw.truncate(kept);
+    reserved.truncate(kept);
 }
 
 /// Data ready to be flushed to `ClickHouse` (`JSONEachRow`).
@@ -142,15 +157,26 @@ pub struct FlushBatch {
     pub offsets: Vec<KafkaOffset>,
     /// Raw payload bytes (JSON) parallel to rows — spliced as `_json` at flush time
     pub raw_payloads: Vec<Arc<[u8]>>,
+    /// Bytes the memory guard holds for each row, parallel to rows, released
+    /// once the row leaves the loader whatever its capture mode kept.
+    pub reserved: Vec<u64>,
 }
 
 impl FlushBatch {
+    /// Bytes the memory guard holds for the batch's rows.
+    pub fn reserved_bytes(&self) -> u64 {
+        self.reserved.iter().sum()
+    }
+
     /// Remove every row read from `topic`/`partition`, adding each to `purged`.
     pub fn purge_partition(&mut self, topic: &str, partition: i32, purged: &mut Purged) {
         purge_rows(
-            &mut self.rows,
-            &mut self.offsets,
-            &mut self.raw_payloads,
+            RowColumns {
+                rows: &mut self.rows,
+                offsets: &mut self.offsets,
+                raw: &mut self.raw_payloads,
+                reserved: &mut self.reserved,
+            },
             topic,
             partition,
             purged,
@@ -166,6 +192,8 @@ struct TableBuffer {
     offsets: Vec<KafkaOffset>,
     /// Raw JSON bytes parallel to rows — zero-copy Arc for _json splice
     raw_payloads: Vec<Arc<[u8]>>,
+    /// Memory-guard bytes held for each row, parallel to rows
+    reserved: Vec<u64>,
     /// Created timestamp
     created_at: Instant,
     /// Target batch size
@@ -178,6 +206,7 @@ impl TableBuffer {
             rows: Vec::with_capacity(batch_size),
             offsets: Vec::new(),
             raw_payloads: Vec::with_capacity(batch_size),
+            reserved: Vec::with_capacity(batch_size),
             created_at: Instant::now(),
             batch_size,
         }
@@ -188,6 +217,7 @@ impl TableBuffer {
         data: Map<String, Value>,
         offset: Option<KafkaOffset>,
         raw: Option<Arc<[u8]>>,
+        reserved: u64,
     ) {
         self.rows.push(data);
         if let Some(off) = offset {
@@ -196,6 +226,7 @@ impl TableBuffer {
         // Always push to keep raw_payloads parallel with rows.
         // Empty slice for transformer-path rows (they already have _json in the map).
         self.raw_payloads.push(raw.unwrap_or_default());
+        self.reserved.push(reserved);
     }
 
     fn is_ready(&self, flush_rows: usize, flush_age_secs: u64) -> bool {
@@ -210,10 +241,12 @@ impl TableBuffer {
         let rows = std::mem::take(&mut self.rows);
         let offsets = std::mem::take(&mut self.offsets);
         let raw_payloads = std::mem::take(&mut self.raw_payloads);
+        let reserved = std::mem::take(&mut self.reserved);
         self.rows = Vec::with_capacity(self.batch_size);
         self.raw_payloads = Vec::with_capacity(self.batch_size);
+        self.reserved = Vec::with_capacity(self.batch_size);
         self.created_at = Instant::now();
-        Some((rows, offsets, raw_payloads))
+        Some((rows, offsets, raw_payloads, reserved))
     }
 
     fn len(&self) -> usize {
@@ -226,9 +259,12 @@ impl TableBuffer {
 
     fn purge_partition(&mut self, topic: &str, partition: i32, purged: &mut Purged) {
         purge_rows(
-            &mut self.rows,
-            &mut self.offsets,
-            &mut self.raw_payloads,
+            RowColumns {
+                rows: &mut self.rows,
+                offsets: &mut self.offsets,
+                raw: &mut self.raw_payloads,
+                reserved: &mut self.reserved,
+            },
             topic,
             partition,
             purged,
@@ -281,7 +317,7 @@ impl BufferManager {
         self.flush_age_secs = config.flush_age_secs;
     }
 
-    /// Push a promoted row to the appropriate table buffer.
+    /// Push a promoted row the memory guard holds no bytes for.
     ///
     /// `data` contains only schema-promoted columns and common header fields.
     /// `raw` is the original JSON bytes (Arc shared from message receipt) —
@@ -294,15 +330,29 @@ impl BufferManager {
         offset: Option<KafkaOffset>,
         raw: Option<Arc<[u8]>>,
     ) {
+        self.push_reserved(table, data, offset, raw, 0);
+    }
+
+    /// Push a promoted row the memory guard holds `reserved` bytes for, which
+    /// the flush or purge that takes the row out releases.
+    #[inline]
+    pub fn push_reserved(
+        &mut self,
+        table: &str,
+        data: Map<String, Value>,
+        offset: Option<KafkaOffset>,
+        raw: Option<Arc<[u8]>>,
+        reserved: u64,
+    ) {
         // Fast path: table already exists (common case after first message)
         if let Some(buffer) = self.buffers.get_mut(table) {
-            buffer.push(data, offset, raw);
+            buffer.push(data, offset, raw, reserved);
             return;
         }
 
         // Slow path: new table — allocate key and create buffer
         let mut buffer = TableBuffer::new(self.batch_size);
-        buffer.push(data, offset, raw);
+        buffer.push(data, offset, raw, reserved);
         self.buffers.insert(table.to_string(), buffer);
     }
 
@@ -330,7 +380,7 @@ impl BufferManager {
                 } else {
                     "age"
                 };
-                if let Some((rows, offsets, raw_payloads)) = buffer.build() {
+                if let Some((rows, offsets, raw_payloads, reserved)) = buffer.build() {
                     let row_count = rows.len();
                     let byte_estimate = row_count * 200;
                     debug!(
@@ -345,6 +395,7 @@ impl BufferManager {
                         rows,
                         offsets,
                         raw_payloads,
+                        reserved,
                     });
                 }
             }
@@ -373,12 +424,13 @@ impl BufferManager {
             if !take(buffer) {
                 continue;
             }
-            if let Some((rows, offsets, raw_payloads)) = buffer.build() {
+            if let Some((rows, offsets, raw_payloads, reserved)) = buffer.build() {
                 flush_batches.push(FlushBatch {
                     table: CompactString::from(table.as_str()),
                     rows,
                     offsets,
                     raw_payloads,
+                    reserved,
                 });
             }
         }
@@ -1050,14 +1102,15 @@ mod tests {
     // purge_partition -- a revoked partition's rows leave every buffer
     // ========================================================================
 
-    /// Push one row of `payload` read from `topic`/`partition` at `offset`.
+    /// Push one row of `payload` read from `topic`/`partition` at `offset`, reserving its length.
     fn push_read(m: &mut BufferManager, table: &str, at: (&str, i32, i64), payload: &[u8]) {
         let (topic, partition, offset) = at;
-        m.push(
+        m.push_reserved(
             table,
             json!({"offset": offset}).as_object().unwrap().clone(),
             Some(KafkaOffset::new(topic, partition, offset)),
             Some(Arc::from(payload)),
+            payload.len() as u64,
         );
     }
 
@@ -1073,11 +1126,7 @@ mod tests {
         m.purge_partition("t", 0, &mut purged);
 
         assert_eq!(purged.records(), 2);
-        assert_eq!(
-            purged.bytes,
-            3 + 5,
-            "the tracked payload bytes of both rows"
-        );
+        assert_eq!(purged.bytes, 3 + 5, "the reserved bytes of both rows");
         assert_eq!(m.pending_rows(), 2);
         let mut kept: Vec<(String, i32, i64)> = m
             .flush_all()
@@ -1182,15 +1231,18 @@ mod tests {
                 Arc::from(&b"b"[..]),
                 Arc::from(&b"ccc"[..]),
             ],
+            reserved: vec![20, 10, 30],
         };
 
         let mut purged = Purged::default();
         batch.purge_partition("t", 0, &mut purged);
         assert_eq!(purged.records(), 2);
-        assert_eq!(purged.bytes, 5);
+        assert_eq!(purged.bytes, 50, "the reservation, not the kept payload");
         assert_eq!(batch.rows.len(), 1);
         assert_eq!(batch.offsets[0].offset, 2);
         assert_eq!(&*batch.raw_payloads[0], b"b");
+        assert_eq!(batch.reserved, [10]);
+        assert_eq!(batch.reserved_bytes(), 10);
     }
 
     #[test]

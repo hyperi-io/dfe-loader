@@ -33,6 +33,8 @@ mod kafka_offset_floor;
 mod kafka_rebalance;
 #[cfg(feature = "testcontainers")]
 mod kafka_transport_e2e;
+#[cfg(feature = "testcontainers")]
+mod memory_balance;
 mod offset;
 mod property;
 mod resilience;

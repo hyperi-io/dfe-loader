@@ -34,7 +34,7 @@ schema itself. The loader injects these system fields into every event.
 - **Landing table** (`dfe.main`): schema IS just the common header. This is the
   catch-all for unrouted events and the only table auto-created by the loader.
 - **Other tables** (e.g., `dfe.auth`, `dfe.metrics`): schema = common header
-  + data-specific columns. These tables are created externally (by DBAs or IaC)
+  plus data-specific columns. These tables are created externally (by DBAs or IaC)
   with their own columns alongside the common header.
 
 ```text

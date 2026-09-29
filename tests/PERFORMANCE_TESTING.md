@@ -52,7 +52,7 @@ assert!(comparison.regressions.is_empty(),
 
 ## Example Output
 
-```
+```text
 === Metrics Comparison Report ===
 Baseline: baseline_v1 (abc123)
 Current:  optimized_v2 (def456)

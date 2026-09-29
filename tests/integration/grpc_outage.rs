@@ -403,7 +403,7 @@ async fn client_for(listen_port: u16) -> GrpcTransport {
 }
 
 /// Run `orchestrator` and connect a gRPC client to its listener.
-async fn start(
+pub(super) async fn start(
     mut orchestrator: Orchestrator,
     listen_port: u16,
 ) -> (CancellationToken, JoinHandle<()>, GrpcTransport) {

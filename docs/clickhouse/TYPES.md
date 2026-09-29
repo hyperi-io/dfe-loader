@@ -341,7 +341,7 @@ layout for zero-copy operations.
 
 ### Arrays
 
-```
+```text
 Offsets: [UInt64 offsets array]
 Data: [T elements array]
 ```
@@ -350,14 +350,14 @@ Offset[i] = end index of array[i] in data
 
 ### Nullable
 
-```
+```text
 Nulls: [UInt8 mask, 1=null]
 Values: [T values, null positions have default]
 ```
 
 ### LowCardinality
 
-```
+```text
 Index type + Keys + Dictionary
 ```
 

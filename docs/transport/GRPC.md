@@ -286,7 +286,7 @@ Starting with unary means fewer moving parts for v1.
 
 ### New files
 
-```
+```text
 src/transport/
 |- grpc/
 |  |- mod.rs          # GrpcTransport (client + server)
@@ -303,7 +303,7 @@ proto/
 
 ### Removed files
 
-```
+```text
 src/transport/
 |- zenoh/              # REMOVED entirely
    |- mod.rs

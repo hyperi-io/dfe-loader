@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Download DB-IP Lite MMDB databases for CI bundling
 #
-# These are CC BY 4.0 licensed — attribution is required.
+# These are CC BY 4.0 licensed -- attribution is required.
 # See: https://db-ip.com/db/lite.php
 #
 # Usage:

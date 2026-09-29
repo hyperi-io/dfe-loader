@@ -303,7 +303,7 @@ impl PendingSchemaBuffer {
             let before = queue.len();
             queue.retain(|p| {
                 if from(&p.msg) {
-                    purged.record(p.msg.offset, p.msg.payload.len());
+                    purged.record(p.msg.offset, p.msg.payload.len() as u64);
                     return false;
                 }
                 true
@@ -319,7 +319,7 @@ impl PendingSchemaBuffer {
         }
         self.evicted.retain(|(msg, _)| {
             if from(msg) {
-                purged.record(msg.offset, msg.payload.len());
+                purged.record(msg.offset, msg.payload.len() as u64);
                 return false;
             }
             true

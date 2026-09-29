@@ -1325,9 +1325,8 @@ impl Orchestrator {
             .into_iter()
             .map(|mut b| {
                 per_batch_offsets.push(std::mem::take(&mut b.offsets));
-                // Track original payload bytes for memory guard release
-                let batch_bytes: u64 = b.raw_payloads.iter().map(|p| p.len() as u64).sum();
-                per_batch_bytes.push(batch_bytes);
+                // What receipt reserved, whether or not the capture mode kept the payload.
+                per_batch_bytes.push(b.reserved_bytes());
                 per_batch_tables.push(b.table.to_string());
                 // Refcount clones only, so a permanently rejected batch can still
                 // reach the DLQ without copying any payload.
@@ -4694,11 +4693,12 @@ mod tests {
 
     /// Push one row read from `dfe-events`/`partition` at `off`.
     fn read_row(m: &mut BufferManager, table: &str, partition: i32, off: i64) {
-        m.push(
+        m.push_reserved(
             table,
             serde_json::Map::new(),
             Some(offset("dfe-events", partition, off)),
             Some(Arc::from(READ_PAYLOAD)),
+            READ_PAYLOAD.len() as u64,
         );
     }
 

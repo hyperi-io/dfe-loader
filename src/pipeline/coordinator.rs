@@ -124,12 +124,13 @@ impl BatchCoordinator<'_> {
                     }
                     self.computed_column_cache.mark_pending(&processed.table);
 
-                    // Buffer push (sequential — needs &mut BufferManager)
-                    self.buffer_manager.push(
+                    // The row carries the reservation its message took on receipt.
+                    self.buffer_manager.push_reserved(
                         &processed.table,
                         processed.data,
                         Some(processed.kafka_offset),
                         processed.raw_payload,
+                        msg.payload.len() as u64,
                     );
 
                     outcome.processed += 1;
@@ -447,6 +448,47 @@ mod tests {
         assert_eq!(outcome.processed, 3);
         assert_eq!(outcome.errors, 0);
         assert!(outcome.dead_letters.is_empty());
+    }
+
+    #[test]
+    fn a_buffered_row_carries_the_bytes_its_message_reserved() {
+        let guard = MemoryGuard::new(MemoryGuardConfig {
+            limit_bytes: 1_073_741_824,
+            ..Default::default()
+        });
+        let mut buffer_manager = BufferManager::new(&BufferConfig::default());
+        let mut capture_overrides = CaptureOverrides::new(&MetadataConfig::default());
+        let mut field_mapping_cache = None;
+        let mut computed_column_cache = ComputedColumnCache::new(ComputedColumnsConfig::default());
+        let mut pending = make_pending();
+
+        let mut coord = make_coordinator(
+            &mut buffer_manager,
+            &mut capture_overrides,
+            &mut field_mapping_cache,
+            &mut computed_column_cache,
+            &None,
+            &guard,
+            &mut pending,
+        );
+
+        let messages = vec![
+            make_kafka_message(b"four", "topic", 0, 1),
+            make_kafka_message(b"eleven long", "topic", 0, 2),
+        ];
+        // A capture mode that keeps no payload, and one that keeps less than was read.
+        let mut kept_short = make_processed("dfe.events");
+        kept_short.raw_payload = Some(Arc::from(&b"{}"[..]));
+        let results: Vec<crate::Result<ProcessedMessage>> =
+            vec![Ok(make_processed("dfe.events")), Ok(kept_short)];
+
+        let outcome = coord.apply_results(results, &messages);
+        assert_eq!(outcome.processed, 2);
+
+        let batches = buffer_manager.flush_all();
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].reserved, [4, 11]);
+        assert_eq!(batches[0].reserved_bytes(), 15);
     }
 
     #[test]
