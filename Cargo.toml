@@ -32,8 +32,8 @@ tokio = { version = ">=1.53.1, <2", features = ["full"] }
 tokio-util = { version = ">=0.7.19, <0.8", features = ["rt"] }
 
 # Shared library with transport abstraction. The floor is the first release with
-# scalo::transport::ack and the public scalo::parse_guard.
-scalo = { version = ">=2.13.0, <3", features = ["config-schema", "transport-kafka", "transport-grpc", "dlq-kafka", "config", "config-reload", "deployment", "version-check", "scaling", "cli-service", "top", "logger", "metrics", "service-metrics", "expression", "memory", "worker-batch", "governor", "secrets", "sink-stack"] }
+# KafkaTransport::lease, which the flush checks before writing buffered rows.
+scalo = { version = ">=2.13.2, <3", features = ["config-schema", "transport-kafka", "transport-grpc", "dlq-kafka", "config", "config-reload", "deployment", "version-check", "scaling", "cli-service", "top", "logger", "metrics", "service-metrics", "expression", "memory", "worker-batch", "governor", "secrets", "sink-stack"] }
 
 # Steps scalo's jittered retry schedule (sink_stack backoff). Range MUST track
 # scalo's: BackoffBuilder only applies to the ExponentialBuilder scalo returns.

@@ -433,7 +433,7 @@ pub(super) async fn wait_for_loader(client: &GrpcTransport, clickhouse: &str, ta
 
 /// The value of the counter `name` in `manager`'s Prometheus output, summed
 /// over label sets matching `labels`, or 0 when it has never been counted.
-fn counter_value(manager: &MetricsManager, name: &str, labels: &str) -> f64 {
+pub(super) fn counter_value(manager: &MetricsManager, name: &str, labels: &str) -> f64 {
     manager
         .render()
         .lines()

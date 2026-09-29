@@ -23,7 +23,7 @@ use scalo::dlq::DlqEntry;
 use scalo::sink_stack::SinkStackConfig;
 use tokio::time::Instant;
 
-use crate::buffer::{FlushBatch, KafkaOffset};
+use crate::buffer::{FlushBatch, KafkaOffset, Purged};
 
 /// The delay schedule `ExponentialBuilder` produces.
 type Schedule = <ExponentialBuilder as BackoffBuilder>::Backoff;
@@ -68,6 +68,31 @@ fn kafka_source(entry: &DlqEntry) -> Option<KafkaOffset> {
         source.partition?,
         source.offset?,
     ))
+}
+
+/// Remove every dead letter read from `topic`/`partition`, adding each to
+/// `purged`. An entry that names no Kafka source stays.
+pub(crate) fn purge_dead_letters(
+    dead_letters: &mut Vec<DlqEntry>,
+    topic: &str,
+    partition: i32,
+    purged: &mut Purged,
+) {
+    dead_letters.retain(|entry| {
+        let Some(source) = entry.source.as_ref() else {
+            return true;
+        };
+        match source.offset {
+            Some(offset)
+                if source.partition == Some(partition)
+                    && source.topic.as_deref() == Some(topic) =>
+            {
+                purged.record(offset, entry.payload.len());
+                false
+            }
+            _ => true,
+        }
+    });
 }
 
 /// The lowest of `offsets` on each topic partition.
@@ -148,6 +173,21 @@ impl Unsettled {
                 .chain(&dead_letters)
                 .chain(&self.awaiting_reread),
         )
+    }
+
+    /// Remove every held row read from `topic`/`partition` -- in a held batch,
+    /// a held dead letter, or awaiting a re-read -- adding each held one to
+    /// `purged`.
+    ///
+    /// A row awaiting a re-read is no longer in memory, so it adds nothing.
+    pub(crate) fn purge_partition(&mut self, topic: &str, partition: i32, purged: &mut Purged) {
+        for batch in &mut self.batches {
+            batch.purge_partition(topic, partition, purged);
+        }
+        self.batches.retain(|batch| !batch.rows.is_empty());
+        purge_dead_letters(&mut self.dead_letters, topic, partition, purged);
+        self.awaiting_reread
+            .retain(|off| !off.is_from(topic, partition));
     }
 
     /// Rows across every held batch and dead letter.
@@ -361,6 +401,61 @@ mod tests {
         // Only a restart re-reads them, so taking the hold leaves them in place.
         let _ = held.take();
         assert_eq!(floors(&held).len(), 2);
+    }
+
+    #[test]
+    fn purge_partition_takes_the_partitions_rows_from_every_hold() {
+        let mut held = Unsettled::new(Duration::from_secs(5));
+        held.hold(batch_at("t", 0, 100..103));
+        held.hold(batch_at("t", 1, 7..9));
+        held.hold_dead_letters(vec![
+            dead_letter(b"12345").with_source(scalo::dlq::DlqSource::kafka("t", 0, 41)),
+            dead_letter(b"678").with_source(scalo::dlq::DlqSource::kafka("t", 1, 42)),
+            // An inbound-filter reject carries no source, so no partition claims it.
+            dead_letter(b"9"),
+        ]);
+        held.await_reread(&[KafkaOffset::new("t", 0, 20), KafkaOffset::new("t", 3, 8)]);
+
+        let mut purged = Purged::default();
+        held.purge_partition("t", 0, &mut purged);
+
+        assert_eq!(purged.records(), 4, "three batch rows and one dead letter");
+        assert_eq!(
+            purged.bytes,
+            3 * 2 + 5,
+            "each batch row holds `{{}}`, and the dead letter five bytes"
+        );
+        assert_eq!(
+            held.rows(),
+            2 + 2,
+            "the other partition's batch and its dead letters"
+        );
+        assert_eq!(
+            floors(&held),
+            vec![("t".to_string(), 1, 7), ("t".to_string(), 3, 8)],
+            "no floor is left for the purged partition, a re-read one included"
+        );
+        let taken = held.take();
+        assert_eq!(taken.batches.len(), 1, "the emptied batch is gone");
+        assert_eq!(taken.dead_letters.len(), 2);
+    }
+
+    #[test]
+    fn purge_dead_letters_matches_topic_and_partition_both() {
+        let mut dead_letters = vec![
+            dead_letter(b"a").with_source(scalo::dlq::DlqSource::kafka("t", 0, 1)),
+            dead_letter(b"b").with_source(scalo::dlq::DlqSource::kafka("u", 0, 2)),
+            dead_letter(b"c").with_source(scalo::dlq::DlqSource::kafka("t", 1, 3)),
+            dead_letter(b"d").with_source(scalo::dlq::DlqSource::kafka("t", 0, 1)),
+        ];
+
+        let mut purged = Purged::default();
+        purge_dead_letters(&mut dead_letters, "t", 0, &mut purged);
+
+        assert_eq!(purged.records(), 1, "two rows of one record");
+        assert_eq!(purged.bytes, 2);
+        let kept: Vec<&[u8]> = dead_letters.iter().map(|e| e.payload.as_slice()).collect();
+        assert_eq!(kept, [b"b".as_slice(), b"c".as_slice()]);
     }
 
     #[test]

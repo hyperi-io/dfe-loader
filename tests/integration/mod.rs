@@ -30,6 +30,8 @@ mod kafka;
 #[cfg(feature = "testcontainers")]
 mod kafka_offset_floor;
 #[cfg(feature = "testcontainers")]
+mod kafka_rebalance;
+#[cfg(feature = "testcontainers")]
 mod kafka_transport_e2e;
 mod offset;
 mod property;
