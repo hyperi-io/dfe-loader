@@ -130,10 +130,11 @@ per-table config > global default.
 | Mode | `_json` | `_raw` | Use |
 |------|---------|--------|-----|
 | `full` (default) | full payload (JSON type) | the record's own raw field, else NULL | path queries + text search |
+| `json_only` | full payload (JSON type) | NULL | path queries without the `_raw` overhead |
 | `raw_only` | NULL | full Kafka payload (String) | CH CPU saving, no JSON-type overhead |
 | `extracted_only` | NULL | NULL | promoted columns only |
 
-All three still promote schema columns; the difference is whether (and where)
+All four still promote schema columns; the difference is whether (and where)
 the full payload is kept. Under `full` a JSON record is stored once, in `_json`: `_raw` holds only raw data the source sent with it, such as a syslog line the receiver captured.
 
 ## Resilience

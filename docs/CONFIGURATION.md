@@ -85,7 +85,7 @@ back to public roots). See [clickhouse/TLS.md](clickhouse/TLS.md).
 
 | Setting | Values | Effect |
 |---------|--------|--------|
-| `metadata.capture_mode` | `full` (default), `raw_only`, `extracted_only` | `_json` + `_raw` population -- see [ARCHITECTURE.md](ARCHITECTURE.md#capture-modes) |
+| `metadata.capture_mode` | `full` (default), `json_only`, `raw_only`, `extracted_only` | `_json` + `_raw` population -- see [ARCHITECTURE.md](ARCHITECTURE.md#capture-modes) |
 | `metadata.table_capture_modes` | map | per-table override of `capture_mode` |
 | DDL `@capture_mode: <mode>` | comment tag | highest-priority override, per table |
 

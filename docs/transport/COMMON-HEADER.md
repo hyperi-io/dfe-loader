@@ -321,10 +321,11 @@ with no false positives. Supported query functions: `hasToken()`,
 | `capture_mode` | `_json` | `_raw` | Use case |
 |---|---|---|---|
 | `full` (default) | Full payload (JSON type) | The record's own raw field, else NULL | Full observability |
+| `json_only` | Full payload (JSON type) | NULL | Full observability without the `_raw` storage/index overhead |
 | `raw_only` | NULL | Full Kafka payload (String) | CH CPU saving -- no JSON type overhead |
 | `extracted_only` | NULL | NULL | Minimal -- only promoted schema fields |
 
-All three modes extract promoted fields to schema columns. Configurable at global,
+All four modes extract promoted fields to schema columns. Configurable at global,
 per-table, and DDL levels. See `metadata.capture_mode` in config.
 
 ### `_json`
@@ -372,7 +373,7 @@ native columnar JSON. `_raw` is the original wire format before parsing.
 
 ```toml
 [metadata]
-capture_mode = "full"  # full (default) | raw_only | extracted_only
+capture_mode = "full"  # full (default) | json_only | raw_only | extracted_only
 ```
 
 `capture_mode` controls `_json` and `_raw` population -- see the Capture Modes
@@ -778,7 +779,7 @@ default_db = "common"
 default_table = "default"
 
 [metadata]
-capture_mode = "full"              # full (default) | raw_only | extracted_only
+capture_mode = "full"              # full (default) | json_only | raw_only | extracted_only
 tags_fields = ["tags", "_tags", "meta", "metadata.tags"]
 tags_output = "_tags"
 drop_tags = false                  # Keep tags in _json after extraction
