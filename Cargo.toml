@@ -285,44 +285,17 @@ duration_suboptimal_units = "allow"
 map_unwrap_or = "allow"
 
 # =============================================================================
-# clickhouse-rs Fork Swap (hyperi-io/clickhouse-rs)
+# clickhouse: the HyperI fork (hyperi-io/clickhouse-rs), pinned by rev
 # =============================================================================
 #
-# dfe-loader is the test harness for the HyperI clickhouse-rs fork.
-# Swap mechanism: uncomment [patch] below to activate the fork.
-# Zero change to [dependencies] — the patch overrides the crates.io version.
-#
-# Fork branch chain (merge order — test each in dfe-loader before merging next):
-#   native-transport → connection-pooling → lc-insert → async-inserter → optimise-1
-#   batching and remediation are independent (mergeable to upstream anytime)
-#
-# Branch structure:
-#   main (upstream v0.14.2)
-#   ├── hyperi/remediation-deps — Drop fxhash + linked-hash-map (RUSTSEC-2025-0057)
-#   │   └── hyperi/remediation-polonius — Drop polonius-the-crab (RUSTSEC-2024-0436)
-#   ├── hyperi/native-transport — Native TCP SELECT + INSERT, full type coverage
-#   │   └── hyperi/connection-pooling — Deadpool pool, cursor drain, health checks
-#   │       └── hyperi/lc-insert — LowCardinality INSERT + LC(Nullable) reader fix
-#   │           └── hyperi/async-inserter — AsyncInserter (HTTP + native), TableBatcher
-#   │               └── hyperi/optimise-1 — DynamicInsert, ParsedType, schema recovery
-#   └── hyperi/batching — HTTP TableBatcher (independent)
-#
-# optimise-1 has remediation-polonius merged in (no code overlap, clean merge)
-# so dfe-loader gets both feature work and dep remediation from one checkout.
-#
-# Design spec: docs/specs/2026-03-18-clickhouse-rs-fork-swap.md
-#
+# This patch is active: every `clickhouse` dependency above builds from the fork
+# at this rev, the tip of its hyperi-port/06d-tcp-tls-new branch. It stays for
+# GA because the manifest cannot resolve without it: the `tcp` and
+# `native-tls-rustls` features requested above, and the `Client::tcp` and
+# `with_tcp_addrs` calls in src/clickhouse/client_http.rs, exist only on the
+# fork, not in crates.io clickhouse 0.15.x. Retiring it is #133.
 [patch.crates-io]
-# hyperi/connection-actor stacks on hyperi/schema-cache-strong with the
-# socket-state actor work — every native-transport operation goes through
-# a background actor task with protocol-level Cancel-on-drop, full-duplex
-# INSERT exception detection, and idle keepalive. See the fork's
-# src/worker/ + src/native/connection_actor.rs for design + rationale.
-# Pinned to the hyperi-port/06d-tcp-tls-new branch tip for a reproducible
-# build (a sha, not a floating branch ref).
 clickhouse = { git = "https://github.com/hyperi-io/clickhouse-rs.git", rev = "6f9acd9694acc9c596ff687c908aa215af100887" }
-#
-# To revert: comment out or remove the [patch.crates-io] section above.
 # =============================================================================
 
 [features]

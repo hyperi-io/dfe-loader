@@ -173,7 +173,6 @@ properties:
     $ref: '#/$defs/BatchProcessingConfig'
     default:
       max_chunk_size: 10000
-      format: auto
       routing_field: null
       pre_route_filters: []
       parse_error_action: dlq
@@ -926,7 +925,7 @@ $defs:
       sanitisation, timestamp DQ, coercion settings.
 
       **Requires restart:** Kafka brokers/topics/auth, `ClickHouse` hosts/auth,
-      payload format, transport type.
+      payload pipeline mode, transport type.
     type: object
     properties:
       enabled:
@@ -1065,40 +1064,27 @@ $defs:
         default: 100.0
   BatchProcessingConfig:
     description: |-
-      Configuration for the batch processing engine.
+      The `batch_processing` keys the loader offers.
 
-      All values are overridable via the 7-layer config cascade
-      (CLI > ENV > .env > settings.{env}.yaml > settings.yaml > defaults > scalo > hard-coded).
+      scalo's runtime reads the same key to build the batch engine. JSON is the
+      only payload format, so there is no `format` key. One left in a config is
+      ignored.
     type: object
     properties:
       max_chunk_size:
-        description: |-
-          Maximum number of messages per rayon chunk.
-
-          Smaller chunks reduce per-task overhead; larger chunks amortise
-          the rayon work-stealing cost. Default 10 000 matches data-plane batch sizes.
+        description: Maximum number of messages per rayon chunk.
         type: integer
         format: uint
         minimum: 0
         default: 10000
-      format:
-        description: Expected payload format (auto-detect by default).
-        $ref: '#/$defs/PayloadFormat'
-        default: auto
       routing_field:
-        description: |-
-          JSON field used to route messages to the correct downstream sink.
-
-          For a loader this is typically `"_table"`.
+        description: JSON field the pre-route reads before the full parse. Unset skips the pre-route.
         type:
         - string
         - 'null'
         default: null
       pre_route_filters:
-        description: |-
-          Pre-route filters applied before routing decisions.
-
-          Evaluated in order -- first match wins.
+        description: Pre-route filters, evaluated in order. The first match wins.
         type: array
         items:
           $ref: '#/$defs/PreRouteFilterConfig'
@@ -1108,12 +1094,7 @@ $defs:
         $ref: '#/$defs/ParseErrorAction'
         default: dlq
       known_fields:
-        description: |-
-          Fields to pre-extract into [`super::types::ParsedMessage::extracted`]
-          for fast routing lookups.
-
-          Extracting these at parse time avoids repeated `value.get()` traversals
-          during routing and filtering.
+        description: Fields to pre-extract at parse time for routing lookups.
         type: array
         items:
           type: string
@@ -1124,23 +1105,6 @@ $defs:
         - host
         - source_type
         - event_type
-  PayloadFormat:
-    description: |-
-      Payload format for a raw message.
-
-      Mirrors `crate::transport::types::PayloadFormat` for use when the `transport`
-      feature is not enabled. When `transport` is enabled, conversions between the
-      two types are provided.
-    oneOf:
-    - description: Auto-detect from payload bytes.
-      type: string
-      const: auto
-    - description: JSON format.
-      type: string
-      const: json
-    - description: MessagePack format.
-      type: string
-      const: msgpack
   PreRouteFilterConfig:
     description: |-
       Pre-route filter applied to each message before routing decisions.

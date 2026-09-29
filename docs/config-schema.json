@@ -179,7 +179,6 @@
       "$ref": "#/$defs/BatchProcessingConfig",
       "default": {
         "max_chunk_size": 10000,
-        "format": "auto",
         "routing_field": null,
         "pre_route_filters": [],
         "parse_error_action": "dlq",
@@ -1031,7 +1030,7 @@
       }
     },
     "HotReloadConfig": {
-      "description": "Hot-reload configuration\n\nControls whether the config file is watched for changes at runtime.\nWhen enabled, the config cascade is re-evaluated on file change and\nsafe-to-reload settings are applied without process restart.\n\n**Safe to hot-reload:** buffer thresholds, routing, metadata, field\nsanitisation, timestamp DQ, coercion settings.\n\n**Requires restart:** Kafka brokers/topics/auth, `ClickHouse` hosts/auth,\npayload format, transport type.",
+      "description": "Hot-reload configuration\n\nControls whether the config file is watched for changes at runtime.\nWhen enabled, the config cascade is re-evaluated on file change and\nsafe-to-reload settings are applied without process restart.\n\n**Safe to hot-reload:** buffer thresholds, routing, metadata, field\nsanitisation, timestamp DQ, coercion settings.\n\n**Requires restart:** Kafka brokers/topics/auth, `ClickHouse` hosts/auth,\npayload pipeline mode, transport type.",
       "type": "object",
       "properties": {
         "enabled": {
@@ -1180,23 +1179,18 @@
       }
     },
     "BatchProcessingConfig": {
-      "description": "Configuration for the batch processing engine.\n\nAll values are overridable via the 7-layer config cascade\n(CLI > ENV > .env > settings.{env}.yaml > settings.yaml > defaults > scalo > hard-coded).",
+      "description": "The `batch_processing` keys the loader offers.\n\nscalo's runtime reads the same key to build the batch engine. JSON is the\nonly payload format, so there is no `format` key. One left in a config is\nignored.",
       "type": "object",
       "properties": {
         "max_chunk_size": {
-          "description": "Maximum number of messages per rayon chunk.\n\nSmaller chunks reduce per-task overhead; larger chunks amortise\nthe rayon work-stealing cost. Default 10 000 matches data-plane batch sizes.",
+          "description": "Maximum number of messages per rayon chunk.",
           "type": "integer",
           "format": "uint",
           "minimum": 0,
           "default": 10000
         },
-        "format": {
-          "description": "Expected payload format (auto-detect by default).",
-          "$ref": "#/$defs/PayloadFormat",
-          "default": "auto"
-        },
         "routing_field": {
-          "description": "JSON field used to route messages to the correct downstream sink.\n\nFor a loader this is typically `\"_table\"`.",
+          "description": "JSON field the pre-route reads before the full parse. Unset skips the pre-route.",
           "type": [
             "string",
             "null"
@@ -1204,7 +1198,7 @@
           "default": null
         },
         "pre_route_filters": {
-          "description": "Pre-route filters applied before routing decisions.\n\nEvaluated in order -- first match wins.",
+          "description": "Pre-route filters, evaluated in order. The first match wins.",
           "type": "array",
           "items": {
             "$ref": "#/$defs/PreRouteFilterConfig"
@@ -1217,7 +1211,7 @@
           "default": "dlq"
         },
         "known_fields": {
-          "description": "Fields to pre-extract into [`super::types::ParsedMessage::extracted`]\nfor fast routing lookups.\n\nExtracting these at parse time avoids repeated `value.get()` traversals\nduring routing and filtering.",
+          "description": "Fields to pre-extract at parse time for routing lookups.",
           "type": "array",
           "items": {
             "type": "string"
@@ -1232,26 +1226,6 @@
           ]
         }
       }
-    },
-    "PayloadFormat": {
-      "description": "Payload format for a raw message.\n\nMirrors `crate::transport::types::PayloadFormat` for use when the `transport`\nfeature is not enabled. When `transport` is enabled, conversions between the\ntwo types are provided.",
-      "oneOf": [
-        {
-          "description": "Auto-detect from payload bytes.",
-          "type": "string",
-          "const": "auto"
-        },
-        {
-          "description": "JSON format.",
-          "type": "string",
-          "const": "json"
-        },
-        {
-          "description": "MessagePack format.",
-          "type": "string",
-          "const": "msgpack"
-        }
-      ]
     },
     "PreRouteFilterConfig": {
       "description": "Pre-route filter applied to each message before routing decisions.\n\nFilters are evaluated in order. The first filter that matches determines\nthe message's [`super::types::PreRouteResult`].",

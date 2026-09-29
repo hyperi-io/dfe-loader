@@ -46,12 +46,12 @@ mod testcontainers_impl {
     /// a bare tag on the line below the annotation and stops at a colon, so a
     /// `tag@sha256:...` value would take the pin out of review.
     // renovate: datasource=docker depName=clickhouse/clickhouse-server
-    const CLICKHOUSE_TAG: &str = "26.3.17.56";
+    const CLICKHOUSE_TAG: &str = "26.3.32.14";
 
     /// Digest of `CLICKHOUSE_TAG`. Docker resolves the reference by digest, so
     /// a tag moved without this one still pulls the old server.
     const CLICKHOUSE_DIGEST: &str =
-        "sha256:422be85ae7344058369cdd366ac0efea9daa8428b55c9cf50258e83a7d12fcb3";
+        "sha256:456063a689194186633bb3db0862283068f4c2ee538852d3aaffa7eb66f1f841";
 
     /// Bound on one ClickHouse readiness probe, so a hung connection costs a
     /// retry instead of the whole startup budget.

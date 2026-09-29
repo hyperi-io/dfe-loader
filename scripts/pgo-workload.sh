@@ -27,11 +27,13 @@
 #   - pgo-driver binary built with --features pgo-driver (auto-built if missing)
 #
 # Behaviour:
-#   - Starts single-node Kafka (KRaft) and single-node ClickHouse
+#   - Starts single-node Redpanda and single-node ClickHouse
+#   - Creates the tables the loader config routes to
 #   - Writes ephemeral loader config pointing at both
 #   - Starts the passed-in loader binary in background
 #   - Waits for loader readiness probe
 #   - Runs pgo-driver to produce messages for the configured duration
+#   - Fails if a source table received no rows
 #   - Cleans up (traps EXIT): kills loader, removes containers
 
 set -euo pipefail
@@ -65,12 +67,18 @@ DURATION="${PGO_WORKLOAD_DURATION_SECS:-300}"
 # protocol here -- it is not what we are profiling -- and the JVM's ~1.5-2GB
 # heap alongside ClickHouse and an instrumented binary does not fit a 4GB
 # runner, so the loader's consumer never connected and the build aborted.
+#
+# Both images equal dfe-infra versions.yaml (services.redpanda-version and
+# services.clickhouse-version), pinned by digest so a rebuilt tag cannot change
+# the server. Digests sit on their own lines: the Renovate regex stops at a colon.
 # renovate: datasource=docker depName=docker.redpanda.com/redpandadata/redpanda
-KAFKA_TAG="v26.1.8"
+KAFKA_TAG="v26.2.2"
+KAFKA_DIGEST="sha256:468bd13a9f2bd24794cb7fddc867c767fb1008b9a07b297b89fde48c564d7d96"
 # renovate: datasource=docker depName=clickhouse/clickhouse-server
-CH_TAG="26.3"
-KAFKA_IMAGE="${PGO_WORKLOAD_KAFKA_IMAGE:-docker.redpanda.com/redpandadata/redpanda:${KAFKA_TAG}}"
-CH_IMAGE="${PGO_WORKLOAD_CH_IMAGE:-clickhouse/clickhouse-server:${CH_TAG}}"
+CH_TAG="26.3.32.14"
+CH_DIGEST="sha256:456063a689194186633bb3db0862283068f4c2ee538852d3aaffa7eb66f1f841"
+KAFKA_IMAGE="${PGO_WORKLOAD_KAFKA_IMAGE:-docker.redpanda.com/redpandadata/redpanda:${KAFKA_TAG}@${KAFKA_DIGEST}}"
+CH_IMAGE="${PGO_WORKLOAD_CH_IMAGE:-clickhouse/clickhouse-server:${CH_TAG}@${CH_DIGEST}}"
 KEEP="${PGO_WORKLOAD_KEEP:-0}"
 
 # Floor of 60s -- shorter workloads produce bad PGO profiles
@@ -180,11 +188,50 @@ for attempt in $(seq 1 60); do
     sleep 1
 done
 
-# Pre-create the destination database the loader will write to. The loader
-# also auto-creates tables from its embedded DDL on first insert.
+# The loader creates no tables, so every table the config below routes to is
+# created here, or the profile covers the table-absent path instead of inserts.
 curl -sf -X POST "http://127.0.0.1:18123/" \
     --data "CREATE DATABASE IF NOT EXISTS dfe" \
     >/dev/null
+
+# The single-node DDL dfe-engine applies for a timeseries table (dfe-schemas
+# 0.2.8, data.main), with the table name as a placeholder.
+IFS= read -r -d '' TABLE_DDL <<'SQL' || true
+CREATE TABLE IF NOT EXISTS `dfe`.`__TABLE__`
+(
+    `_timestamp_load` DateTime64(3,'UTC') DEFAULT now64(3) COMMENT '@generated: now64(3) - Insertion timestamp (ms precision)' CODEC(Delta, LZ4),
+    `_timestamp` DateTime64(3,'UTC') COMMENT '@source: timestamp | now() - Event timestamp from source data' CODEC(Delta, LZ4),
+    `_timestamp_received` DateTime64(3,'UTC') COMMENT '@source: first(timestamp_received/received_at) - When the event was first received by the receiver' CODEC(Delta, LZ4),
+    `_uuid` Nullable(UUID) DEFAULT generateUUIDv7() COMMENT '@generated: generateUUIDv7() - Time-ordered unique event identifier',
+    `_org_id` LowCardinality(String) COMMENT '@source: org_id - Tenant/organisation identifier' CODEC(ZSTD(1)),
+    `_source` LowCardinality(Nullable(String)) COMMENT '@source: first(_source) | topic_name - Data source label (e.g. beats, syslog, crowdstrike-edr)' CODEC(ZSTD(1)),
+    `_raw` Nullable(String) COMMENT '@captured: raw_payload - Original event payload as text (full-text indexed)' CODEC(ZSTD(3)),
+    `_json` JSON(max_dynamic_paths=2048) COMMENT '@captured: raw_payload as JSON - Original event payload as structured JSON' CODEC(ZSTD(3)),
+    `_tags` JSON COMMENT '@source: first(tags/_tags/meta/metadata.tags) - Event metadata tags' CODEC(ZSTD(3)),
+    INDEX idx__timestamp `_timestamp` TYPE minmax GRANULARITY 4,
+    INDEX idx__org_id `_org_id` TYPE set(0) GRANULARITY 4,
+    INDEX idx__source `_source` TYPE set(0) GRANULARITY 4,
+    INDEX idx__raw `_raw` TYPE text(tokenizer=ngrams(3)) GRANULARITY 1
+)
+ENGINE = MergeTree()
+PARTITION BY toYYYYMMDD(_timestamp_load)
+PRIMARY KEY (`_timestamp_load`, `_timestamp`, `_org_id`)
+ORDER BY (`_timestamp_load`, `_timestamp`, `_org_id`)
+TTL _timestamp_load + INTERVAL 90 DAY DELETE WHERE _timestamp_load >= 0
+SETTINGS
+    index_granularity = 2048,
+    ttl_only_drop_parts = 1
+COMMENT '@profile: timeseries | @profile_version: 1.0.1'
+SQL
+
+# The four source tables routing.source_to_table names, then routing.default_table.
+SOURCE_TABLES=(auth_events api_events admin_events error_events)
+for table in "${SOURCE_TABLES[@]}" main; do
+    curl -sf -X POST "http://127.0.0.1:18123/" \
+        --data-binary "${TABLE_DDL//__TABLE__/${table}}" \
+        >/dev/null
+done
+echo "pgo-workload: created tables in dfe: ${SOURCE_TABLES[*]} main"
 
 # ----------------------------------------------------------------------------
 # Start the broker (Redpanda, single node, dev-container mode)
@@ -260,7 +307,7 @@ routing:
   table_fields:
     - "_source"
   default_db: "dfe"
-  default_table: "default"
+  default_table: "main"
   org_routes: []
   source_to_table:
     auth: "auth_events"
@@ -275,9 +322,9 @@ buffer:
 
 metrics:
   enabled: true
-  bind_address: "127.0.0.1:9090"
+  address: "127.0.0.1:9090"
 
-log:
+logger:
   format: "json"
   level: "warn"
 
@@ -339,5 +386,20 @@ echo "pgo-workload: driver complete"
 
 # Give the loader a moment to drain buffers + flush profile data
 sleep 5
+
+# A source table with no rows means the profile missed the insert path.
+empty=0
+for table in "${SOURCE_TABLES[@]}" main; do
+    rows=$(curl -sf "http://127.0.0.1:18123/" --data-binary "SELECT count() FROM dfe.${table}")
+    echo "pgo-workload: dfe.${table} rows=${rows}"
+    if [[ "$table" != "main" && "$rows" -eq 0 ]]; then
+        empty=1
+    fi
+done
+if [[ "$empty" -ne 0 ]]; then
+    echo "error: a source table received no rows" >&2
+    tail -100 "$CONFIG_DIR/loader.log" >&2
+    exit 1
+fi
 
 echo "pgo-workload: done (loader logs: $CONFIG_DIR/loader.log)"

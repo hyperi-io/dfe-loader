@@ -483,6 +483,51 @@ impl DlqConfig {
 }
 
 // ============================================================================
+// Batch Processing Configuration
+// ============================================================================
+
+/// The `batch_processing` keys the loader offers.
+///
+/// scalo's runtime reads the same key to build the batch engine. JSON is the
+/// only payload format, so there is no `format` key. One left in a config is
+/// ignored.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct BatchProcessingConfig {
+    /// Maximum number of messages per rayon chunk.
+    pub max_chunk_size: usize,
+    /// JSON field the pre-route reads before the full parse. Unset skips the pre-route.
+    pub routing_field: Option<String>,
+    /// Pre-route filters, evaluated in order. The first match wins.
+    pub pre_route_filters: Vec<scalo::worker::PreRouteFilterConfig>,
+    /// Action to take when a message fails JSON parsing.
+    pub parse_error_action: scalo::worker::engine::ParseErrorAction,
+    /// Fields to pre-extract at parse time for routing lookups.
+    pub known_fields: Vec<String>,
+}
+
+impl Default for BatchProcessingConfig {
+    fn default() -> Self {
+        // scalo owns these defaults, and `..` drops its payload format.
+        let scalo::worker::BatchProcessingConfig {
+            max_chunk_size,
+            routing_field,
+            pre_route_filters,
+            parse_error_action,
+            known_fields,
+            ..
+        } = scalo::worker::BatchProcessingConfig::default();
+        Self {
+            max_chunk_size,
+            routing_field,
+            pre_route_filters,
+            parse_error_action,
+            known_fields,
+        }
+    }
+}
+
+// ============================================================================
 // Buffer Configuration
 // ============================================================================
 
@@ -1083,7 +1128,7 @@ impl Default for SchemaConfig {
 /// sanitisation, timestamp DQ, coercion settings.
 ///
 /// **Requires restart:** Kafka brokers/topics/auth, `ClickHouse` hosts/auth,
-/// payload format, transport type.
+/// payload pipeline mode, transport type.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct HotReloadConfig {

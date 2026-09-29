@@ -1,7 +1,16 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "description": "Extends the org preset (github>hyperi-io/renovate-config) like every other DFE consumer. Local-only: ignoreDeps (clickhouse pinned to the fork via [patch.crates-io]; reqwest pinned <0.13 to match scalo, cel pinned <0.14 to match scalo because cel::Program crosses that boundary - both come off the list once scalo upgrades) and commitMessageAction lowercase (hyperi-ci commit-lint requires the description to start lowercase; renovate's default 'Update' fails it).",
+  "description": "Extends the org preset (github>hyperi-io/renovate-config) like every other DFE consumer. Local-only: ignoreDeps (clickhouse pinned to the fork via [patch.crates-io]; reqwest pinned <0.13 to match scalo, cel pinned <0.14 to match scalo because cel::Program crosses that boundary - both come off the list once scalo upgrades), commitMessageAction lowercase (hyperi-ci commit-lint requires the description to start lowercase; renovate's default 'Update' fails it), and a ClickHouse server ceiling at the deployed version.",
   "extends": ["github>hyperi-io/renovate-config"],
   "commitMessageAction": "update",
-  "ignoreDeps": ["clickhouse", "reqwest", "cel"]
+  "ignoreDeps": ["clickhouse", "reqwest", "cel"],
+  "packageRules": [
+    {
+      "description": "ClickHouse server never runs ahead of the one dfe-infra deploys (versions.yaml services.clickhouse-version, 26.3.32.14). The test container, the dev compose and the PGO workload all pin it, so a newer tag would test and profile a server production does not run. The org preset only holds the 26.3 LTS line, so without this Renovate proposes 26.3.35.x. Raise the ceiling in step with dfe-infra. allowedVersions falls back to semver for a four-part tag, so the fourth part is ignored.",
+      "matchDatasources": ["docker"],
+      "matchPackageNames": ["clickhouse/clickhouse-server"],
+      "allowedVersions": "<=26.3.32",
+      "minimumReleaseAge": "7 days"
+    }
+  ]
 }
