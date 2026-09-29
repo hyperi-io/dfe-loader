@@ -53,7 +53,7 @@ flowchart LR
     DR["DynamicRow"]
     M --> DR
     CD --> DR
-    DR -->|encode() bytes| IFW["insert_formatted_with<br/>FORMAT RowBinaryWithNamesAndTypes (HTTP)"]
+    DR -->|"encode() bytes"| IFW["insert_formatted_with<br/>FORMAT RowBinaryWithNamesAndTypes (HTTP)"]
     DR -.->|per-column Serialize, not wired| INC["insert_native_with_columns<br/>with_columns_tcp (waits on #15)"]
 ```
 

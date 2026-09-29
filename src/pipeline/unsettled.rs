@@ -87,7 +87,7 @@ pub(crate) fn purge_dead_letters(
                 if source.partition == Some(partition)
                     && source.topic.as_deref() == Some(topic) =>
             {
-                purged.record(offset, entry.payload.len());
+                purged.record(offset, entry.payload.len() as u64);
                 false
             }
             _ => true,
@@ -241,6 +241,7 @@ mod tests {
             rows: vec![serde_json::Map::new(); rows],
             offsets: Vec::new(),
             raw_payloads: vec![Arc::from(&b"{}"[..]); rows],
+            reserved: vec![4; rows],
         }
     }
 
@@ -422,8 +423,8 @@ mod tests {
         assert_eq!(purged.records(), 4, "three batch rows and one dead letter");
         assert_eq!(
             purged.bytes,
-            3 * 2 + 5,
-            "each batch row holds `{{}}`, and the dead letter five bytes"
+            3 * 4 + 5,
+            "each batch row reserved four bytes, and the dead letter five"
         );
         assert_eq!(
             held.rows(),

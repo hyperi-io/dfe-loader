@@ -10,13 +10,15 @@
 //! loaders in one consumer group, against Kafka and `ClickHouse` containers,
 //! run that sequence: the first buffers every record, the second joins and
 //! writes what it takes over, and the first then flushes. Every record must be
-//! in `ClickHouse` exactly once, and `transport_revoke_discarded_total` must
-//! count what the first loader dropped.
+//! in `ClickHouse` exactly once, `transport_revoke_discarded_total` must
+//! count what the first loader dropped, and neither loader may end with bytes
+//! still reserved against its memory guard.
 //!
 //! Gated behind `#[cfg(feature = "testcontainers")]`.
 
 #![cfg(feature = "testcontainers")]
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use dfe_loader::metrics::Metrics;
@@ -152,6 +154,7 @@ async fn a_partition_moved_mid_buffer_lands_each_row_once() {
     first.buffer.flush_rows = 100_000;
     first.buffer.flush_age_secs = 3_600;
     let mut first = Orchestrator::with_metrics(first, Metrics::new(&manager));
+    let first_guard = Arc::clone(first.memory_guard());
     let stop_first = first.shutdown_token();
     let first = tokio::spawn(async move {
         let _ = first.run().await;
@@ -177,6 +180,7 @@ async fn a_partition_moved_mid_buffer_lands_each_row_once() {
         clickhouse.clone(),
         &table,
     ));
+    let second_guard = Arc::clone(second.memory_guard());
     let stop_second = second.shutdown_token();
     let second = tokio::spawn(async move {
         let _ = second.run().await;
@@ -237,5 +241,15 @@ async fn a_partition_moved_mid_buffer_lands_each_row_once() {
         discarded, taken_over,
         "transport_revoke_discarded_total{{stage=\"buffer\"}} must count every record the \
          first loader dropped for the second to write"
+    );
+    assert_eq!(
+        first_guard.reserved_bytes(),
+        0,
+        "the first loader's discarded and flushed rows left bytes reserved"
+    );
+    assert_eq!(
+        second_guard.reserved_bytes(),
+        0,
+        "the second loader's written rows left bytes reserved"
     );
 }

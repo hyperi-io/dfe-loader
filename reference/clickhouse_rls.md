@@ -18,7 +18,7 @@ The DFE loader uses a shared-schema multi-tenancy model by default, where all or
 
 ### Default Routing Behaviour
 
-```
+```text
 Event → Extract event_category → Route to common.{event_category}
       → Extract org_id → Store in _org_id field
       → No per-org database routing by default

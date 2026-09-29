@@ -316,6 +316,7 @@ async fn test_inserter_batch_salvage() {
         rows,
         offsets: Vec::new(),
         raw_payloads: Vec::new(),
+        reserved: Vec::new(),
     };
 
     // Insert with salvage

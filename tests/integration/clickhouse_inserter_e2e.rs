@@ -664,6 +664,7 @@ async fn test_inserter_batch_salvage() {
         rows,
         offsets: Vec::new(),
         raw_payloads: Vec::new(),
+        reserved: Vec::new(),
     };
 
     let result = inserter.insert_with_salvage(batch).await;
@@ -992,6 +993,7 @@ async fn a_row_the_server_refuses_against_a_current_schema_is_salvaged_not_retri
             rows,
             offsets: Vec::new(),
             raw_payloads,
+            reserved: Vec::new(),
         })
         .await;
 
@@ -1048,6 +1050,7 @@ async fn a_row_refused_with_an_unlisted_code_is_salvaged_not_retried() {
             rows,
             offsets: Vec::new(),
             raw_payloads: Vec::new(),
+            reserved: Vec::new(),
         })
         .await;
 
@@ -1118,6 +1121,7 @@ async fn an_enum_value_no_member_declares_is_dead_lettered_not_stored() {
             rows,
             offsets: Vec::new(),
             raw_payloads: Vec::new(),
+            reserved: Vec::new(),
         })
         .await;
     let stored: Vec<EnumValue> = reader
@@ -1175,6 +1179,7 @@ async fn a_batch_over_the_partition_limit_is_split_not_held() {
                 .collect(),
             offsets: Vec::new(),
             raw_payloads: Vec::new(),
+            reserved: Vec::new(),
         })
         .await;
 
@@ -1218,6 +1223,7 @@ async fn a_row_refused_with_a_retry_code_is_held_not_dead_lettered() {
             .collect(),
         offsets: Vec::new(),
         raw_payloads: Vec::new(),
+        reserved: Vec::new(),
     };
     let first = inserter.insert_with_salvage(batch(0..1)).await;
     assert_eq!(first.inserted, 1, "the first part did not land");
@@ -1399,6 +1405,7 @@ async fn test_inserter_with_offset_commit() {
         rows,
         offsets: offsets.clone(),
         raw_payloads: Vec::new(),
+        reserved: Vec::new(),
     };
 
     let result = inserter.insert_with_salvage(batch).await;

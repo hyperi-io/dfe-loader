@@ -202,6 +202,7 @@ Current implementation is **slower** than sonic-rs for these reasons:
 ### When Mison Would Win
 
 Mison approach is designed for:
+
 - **Many field extractions** (10+ fields per message)
 - **Same schema for many messages** (index can be partially reused)
 - **Avoiding DOM allocation** (current impl still has overhead)
