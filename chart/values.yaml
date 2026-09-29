@@ -175,7 +175,6 @@ config:
     saturation_errors: 100.0
   batch_processing:
     max_chunk_size: 10000
-    format: auto
     routing_field: null
     pre_route_filters: []
     parse_error_action: dlq

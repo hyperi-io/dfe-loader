@@ -282,17 +282,26 @@ impl MessageProcessor<'_> {
                     "header pass promoted no columns for {table}"
                 )));
             }
-            let promoted = promoted.fields;
+            let mut promoted = promoted.fields;
+            let raw_output = self.config.metadata.raw_output.as_str();
 
             // raw_payload carries Kafka bytes for the zero-copy _json splice, so
             // every mode that populates _json passes it.
             // raw_only: _raw set below from payload bytes, no _json splice needed.
             // extracted_only: neither -- no raw payload passed to inserter.
+            // json_only and extracted_only keep _raw NULL, so a raw field the
+            // header pass promoted is dropped, as on the legacy path.
             let raw: Option<Arc<[u8]>> = match capture_mode {
-                CaptureMode::Full | CaptureMode::JsonOnly => {
+                CaptureMode::Full => Some(Arc::from(msg.payload.as_slice())),
+                CaptureMode::JsonOnly => {
+                    promoted.remove(raw_output);
                     Some(Arc::from(msg.payload.as_slice()))
                 }
-                CaptureMode::RawOnly | CaptureMode::ExtractedOnly => None,
+                CaptureMode::RawOnly => None,
+                CaptureMode::ExtractedOnly => {
+                    promoted.remove(raw_output);
+                    None
+                }
             };
             (promoted, raw)
         } else {
@@ -2094,6 +2103,43 @@ mod tests {
             Some(line),
             "the source's own raw line is what _raw holds"
         );
+    }
+
+    /// #180: a raw field the header pass promoted must not survive a mode whose
+    /// contract is `_raw` = NULL.
+    #[test]
+    fn json_primary_json_only_and_extracted_only_leave_raw_empty_180() {
+        let line = "<134>Sep 29 10:00:00 edge-01 sshd[42]: Accepted publickey";
+        let payload = serde_json::to_vec(&json!({
+            "event_category": "security",
+            "action": "login",
+            "_raw": line
+        }))
+        .expect("serialize");
+
+        for (mode, splices_json) in [
+            (CaptureMode::JsonOnly, true),
+            (CaptureMode::ExtractedOnly, false),
+        ] {
+            let harness = TestHarness::with_config(config_with_capture_mode(mode));
+            let processed = process_json_primary_with_raw_column(&harness, &payload);
+
+            assert!(
+                !processed.data.contains_key("_raw"),
+                "{mode:?} must leave _raw empty, got {:?}",
+                processed.data.get("_raw")
+            );
+            assert_eq!(
+                processed.data.get("action").and_then(|v| v.as_str()),
+                Some("login"),
+                "{mode:?} still promotes the schema columns"
+            );
+            assert_eq!(
+                processed.raw_payload.is_some(),
+                splices_json,
+                "{mode:?} splices _json from the payload bytes only when it writes _json"
+            );
+        }
     }
 
     #[test]

@@ -338,7 +338,7 @@ schema:
 
 # Hot-reload: watch config file for changes at runtime
 # Safe to reload: buffer, routing, metadata, field_sanitization, timestamp_dq, coercion
-# Requires restart: kafka, clickhouse, payload format
+# Requires restart: kafka, clickhouse, payload.pipeline_mode
 hot_reload:
   enabled: false          # Enable config file watching
   poll_interval_secs: 5   # How often to check for file changes

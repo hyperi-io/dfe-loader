@@ -271,8 +271,8 @@ fn rejected_row_bytes(
 pub struct Inserter {
     /// HTTP client for DDL and schema queries only (no inserts)
     http_client: Arc<ClickHouseQueryClient>,
-    /// The fork client -- HTTP or native TCP per config. RowBinary inserts
-    /// dispatch by transport; `JSONEachRow` is HTTP-only.
+    /// The fork client. Every insert, `RowBinary` and `JSONEachRow`, goes over
+    /// HTTP: `clickhouse.protocol: native` is refused at startup.
     ch_client: clickhouse::Client,
     /// Schema cache for the dynamic RowBinary path, shared across
     /// `DynamicInsert` instances and invalidated on schema-mismatch recovery.

@@ -87,7 +87,7 @@ pub struct Config {
     pub scaling: ScalingConfig,
     /// Batch processing engine config (SIMD parse, pre-route, parallelism). **Restart required.**
     #[serde(default)]
-    pub batch_processing: scalo::worker::BatchProcessingConfig,
+    pub batch_processing: BatchProcessingConfig,
 
     // --- Hot-reloaded (takes effect on next batch) ---
     /// Routing rules and table mapping. **Hot-reloaded.**
@@ -2006,6 +2006,45 @@ logging:
         let contract = Config::deployment_contract();
         assert!(contract.config_schema.is_some());
         assert!(contract.capabilities.iter().any(|c| c.name == "clickhouse"));
+    }
+
+    /// #219: the chart defaults and the config schema are generated from these
+    /// two contract fields, and neither may offer a payload format the parse
+    /// path never reads.
+    #[test]
+    fn batch_processing_offers_no_payload_format_219() {
+        let contract = Config::deployment_contract();
+
+        let defaults = contract
+            .default_config
+            .expect("contract carries the defaults");
+        assert!(
+            defaults["batch_processing"].get("format").is_none(),
+            "the chart defaults still offer a payload format: {}",
+            defaults["batch_processing"]
+        );
+
+        let schema = contract.config_schema.expect("contract carries the schema");
+        let properties = &schema["$defs"]["BatchProcessingConfig"]["properties"];
+        assert!(
+            properties.is_object(),
+            "the schema lost batch_processing: {schema}"
+        );
+        assert!(
+            properties.get("format").is_none(),
+            "the schema still offers a payload format: {properties}"
+        );
+    }
+
+    /// A config written before #219 still carries the key: it loads, and the key is ignored.
+    #[test]
+    fn batch_processing_format_from_an_older_config_still_loads_219() {
+        let yaml = "batch_processing:\n  format: msgpack\n  routing_field: _table\n";
+        let config: Config = serde_yaml_ng::from_str(yaml).expect("the removed key is ignored");
+        assert_eq!(
+            config.batch_processing.routing_field.as_deref(),
+            Some("_table")
+        );
     }
 
     /// Committed reflectable artefacts under docs/ must not drift. Regenerate
