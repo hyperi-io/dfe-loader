@@ -286,10 +286,12 @@ TO analytics_users;
 | Nullable | Yes |
 | Default | None |
 | Codec | `ZSTD(3)` |
-| Source | `@captured: raw_payload` |
+| Source | the record's own raw field: a receiver's raw capture, or an `@renamed` source |
 
 **Purpose:** Original raw data as received -- the data as it would appear in a
 tailed log file or a database row, BEFORE any RFC/format parsing.
+
+Under `full` it is filled only when the source provides raw data, such as a syslog line the receiver captured. A JSON record is kept once, in `_json`, and `_raw` stays NULL.
 
 **NOT the same as `_json`:** `_raw` is the original wire format (e.g., raw syslog
 RFC 3164/5424 line), while `_json` is the parsed/structured result.
@@ -318,7 +320,7 @@ with no false positives. Supported query functions: `hasToken()`,
 
 | `capture_mode` | `_json` | `_raw` | Use case |
 |---|---|---|---|
-| `full` (default) | Full payload (JSON type) | Extracted from `raw_source_fields` | Full observability |
+| `full` (default) | Full payload (JSON type) | The record's own raw field, else NULL | Full observability |
 | `raw_only` | NULL | Full Kafka payload (String) | CH CPU saving -- no JSON type overhead |
 | `extracted_only` | NULL | NULL | Minimal -- only promoted schema fields |
 
@@ -745,7 +747,7 @@ Using the DDL Expression Language (see [../clickhouse/DDL-DIRECTIVES.md](../clic
 | `_timestamp_received` | `@source: timestamp_received` | Optional, from source |
 | `_uuid` | `@generated: generateUUIDv7()` | DB generates on insert |
 | `_org_id` | `@source: org_id` | Required from source |
-| `_raw` | `@captured: raw_payload` | Pre-transform capture |
+| `_raw` | `@source: first(raw/_raw)` | The source's own raw data, never a JSON payload `_json` holds |
 | `_json` | `@captured: raw_payload as JSON` | Pre-transform as JSON |
 | `_tags` | `@source: first(tags/_tags/meta/metadata.tags)` | First match wins |
 

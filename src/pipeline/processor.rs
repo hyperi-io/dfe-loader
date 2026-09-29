@@ -108,6 +108,26 @@ fn log_routing_field_absent(topic: &str, table: &str) {
     }
 }
 
+/// Whether the payload itself is written to `_raw` as UTF-8 text.
+///
+/// `RawOnly` always writes it. `Full` writes it only for a payload that is not
+/// a JSON document, and only when the record carried no raw field of its own
+/// (a receiver capture or an `@renamed` source): `_json` already holds a JSON
+/// payload, so a second copy in `_raw` stores it twice. `JsonOnly` and
+/// `ExtractedOnly` never write it.
+fn captures_payload_as_raw(
+    mode: CaptureMode,
+    capture_raw: bool,
+    has_raw_field: bool,
+    payload: &[u8],
+) -> bool {
+    match mode {
+        CaptureMode::RawOnly => true,
+        CaptureMode::Full => capture_raw && !has_raw_field && !opens_json_document(payload),
+        CaptureMode::JsonOnly | CaptureMode::ExtractedOnly => false,
+    }
+}
+
 /// Refuse `payload` as not JSON, naming its leading bytes.
 #[cold]
 #[inline(never)]
@@ -338,22 +358,12 @@ impl MessageProcessor<'_> {
             (d, None)
         };
 
-        // Capture the original event payload into _raw as UTF-8 text.
-        // - RawOnly: _raw is the sole capture; the full payload always wins.
-        // - Full: _raw mirrors _json via @captured: raw_payload (dfe-engine#182).
-        //   The json_primary extractor wires _json only, so without this the API
-        //   /ingest path leaves _raw NULL. Never clobber a _raw already set by
-        //   @renamed (logoriginal) or upstream.
-        // - ExtractedOnly: captures neither _json nor _raw.
-        // - JsonOnly: _json is the sole capture, so _raw stays NULL.
-        let capture_full_raw = match capture_mode {
-            CaptureMode::RawOnly => true,
-            CaptureMode::Full => {
-                self.config.metadata.capture_raw
-                    && !data.contains_key(self.config.metadata.raw_output.as_str())
-            }
-            CaptureMode::JsonOnly | CaptureMode::ExtractedOnly => false,
-        };
+        let capture_full_raw = captures_payload_as_raw(
+            capture_mode,
+            self.config.metadata.capture_raw,
+            data.contains_key(self.config.metadata.raw_output.as_str()),
+            &msg.payload,
+        );
         if capture_full_raw && let Ok(raw_str) = std::str::from_utf8(&msg.payload) {
             data.insert(
                 self.config.metadata.raw_output.clone(),
@@ -1897,13 +1907,12 @@ mod tests {
     }
 
     // ========================================================================
-    // capture_mode=Full: _raw is captured from the raw payload (@captured:
-    // raw_payload). Regression for dfe-engine#182 — the API /ingest path left
-    // _raw NULL because Full mode only wired _json.
+    // capture_mode=Full: `_json` holds a JSON payload, and `_raw` only a raw
+    // field the record carried itself, so the payload is never stored twice.
     // ========================================================================
 
     #[test]
-    fn capture_mode_full_populates_raw_from_payload_182() {
+    fn capture_mode_full_stores_a_json_payload_in_json_alone() {
         let harness = TestHarness::with_config(config_with_capture_mode(CaptureMode::Full));
         let proc = harness.processor();
         let payload = capture_sample_payload();
@@ -1911,22 +1920,58 @@ mod tests {
             .process(&harness.make_msg(&payload))
             .expect("processed");
 
-        // _json still spliced (legacy path inserts it into the map)
-        assert!(
-            processed.data.contains_key("_json"),
-            "Full mode must still populate _json"
-        );
-        // _raw is now the full original payload as text (the #182 fix)
-        let raw = processed
+        let json = processed
             .data
-            .get("_raw")
+            .get("_json")
             .and_then(|v| v.as_str())
-            .expect("Full mode must populate _raw from the raw payload");
-        assert_eq!(
-            raw.as_bytes(),
-            payload.as_slice(),
-            "_raw must be the full original payload as UTF-8 text"
+            .expect("Full mode must populate _json");
+        assert_eq!(json.as_bytes(), payload.as_slice());
+        assert!(
+            !processed.data.contains_key("_raw"),
+            "a JSON payload landed in _raw as well as _json: {:?}",
+            processed.data.get("_raw")
         );
+    }
+
+    #[test]
+    fn full_writes_the_payload_to_raw_only_when_it_is_not_json() {
+        let syslog = b"<134>Sep 29 10:00:00 edge-01 sshd[42]: Accepted publickey";
+        let json = br#"{"event_category":"security"}"#;
+        let full = |has_raw_field, payload: &[u8]| {
+            super::captures_payload_as_raw(CaptureMode::Full, true, has_raw_field, payload)
+        };
+
+        assert!(full(false, syslog), "a text payload has nowhere else to go");
+        assert!(!full(false, json), "_json already holds a JSON payload");
+        assert!(
+            !full(false, b"  \n[1, 2]"),
+            "a JSON array behind whitespace is still JSON"
+        );
+        assert!(
+            !full(true, syslog),
+            "a raw field the record carried is never clobbered"
+        );
+        assert!(
+            !super::captures_payload_as_raw(CaptureMode::Full, false, false, syslog),
+            "capture_raw=false turns the capture off"
+        );
+    }
+
+    #[test]
+    fn only_raw_only_writes_a_json_payload_to_raw() {
+        let json = br#"{"event_category":"security"}"#;
+        for (mode, writes) in [
+            (CaptureMode::RawOnly, true),
+            (CaptureMode::Full, false),
+            (CaptureMode::JsonOnly, false),
+            (CaptureMode::ExtractedOnly, false),
+        ] {
+            assert_eq!(
+                super::captures_payload_as_raw(mode, true, false, json),
+                writes,
+                "{mode:?}"
+            );
+        }
     }
 
     #[test]
@@ -1967,16 +2012,14 @@ mod tests {
         );
     }
 
-    /// Regression for dfe-engine#182 on the ACTUAL failing path: json_primary
-    /// (API /ingest) in Full capture mode. The extractor wires _json only, so
-    /// before the fix _raw landed NULL. Once a schema is cached the processor
-    /// must populate _raw with the full original payload as text.
-    #[test]
-    fn json_primary_full_populates_raw_from_payload_182() {
+    /// Process `payload` on the json_primary path, the default, against a
+    /// cached schema of `action` and `_raw` columns.
+    fn process_json_primary_with_raw_column(
+        harness: &TestHarness,
+        payload: &[u8],
+    ) -> super::ProcessedMessage {
         use crate::clickhouse::{ColumnInfo, ParsedType, TableSchema};
 
-        let harness = TestHarness::with_config(config_with_capture_mode(CaptureMode::Full));
-        let payload = br#"{"event_category":"security","action":"login"}"#;
         let msg = harness.make_msg(payload);
 
         // Schema miss buffers first — discover the routed table.
@@ -1986,54 +2029,85 @@ mod tests {
             Err(e) => panic!("expected SchemaPending, got Err({e:?})"),
         };
 
-        // Cache a schema carrying the _raw String column.
-        let (db, tbl) = table.split_once('.').expect("db.table");
-        let schema = TableSchema {
-            database: db.to_string(),
-            table: tbl.to_string(),
-            columns: vec![
-                ColumnInfo {
-                    name: "action".to_string(),
-                    type_name: "String".to_string(),
-                    parsed_type: ParsedType::parse("String"),
-                    position: 0,
-                    default_kind: String::new(),
-                    default_expression: String::new(),
-                    comment: String::new(),
-                    is_in_primary_key: false,
-                    is_in_sorting_key: false,
-                },
-                ColumnInfo {
-                    name: "_raw".to_string(),
-                    type_name: "String".to_string(),
-                    parsed_type: ParsedType::parse("String"),
-                    position: 1,
-                    default_kind: String::new(),
-                    default_expression: String::new(),
-                    comment: String::new(),
-                    is_in_primary_key: false,
-                    is_in_sorting_key: false,
-                },
-            ],
+        let column = |name: &str, position| ColumnInfo {
+            name: name.to_string(),
+            type_name: "String".to_string(),
+            parsed_type: ParsedType::parse("String"),
+            position,
+            default_kind: String::new(),
+            default_expression: String::new(),
             comment: String::new(),
+            is_in_primary_key: false,
+            is_in_sorting_key: false,
         };
-        harness.schema_cache.insert(table.clone(), schema);
+        let (db, tbl) = table.split_once('.').expect("db.table");
+        harness.schema_cache.insert(
+            table.clone(),
+            TableSchema {
+                database: db.to_string(),
+                table: tbl.to_string(),
+                columns: vec![column("action", 0), column("_raw", 1)],
+                comment: String::new(),
+            },
+        );
 
-        // Reprocess through the extractor path: _raw must be the full payload.
-        let processed = harness
+        harness
             .processor_json_primary()
             .process(&msg)
-            .expect("extractor path should succeed once schema is cached");
-        let raw = processed
-            .data
-            .get("_raw")
-            .and_then(|v| v.as_str())
-            .expect("json_primary Full mode must populate _raw (dfe-engine#182)");
+            .expect("extractor path should succeed once schema is cached")
+    }
+
+    #[test]
+    fn json_primary_full_stores_a_json_payload_in_json_alone() {
+        let harness = TestHarness::with_config(config_with_capture_mode(CaptureMode::Full));
+        let payload = br#"{"event_category":"security","action":"login"}"#;
+
+        let processed = process_json_primary_with_raw_column(&harness, payload);
+
         assert_eq!(
-            raw.as_bytes(),
-            payload.as_slice(),
-            "_raw must be the full original ingest payload as UTF-8 text"
+            processed.raw_payload.as_deref(),
+            Some(payload.as_slice()),
+            "_json is spliced from the payload bytes"
         );
+        assert!(
+            !processed.data.contains_key("_raw"),
+            "a JSON payload landed in _raw as well as _json: {:?}",
+            processed.data.get("_raw")
+        );
+    }
+
+    #[test]
+    fn json_primary_full_keeps_the_raw_line_a_receiver_captured() {
+        let harness = TestHarness::with_config(config_with_capture_mode(CaptureMode::Full));
+        let line = "<134>Sep 29 10:00:00 edge-01 sshd[42]: Accepted publickey";
+        let payload = serde_json::to_vec(&json!({
+            "event_category": "security",
+            "action": "login",
+            "_raw": line
+        }))
+        .expect("serialize");
+
+        let processed = process_json_primary_with_raw_column(&harness, &payload);
+
+        assert_eq!(
+            processed.data.get("_raw").and_then(|v| v.as_str()),
+            Some(line),
+            "the source's own raw line is what _raw holds"
+        );
+    }
+
+    #[test]
+    fn json_primary_raw_only_still_writes_the_whole_payload_to_raw() {
+        let harness = TestHarness::with_config(config_with_capture_mode(CaptureMode::RawOnly));
+        let payload = br#"{"event_category":"security","action":"login"}"#;
+
+        let processed = process_json_primary_with_raw_column(&harness, payload);
+
+        assert_eq!(
+            processed.data.get("_raw").and_then(|v| v.as_str()),
+            std::str::from_utf8(payload).ok()
+        );
+        assert!(processed.raw_payload.is_none(), "raw_only splices no _json");
     }
 
     /// Regression for #144: a header pass that promotes nothing must reject the

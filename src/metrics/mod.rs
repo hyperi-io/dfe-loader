@@ -121,12 +121,14 @@ pub struct Metrics {
     /// Records those messages were split into.
     pub batched_ndjson_records: Counter,
 
+    /// Rows `ClickHouse` took: the landed-rows counter dashboards read.
+    pub rows_inserted: Counter,
+
     // Legacy loader_* metrics (dual-emit — remove after dashboard migration)
     pub messages_received: Counter,
     pub messages_processed: Counter,
     pub messages_dlq: Counter,
     pub batches_flushed: Counter,
-    pub rows_inserted: Counter,
     pub insert_errors: Counter,
     pub offsets_committed: Counter,
     pub buffer_rows: Gauge,
@@ -167,6 +169,9 @@ impl Metrics {
             enrichment: EnrichmentMetrics::new(manager),
             schema_cache: SchemaCacheMetrics::new(manager),
 
+            rows_inserted: manager
+                .counter("rows_inserted_total", "Total rows inserted to ClickHouse"),
+
             // Legacy metrics (dual-emit)
             messages_received: manager.counter(
                 "messages_received_total",
@@ -181,8 +186,6 @@ impl Metrics {
                 "batches_flushed_total",
                 "Total batches flushed to ClickHouse",
             ),
-            rows_inserted: manager
-                .counter("rows_inserted_total", "Total rows inserted to ClickHouse"),
             insert_errors: manager.counter("insert_errors_total", "Total insert errors"),
             offsets_committed: manager.counter(
                 "kafka_offsets_committed_total",

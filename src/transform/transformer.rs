@@ -284,7 +284,7 @@ impl Transformer {
             // Step 5: _json is injected by the buffer manager from raw Kafka bytes.
             // Not injected here — the orchestrator passes raw_payload to BufferManager.push().
 
-            // Step 5b: @renamed: first(logoriginal/_raw/raw/raw_log/message) → _raw
+            // Step 5b: @renamed: first(metadata.raw_source_fields, default logoriginal) -> _raw
             // Zero-copy rename via data.remove() — ownership transfer, no clone.
             // Silent no-op if destination already present (upstream may populate _raw directly).
             if self.capture_raw && !data.contains_key(&self.raw_output) {
