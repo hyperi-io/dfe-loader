@@ -18,6 +18,7 @@ governs the two payload-retention columns.
 | Mode | `_json` | `_raw` | Use |
 |------|---------|--------|-----|
 | `full` (default) | full payload (JSON) | the record's own raw field, else NULL | path queries plus text search |
+| `json_only` | full payload (JSON) | NULL | path queries, never a `_raw` copy |
 | `raw_only` | NULL | full source payload (String) | save ClickHouse CPU, no JSON-type overhead |
 | `extracted_only` | NULL | NULL | promoted columns only |
 
@@ -56,6 +57,7 @@ processor tests assert the observable action, not just that the config parsed
 (`src/pipeline/processor.rs`):
 
 - `full` -> the written row has `_json` populated, and `_raw` only when the record carried a raw field of its own.
+- `json_only` -> the written row has `_json` populated and `_raw` NULL, always.
 - `raw_only` -> the written row has `_raw` = the full payload and `_json` NULL.
 - `extracted_only` -> the written row has neither `_json` nor `_raw`; only the
   promoted columns.

@@ -50,12 +50,21 @@ wins over a COMMENT -- the exact resolution order is in
 |-----------|--------------|--------|
 | `@skip` | `skip: true` | Omit the column from the insert |
 | `@default:value` | `default:` | Substitute when the column is null or absent |
+| `@source:path` | `renamed:` | Source field path(s) for this column; a `\|` fallback also fills `default:` |
 | `@renamed:path` | `renamed:` | Source field path(s) for this column |
 | `@computed:expr` | `computed:` | CEL expression producing the value |
 | `@coerce:category` | `coerce:` | Override the type category for coercion |
 
-The authoring directives -- `@source`, `@generated` -- are consumed
-by the applier when it generates the DDL, not by the loader. See
+`@generated` and `@config` are descriptive only: the loader drops both as
+unknown directives (`DIRECTIVE_NAMES` in
+[`src/column_meta/mod.rs`](../../src/column_meta/mod.rs) lists only the six
+directives above). What makes the loader omit a value for a `@generated`
+column is ClickHouse's own DEFAULT/MATERIALIZED/ALIAS clause on it, reported
+as `default_kind` in `system.columns` -- the applier writes that clause from
+the schema's `default:` and `attribute:` fields, not by parsing the
+`@generated:` text. `@config: path` documents that a mapping is driven by
+loader config (for example `routing.org_id_field`) rather than hardcoded;
+nothing reads the comment text itself. See
 [DDL-DIRECTIVES.md](../clickhouse/DDL-DIRECTIVES.md) for the whole expression
 language.
 
