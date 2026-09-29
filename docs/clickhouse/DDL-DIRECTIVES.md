@@ -140,11 +140,15 @@ reading the `@generated:` text -- so keep the two in agreement by hand.
 `id` UUID DEFAULT generateUUIDv7(),
 ```
 
-### Capture is not a directive
+### Capture is not a column directive
 
-`_raw` and `_json` are populated by the loader's capture mode, not by an
-`@`-comment directive. See [COMMON-HEADER.md](../transport/COMMON-HEADER.md)
-for what each capture mode writes to those two columns.
+`_raw` and `_json` are populated by the loader's capture mode, not by a
+per-column `@`-comment directive. Capture mode has its own tag, but it is a
+**table**-level DDL comment -- `@capture_mode: <mode>` on the `CREATE TABLE`
+itself, resolved ahead of any per-table or global config (see
+[CAPTURE-MODES.md](../pipeline/CAPTURE-MODES.md)). See
+[COMMON-HEADER.md](../transport/COMMON-HEADER.md) for what each capture mode
+writes to `_raw` and `_json`.
 
 ### @config
 
