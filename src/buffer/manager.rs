@@ -958,7 +958,7 @@ mod tests {
         let _ = m.get_ready_for_flush();
         // Buffer exists but empty
         let pending_tables = m.tables_with_pending();
-        assert!(pending_tables.is_empty());
+        assert_eq!(pending_tables, [] as [&str; 0]);
     }
 
     // ========================================================================

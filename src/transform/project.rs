@@ -231,7 +231,7 @@ mod tests {
         assert!(result.data.contains_key("id"));
         assert!(result.data.contains_key("name"));
         assert!(result.data.contains_key("timestamp"));
-        assert!(result.dropped_fields.is_empty());
+        assert_eq!(result.dropped_fields, [] as [std::string::String; 0]);
     }
 
     #[test]
@@ -274,7 +274,7 @@ mod tests {
         let result = projector.project(data.as_object().unwrap().clone());
 
         assert_eq!(result.data.len(), 0);
-        assert!(result.dropped_fields.is_empty());
+        assert_eq!(result.dropped_fields, [] as [std::string::String; 0]);
         assert_eq!(result.missing_fields.len(), 2);
     }
 
@@ -342,14 +342,14 @@ mod tests {
     fn test_project_bytes_invalid_json() {
         let schema = make_schema(&["id"]);
         let result = project(b"not json", &schema);
-        assert!(result.is_empty());
+        assert_eq!(result, [] as [u8; 0]);
     }
 
     #[test]
     fn test_project_bytes_non_object() {
         let schema = make_schema(&["id"]);
         let result = project(b"[1, 2, 3]", &schema);
-        assert!(result.is_empty());
+        assert_eq!(result, [] as [u8; 0]);
     }
 
     #[test]

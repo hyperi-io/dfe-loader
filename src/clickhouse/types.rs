@@ -335,7 +335,7 @@ mod tests {
     fn table_schema_column_names_empty() {
         let schema = make_schema(vec![]);
         let names = schema.column_names();
-        assert!(names.is_empty());
+        assert_eq!(names, [] as [&str; 0]);
     }
 
     #[test]

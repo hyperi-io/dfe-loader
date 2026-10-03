@@ -423,7 +423,7 @@ mod tests {
 
         // Take again should be empty
         let pending2 = cache.take_pending();
-        assert!(pending2.is_empty());
+        assert_eq!(pending2, [] as [std::string::String; 0]);
     }
 
     #[test]
@@ -712,7 +712,7 @@ mod tests {
         assert!(pending.contains(&"t1".to_string()));
         assert!(pending.contains(&"t2".to_string()));
         // Now empty
-        assert!(cache.take_pending().is_empty());
+        assert_eq!(cache.take_pending(), [] as [std::string::String; 0]);
     }
 
     #[test]

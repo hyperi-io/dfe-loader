@@ -784,8 +784,8 @@ mod tests {
         assert!(config.capture_raw);
         assert_eq!(config.raw_output, "_raw");
         assert_eq!(config.raw_source_fields, vec!["logoriginal"]);
-        assert!(config.disable_json_tables.is_empty());
-        assert!(config.disable_raw_tables.is_empty());
+        assert_eq!(config.disable_json_tables, [] as [std::string::String; 0]);
+        assert_eq!(config.disable_raw_tables, [] as [std::string::String; 0]);
     }
 
     #[test]
@@ -1411,7 +1411,7 @@ kafka:
         assert_eq!(config.clickhouse.database, "dfe");
         assert_eq!(config.clickhouse.username, "default");
         assert_eq!(config.clickhouse.protocol, "http");
-        assert!(config.clickhouse.tables.is_empty());
+        assert_eq!(config.clickhouse.tables, [] as [std::string::String; 0]);
         assert!(config.clickhouse.tls.is_none());
     }
 
@@ -1425,8 +1425,11 @@ kafka:
             config.routing.topic_suffixes,
             vec!["_land".to_string(), "_load".to_string()]
         );
-        assert!(config.routing.rules.is_empty());
-        assert!(config.routing.db_fields.is_empty());
+        assert_eq!(
+            config.routing.rules,
+            [] as [crate::config::pipeline::RoutingRule; 0]
+        );
+        assert_eq!(config.routing.db_fields, [] as [std::string::String; 0]);
     }
 
     #[test]
@@ -2064,7 +2067,7 @@ logging:
         // base_image is cascade-resolved (deployment.base_image config/env wins,
         // else scalo's DEFAULT_BASE_IMAGE). Don't pin to a distro: just assert it
         // is non-empty and carries an explicit tag.
-        assert!(!contract.base_image.is_empty());
+        assert_ne!(contract.base_image, "");
         assert!(
             contract.base_image.contains(':'),
             "base_image must include an explicit tag: {}",
@@ -2163,7 +2166,7 @@ clickhouse:
         assert!(result.is_ok(), "load should succeed: {:?}", result.err());
         let config = result.unwrap();
         // At minimum, config should have non-empty brokers
-        assert!(!config.kafka.brokers.is_empty());
+        assert_ne!(config.kafka.brokers, [] as [std::string::String; 0]);
     }
 
     #[test]

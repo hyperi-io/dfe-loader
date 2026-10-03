@@ -150,7 +150,7 @@ mod tests {
     fn a_seq_never_admitted_or_already_released_is_ignored() {
         let mut ledger = AckLedger::default();
         ledger.settle(9, DeliveryStatus::Errored);
-        assert!(settled(&mut ledger).is_empty());
+        assert_eq!(settled(&mut ledger), [] as [(DeliveryStatus, Vec<u64>); 0]);
 
         ledger.admit(3);
         ledger.settle(3, DeliveryStatus::Delivered);

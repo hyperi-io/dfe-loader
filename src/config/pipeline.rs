@@ -1503,7 +1503,7 @@ mod tests {
         assert!(!cfg.enabled);
         assert_eq!(cfg.default_action, "rename");
         assert_eq!(cfg.builtin, "none");
-        assert!(cfg.files.is_empty());
+        assert_eq!(cfg.files, [] as [std::string::String; 0]);
         assert!(cfg.overrides.is_empty());
     }
 

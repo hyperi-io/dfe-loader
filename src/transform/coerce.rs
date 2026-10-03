@@ -2689,7 +2689,7 @@ mod tests {
         let v = serde_json::json!(1.0e20);
         let result = c.coerce_string(&v, &target).unwrap();
         // 1e20 is whole but exceeds i64::MAX so falls to f.to_string()
-        assert!(!result.as_str().unwrap().is_empty());
+        assert_ne!(result.as_str().unwrap(), "");
     }
 
     #[test]

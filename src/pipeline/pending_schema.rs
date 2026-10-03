@@ -808,7 +808,7 @@ mod tests {
             buf.deepest_tables(2),
             vec![("dfe.three", 3), ("dfe.two", 2)]
         );
-        assert!(buf.deepest_tables(0).is_empty());
+        assert_eq!(buf.deepest_tables(0), [] as [(&str, usize); 0]);
     }
 
     #[test]
@@ -816,18 +816,18 @@ mod tests {
         let mut buf = PendingSchemaBuffer::new(small_cfg());
         buf.enqueue("dfe.t1".into(), make_msg(b"a")).unwrap();
         // Just enqueued -> not yet due.
-        assert!(
-            buf.tables_needing_rerequest(Instant::now(), Duration::from_secs(2))
-                .is_empty()
+        assert_eq!(
+            buf.tables_needing_rerequest(Instant::now(), Duration::from_secs(2)),
+            [] as [std::string::String; 0]
         );
         // After the interval -> due, and re-stamped.
         let later = Instant::now() + Duration::from_secs(3);
         let due = buf.tables_needing_rerequest(later, Duration::from_secs(2));
         assert_eq!(due, vec!["dfe.t1".to_string()]);
         // Immediately asking again at the same instant -> nothing (re-stamped).
-        assert!(
-            buf.tables_needing_rerequest(later, Duration::from_secs(2))
-                .is_empty()
+        assert_eq!(
+            buf.tables_needing_rerequest(later, Duration::from_secs(2)),
+            [] as [std::string::String; 0]
         );
     }
 }

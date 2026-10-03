@@ -374,7 +374,7 @@ mod tests {
         assert_eq!(outcome.processed, 0);
         assert_eq!(outcome.errors, 0);
         assert_eq!(outcome.pending, 0);
-        assert!(outcome.needs_resolution.is_empty());
+        assert_eq!(outcome.needs_resolution, [] as [std::string::String; 0]);
         assert!(outcome.dead_letters.is_empty());
     }
 
