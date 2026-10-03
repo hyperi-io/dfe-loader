@@ -46,7 +46,7 @@ async fn test_clickhouse_connect() {
 
     assert!(result.is_ok(), "Health check failed: {:?}", result.err());
     eprintln!("✓ Connected to ClickHouse in {elapsed:?}");
-    assert!(!client.database().is_empty());
+    assert_ne!(client.database(), "");
 }
 
 #[tokio::test]

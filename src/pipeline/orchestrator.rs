@@ -4007,7 +4007,7 @@ mod tests {
                     "the sender was answered before the DLQ took the row, or not at all"
                 );
             } else {
-                assert!(released.is_empty());
+                assert_eq!(released, [] as [(DeliveryStatus, Vec<u64>); 0]);
             }
             let _ = std::fs::remove_dir_all(&dir);
         }
@@ -4645,7 +4645,7 @@ mod tests {
         )
         .await;
         assert_eq!(report.succeeded, vec!["dfe.late".to_string()]);
-        assert!(report.failed.is_empty());
+        assert_eq!(report.failed, [] as [std::string::String; 0]);
         assert!(report.rounds >= 3);
     }
 
@@ -4659,7 +4659,7 @@ mod tests {
             &shutdown,
         )
         .await;
-        assert!(report.succeeded.is_empty());
+        assert_eq!(report.succeeded, [] as [std::string::String; 0]);
         assert_eq!(report.failed, vec!["dfe.never".to_string()]);
     }
 
@@ -4683,7 +4683,7 @@ mod tests {
             t0.elapsed() < Duration::from_secs(3),
             "should cancel quickly"
         );
-        assert!(!report.failed.is_empty());
+        assert_ne!(report.failed, [] as [std::string::String; 0]);
     }
 
     // ---- a partition whose lease ended is discarded before any write ----

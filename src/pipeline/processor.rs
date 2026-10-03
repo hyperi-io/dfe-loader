@@ -1730,7 +1730,7 @@ mod tests {
         let msg = harness.make_msg(payload);
         let processed = proc.process(&msg).expect("should succeed");
         // Table should route to default
-        assert!(!processed.table.is_empty());
+        assert_ne!(processed.table, "");
     }
 
     #[test]

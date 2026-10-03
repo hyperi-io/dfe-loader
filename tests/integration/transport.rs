@@ -98,7 +98,7 @@ async fn inject_with_empty_key_preserves_it() {
     assert_eq!(messages.len(), 1);
     // Empty key is still Some("")
     let key = messages[0].key.as_ref().expect("key should be Some");
-    assert!(key.is_empty());
+    assert_eq!(key.as_slice(), [] as [u8; 0]);
 }
 
 // ============================================================================
@@ -300,7 +300,7 @@ async fn handles_empty_payload() {
 
     let messages = transport.recv(10).await.expect("recv");
     assert_eq!(messages.len(), 1);
-    assert!(messages[0].payload.is_empty());
+    assert_eq!(messages[0].payload, [] as [u8; 0]);
 }
 
 // ============================================================================

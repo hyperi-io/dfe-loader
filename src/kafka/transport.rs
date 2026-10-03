@@ -1480,7 +1480,7 @@ mod tests {
 
         let msgs = adapter.recv(1).await.expect("recv");
         assert_eq!(msgs.len(), 1);
-        assert!(msgs[0].payload.is_empty());
+        assert_eq!(msgs[0].payload, [] as [u8; 0]);
     }
 
     #[tokio::test]

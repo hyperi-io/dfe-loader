@@ -165,13 +165,13 @@ async fn test_kafka_config_validation() {
         ..Default::default()
     };
 
-    assert!(!config.brokers.is_empty());
-    assert!(!config.topics.is_empty());
-    assert!(!config.group.is_empty());
+    assert_ne!(config.brokers, [] as [std::string::String; 0]);
+    assert_ne!(config.topics, [] as [std::string::String; 0]);
+    assert_ne!(config.group, "");
 
     let mut invalid = config;
     invalid.brokers = vec![];
-    assert!(invalid.brokers.is_empty());
+    assert_eq!(invalid.brokers, [] as [std::string::String; 0]);
 }
 
 #[tokio::test]

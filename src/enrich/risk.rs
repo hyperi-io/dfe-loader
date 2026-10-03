@@ -835,7 +835,7 @@ mod tests {
         assert_eq!(output.threat_risk_score, 0);
         assert_eq!(output.risk_score, 0);
         assert_eq!(output.risk_level, RiskLevel::Minimal);
-        assert!(output.risk_factors.is_empty());
+        assert_eq!(output.risk_factors, [] as [&str; 0]);
     }
 
     #[test]

@@ -27,7 +27,7 @@ fn test_shared_config_read() {
 
     // Read should work
     let guard = shared.read();
-    assert!(!guard.kafka.brokers.is_empty());
+    assert_ne!(guard.kafka.brokers, [] as [std::string::String; 0]);
 }
 
 #[test]

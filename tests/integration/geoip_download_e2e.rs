@@ -539,7 +539,7 @@ async fn test_download_corrupted_tar() {
         "dest must not be written when tar is corrupt or missing entry",
     );
     // Message depends on failure mode — just assert it's non-empty.
-    assert!(!err.to_string().is_empty());
+    assert_ne!(err.to_string(), "");
 }
 
 #[tokio::test]
@@ -589,7 +589,7 @@ async fn test_atomic_write_no_partial() {
     let err = fetch_raw_to(&client, &server.url("truncated.mmdb"), &dest)
         .await
         .expect_err("truncated response must error");
-    assert!(!err.to_string().is_empty());
+    assert_ne!(err.to_string(), "");
     // Critical: no partial file left at final destination.
     assert!(
         !dest.exists(),

@@ -83,7 +83,7 @@ fn test_dlq_file_backend_write() {
     // Verify NDJSON file was created
     let content =
         std::fs::read_to_string(dir.path().join("loader/dlq.ndjson")).expect("read DLQ file");
-    assert!(!content.is_empty());
+    assert_ne!(content, "");
     let parsed: serde_json::Value = serde_json::from_str(content.trim()).expect("parse JSON");
     assert_eq!(parsed["service"], "loader");
     assert_eq!(parsed["reason"], "parse_error");

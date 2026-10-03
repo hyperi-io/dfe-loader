@@ -580,7 +580,7 @@ mod tests {
     fn test_parse_skip() {
         let d = parse_directives("@skip");
         assert!(d.skip);
-        assert!(d.renamed.is_empty());
+        assert_eq!(d.renamed, [] as [std::string::String; 0]);
         assert!(d.default.is_none());
     }
 
@@ -853,7 +853,7 @@ mod tests {
         let d = parse_directives("");
         assert!(!d.skip);
         assert!(d.default.is_none());
-        assert!(d.renamed.is_empty());
+        assert_eq!(d.renamed, [] as [std::string::String; 0]);
         assert!(d.computed.is_none());
     }
 
@@ -947,12 +947,15 @@ mod tests {
 
     #[test]
     fn test_parse_renamed_value_empty() {
-        assert!(parse_renamed_value("").is_empty());
+        assert_eq!(parse_renamed_value(""), [] as [std::string::String; 0]);
     }
 
     #[test]
     fn test_parse_renamed_value_first_empty_inner() {
-        assert!(parse_renamed_value("first()").is_empty());
+        assert_eq!(
+            parse_renamed_value("first()"),
+            [] as [std::string::String; 0]
+        );
     }
 
     #[test]

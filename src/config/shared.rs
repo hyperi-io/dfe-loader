@@ -48,7 +48,7 @@ mod tests {
         let shared = SharedConfig::new(config);
 
         let cfg = shared.read();
-        assert!(!cfg.kafka.brokers.is_empty());
+        assert_ne!(cfg.kafka.brokers, [] as [std::string::String; 0]);
     }
 
     #[test]
@@ -108,7 +108,7 @@ mod tests {
 
         // get() clones the config (available from scalo generic)
         let cfg = shared.get();
-        assert!(!cfg.kafka.brokers.is_empty());
+        assert_ne!(cfg.kafka.brokers, [] as [std::string::String; 0]);
     }
 
     #[test]

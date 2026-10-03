@@ -379,7 +379,7 @@ mod tests {
         assert!(pending.contains(&"common.auth".to_string()));
 
         // After take, pending should be empty
-        assert!(cache.take_pending().is_empty());
+        assert_eq!(cache.take_pending(), [] as [std::string::String; 0]);
     }
 
     #[test]
@@ -541,7 +541,7 @@ mod tests {
         // Already cached; mark_pending should not add to pending list
         cache.mark_pending("common.cached");
         let pending = cache.take_pending();
-        assert!(pending.is_empty());
+        assert_eq!(pending, [] as [std::string::String; 0]);
     }
 
     #[test]

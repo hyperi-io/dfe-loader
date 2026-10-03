@@ -379,7 +379,7 @@ mod tests {
 
         overrides.mark_pending("dfe.events");
         let pending = overrides.take_pending();
-        assert!(pending.is_empty());
+        assert_eq!(pending, [] as [std::string::String; 0]);
     }
 
     #[test]
@@ -535,7 +535,7 @@ mod tests {
     fn test_take_pending_empty_initially() {
         let metadata_config = MetadataConfig::default();
         let mut overrides = CaptureOverrides::new(&metadata_config);
-        assert!(overrides.take_pending().is_empty());
+        assert_eq!(overrides.take_pending(), [] as [std::string::String; 0]);
     }
 
     #[test]

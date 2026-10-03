@@ -375,7 +375,7 @@ mod tests {
         assert_eq!(config.transport, Transport::Native);
         assert_eq!(config.database, "dfe");
         assert_eq!(config.username, "default");
-        assert!(config.password.is_empty());
+        assert_eq!(config.password, "");
         assert!(!config.tls);
         assert_eq!(config.connect_timeout_ms, 5000);
         assert_eq!(config.request_timeout_ms, 30000);
@@ -476,7 +476,7 @@ mod tests {
         let json =
             r#"{"hosts":["localhost:8123"],"database":"db","username":"default","password":""}"#;
         let config: ClickHouseConfig = serde_json::from_str(json).unwrap();
-        assert!(config.password.is_empty());
+        assert_eq!(config.password, "");
     }
 
     #[test]
@@ -484,14 +484,14 @@ mod tests {
         let json =
             r#"{"hosts":["localhost:8123"],"database":"db","username":"default","password":null}"#;
         let config: ClickHouseConfig = serde_json::from_str(json).unwrap();
-        assert!(config.password.is_empty());
+        assert_eq!(config.password, "");
     }
 
     #[test]
     fn test_password_missing() {
         let json = r#"{"hosts":["localhost:8123"],"database":"db","username":"default"}"#;
         let config: ClickHouseConfig = serde_json::from_str(json).unwrap();
-        assert!(config.password.is_empty());
+        assert_eq!(config.password, "");
     }
 
     #[test]
@@ -503,7 +503,7 @@ mod tests {
         };
         let result = config.validate();
         assert!(result.is_ok());
-        assert!(result.unwrap().is_empty());
+        assert_eq!(result.unwrap(), [] as [std::string::String; 0]);
     }
 
     #[test]
@@ -527,7 +527,7 @@ mod tests {
         };
         let result = config.validate();
         assert!(result.is_ok());
-        assert!(result.unwrap().is_empty());
+        assert_eq!(result.unwrap(), [] as [std::string::String; 0]);
     }
 
     #[test]

@@ -1681,7 +1681,10 @@ mod tests {
                 ("x = y".to_string(), 3)
             ]
         );
-        assert!(enum_members("String").is_empty());
+        assert_eq!(
+            enum_members("String"),
+            [] as [(std::string::String, i64); 0]
+        );
     }
 
     // ---- Nullable ----
