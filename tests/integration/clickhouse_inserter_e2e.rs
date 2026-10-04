@@ -408,7 +408,7 @@ async fn test_rowbinary_ecs_tags_array_lands_in_the_json_tags_column() {
 /// `insert_format = "json"` is a live config value, and this path serialises
 /// the row map as it stands -- so a hoisted ECS `tags` array reaches the JSON
 /// `_tags` column unshaped unless the inserter shapes it against the schema.
-/// Backing `shape_json_row` out fails this test with `code 117: Cannot insert
+/// Backing `shape_row` out fails this test with `code 117: Cannot insert
 /// data into JSON column`.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_jsoneachrow_ecs_tags_array_lands_in_the_json_tags_column() {
@@ -614,6 +614,242 @@ async fn test_rowbinary_tags_source_comment_lands_in_the_json_tags_column() {
             "every tag must survive, in order"
         );
     }
+}
+
+// ============================================================================
+// Inserter: geo points and single values bound for arrays
+// ============================================================================
+
+/// An ECS-shaped table in miniature: two geo_point columns, two Array columns
+/// and the geo shapes `ch_override` allows.
+async fn create_geo_table(client: &ClickHouseQueryClient, table: &str) {
+    client
+        .execute(&format!(
+            "CREATE TABLE {table} (
+                id UInt64,
+                source_geo_location Point,
+                destination_geo_location Point,
+                related_ip Array(IPv6),
+                tags Array(String),
+                area Ring,
+                zone Polygon,
+                regions MultiPolygon,
+                path LineString,
+                paths MultiLineString
+            ) ENGINE = MergeTree() ORDER BY id"
+        ))
+        .await
+        .expect("create the geo table");
+}
+
+/// Three rows carrying every geo_point form, a related_ip sent once as one
+/// string and once as an array, and geo shapes both absent and present.
+fn geo_rows() -> Vec<Map<String, Value>> {
+    [
+        json!({
+            "id": 1u64,
+            "source_geo_location": {"lat": 41.12, "lon": -71.34},
+            "related_ip": "52.108.0.3",
+            "tags": ["a", "b"],
+        }),
+        json!({
+            "id": 2u64,
+            "source_geo_location": "41.12,-71.34",
+            "destination_geo_location": [-0.1278, 51.5074],
+            "related_ip": ["10.0.0.1", "2001:db8::1"],
+            "tags": "solo",
+            "area": [[0, 0], [1, 0], [1, 1], [0, 0]],
+            "zone": [[[0, 0], [2, 0], [2, 2], [0, 0]]],
+        }),
+        json!({
+            "id": 3u64,
+            "source_geo_location": "POINT (-71.34 41.12)",
+            "destination_geo_location": {"type": "Point", "coordinates": [151.2093, -33.8688]},
+            "related_ip": null,
+        }),
+    ]
+    .into_iter()
+    .map(|v| v.as_object().unwrap().clone())
+    .collect()
+}
+
+/// One geo row read back: each point's x and y, the arrays as text, and each
+/// shape's element count.
+#[derive(clickhouse::Row, serde::Deserialize, Debug, PartialEq)]
+struct GeoRow {
+    id: u64,
+    source_lon: f64,
+    source_lat: f64,
+    destination_lon: f64,
+    destination_lat: f64,
+    ips: Vec<String>,
+    tags: Vec<String>,
+    area: u64,
+    zone: u64,
+    regions: u64,
+    path: u64,
+    paths: u64,
+}
+
+/// What every insert format must store for [`geo_rows`].
+fn expected_geo_rows() -> Vec<GeoRow> {
+    vec![
+        GeoRow {
+            id: 1,
+            source_lon: -71.34,
+            source_lat: 41.12,
+            destination_lon: 0.0,
+            destination_lat: 0.0,
+            ips: vec!["::ffff:52.108.0.3".into()],
+            tags: vec!["a".into(), "b".into()],
+            area: 0,
+            zone: 0,
+            regions: 0,
+            path: 0,
+            paths: 0,
+        },
+        GeoRow {
+            id: 2,
+            source_lon: -71.34,
+            source_lat: 41.12,
+            destination_lon: -0.1278,
+            destination_lat: 51.5074,
+            ips: vec!["::ffff:10.0.0.1".into(), "2001:db8::1".into()],
+            tags: vec!["solo".into()],
+            area: 4,
+            zone: 1,
+            regions: 0,
+            path: 0,
+            paths: 0,
+        },
+        GeoRow {
+            id: 3,
+            source_lon: -71.34,
+            source_lat: 41.12,
+            destination_lon: 151.2093,
+            destination_lat: -33.8688,
+            ips: vec![],
+            tags: vec![],
+            area: 0,
+            zone: 0,
+            regions: 0,
+            path: 0,
+            paths: 0,
+        },
+    ]
+}
+
+/// Insert [`geo_rows`] in `format` and read them back from the real server.
+async fn geo_round_trip(test: &str, format: InsertFormat) {
+    let (_infra, client, ch) = spin_up(test).await;
+    let reader = ch.clone();
+    let table = unique_table_name("tc_geo");
+    create_geo_table(&client, &table).await;
+
+    let inserter = Inserter::new(client.clone(), ch, fast_fail_config()).with_insert_format(format);
+    let inserted = inserter
+        .insert_rows(&table, &geo_rows(), &[])
+        .await
+        .expect("geo points and single array values must land");
+    assert_eq!(inserted, 3);
+
+    let stored: Vec<GeoRow> = reader
+        .query(&format!(
+            "SELECT id, \
+             tupleElement(source_geo_location, 1) AS source_lon, \
+             tupleElement(source_geo_location, 2) AS source_lat, \
+             tupleElement(destination_geo_location, 1) AS destination_lon, \
+             tupleElement(destination_geo_location, 2) AS destination_lat, \
+             arrayMap(ip -> toString(ip), related_ip) AS ips, tags, \
+             length(area) AS area, length(zone) AS zone, length(regions) AS regions, \
+             length(path) AS path, length(paths) AS paths \
+             FROM {table} ORDER BY id"
+        ))
+        .fetch_all()
+        .await
+        .expect("read back");
+    assert_eq!(stored, expected_geo_rows(), "{format}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn geo_points_and_single_array_values_land_over_rowbinary() {
+    geo_round_trip(test_name!(), InsertFormat::RowBinary).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn geo_points_and_single_array_values_land_over_jsoneachrow() {
+    geo_round_trip(test_name!(), InsertFormat::JsonEachRow).await;
+}
+
+/// The server refuses a nullable Point, so an absent Point always takes the
+/// `(0, 0)` default and the encoder's `Nullable(Point)` arm is never reached
+/// from a real table.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_server_refuses_a_nullable_point_column() {
+    let (_infra, client, _ch) = spin_up(test_name!()).await;
+    let table = unique_table_name("tc_nullable_point");
+    let refused = client
+        .execute(&format!(
+            "CREATE TABLE {table} (id UInt64, p Nullable(Point)) ENGINE = MergeTree() ORDER BY id"
+        ))
+        .await;
+    assert!(refused.is_err(), "Nullable(Point) was accepted");
+}
+
+/// A geo_point no form reads is the row's own fault: salvage isolates it with
+/// the reason and the rows around it land at once.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_point_no_form_reads_is_dead_lettered_alone() {
+    let (_infra, client, ch) = spin_up(test_name!()).await;
+    let table = unique_table_name("tc_bad_point");
+    create_geo_table(&client, &table).await;
+    let inserter = Inserter::new(client.clone(), ch, InserterConfig::default())
+        .with_insert_format(InsertFormat::RowBinary);
+    let rows: Vec<Map<String, Value>> = (0..5u64)
+        .map(|id| {
+            let location = if id == 2 {
+                json!("drm3btev3e86")
+            } else {
+                json!({"lat": 41.12, "lon": -71.34})
+            };
+            json!({ "id": id, "source_geo_location": location })
+                .as_object()
+                .unwrap()
+                .clone()
+        })
+        .collect();
+
+    let started = std::time::Instant::now();
+    let result = inserter
+        .insert_with_salvage(FlushBatch {
+            table: CompactString::from(table.as_str()),
+            rows,
+            offsets: Vec::new(),
+            raw_payloads: Vec::new(),
+            reserved: Vec::new(),
+        })
+        .await;
+
+    assert!(
+        result.is_settled(),
+        "a bad point held the batch: {:?}",
+        result.disposition
+    );
+    assert_eq!(result.inserted, 4, "the good rows did not land");
+    assert_eq!(result.failed.len(), 1, "failed: {:?}", result.failed);
+    assert_eq!(result.failed[0].row_index, 2);
+    assert!(
+        result.failed[0].reason.contains("geohash"),
+        "the reason does not say why: {}",
+        result.failed[0].reason
+    );
+    // The default five retries with backoff take about 3 s per failing insert.
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "the bad point was retried: {:?}",
+        started.elapsed()
+    );
+    assert_eq!(client.query_count(&table, None).await.expect("count"), 4);
 }
 
 // ============================================================================

@@ -162,9 +162,11 @@ Supported inner types: String, FixedString, Date, DateTime, numbers
 
 | Type | Underlying | Description |
 |------|------------|-------------|
-| `Point` | Tuple(Float64, Float64) | (x, y) coordinate |
+| `Point` | Tuple(Float64, Float64) | (x, y) coordinate: longitude, latitude |
 | `Ring` | Array(Point) | Closed polygon ring |
+| `LineString` | Array(Point) | Open line |
 | `Polygon` | Array(Ring) | Polygon with holes |
+| `MultiLineString` | Array(LineString) | Multiple lines |
 | `MultiPolygon` | Array(Polygon) | Multiple polygons |
 
 ---
@@ -379,15 +381,29 @@ schema contains a JSON column -- no configuration needed. See
 
 ## Encoder implementation status
 
-**RowBinary (default):** encoded by `clickhouse_ext::DynamicInsert` from the
-reflected schema. Covers all standard types plus JSON, Variant, Dynamic, Nested,
-BFloat16, Time/Time64, AggregateFunction, and SimpleAggregateFunction.
-`Decimal(P, S)` resolves to the concrete Decimal32/64/128/256 at encode time
-based on precision.
+**RowBinary (default):** encoded by `clickhouse_ext::DynamicInsert` from the reflected schema. It covers the integer, float, decimal, bool, string, date and time, UUID, IP, enum, `Array`, `Map`, JSON and geo types, inside `Nullable` and `LowCardinality`. `Decimal(P, S)` resolves to the concrete Decimal32/64/128/256 at encode time based on precision. A value bound for a type the encoder has no arm for (`Tuple`, `Variant`, `Dynamic`, `Nested`, ...) is refused with `UnsupportedType`, which holds the batch for retry rather than writing wrong bytes.
 
-**JSONEachRow (fallback):** all types work via server-side coercion. Set
-`insert_format = "json_each_row"` to opt in (HTTP transport only -- see the
-config guard in [INSERT-FORMATS.md](INSERT-FORMATS.md)).
+**JSONEachRow (fallback):** the server parses each type itself. Before it does, the loader shapes the values it would refuse by the same rules as RowBinary: a JSON column's non-object, every geo_point form (sent as `[lon, lat]`), and a single value bound for an `Array`. Set `insert_format = "json_each_row"` to opt in (HTTP transport only -- see the config guard in [INSERT-FORMATS.md](INSERT-FORMATS.md)).
+
+### Geo points
+
+A `Point` is written as two little-endian `Float64`, x then y, where x is the longitude and y the latitude. The value can arrive in any form Elasticsearch takes for a `geo_point`:
+
+| Form | Example | Coordinate order |
+|------|---------|------------------|
+| Object | `{"lat": 41.12, "lon": -71.34}` | named |
+| GeoJSON | `{"type": "Point", "coordinates": [-71.34, 41.12]}` | lon, lat |
+| String | `"41.12,-71.34"` | lat, lon |
+| Array | `[-71.34, 41.12]` | lon, lat |
+| WKT | `"POINT (-71.34 41.12)"` | lon, lat |
+
+A third coordinate is read and ignored. A geohash, a latitude outside -90 to 90, a longitude outside -180 to 180, or a value no form reads is an encoding error for that row alone: salvage isolates it and it goes to the DLQ with the reason. An absent `Point` is `(0, 0)`, the type's own default. ClickHouse refuses `Nullable(Point)`, so there is no null to write instead.
+
+`Ring`, `LineString`, `Polygon`, `MultiLineString` and `MultiPolygon` are arrays of points on the wire, written from nested arrays whose innermost elements take any form above. An absent one is the empty array.
+
+### A single value bound for an Array
+
+Elasticsearch lets any field carry one value or many, so a scalar bound for an `Array(T)` column is written as a one-element array, and T's own rules then decide whether it is valid. `"related_ip": "52.108.0.3"` lands in an `Array(IPv6)` column as `['::ffff:52.108.0.3']`. An object is wrapped only where the element is read from one (`JSON`, `Map`, `Point`); bound for an array of scalars it stays an encoding error. A null or absent array is the empty array. For an `Array(Point)` column, a bare `[lon, lat]` is one point, as Elasticsearch reads it.
 
 The rationale for RowBinary as the default: schema-reflected RowBinary skips the
 server-side JSON parse, cuts ClickHouse CPU, and gives full type support without

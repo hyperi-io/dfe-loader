@@ -37,7 +37,7 @@ pub mod parsed_type;
 pub mod schema;
 
 pub use encode::{
-    ColumnDef, DynamicRow, json_shaping_changes, shape_json_for_type, shape_json_value,
+    ColumnDef, DynamicRow, needs_shaping, shape_for_type, shape_json_value, shaping_changes,
 };
 pub use error::DynamicError;
 pub use insert::DynamicInsert;

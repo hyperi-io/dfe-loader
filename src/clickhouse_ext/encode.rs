@@ -44,10 +44,11 @@
 //!
 //! This encoder folds in the DFE coercions that ClickHouse's JSONEachRow path
 //! cannot do server-side: epoch magnitude detection (ms/us/ns) and ISO-8601
-//! 'T'-separator handling for date/time types, hyphen-less UUID hex, and
-//! integer-to-dotted IPv4. All timestamps are treated as UTC; non-zero
-//! timezone offsets on datetime strings are rejected rather than silently
-//! dropped.
+//! 'T'-separator handling for date/time types, hyphen-less UUID hex,
+//! integer-to-dotted IPv4, every Elasticsearch geo_point form for a `Point`,
+//! and a single value written as a one-element `Array`. All timestamps are
+//! treated as UTC; non-zero timezone offsets on datetime strings are rejected
+//! rather than silently dropped.
 
 use std::borrow::Cow;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -270,8 +271,7 @@ fn encode_value(
         }
         buf.push(0);
     } else if value.is_null() {
-        write_default(pt, buf);
-        return Ok(());
+        return write_default(pt, col, buf);
     }
 
     encode_typed(value, pt, col, buf)
@@ -433,11 +433,10 @@ fn encode_typed(
         TypeTag::JSON => {
             write_string(&json_column_text(value), buf);
         }
-        // Geo Point and any type the parser left as Unknown are not part of
-        // the supported dynamic-insert surface. Tuple/Variant/Dynamic/Nested
-        // were not handled by the source encoder either; reject explicitly so
-        // a schema using them fails loudly instead of writing wrong bytes.
-        TypeTag::Point | TypeTag::Tuple | TypeTag::Unknown => {
+        TypeTag::Point => encode_point(value, col, buf)?,
+        // Tuple and every Unknown type (Variant, Dynamic, ...) are refused
+        // rather than written as wrong bytes.
+        TypeTag::Tuple | TypeTag::Unknown => {
             return Err(DynamicError::UnsupportedType {
                 column: col.to_string(),
                 type_str: pt.raw.clone(),
@@ -558,19 +557,44 @@ fn wrap_value(key: &str, inner: Value) -> Value {
     Value::Object(wrapped)
 }
 
-/// Shape every JSON position inside a value, at the same depths the RowBinary
-/// encoder writes JSON text: a JSON column, and a JSON nested in an `Array` or
-/// a `Map` value, which `ParsedType::contains_json` reports.
-pub fn shape_json_for_type(value: &mut Value, ty: &ParsedType) {
+/// Whether a column's values can need [`shape_for_type`] before a JSONEachRow
+/// body carries them: a JSON, a `Point` or an `Array`, alone or as a `Map`
+/// value.
+#[must_use]
+pub fn needs_shaping(ty: &ParsedType) -> bool {
+    match ty.tag {
+        TypeTag::JSON | TypeTag::Point | TypeTag::Array => true,
+        TypeTag::Map => ty.map_types.as_ref().is_some_and(|(_, v)| needs_shaping(v)),
+        _ => false,
+    }
+}
+
+/// Shape a value into the form its column reads from a JSONEachRow body, by
+/// the rules the RowBinary encoder applies at the same depths: JSON text and
+/// non-objects for a JSON, any geo_point form for a `Point`, and a single
+/// value for an `Array`.
+pub fn shape_for_type(value: &mut Value, ty: &ParsedType) {
     if ty.nullable && value.is_null() {
         return;
     }
     match ty.tag {
         TypeTag::JSON => shape_json_value(value),
+        TypeTag::Point => {
+            // A value no geo_point form reads is left for the server to refuse.
+            if let Ok((lon, lat)) = geo_point_lon_lat(value) {
+                *value = Value::Array(vec![Value::from(lon), Value::from(lat)]);
+            }
+        }
         TypeTag::Array => {
-            if let (Some(element), Value::Array(items)) = (ty.array_element.as_ref(), &mut *value) {
+            let Some(element) = ty.array_element.as_deref() else {
+                return;
+            };
+            if is_single_element(value, element) {
+                *value = Value::Array(vec![value.take()]);
+            }
+            if let Value::Array(items) = value {
                 for item in items {
-                    shape_json_for_type(item, element);
+                    shape_for_type(item, element);
                 }
             }
         }
@@ -579,7 +603,7 @@ pub fn shape_json_for_type(value: &mut Value, ty: &ParsedType) {
                 (ty.map_types.as_ref(), &mut *value)
             {
                 for (_, entry) in entries {
-                    shape_json_for_type(entry, value_type);
+                    shape_for_type(entry, value_type);
                 }
             }
         }
@@ -587,25 +611,31 @@ pub fn shape_json_for_type(value: &mut Value, ty: &ParsedType) {
     }
 }
 
-/// Whether [`shape_json_for_type`] would change this value -- the check that
-/// keeps the JSONEachRow path from cloning a row it does not need to touch.
+/// Whether [`shape_for_type`] would change this value -- the check that keeps
+/// the JSONEachRow path from cloning a row it does not need to touch.
 #[must_use]
-pub fn json_shaping_changes(value: &Value, ty: &ParsedType) -> bool {
+pub fn shaping_changes(value: &Value, ty: &ParsedType) -> bool {
     if ty.nullable && value.is_null() {
         return false;
     }
     match ty.tag {
         TypeTag::JSON => !value.is_object(),
-        TypeTag::Array => match (ty.array_element.as_ref(), value) {
+        TypeTag::Point => {
+            let already_pair = matches!(value, Value::Array(items)
+                if items.len() == 2 && items.iter().all(Value::is_number));
+            !already_pair && geo_point_lon_lat(value).is_ok()
+        }
+        TypeTag::Array => match (ty.array_element.as_deref(), value) {
+            (Some(element), _) if is_single_element(value, element) => true,
             (Some(element), Value::Array(items)) => {
-                items.iter().any(|item| json_shaping_changes(item, element))
+                items.iter().any(|item| shaping_changes(item, element))
             }
             _ => false,
         },
         TypeTag::Map => match (ty.map_types.as_ref(), value) {
             (Some((_, value_type)), Value::Object(entries)) => entries
                 .iter()
-                .any(|(_, entry)| json_shaping_changes(entry, value_type)),
+                .any(|(_, entry)| shaping_changes(entry, value_type)),
             _ => false,
         },
         _ => false,
@@ -644,7 +674,13 @@ fn write_varint(mut value: u64, buf: &mut Vec<u8>) {
     }
 }
 
-fn write_default(pt: &ParsedType, buf: &mut Vec<u8>) {
+/// Write the value a non-nullable column takes when the row has none.
+///
+/// # Errors
+///
+/// Returns [`DynamicError::UnsupportedType`] for a `Tuple`, whose width is the
+/// sum of its elements' and is not derived here.
+fn write_default(pt: &ParsedType, col: &str, buf: &mut Vec<u8>) -> Result<(), DynamicError> {
     // A bare `Decimal(P, S)` has no fixed_byte_size by base name; resolve it.
     if pt.base == "Decimal" {
         let size = match decimal_tag_for_precision(pt.precision.unwrap_or(38)) {
@@ -654,13 +690,19 @@ fn write_default(pt: &ParsedType, buf: &mut Vec<u8>) {
             _ => 16,
         };
         buf.resize(buf.len() + size, 0);
-        return;
+        return Ok(());
     }
     // JSON's no-value is the empty object: the column parser rejects empty
     // input (code 117) and JSON cannot be Nullable.
     if pt.tag == TypeTag::JSON {
         write_string(b"{}", buf);
-        return;
+        return Ok(());
+    }
+    if pt.tag == TypeTag::Tuple {
+        return Err(DynamicError::UnsupportedType {
+            column: col.to_string(),
+            type_str: pt.raw.clone(),
+        });
     }
     if let Some(size) = pt.fixed_byte_size() {
         buf.resize(buf.len() + size, 0);
@@ -668,6 +710,7 @@ fn write_default(pt: &ParsedType, buf: &mut Vec<u8>) {
         // Variable-length default: empty string / array / map.
         write_varint(0, buf);
     }
+    Ok(())
 }
 
 fn enc_err(col: &str, msg: &str) -> DynamicError {
@@ -1156,24 +1199,199 @@ fn encode_ipv6(value: &Value, col: &str, buf: &mut Vec<u8>) -> Result<(), Dynami
 }
 
 // ---------------------------------------------------------------------------
+// Geo
+// ---------------------------------------------------------------------------
+
+/// Write a `Point` as `ClickHouse` stores it: x then y, each a little-endian
+/// `Float64`, where x is the longitude and y the latitude.
+fn encode_point(value: &Value, col: &str, buf: &mut Vec<u8>) -> Result<(), DynamicError> {
+    let (lon, lat) = geo_point_lon_lat(value).map_err(|m| enc_err(col, m))?;
+    buf.extend_from_slice(&lon.to_le_bytes());
+    buf.extend_from_slice(&lat.to_le_bytes());
+    Ok(())
+}
+
+/// Read a geo point as `(longitude, latitude)` from any form Elasticsearch
+/// takes for a `geo_point`: `{"lat": n, "lon": n}`, a GeoJSON point,
+/// `"lat,lon"`, `[lon, lat]`, or WKT `POINT (lon lat)`. A third coordinate is
+/// read and ignored, as Elasticsearch ignores it.
+///
+/// The messages name neither the value nor its coordinates, which are
+/// customer data.
+fn geo_point_lon_lat(value: &Value) -> Result<(f64, f64), &'static str> {
+    let (lon, lat) = match value {
+        Value::Object(fields) => point_from_object(fields)?,
+        Value::Array(coordinates) => point_from_coordinates(coordinates)?,
+        Value::String(text) => point_from_text(text)?,
+        Value::Null | Value::Bool(_) | Value::Number(_) => {
+            return Err("geo_point must be an object, a string or an array");
+        }
+    };
+    if !(-90.0..=90.0).contains(&lat) {
+        return Err("geo_point latitude is outside -90 to 90");
+    }
+    if !(-180.0..=180.0).contains(&lon) {
+        return Err("geo_point longitude is outside -180 to 180");
+    }
+    Ok((lon, lat))
+}
+
+/// `{"lat": n, "lon": n}`, or a GeoJSON `{"type": "Point", "coordinates": [lon, lat]}`.
+fn point_from_object(fields: &Map<String, Value>) -> Result<(f64, f64), &'static str> {
+    if let (Some(lat), Some(lon)) = (fields.get("lat"), fields.get("lon")) {
+        return Ok((coordinate(lon)?, coordinate(lat)?));
+    }
+    let geojson_point = fields
+        .get("type")
+        .and_then(Value::as_str)
+        .is_some_and(|t| t.eq_ignore_ascii_case("point"));
+    match fields.get("coordinates") {
+        Some(Value::Array(coordinates)) if geojson_point => point_from_coordinates(coordinates),
+        _ => Err("geo_point object needs lat and lon"),
+    }
+}
+
+/// `[lon, lat]` or `[lon, lat, z]` -- GeoJSON order, longitude first.
+fn point_from_coordinates(coordinates: &[Value]) -> Result<(f64, f64), &'static str> {
+    match coordinates {
+        [lon, lat] | [lon, lat, _] => Ok((coordinate(lon)?, coordinate(lat)?)),
+        _ => Err("geo_point array must be [lon, lat]"),
+    }
+}
+
+/// `"lat,lon"` (latitude first) or WKT `POINT (lon lat)`. A geohash has no
+/// decoder here and is refused by name.
+fn point_from_text(text: &str) -> Result<(f64, f64), &'static str> {
+    let text = text.trim();
+    if let Some(keyword) = text.get(..5)
+        && keyword.eq_ignore_ascii_case("point")
+    {
+        return point_from_wkt(&text[5..]);
+    }
+    let mut parts = text.split(',');
+    match (parts.next(), parts.next(), parts.next(), parts.next()) {
+        (Some(lat), Some(lon), _, None) => Ok((text_coordinate(lon)?, text_coordinate(lat)?)),
+        (Some(word), None, _, _) if is_geohash(word) => Err("geohash geo_points are not supported"),
+        _ => Err("geo_point string must be \"lat,lon\" or WKT POINT (lon lat)"),
+    }
+}
+
+/// The body of a WKT point after its `POINT` keyword: an optional `Z`/`M`/`ZM`
+/// tag, then `(lon lat)` with an optional third ordinate.
+fn point_from_wkt(body: &str) -> Result<(f64, f64), &'static str> {
+    const WKT: &str = "geo_point WKT must read POINT (lon lat)";
+    let body = body.trim_start();
+    let body = ["ZM", "Z", "M"]
+        .iter()
+        .find_map(|tag| {
+            body.get(..tag.len())
+                .filter(|head| head.eq_ignore_ascii_case(tag))
+                .map(|_| body[tag.len()..].trim_start())
+        })
+        .unwrap_or(body);
+    let inner = body
+        .strip_prefix('(')
+        .and_then(|rest| rest.trim_end().strip_suffix(')'))
+        .ok_or(WKT)?;
+    let mut ordinates = inner.split_ascii_whitespace();
+    match (
+        ordinates.next(),
+        ordinates.next(),
+        ordinates.next(),
+        ordinates.next(),
+    ) {
+        (Some(lon), Some(lat), _, None) => Ok((text_coordinate(lon)?, text_coordinate(lat)?)),
+        _ => Err(WKT),
+    }
+}
+
+/// One coordinate from a JSON number or a numeric string, refused unless finite.
+fn coordinate(value: &Value) -> Result<f64, &'static str> {
+    match value {
+        Value::Number(n) => n
+            .as_f64()
+            .filter(|f| f.is_finite())
+            .ok_or("geo_point coordinate is not a finite number"),
+        Value::String(s) => text_coordinate(s),
+        _ => Err("geo_point coordinate is not a number"),
+    }
+}
+
+/// One coordinate from text, refused unless it reads as a finite number.
+fn text_coordinate(text: &str) -> Result<f64, &'static str> {
+    text.trim()
+        .parse::<f64>()
+        .ok()
+        .filter(|f| f.is_finite())
+        .ok_or("geo_point coordinate is not a finite number")
+}
+
+/// Whether a word reads as a geohash: 1 to 12 characters of its base-32
+/// alphabet, which leaves out `a`, `i`, `l` and `o`.
+fn is_geohash(word: &str) -> bool {
+    (1..=12).contains(&word.len()) && word.bytes().all(is_geohash_digit)
+}
+
+/// One character of the geohash base-32 alphabet, in either case.
+fn is_geohash_digit(byte: u8) -> bool {
+    matches!(
+        byte.to_ascii_lowercase(),
+        b'0'..=b'9' | b'b'..=b'h' | b'j' | b'k' | b'm' | b'n' | b'p'..=b'z'
+    )
+}
+
+// ---------------------------------------------------------------------------
 // Array / Map
 // ---------------------------------------------------------------------------
 
+/// Write an `Array(elem)`. Elasticsearch lets any field carry one value or
+/// many, so a single value an element accepts is written as a one-element
+/// array.
 fn encode_array(
     value: &Value,
     elem: &ParsedType,
     col: &str,
     buf: &mut Vec<u8>,
 ) -> Result<(), DynamicError> {
-    let arr = match value {
-        Value::Array(a) => a,
-        _ => return Err(enc_err(col, "expected array")),
+    if is_single_element(value, elem) {
+        write_varint(1, buf);
+        return encode_value(value, elem, col, buf);
+    }
+    let Value::Array(items) = value else {
+        return Err(enc_err(col, "expected array"));
     };
-    write_varint(arr.len() as u64, buf);
-    for item in arr {
+    write_varint(items.len() as u64, buf);
+    for item in items {
         encode_value(item, elem, col, buf)?;
     }
     Ok(())
+}
+
+/// Whether `value`, bound for an `Array(elem)`, is one element rather than the
+/// array: any scalar, an object only where the element is read from one, and
+/// for an array of points a bare `[lon, lat]`, which Elasticsearch reads as one
+/// point.
+fn is_single_element(value: &Value, elem: &ParsedType) -> bool {
+    match value {
+        Value::Bool(_) | Value::Number(_) | Value::String(_) => true,
+        Value::Object(_) => reads_objects(elem),
+        Value::Array(items) => elem.tag == TypeTag::Point && is_coordinate_pair(items),
+        Value::Null => false,
+    }
+}
+
+/// Whether a value of this type can be read from a JSON object.
+fn reads_objects(ty: &ParsedType) -> bool {
+    match ty.tag {
+        TypeTag::JSON | TypeTag::Map | TypeTag::Point => true,
+        TypeTag::Array => ty.array_element.as_deref().is_some_and(reads_objects),
+        _ => false,
+    }
+}
+
+/// `[lon, lat]` or `[lon, lat, z]`, all numbers.
+fn is_coordinate_pair(items: &[Value]) -> bool {
+    matches!(items.len(), 2 | 3) && items.iter().all(Value::is_number)
 }
 
 fn encode_map(
@@ -2003,8 +2221,8 @@ mod tests {
         // wrapping the array itself would bury every element under one key.
         let ty = ParsedType::parse("Array(JSON)");
         let mut value = json!([["forwarded"], {"env": "prod"}, 42]);
-        assert!(json_shaping_changes(&value, &ty));
-        shape_json_for_type(&mut value, &ty);
+        assert!(shaping_changes(&value, &ty));
+        shape_for_type(&mut value, &ty);
         assert_eq!(
             value,
             json!([{"list": ["forwarded"]}, {"env": "prod"}, {"value": 42}])
@@ -2015,8 +2233,8 @@ mod tests {
     fn shaped_map_of_json_shapes_each_value() {
         let ty = ParsedType::parse("Map(String, JSON)");
         let mut value = json!({"a": ["forwarded"], "b": {"env": "prod"}});
-        assert!(json_shaping_changes(&value, &ty));
-        shape_json_for_type(&mut value, &ty);
+        assert!(shaping_changes(&value, &ty));
+        shape_for_type(&mut value, &ty);
         assert_eq!(
             value,
             json!({"a": {"list": ["forwarded"]}, "b": {"env": "prod"}})
@@ -2027,27 +2245,89 @@ mod tests {
     fn shaping_a_parameterised_json_column_wraps_an_array() {
         let ty = ParsedType::parse("JSON(max_dynamic_paths=2048)");
         let mut value = json!(["forwarded"]);
-        assert!(json_shaping_changes(&value, &ty));
-        shape_json_for_type(&mut value, &ty);
+        assert!(shaping_changes(&value, &ty));
+        shape_for_type(&mut value, &ty);
         assert_eq!(value, json!({"list": ["forwarded"]}));
     }
 
     #[test]
     fn shaping_does_not_change_an_object_or_a_nullable_null() {
         let json = ParsedType::parse("JSON");
-        assert!(!json_shaping_changes(&json!({"env": "prod"}), &json));
+        assert!(!shaping_changes(&json!({"env": "prod"}), &json));
 
         // Nullable(JSON) keeps its null -- the encoder writes the null marker
         // and never reaches the JSON text.
         let nullable = ParsedType::parse("Nullable(JSON)");
-        assert!(!json_shaping_changes(&Value::Null, &nullable));
+        assert!(!shaping_changes(&Value::Null, &nullable));
         let mut value = Value::Null;
-        shape_json_for_type(&mut value, &nullable);
+        shape_for_type(&mut value, &nullable);
         assert_eq!(value, Value::Null);
 
         // A plain String column is never shaped.
         let string = ParsedType::parse("String");
-        assert!(!json_shaping_changes(&json!("[forwarded]"), &string));
+        assert!(!shaping_changes(&json!("[forwarded]"), &string));
+    }
+
+    /// Assert what shaping leaves for one value bound for `ty`, and that the
+    /// change check agrees.
+    fn assert_shaped_for(ty: &str, value: Value, expected: Value) {
+        let ty = ParsedType::parse(ty);
+        let described = value.to_string();
+        let mut shaped = value;
+        assert_eq!(
+            shaping_changes(&shaped, &ty),
+            shaped != expected,
+            "the change check disagrees with shaping for {described}"
+        );
+        shape_for_type(&mut shaped, &ty);
+        assert_eq!(shaped, expected, "shaping {described} for {}", ty.raw);
+    }
+
+    #[test]
+    fn shaping_gives_a_point_the_lon_lat_pair_jsoneachrow_reads() {
+        for value in [
+            json!({"lat": 41.12, "lon": -71.34}),
+            json!("41.12,-71.34"),
+            json!("POINT (-71.34 41.12)"),
+            json!([-71.34, 41.12, 7.0]),
+            json!({"type": "Point", "coordinates": [-71.34, 41.12]}),
+        ] {
+            assert_shaped_for("Point", value, json!([-71.34, 41.12]));
+        }
+        assert_shaped_for("Point", json!([-71.34, 41.12]), json!([-71.34, 41.12]));
+    }
+
+    #[test]
+    fn shaping_leaves_an_unreadable_point_for_the_server_to_refuse() {
+        assert_shaped_for("Point", json!("u4pruydqqvj"), json!("u4pruydqqvj"));
+        assert_shaped_for("Point", json!({"x": 1}), json!({"x": 1}));
+    }
+
+    #[test]
+    fn shaping_makes_a_single_value_a_one_element_array() {
+        assert_shaped_for("Array(IPv6)", json!("10.0.0.1"), json!(["10.0.0.1"]));
+        assert_shaped_for("Array(Int64)", json!(7), json!([7]));
+        assert_shaped_for("Array(String)", json!(["a"]), json!(["a"]));
+        assert_shaped_for(
+            "Array(Point)",
+            json!([-71.34, 41.12]),
+            json!([[-71.34, 41.12]]),
+        );
+        assert_shaped_for(
+            "Array(Point)",
+            json!({"lat": 41.12, "lon": -71.34}),
+            json!([[-71.34, 41.12]]),
+        );
+        assert_shaped_for(
+            "Array(JSON)",
+            json!({"env": "prod"}),
+            json!([{"env": "prod"}]),
+        );
+    }
+
+    #[test]
+    fn shaping_leaves_an_object_bound_for_an_array_of_scalars() {
+        assert_shaped_for("Array(String)", json!({"a": 1}), json!({"a": 1}));
     }
 
     #[test]
@@ -2137,12 +2417,270 @@ mod tests {
     }
 
     #[test]
-    fn point_is_unsupported() {
-        let e = enc_err_of(json!({"p": [1.0, 2.0]}), &[("p", "Point")]);
-        assert!(
-            matches!(e, DynamicError::UnsupportedType { .. }),
-            "got: {e:?}"
+    fn an_absent_tuple_is_refused_not_guessed() {
+        // One byte here is what the server read as a short row (code 33).
+        for row in [json!({}), json!({"t": null})] {
+            let e = enc_err_of(row, &[("t", "Tuple(UInt8, UInt8)")]);
+            assert!(
+                matches!(e, DynamicError::UnsupportedType { .. }),
+                "got: {e:?}"
+            );
+        }
+    }
+
+    // ---- Geo ----
+
+    /// A `Point` on the wire: x (longitude) then y (latitude), little-endian.
+    fn point_bytes(lon: f64, lat: f64) -> Vec<u8> {
+        let mut bytes = lon.to_le_bytes().to_vec();
+        bytes.extend_from_slice(&lat.to_le_bytes());
+        bytes
+    }
+
+    #[test]
+    fn a_point_is_written_longitude_then_latitude_from_every_geo_point_form() {
+        let expected = point_bytes(-71.34, 41.12);
+        for value in [
+            json!({"lat": 41.12, "lon": -71.34}),
+            json!({"lat": "41.12", "lon": "-71.34"}),
+            json!({"type": "Point", "coordinates": [-71.34, 41.12]}),
+            json!("41.12,-71.34"),
+            json!(" 41.12 , -71.34 "),
+            json!("41.12,-71.34,7"),
+            json!([-71.34, 41.12]),
+            json!([-71.34, 41.12, 7.0]),
+            json!("POINT (-71.34 41.12)"),
+            json!("point(-71.34 41.12)"),
+            json!("POINT Z (-71.34 41.12 7)"),
+        ] {
+            let described = value.to_string();
+            assert_eq!(
+                enc(json!({ "p": value }), &[("p", "Point")]),
+                expected,
+                "{described}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_point_takes_the_ends_of_both_ranges() {
+        assert_eq!(
+            enc(json!({"p": "-90,-180"}), &[("p", "Point")]),
+            point_bytes(-180.0, -90.0)
         );
+        assert_eq!(
+            enc(json!({"p": [180, 90]}), &[("p", "Point")]),
+            point_bytes(180.0, 90.0)
+        );
+    }
+
+    #[test]
+    fn an_absent_point_is_sixteen_zero_bytes() {
+        assert_eq!(enc(json!({}), &[("p", "Point")]), vec![0u8; 16]);
+        assert_eq!(enc(json!({"p": null}), &[("p", "Point")]), vec![0u8; 16]);
+    }
+
+    #[test]
+    fn an_absent_point_keeps_the_columns_after_it_aligned() {
+        // The server reads each column at a fixed offset, so a short Point
+        // shifts every column after it.
+        let mut expected = vec![0u8; 16];
+        expected.push(7);
+        assert_eq!(
+            enc(json!({"id": 7}), &[("p", "Point"), ("id", "UInt8")]),
+            expected
+        );
+    }
+
+    #[test]
+    fn a_nullable_point_writes_its_null_marker() {
+        assert_eq!(
+            enc(json!({"p": null}), &[("p", "Nullable(Point)")]),
+            vec![1]
+        );
+        let mut expected = vec![0u8];
+        expected.extend_from_slice(&point_bytes(1.5, 2.5));
+        assert_eq!(
+            enc(json!({"p": [1.5, 2.5]}), &[("p", "Nullable(Point)")]),
+            expected
+        );
+    }
+
+    #[test]
+    fn a_point_no_form_reads_is_a_row_level_data_error() {
+        for (value, says) in [
+            (json!("drm3btev3e86"), "geohash"),
+            (json!("not a point"), "geo_point string"),
+            (json!("日本語のテキスト"), "geo_point string"),
+            (json!(""), "geo_point string"),
+            (json!("POINT EMPTY"), "WKT"),
+            (json!("POINT (1)"), "WKT"),
+            (json!("POINT (1 2 3 4)"), "WKT"),
+            (json!("1,2,3,4"), "geo_point string"),
+            (json!({"x": 1, "y": 2}), "lat and lon"),
+            (
+                json!({"type": "LineString", "coordinates": [1, 2]}),
+                "lat and lon",
+            ),
+            (json!({"lat": "north", "lon": 1}), "not a finite number"),
+            (json!({"lat": true, "lon": 1}), "not a number"),
+            (json!("NaN,1"), "not a finite number"),
+            (json!([1]), "[lon, lat]"),
+            (json!([1, 2, 3, 4]), "[lon, lat]"),
+            (json!(42), "object, a string or an array"),
+            (json!(true), "object, a string or an array"),
+            (json!("91,0"), "latitude"),
+            (json!("0,181"), "longitude"),
+            (json!([-181, 0]), "longitude"),
+        ] {
+            let described = value.to_string();
+            let e = enc_err_of(json!({ "timeout_p": value }), &[("timeout_p", "Point")]);
+            let DynamicError::EncodingError { ref message, .. } = e else {
+                panic!("{described}: expected an encoding error, got {e:?}");
+            };
+            assert!(message.contains(says), "{described}: {message}");
+            assert_eq!(
+                crate::clickhouse::error::classify_dynamic_error(&e),
+                crate::clickhouse::error::ErrorCategory::Data,
+                "{described}: a bad point must dead-letter its row, not hold the batch"
+            );
+            assert!(
+                !crate::clickhouse::error::is_schema_drift_error(&e.to_string()),
+                "{described}: a bad point must not read as schema drift"
+            );
+        }
+    }
+
+    #[test]
+    fn a_ring_is_an_array_of_points() {
+        let mut expected = vec![4u8];
+        for (lon, lat) in [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 0.0)] {
+            expected.extend_from_slice(&point_bytes(lon, lat));
+        }
+        assert_eq!(
+            enc(
+                json!({"r": [[0, 0], [1, 0], [1, 1], [0, 0]]}),
+                &[("r", "Ring")]
+            ),
+            expected
+        );
+    }
+
+    #[test]
+    fn a_multipolygon_nests_polygons_of_rings_of_points() {
+        let mut expected = vec![1u8, 1, 3];
+        for (lon, lat) in [(0.0, 0.0), (1.0, 1.0), (0.0, 0.0)] {
+            expected.extend_from_slice(&point_bytes(lon, lat));
+        }
+        assert_eq!(
+            enc(
+                json!({"m": [[[[0, 0], [1, 1], "0,0"]]]}),
+                &[("m", "MultiPolygon")]
+            ),
+            expected
+        );
+    }
+
+    #[test]
+    fn an_absent_geo_shape_is_an_empty_array() {
+        for ty in [
+            "Ring",
+            "LineString",
+            "Polygon",
+            "MultiLineString",
+            "MultiPolygon",
+        ] {
+            assert_eq!(enc(json!({}), &[("g", ty)]), vec![0], "{ty}");
+        }
+    }
+
+    // ---- A single value bound for an Array ----
+
+    #[test]
+    fn a_single_value_bound_for_an_array_is_a_one_element_array() {
+        for (value, ty) in [
+            (json!("x"), "Array(String)"),
+            (json!("10.0.0.1"), "Array(IPv6)"),
+            (json!("2001:db8::1"), "Array(IPv6)"),
+            (json!(7), "Array(Int64)"),
+            (json!("7"), "Array(UInt32)"),
+            (json!(true), "Array(Bool)"),
+            (json!("x"), "Array(Nullable(String))"),
+            (json!("x"), "Array(LowCardinality(String))"),
+            (json!("x"), "Array(Array(String))"),
+            (json!({"env": "prod"}), "Array(JSON)"),
+            (json!({"k": "v"}), "Array(Map(String, String))"),
+            (json!({"lat": 41.12, "lon": -71.34}), "Array(Point)"),
+            (json!("41.12,-71.34"), "Array(Point)"),
+        ] {
+            let described = format!("{value} into {ty}");
+            let single = enc(json!({ "a": value.clone() }), &[("a", ty)]);
+            let wrapped = enc(json!({ "a": [value] }), &[("a", ty)]);
+            assert_eq!(single, wrapped, "{described}");
+            assert_eq!(single[0], 1, "{described}: one element");
+        }
+    }
+
+    #[test]
+    fn related_ip_as_one_string_lands_as_one_address() {
+        // The o365 Filebeat document that was refused carried related.ip as a
+        // single string, as Elasticsearch's own output for it does.
+        let mapped: Ipv6Addr = "::ffff:52.108.0.3".parse().unwrap();
+        let mut expected = vec![1u8];
+        expected.extend_from_slice(&mapped.octets());
+        assert_eq!(
+            enc(
+                json!({"related_ip": "52.108.0.3"}),
+                &[("related_ip", "Array(IPv6)")]
+            ),
+            expected
+        );
+    }
+
+    #[test]
+    fn a_lon_lat_pair_bound_for_an_array_of_points_is_one_point() {
+        let mut one = vec![1u8];
+        one.extend_from_slice(&point_bytes(-71.34, 41.12));
+        assert_eq!(
+            enc(json!({"a": [-71.34, 41.12]}), &[("a", "Array(Point)")]),
+            one
+        );
+
+        let mut two = vec![2u8];
+        two.extend_from_slice(&point_bytes(-71.34, 41.12));
+        two.extend_from_slice(&point_bytes(1.0, 2.0));
+        assert_eq!(
+            enc(
+                json!({"a": [[-71.34, 41.12], [1, 2]]}),
+                &[("a", "Array(Point)")]
+            ),
+            two
+        );
+    }
+
+    #[test]
+    fn a_null_bound_for_an_array_is_an_empty_array() {
+        assert_eq!(enc(json!({"a": null}), &[("a", "Array(String)")]), vec![0]);
+        assert_eq!(enc(json!({}), &[("a", "Array(IPv6)")]), vec![0]);
+    }
+
+    #[test]
+    fn an_object_bound_for_an_array_of_scalars_is_refused() {
+        for ty in ["Array(String)", "Array(IPv6)", "Array(Array(Int64))"] {
+            let e = enc_err_of(json!({"a": {"ip": "10.0.0.1"}}), &[("a", ty)]);
+            assert!(
+                matches!(&e, DynamicError::EncodingError { message, .. } if message == "expected array"),
+                "{ty}: {e:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_single_value_the_element_cannot_take_is_refused_by_the_element() {
+        let e = enc_err_of(json!({"a": "not-an-ip"}), &[("a", "Array(IPv6)")]);
+        assert!(e.to_string().contains("invalid IP address"), "{e}");
+        let e = enc_err_of(json!({"a": "seven"}), &[("a", "Array(UInt32)")]);
+        assert!(matches!(e, DynamicError::EncodingError { .. }), "{e:?}");
     }
 
     // ---- varint ----
