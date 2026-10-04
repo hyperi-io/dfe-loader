@@ -2471,7 +2471,10 @@ fn dlq_backends(config: &Config) -> (scalo::dlq::DlqConfig, Option<scalo::transp
 fn spawn_dlq(config: &Config) -> Option<Arc<Dlq>> {
     let (dlq_config, kafka) = dlq_backends(config);
     if !dlq_config.enabled {
-        debug!("DLQ disabled by config");
+        warn!(
+            "DLQ disabled by config -- every row only a DLQ can take, permanently rejected rows \
+             included, is lost and counted in dfe_loader_rows_lost_total"
+        );
         return None;
     }
     // Not the shutdown token: the final flush and the pending-schema drain

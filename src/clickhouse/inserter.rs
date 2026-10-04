@@ -51,7 +51,7 @@ use crate::clickhouse::error::{
     retries, server_code,
 };
 use crate::clickhouse::{ClickHouseQueryClient, SchemaCache};
-use crate::clickhouse_ext::{ColumnDef, json_shaping_changes, shape_json_for_type};
+use crate::clickhouse_ext::{ColumnDef, needs_shaping, shape_for_type, shaping_changes};
 use crate::transform::Coercer;
 
 /// Split "db.table" into (db, table). Panics if no dot — callers always
@@ -442,12 +442,12 @@ impl Inserter {
         }
     }
 
-    /// The table's columns that carry a JSON type at any depth, read through
-    /// the same schema cache the RowBinary path fills.
+    /// The table's columns whose values can need shaping (JSON, `Point`,
+    /// `Array`), read through the same schema cache the RowBinary path fills.
     ///
     /// A schema that cannot be fetched returns none and the rows go unshaped,
     /// which is where this path stood before shaping existed.
-    async fn json_columns(&self, table: &str) -> Vec<ColumnDef> {
+    async fn shaped_columns(&self, table: &str) -> Vec<ColumnDef> {
         let (db, tbl) = parse_db_table(table);
         let schema = match self.dynamic_schema_cache.get(table) {
             Some(schema) => schema,
@@ -458,19 +458,16 @@ impl Inserter {
                         fetched
                     }
                     Err(e) => {
-                        warn!(table = %table, error = %e, "Schema fetch failed, JSON columns not shaped");
+                        warn!(table = %table, error = %e, "Schema fetch failed, columns not shaped");
                         return Vec::new();
                     }
                 }
             }
         };
-        if !schema.has_json_columns() {
-            return Vec::new();
-        }
         schema
             .columns
             .iter()
-            .filter(|c| c.ty.contains_json())
+            .filter(|c| needs_shaping(&c.ty))
             .cloned()
             .collect()
     }
@@ -763,15 +760,16 @@ impl Inserter {
         let (db, tbl) = parse_db_table(table);
 
         // This path serialises the row map as it stands, so a value bound for a
-        // JSON column is shaped here — the encoder does it for RowBinary, and a
-        // hoisted `tags` array reaching the column unshaped is code 117.
-        let json_columns = self.json_columns(table).await;
+        // JSON, `Point` or `Array` column is shaped here — the encoder does it
+        // for RowBinary, and a hoisted `tags` array reaching a JSON column
+        // unshaped is code 117.
+        let shaped_columns = self.shaped_columns(table).await;
 
         // Serialise rows as NDJSON — sonic_rs for SIMD-accelerated encoding.
         let estimated_size = rows.len() * 256;
         let mut body = Vec::with_capacity(estimated_size);
         for (idx, row) in rows.iter().enumerate() {
-            let shaped = shape_json_row(row, &json_columns);
+            let shaped = shape_row(row, &shaped_columns);
             let row = shaped.as_ref().unwrap_or(row);
             match raw_payloads.get(idx) {
                 // Zero-copy `_json` splice; an empty entry (or none at all) is
@@ -1171,23 +1169,20 @@ impl Inserter {
     }
 }
 
-/// Shape a row's JSON-column values for the JSONEachRow body, cloning the row
-/// only when a value must change.
-fn shape_json_row(
-    row: &Map<String, Value>,
-    json_columns: &[ColumnDef],
-) -> Option<Map<String, Value>> {
-    let changes = json_columns.iter().any(|col| {
+/// Shape a row's values for the JSONEachRow body, cloning the row only when a
+/// value must change.
+fn shape_row(row: &Map<String, Value>, shaped_columns: &[ColumnDef]) -> Option<Map<String, Value>> {
+    let changes = shaped_columns.iter().any(|col| {
         row.get(&col.name)
-            .is_some_and(|value| json_shaping_changes(value, &col.ty))
+            .is_some_and(|value| shaping_changes(value, &col.ty))
     });
     if !changes {
         return None;
     }
     let mut shaped = row.clone();
-    for col in json_columns {
+    for col in shaped_columns {
         if let Some(value) = shaped.get_mut(&col.name) {
-            shape_json_for_type(value, &col.ty);
+            shape_for_type(value, &col.ty);
         }
     }
     Some(shaped)
@@ -1378,12 +1373,12 @@ mod tests {
     }
 
     #[test]
-    fn test_shape_json_row_wraps_an_ecs_tags_array() {
+    fn test_shape_row_wraps_an_ecs_tags_array() {
         let row = row_map(
             serde_json::json!({"message": "x", "_tags": ["preserve_original_event", "forwarded"]}),
         );
 
-        let shaped = shape_json_row(&row, &tags_json_column()).expect("the array must be shaped");
+        let shaped = shape_row(&row, &tags_json_column()).expect("the array must be shaped");
 
         assert_eq!(
             shaped.get("_tags").unwrap(),
@@ -1393,30 +1388,86 @@ mod tests {
     }
 
     #[test]
-    fn test_shape_json_row_does_not_clone_a_row_it_would_not_change() {
+    fn test_shape_row_does_not_clone_a_row_it_would_not_change() {
         let row = row_map(serde_json::json!({"message": "x", "_tags": {"env": "prod"}}));
 
         assert!(
-            shape_json_row(&row, &tags_json_column()).is_none(),
+            shape_row(&row, &tags_json_column()).is_none(),
             "an object needs no shaping, so the row must not be cloned"
         );
         assert!(
-            shape_json_row(&row, &[]).is_none(),
-            "a table with no JSON column must not be cloned either"
+            shape_row(&row, &[]).is_none(),
+            "a table with no shaped column must not be cloned either"
         );
     }
 
     #[test]
-    fn test_shape_json_row_wraps_broken_object_text() {
+    fn test_shape_row_wraps_broken_object_text() {
         let row = row_map(serde_json::json!({"_tags": "{not json"}));
 
-        let shaped = shape_json_row(&row, &tags_json_column()).expect("broken text must be shaped");
+        let shaped = shape_row(&row, &tags_json_column()).expect("broken text must be shaped");
 
         assert_eq!(
             shaped.get("_tags").unwrap(),
             &serde_json::json!({"value": "{not json"}),
             "text that does not parse is stored as the string it is"
         );
+    }
+
+    #[test]
+    fn test_shape_row_gives_a_point_and_a_single_array_value_their_column_forms() {
+        let columns = vec![
+            ColumnDef::new("source_geo_location", "Point"),
+            ColumnDef::new("related_ip", "Array(IPv6)"),
+        ];
+        let row = row_map(serde_json::json!({
+            "source_geo_location": {"lat": 41.12, "lon": -71.34},
+            "related_ip": "10.0.0.1",
+        }));
+
+        let shaped = shape_row(&row, &columns).expect("both values need shaping");
+
+        assert_eq!(
+            shaped.get("source_geo_location").unwrap(),
+            &serde_json::json!([-71.34, 41.12]),
+            "a JSONEachRow Point reads [lon, lat]"
+        );
+        assert_eq!(
+            shaped.get("related_ip").unwrap(),
+            &serde_json::json!(["10.0.0.1"])
+        );
+    }
+
+    #[test]
+    fn test_shape_row_leaves_values_already_in_their_column_form() {
+        let columns = vec![
+            ColumnDef::new("p", "Point"),
+            ColumnDef::new("ips", "Array(IPv6)"),
+        ];
+        let row = row_map(serde_json::json!({"p": [-71.34, 41.12], "ips": ["10.0.0.1"]}));
+
+        assert!(shape_row(&row, &columns).is_none());
+    }
+
+    #[test]
+    fn test_only_json_point_and_array_columns_are_shaped() {
+        for (ty, shaped) in [
+            ("JSON", true),
+            ("Point", true),
+            ("Array(String)", true),
+            ("Ring", true),
+            ("Map(String, JSON)", true),
+            ("Map(String, Point)", true),
+            ("Map(String, String)", false),
+            ("String", false),
+            ("Nullable(IPv6)", false),
+        ] {
+            assert_eq!(
+                needs_shaping(&crate::clickhouse_ext::ParsedType::parse(ty)),
+                shaped,
+                "{ty}"
+            );
+        }
     }
 
     #[test]

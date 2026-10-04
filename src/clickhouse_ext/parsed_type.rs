@@ -61,7 +61,7 @@ pub enum TypeTag {
     Tuple,
     Point,
     JSON,
-    /// Forward compat -- unknown types encode as String.
+    /// A type the encoder has no arm for; a value bound for it is refused.
     Unknown,
 }
 
@@ -282,6 +282,23 @@ impl ParsedType {
             return result;
         }
 
+        // Tuple(...) carries its element types as parameters; the tag is what
+        // keeps the encoder from guessing its width.
+        if let Some(("Tuple", _)) = type_str.split_once('(') {
+            result.base = "Tuple".to_string();
+            result.tag = TypeTag::Tuple;
+            return result;
+        }
+
+        // A geo shape is an array of points on the wire, so it encodes through
+        // the Array arm while `base` keeps the name `system.columns` reported.
+        if let Some(element) = geo_shape_element(&type_str) {
+            result.tag = TypeTag::Array;
+            result.array_element = Some(Box::new(Self::parse(element)));
+            result.base = type_str;
+            return result;
+        }
+
         // Check for Enum8/Enum16
         if type_str.starts_with("Enum8") || type_str.starts_with("Enum16") {
             if type_str.starts_with("Enum8") {
@@ -450,11 +467,22 @@ impl ParsedType {
                 Some(4)
             }
             "UInt64" | "Int64" | "Float64" | "Decimal64" | "DateTime64" => Some(8),
-            "Int128" | "UInt128" | "Decimal128" | "UUID" | "IPv6" => Some(16),
+            "Int128" | "UInt128" | "Decimal128" | "UUID" | "IPv6" | "Point" => Some(16),
             "Int256" | "UInt256" | "Decimal256" => Some(32),
             "FixedString" => self.fixed_size,
             _ => None,
         }
+    }
+}
+
+/// The element type of a ClickHouse geo shape, which is an `Array` of it.
+fn geo_shape_element(base: &str) -> Option<&'static str> {
+    match base {
+        "Ring" | "LineString" => Some("Point"),
+        "Polygon" => Some("Ring"),
+        "MultiLineString" => Some("LineString"),
+        "MultiPolygon" => Some("Polygon"),
+        _ => None,
     }
 }
 
@@ -665,6 +693,46 @@ mod tests {
         );
         assert_eq!(ParsedType::parse("String").fixed_byte_size(), None);
         assert_eq!(ParsedType::parse("Array(Int64)").fixed_byte_size(), None);
+    }
+
+    #[test]
+    fn a_parameterised_tuple_is_tagged_tuple() {
+        let t = ParsedType::parse("Tuple(UInt8, String)");
+        assert_eq!(t.tag, TypeTag::Tuple);
+        assert_eq!(t.base, "Tuple");
+        assert_eq!(t.category(), "Tuple");
+        assert_eq!(t.raw, "Tuple(UInt8, String)");
+        assert_eq!(t.fixed_byte_size(), None);
+    }
+
+    #[test]
+    fn a_point_is_two_float64_wide() {
+        let t = ParsedType::parse("Point");
+        assert_eq!(t.tag, TypeTag::Point);
+        assert_eq!(t.category(), "Geo");
+        assert_eq!(t.fixed_byte_size(), Some(16));
+    }
+
+    #[test]
+    fn a_geo_shape_is_an_array_down_to_its_points() {
+        for (raw, arrays) in [
+            ("Ring", 1),
+            ("LineString", 1),
+            ("Polygon", 2),
+            ("MultiLineString", 2),
+            ("MultiPolygon", 3),
+        ] {
+            let t = ParsedType::parse(raw);
+            assert_eq!(t.base, raw, "base keeps the reported name");
+            assert_eq!(t.category(), "Geo", "{raw}");
+            assert_eq!(t.fixed_byte_size(), None, "{raw} is variable length");
+            let mut level = &t;
+            for _ in 0..arrays {
+                assert_eq!(level.tag, TypeTag::Array, "{raw}");
+                level = level.array_element.as_deref().expect("an element type");
+            }
+            assert_eq!(level.tag, TypeTag::Point, "{raw} must bottom out at Point");
+        }
     }
 
     #[test]

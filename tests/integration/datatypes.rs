@@ -716,7 +716,8 @@ async fn every_supported_column_type_lands_through_the_row_binary_header() {
 }
 
 /// A column type the encoder has no writer for is refused before anything is
-/// sent, never written as some other type's bytes.
+/// sent, never written as some other type's bytes -- whether the row carries a
+/// value for it or leaves it to a default.
 #[tokio::test]
 async fn an_unsupported_column_type_is_refused_before_it_is_sent() {
     let target = Target::new(test_name!()).await;
@@ -732,7 +733,7 @@ async fn an_unsupported_column_type_is_refused_before_it_is_sent() {
 
     for (index, (ty, value)) in [
         ("Tuple(String, UInt8)", json!(["a", 1])),
-        ("Point", json!([1.0, 2.0])),
+        ("Tuple(String, UInt8)", Value::Null),
     ]
     .into_iter()
     .enumerate()
