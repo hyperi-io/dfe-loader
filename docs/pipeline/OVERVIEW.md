@@ -88,10 +88,7 @@ name. Anything not promoted stays in the payload, available as `_json`.
 
 ## 4. Coerce
 
-Coercion is applied only to the delta between the payload value and the column
-type that needs help: epoch vs ISO timestamps, UUID strings, IPv4/IPv6, numeric
-strings. It is deliberately narrow -- the encoder handles native types directly,
-so coercion only steps in where a wire value needs reshaping to fit the column.
+Coercion is applied only to the delta between the payload value and the column type that needs help: epoch vs ISO timestamps, UUID strings, IPv4/IPv6, numeric strings, every geo_point form for a `Point`, and a single value for an `Array` (see [../clickhouse/TYPES.md](../clickhouse/TYPES.md)). It is deliberately narrow -- the encoder handles native types directly, so coercion only steps in where a wire value needs reshaping to fit the column.
 Coercion warnings are sampled, not logged per row, to avoid flooding.
 
 ## 5. Enrich
