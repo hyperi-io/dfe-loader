@@ -780,7 +780,7 @@
           "default": true
         },
         "pre_warm_retry_secs": {
-          "description": "Total wall-clock budget for pre-warm retry on startup.\n`0` disables retry — pre-warm runs once and moves on.",
+          "description": "How long, from startup, a failed schema fetch for a table the config\nnames is retried in the background. Intake never waits on it. `0`\nfetches each table once.",
           "type": "integer",
           "format": "uint64",
           "minimum": 0,
