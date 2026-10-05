@@ -558,13 +558,11 @@ impl Config {
             image_registry_from_cascade,
         };
 
-        // Resolve base image + registry via the scalo cascade helpers so org-wide
-        // overrides in deployment.* config keys (or env) win before falling back
-        // to scalo's DEFAULT_BASE_IMAGE / DEFAULT_IMAGE_REGISTRY. scalo 2.10's
-        // Dockerfile generator is contract-driven, so these values flow into the
-        // generated Dockerfile.
+        // A deployment.* cascade key (or env) wins over the base image and registry
+        // defaults; scalo names no default registry, so the published one is ours.
         let base_image = base_image_from_cascade();
-        let image_registry = image_registry_from_cascade();
+        let image_registry =
+            image_registry_from_cascade().unwrap_or_else(|| "ghcr.io/hyperi-io".into());
 
         DeploymentContract {
             schema_version: 3,
@@ -645,18 +643,19 @@ impl Config {
                 &base_image,
             ),
             image_profile: ImageProfile::Production,
-            // dfe-loader is BUSL-1.1 (scalo itself is Apache-2.0). Drive the OCI
-            // licenses label + the generated Dockerfile's `# License` header from
-            // the contract so a regen never stamps Apache into this BUSL repo.
+            // scalo writes no vendor, licence or copyright of its own, so the
+            // labels and the generated Dockerfile header carry exactly these.
             oci_labels: OciLabels {
                 title: "dfe-loader".into(),
                 description: "High-performance Kafka to ClickHouse data loader".into(),
+                vendor: "HYPERI PTY LIMITED".into(),
+                label_namespace: "io.hyperi".into(),
                 licenses: "BUSL-1.1".into(),
-                ..OciLabels::default()
+                copyright: "(c) 2026 HYPERI PTY LIMITED".into(),
             },
             // Reflectable config (scalo-rs#6): derived JSON Schema of the full
             // Config (ClickHouse sink + the routing/enrichment/coercion pipeline,
-            // secret fields marked x-dfe-secret) + a catalog of the sink + the
+            // secret fields marked x-scalo-secret) + a catalog of the sink + the
             // pipeline transform stages.
             config_schema: Some(scalo::deployment::config_schema_json::<crate::config::Config>()),
             capabilities: Self::capabilities(),
