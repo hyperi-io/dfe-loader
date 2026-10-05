@@ -337,7 +337,7 @@ impl Orchestrator {
             mpsc::channel::<TableResolutionResult>(SCHEMA_RESOLVE_CAPACITY);
         {
             let resolver_client = Arc::clone(&http_client);
-            let result_tx = schema_result_tx;
+            let result_tx = schema_result_tx.clone();
             let shutdown_resolver = self.shutdown.clone();
             tokio::spawn(async move {
                 loop {
@@ -349,35 +349,11 @@ impl Orchestrator {
                             let tx = result_tx.clone();
                             // Each table resolved concurrently — never blocks the resolver loop.
                             tokio::spawn(async move {
-                                let (comment_res, schema_res, comments_res) = tokio::join!(
-                                    client.fetch_table_comment(&table),
-                                    client.fetch_table_schema(&table),
-                                    client.fetch_column_comments(&table),
-                                );
-                                let column_directives = comments_res
-                                    .unwrap_or_default()
-                                    .into_iter()
-                                    .map(|(col, comment)| (col, parse_directives(&comment)))
-                                    .collect();
-                                // Keep the reason: the event loop can only fall
-                                // back to the default table safely if it can tell
-                                // an absent table from an unreachable ClickHouse.
-                                let schema = match schema_res {
-                                    Ok(s) => SchemaResolution::Resolved(s),
-                                    Err(ClickHouseError::TableNotFound(_)) => {
-                                        SchemaResolution::TableNotFound
-                                    }
-                                    Err(e) => {
-                                        debug!(table = %table, error = %e, "Schema fetch failed, will retry");
-                                        SchemaResolution::Unavailable
-                                    }
-                                };
-                                let _ = tx.send(TableResolutionResult {
-                                    table,
-                                    comment: comment_res.unwrap_or_default(),
-                                    schema,
-                                    column_directives,
-                                }).await;
+                                let (result, fault) = resolve_table(&client, table).await;
+                                if let Some(e) = fault {
+                                    debug!(table = %result.table, error = %e, "Schema fetch failed, will retry");
+                                }
+                                let _ = tx.send(result).await;
                             });
                         }
                     }
@@ -497,61 +473,17 @@ impl Orchestrator {
             "Pipeline running"
         );
 
-        // Pre-warm the schema cache with bounded-backoff retry so a brief
-        // ClickHouse outage at startup recovers before the first message —
-        // failed tables otherwise fall to the silent-loss transformer path (#36).
-        // Tables still failing after the budget fall back to per-message
-        // queue-and-retry. Comments are collected and applied to capture
-        // overrides after the loop (capture_overrides is &mut and cannot be
-        // borrowed inside the warm closure's future).
-        {
-            let pre_warm_budget = Duration::from_secs(self.config.schema.pre_warm_retry_secs);
-            let tables = collect_pre_warm_tables(&self.config.routing);
-            let comments_cell: Arc<std::sync::Mutex<Vec<(String, String)>>> =
-                Arc::new(std::sync::Mutex::new(Vec::new()));
-            let report = {
-                let http = &http_client;
-                let sc = &schema_cache;
-                let cm = &col_meta_cache;
-                let comments = Arc::clone(&comments_cell);
-                pre_warm_with_retry(
-                    move |t| {
-                        let comments = Arc::clone(&comments);
-                        warm_tables_once(t, http, sc, cm, comments)
-                    },
-                    tables,
-                    pre_warm_budget,
-                    &self.shutdown,
-                )
-                .await
-            };
-            let collected = Arc::try_unwrap(comments_cell)
-                .unwrap_or_else(|a| std::sync::Mutex::new(a.lock().unwrap().clone()))
-                .into_inner()
-                .unwrap_or_default();
-            for (table, comment) in collected {
-                capture_overrides.update_from_comment(&table, &comment);
-            }
-            info!(
-                succeeded = report.succeeded.len(),
-                failed = report.failed.len(),
-                rounds = report.rounds,
-                "Schema cache pre-warm complete"
-            );
-            if !report.failed.is_empty() {
-                warn!(
-                    tables = ?report.failed,
-                    "Pre-warm gave up on some tables — will retry per-message"
-                );
-            }
-            if let Some(ref m) = self.metrics {
-                m.update_schema_prewarm_failed_tables(report.failed.len());
-                // Rounds beyond the first are retries.
-                for _ in 1..report.rounds {
-                    m.record_schema_prewarm_retry();
-                }
-            }
-        }
+        // Intake never waits on a schema: a record whose table is not resolved
+        // yet waits in the pending-schema buffer (#36), so pre-warm runs beside
+        // the event loop and hands each answer to it like any resolution.
+        let pre_warm = tokio::spawn(pre_warm_schemas(
+            Arc::clone(&http_client),
+            collect_pre_warm_tables(&self.config.routing),
+            Duration::from_secs(self.config.schema.pre_warm_retry_secs),
+            schema_result_tx,
+            self.shutdown.clone(),
+            self.metrics.clone(),
+        ));
 
         // Whether a full pending-schema buffer stopping intake has been logged.
         let mut schema_pause_logged = false;
@@ -725,6 +657,20 @@ impl Orchestrator {
                             }
                             // Populate SchemaCache for HeaderExtractor (Change A)
                             schema_cache.insert(table.clone(), schema);
+                        }
+                        SchemaResolution::TableNotFound if *table == default_table => {
+                            // Nothing falls back from the default table, so it is never recorded
+                            // absent and its rows wait for it in the pending-schema buffer.
+                            schema_cache.invalidate(table);
+                            static DEFAULT_ABSENT_TS: std::sync::atomic::AtomicU64 =
+                                std::sync::atomic::AtomicU64::new(0);
+                            if scalo::logger::log_debounced(&DEFAULT_ABSENT_TS, 60_000) {
+                                warn!(
+                                    table = %table,
+                                    pending = pending_schema_buffer.len_per_table(table),
+                                    "The default table does not exist, rows routed to it wait for it (max 1 per 60s)"
+                                );
+                            }
                         }
                         SchemaResolution::TableNotFound => {
                             // An unknown source is a routing miss, so its events
@@ -1252,6 +1198,7 @@ impl Orchestrator {
 
         // Stop schema cache background refresh task.
         schema_cache.shutdown();
+        pre_warm.abort();
 
         // Idempotent: a drain has closed the transport already, a failed recv has not.
         if let Err(e) = transport.close().await {
@@ -2293,68 +2240,108 @@ where
     }
 }
 
-/// Production single-pass warm: fetch schema + column comments + table comment
-/// for each table, populate the schema cache and column-meta cache, and collect
-/// non-empty table comments into `comments_out` for the caller to apply to
-/// `CaptureOverrides` afterwards. Returns per-table success.
+/// Fetch `table`'s schema, table COMMENT and column directives, with the fetch
+/// error behind an `Unavailable` answer so the caller can name it.
+async fn resolve_table(
+    client: &ClickHouseQueryClient,
+    table: String,
+) -> (TableResolutionResult, Option<ClickHouseError>) {
+    let (comment_res, schema_res, comments_res) = tokio::join!(
+        client.fetch_table_comment(&table),
+        client.fetch_table_schema(&table),
+        client.fetch_column_comments(&table),
+    );
+    let column_directives = comments_res
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(col, comment)| (col, parse_directives(&comment)))
+        .collect();
+    // Keep the reason: the event loop can only fall back to the default table
+    // safely if it can tell an absent table from an unreachable ClickHouse.
+    let (schema, fault) = match schema_res {
+        Ok(s) => (SchemaResolution::Resolved(s), None),
+        Err(ClickHouseError::TableNotFound(_)) => (SchemaResolution::TableNotFound, None),
+        Err(e) => (SchemaResolution::Unavailable, Some(e)),
+    };
+    let result = TableResolutionResult {
+        table,
+        comment: comment_res.unwrap_or_default(),
+        schema,
+        column_directives,
+    };
+    (result, fault)
+}
+
+/// Resolve the tables the config names, retrying a failed fetch within
+/// `budget`, and hand every answer to the event loop on `results`.
 ///
-/// All borrowed parameters are SHARED references (the caches use interior
-/// mutability via `Arc`), so the returned future borrows the caller's scope —
-/// NOT a closure environment — which keeps `pre_warm_with_retry`'s closure
-/// bound satisfiable.
+/// Runs beside the event loop, which applies each answer as it does any
+/// resolution, so no record waits on it.
+async fn pre_warm_schemas(
+    client: Arc<ClickHouseQueryClient>,
+    tables: Vec<String>,
+    budget: Duration,
+    results: mpsc::Sender<TableResolutionResult>,
+    shutdown: CancellationToken,
+    metrics: Option<Metrics>,
+) {
+    let report = {
+        let client = client.as_ref();
+        let results = &results;
+        pre_warm_with_retry(
+            move |t| warm_tables_once(t, client, results),
+            tables,
+            budget,
+            &shutdown,
+        )
+        .await
+    };
+    info!(
+        resolved = report.succeeded.len(),
+        failed = report.failed.len(),
+        rounds = report.rounds,
+        "Schema cache pre-warm complete"
+    );
+    if !report.failed.is_empty() {
+        warn!(
+            tables = ?report.failed,
+            "Pre-warm gave up on some tables, each is resolved again when a record needs it"
+        );
+    }
+    if let Some(ref m) = metrics {
+        m.update_schema_prewarm_failed_tables(report.failed.len());
+        // Rounds beyond the first are retries.
+        for _ in 1..report.rounds {
+            m.record_schema_prewarm_retry();
+        }
+    }
+}
+
+/// One pre-warm round: resolve each of `tables` and send every answer to
+/// `results`. A table `ClickHouse` answered for is done, absent included, and
+/// only a failed fetch is tried again.
 ///
-/// `comments_out` uses `Arc<Mutex<_>>` rather than `RefCell` so that the
-/// future is `Send` when the calling async task requires it.
+/// Both references come from the caller's scope, not a closure environment,
+/// which keeps `pre_warm_with_retry`'s closure bound satisfiable.
 async fn warm_tables_once(
     tables: Vec<String>,
-    http_client: &Arc<ClickHouseQueryClient>,
-    schema_cache: &SharedSchemaCache,
-    col_meta_cache: &Arc<ColumnMetaCache>,
-    comments_out: Arc<std::sync::Mutex<Vec<(String, String)>>>,
+    client: &ClickHouseQueryClient,
+    results: &mpsc::Sender<TableResolutionResult>,
 ) -> Vec<(String, bool)> {
     use futures::future::join_all;
 
-    let results: Vec<_> = join_all(tables.into_iter().map(|table| {
-        let client = Arc::clone(http_client);
-        async move {
-            let (schema_res, comments_res, comment_res) = tokio::join!(
-                client.fetch_table_schema(&table),
-                client.fetch_column_comments(&table),
-                client.fetch_table_comment(&table),
-            );
-            (table, schema_res, comments_res, comment_res)
+    let resolved = join_all(tables.into_iter().map(|table| resolve_table(client, table))).await;
+    let mut out = Vec::with_capacity(resolved.len());
+    for (result, fault) in resolved {
+        let table = result.table.clone();
+        if let Some(e) = &fault {
+            // Name the fault: a swallowed fetch error here once hid a
+            // wrong-protocol config behind a bare failed-count (#115).
+            warn!(table = %table, error = %e, "Schema pre-warm fetch failed");
         }
-    }))
-    .await;
-
-    let mut out = Vec::with_capacity(results.len());
-    for (table, schema_res, comments_res, comment_res) in results {
-        match schema_res {
-            Ok(schema) => {
-                schema_cache.insert(table.clone(), schema);
-                if let Ok(comments) = comments_res {
-                    let directives = comments
-                        .into_iter()
-                        .map(|(col, comment)| (col, parse_directives(&comment)))
-                        .collect();
-                    col_meta_cache.apply_ddl(&table, directives);
-                }
-                if let Ok(comment) = comment_res
-                    && !comment.is_empty()
-                    && let Ok(mut guard) = comments_out.lock()
-                {
-                    guard.push((table.clone(), comment));
-                }
-                debug!(table = %table, "Pre-warmed schema cache");
-                out.push((table, true));
-            }
-            Err(e) => {
-                // Name the fault: a swallowed fetch error here once hid a
-                // wrong-protocol config behind a bare failed-count (#115).
-                warn!(table = %table, error = %e, "Schema pre-warm fetch failed");
-                out.push((table, false));
-            }
-        }
+        // A closed channel means the event loop has stopped, and the task is aborted with it.
+        let _ = results.send(result).await;
+        out.push((table, fault.is_none()));
     }
     out
 }

@@ -1085,8 +1085,9 @@ pub struct SchemaConfig {
     pub cache_ttl_secs: u64,
     /// Whether to refresh the schema cache on insert errors.
     pub refresh_on_error: bool,
-    /// Total wall-clock budget for pre-warm retry on startup.
-    /// `0` disables retry — pre-warm runs once and moves on.
+    /// How long, from startup, a failed schema fetch for a table the config
+    /// names is retried in the background. Intake never waits on it. `0`
+    /// fetches each table once.
     pub pre_warm_retry_secs: u64,
     /// Max messages buffered per table while waiting for schema resolution.
     /// On Kafka, excess messages route to DLQ with a security event. On gRPC,

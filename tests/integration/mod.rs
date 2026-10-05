@@ -22,6 +22,8 @@ mod field_mapping;
 mod geoip_download_e2e;
 #[cfg(feature = "testcontainers")]
 mod grpc_outage;
+#[cfg(feature = "testcontainers")]
+mod grpc_startup;
 mod helm_contract;
 mod inserter;
 #[cfg(feature = "testcontainers")]

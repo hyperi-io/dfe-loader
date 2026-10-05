@@ -89,6 +89,8 @@ pod restart. The warning names the move into absence and not the state: the
 re-resolved answer is the one already held, so a dead source name is announced
 once rather than once a minute for the life of the deployment.
 
+The default table is never held absent, because nothing falls back from it. A record routed to it while it does not exist waits in the pending-schema buffer and is resolved again while it waits, until the table exists or the record reaches `schema.pending_max_age_secs` and is retired like any record whose schema never arrived.
+
 ## The setting drives the action
 
 Routing is config-cascade behaviour, so it is tested by outcome, not by parse:
