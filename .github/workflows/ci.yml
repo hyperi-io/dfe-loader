@@ -21,12 +21,12 @@ on:
         type: string
         required: false
         default: ""
-        description: "Tag to re-publish (existing tag). Omit + set from-head to release HEAD."
+        description: "Tag to publish (e.g. v1.14.5)"
       from-head:
         type: string
         required: false
         default: ""
-        description: "'true' to release/retry the current HEAD (issue #35)."
+        description: "'true' to release/retry the current HEAD."
       bump:
         type: string
         required: false
@@ -42,6 +42,11 @@ on:
         required: false
         default: ""
         description: "'true' to consent, for this run only, to shipping a skipped-optimisation build under a release tag."
+      optimize-tier:
+        type: string
+        required: false
+        default: ""
+        description: "'release' to build the release optimisation tier on a run that publishes nothing (Rust: PGO + BOLT)."
 
 permissions:
   contents: write
@@ -58,6 +63,7 @@ jobs:
       bump: ${{ inputs.bump || 'auto' }}
       skip-optimize: ${{ inputs.skip-optimize || '' }}
       release-unoptimized: ${{ inputs.release-unoptimized || '' }}
+      optimize-tier: ${{ inputs.optimize-tier || '' }}
     # Least privilege: pass only the secrets rust-ci.yml consumes, never `inherit`.
     secrets:
       CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

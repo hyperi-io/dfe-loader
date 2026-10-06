@@ -34,6 +34,10 @@ mod testcontainers_impl {
     // renovate: datasource=docker depName=apache/kafka
     const KAFKA_TAG: &str = "4.3.1";
 
+    /// Digest of `KAFKA_TAG`, apart from it because the Renovate regex stops at a colon.
+    const KAFKA_DIGEST: &str =
+        "sha256:77e3df9054047a88b520d0cc46e16696d3b22022e1d580aeccd2632df6532837";
+
     /// ClickHouse to test against -- the server dfe-infra `versions.yaml`
     /// deploys and `docker-compose.dev.yaml` runs, pinned to the patch and its
     /// digest rather than the 26.3 minor, so a rebuild of that tag cannot
@@ -46,12 +50,12 @@ mod testcontainers_impl {
     /// a bare tag on the line below the annotation and stops at a colon, so a
     /// `tag@sha256:...` value would take the pin out of review.
     // renovate: datasource=docker depName=clickhouse/clickhouse-server
-    const CLICKHOUSE_TAG: &str = "26.3.32.14";
+    const CLICKHOUSE_TAG: &str = "26.3.42.3";
 
     /// Digest of `CLICKHOUSE_TAG`. Docker resolves the reference by digest, so
     /// a tag moved without this one still pulls the old server.
     const CLICKHOUSE_DIGEST: &str =
-        "sha256:456063a689194186633bb3db0862283068f4c2ee538852d3aaffa7eb66f1f841";
+        "sha256:21d572843e59539c7d100286b6f5a6053c341fe4b33c2d7b74b1ff7cb24c5399";
 
     /// Bound on one ClickHouse readiness probe, so a hung connection costs a
     /// retry instead of the whole startup budget.
@@ -227,7 +231,7 @@ mod testcontainers_impl {
         // during its GraalVM `setup` binary, so use the JVM image.
         KafkaImage::default()
             .with_jvm_image()
-            .with_tag(KAFKA_TAG)
+            .with_tag(format!("{KAFKA_TAG}@{KAFKA_DIGEST}"))
             .with_container_name(&name)
             .with_labels(crate::common::test_labels("kafka"))
             // A JVM broker takes tens of seconds to print "Kafka Server

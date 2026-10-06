@@ -28,12 +28,12 @@ required-features = ["pgo-driver"]
 
 [dependencies]
 # Async runtime
-tokio = { version = ">=1.53.1, <2", features = ["full"] }
+tokio = { version = ">=1.53.2, <2", features = ["full"] }
 tokio-util = { version = ">=0.7.19, <0.8", features = ["rt"] }
 
 # Shared library with transport abstraction. The floor is the first release whose
 # contract carries no vendor defaults, so the app names its own.
-scalo = { version = "2.14.0", features = ["config-schema", "transport-kafka", "transport-grpc", "dlq-kafka", "config", "config-reload", "deployment", "version-check", "scaling", "cli-service", "top", "logger", "metrics", "service-metrics", "expression", "memory", "worker-batch", "governor", "secrets", "sink-stack"] }
+scalo = { version = "2.14.1", features = ["config-schema", "transport-kafka", "transport-grpc", "dlq-kafka", "config", "config-reload", "deployment", "version-check", "scaling", "cli-service", "top", "logger", "metrics", "service-metrics", "expression", "memory", "worker-batch", "governor", "secrets", "sink-stack"] }
 
 # Steps scalo's jittered retry schedule (sink_stack backoff). Range MUST track
 # scalo's: BackoffBuilder only applies to the ExponentialBuilder scalo returns.
@@ -44,11 +44,11 @@ backon = { version = ">=1.6.0, <2", default-features = false, features = ["std"]
 schemars = { version = ">=1.2.2, <2", default-features = false, features = ["std", "derive", "preserve_order", "indexmap2"] }
 
 # CEL expression evaluation (same crate scalo uses, needed for Program type).
-# Range MUST track scalo's, which is `>=0.13, <0.14`: we hand cel::Program across
+# Range MUST track scalo's, which is `>=0.14.5, <0.15`: we hand cel::Program across
 # the scalo boundary, so a wider range here lets cargo resolve two semver-
-# incompatible cels and Program stops being the same type. cel 0.14 also breaks
-# Type, Env and FunctionContext. In ignoreDeps until scalo moves first.
-cel = { version = ">=0.13, <0.14", features = ["json"] }
+# incompatible cels and Program stops being the same type. In ignoreDeps so it
+# moves only with scalo.
+cel = { version = ">=0.14.5, <0.15", features = ["json"] }
 
 # JSON parsing (SIMD-accelerated)
 sonic-rs = ">=0.5.10, <0.6"
@@ -63,7 +63,7 @@ clap = { version = ">=4.6.7, <5", features = ["derive", "env"] }
 dotenvy = ">=0.15.7, <0.16"
 
 # Error handling
-thiserror = ">=2.0.20, <3"
+thiserror = ">=2.0.21, <3"
 
 # Logging & metrics
 tracing = ">=0.1.44, <0.2"
@@ -79,7 +79,7 @@ tikv-jemallocator = { version = ">=0.7.0, <0.8", optional = true }
 maxminddb = { version = ">=0.32.0, <0.33", features = ["mmap"] }
 
 # GeoIP auto-download (HTTP + gzip decompression + tar extraction)
-# Pinned to 0.12 to match scalo (reqwest-middleware/vaultrs don't support 0.13 yet)
+# Held on 0.12: 0.13 drops the rustls-tls-native-roots feature this client trusts the system store through.
 reqwest = { version = ">=0.12, <0.13", default-features = false, features = ["rustls-tls-native-roots", "gzip"] }
 flate2 = ">=1.1.10, <2"
 tar = ">=0.4.46, <0.5"
@@ -92,7 +92,7 @@ clickhouse = { version = ">=0.15.0, <0.16", features = ["lz4", "time", "rustls-t
 time = ">=0.3.55, <0.4"
 
 # Utilities
-uuid = { version = ">=1.26.1, <2", features = ["v4", "v7"] }
+uuid = { version = ">=1.27.0, <2", features = ["v4", "v7"] }
 rustc-hash = ">=2.1.3, <3"  # FxHashMap - faster hashing for internal maps
 memchr = ">=2.8.3, <3"     # SIMD byte scanning for directive parser
 # Kafka auto-discovery filters are regexes in scalo; escape() keeps a DLQ topic
@@ -117,7 +117,7 @@ rdkafka = { version = ">=0.39.0, <0.40", features = ["dynamic-linking"], optiona
 # Testing
 criterion = { version = ">=0.8.2, <0.9", features = ["html_reports"] }
 proptest = ">=1.11.0, <2"
-test-case = ">=3.3.1, <4"
+test-case = ">=3.4.0, <4"
 
 # Blocking HTTP for sync test reachability probes (skip_if_no_clickhouse macro).
 # Adds the `blocking` feature to the reqwest already-pinned by the lib.
@@ -126,7 +126,7 @@ reqwest = { version = ">=0.12, <0.13", default-features = false, features = ["bl
 # Integration test containers
 testcontainers = ">=0.27.3, <0.28"
 testcontainers-modules = { version = ">=0.15.0, <0.16", features = ["kafka", "clickhouse"] }
-# The reqwest major testcontainers' HttpWaitStrategy::with_client takes; the lib stays on 0.12 for scalo.
+# The reqwest major testcontainers' HttpWaitStrategy::with_client takes; the lib's own reqwest stays on 0.12.
 testcontainers-reqwest = { package = "reqwest", version = ">=0.13.5, <0.14", default-features = false }
 
 # Kafka producer for e2e tests (test message injection)
@@ -137,7 +137,7 @@ clickhouse = { version = ">=0.15.0, <0.16", features = ["lz4", "time", "rustls-t
 time = ">=0.3.55, <0.4"
 
 # Async test utilities
-tokio-test = ">=0.4.5, <0.5"
+tokio-test = ">=0.4.6, <0.5"
 tempfile = ">=3.27.0, <4"
 
 [[bench]]

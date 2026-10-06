@@ -14,7 +14,7 @@ services:
     # Matches CLICKHOUSE_TAG in tests/common/containers.rs and dfe-infra's
     # services.clickhouse-version. The 26.3 minor was a moving tag: every
     # rebuild of it changed the server without changing the pin.
-    image: clickhouse/clickhouse-server:26.3.32.14@sha256:456063a689194186633bb3db0862283068f4c2ee538852d3aaffa7eb66f1f841
+    image: clickhouse/clickhouse-server:26.3.42.3@sha256:21d572843e59539c7d100286b6f5a6053c341fe4b33c2d7b74b1ff7cb24c5399
     container_name: clickhouse-dev
     ports:
       - "9000:9000"   # Native protocol
@@ -41,7 +41,7 @@ services:
     # Matches KAFKA_TAG in scripts/pgo-workload.sh and dfe-infra's
     # services.redpanda-version. Two pins of the same broker on different
     # patches makes Renovate track two lines and open a PR per line.
-    image: redpandadata/redpanda:v26.2.2@sha256:468bd13a9f2bd24794cb7fddc867c767fb1008b9a07b297b89fde48c564d7d96
+    image: redpandadata/redpanda:v26.2.3@sha256:9e83cfa99278f30d0133271c26bf670cd69c94ffa6ba0b42830dd0c3bd9dcfd9
     container_name: redpanda-dev
     command:
       - redpanda
