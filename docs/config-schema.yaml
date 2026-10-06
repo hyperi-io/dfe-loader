@@ -410,6 +410,7 @@ $defs:
         default: ''
       password:
         type: string
+        x-scalo-secret: true
         x-dfe-secret: true
         writeOnly: true
         default: '***REDACTED***'
@@ -430,6 +431,7 @@ $defs:
         type:
         - string
         - 'null'
+        x-scalo-secret: true
         x-dfe-secret: true
         writeOnly: true
         default: null
@@ -462,6 +464,7 @@ $defs:
         type:
         - string
         - 'null'
+        x-scalo-secret: true
         x-dfe-secret: true
         writeOnly: true
         default: null
@@ -470,6 +473,7 @@ $defs:
         type:
         - string
         - 'null'
+        x-scalo-secret: true
         x-dfe-secret: true
         writeOnly: true
         default: null
@@ -608,6 +612,7 @@ $defs:
         default: default
       password:
         type: string
+        x-scalo-secret: true
         x-dfe-secret: true
         writeOnly: true
         default: '***REDACTED***'
@@ -829,6 +834,7 @@ $defs:
         type:
         - string
         - 'null'
+        x-scalo-secret: true
         x-dfe-secret: true
         writeOnly: true
         default: null

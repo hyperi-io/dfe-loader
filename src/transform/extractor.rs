@@ -26,7 +26,7 @@
 //! |---|---|
 //! | `_uuid`, `_timestamp_load` | Skipped — ClickHouse DEFAULT generates these |
 //! | `_json` | Skipped — zero-copy splice at serialisation time |
-//! | `_timestamp_received` | Always set to current UTC time |
+//! | `_timestamp_received` | The edge's receive stamp, then the directive's fields; else current UTC time |
 //! | `DateTime`/`DateTime64` | RFC3339 normalised to ClickHouse's text form |
 //! | `@skip` directive | Excluded from insert |
 //! | `@source:host.name` | Dotted path descends the parsed payload |
@@ -81,6 +81,9 @@ enum Sources<'a> {
     Fixed(&'static [&'static str]),
     /// Try the first path, then the second when there is one.
     Pair(&'a str, Option<&'a str>),
+    /// Try each compiled-in path, then each listed path the compiled-in ones
+    /// do not already name.
+    FixedThen(&'static [&'static str], &'a [String]),
 }
 
 impl<'a> Sources<'a> {
@@ -92,6 +95,13 @@ impl<'a> Sources<'a> {
             Sources::List(paths) => paths.iter().any(|path| f(path.as_str())),
             Sources::Fixed(paths) => paths.iter().any(|path| f(path)),
             Sources::Pair(first, second) => f(first) || second.is_some_and(f),
+            Sources::FixedThen(fixed, listed) => {
+                fixed.iter().any(|path| f(path))
+                    || listed
+                        .iter()
+                        .filter(|path| !fixed.contains(&path.as_str()))
+                        .any(|path| f(path.as_str()))
+            }
         }
     }
 }
@@ -102,6 +112,21 @@ impl<'a> Sources<'a> {
 /// load time as its event time (dfe-engine#498). `timestamp` stays first, which
 /// leaves a source already sending that key unaffected.
 static TIMESTAMP_SOURCES: &[&str] = &["timestamp", "@timestamp", "_timestamp"];
+
+/// The receive stamps DFE's own edges write: dfe-fetcher's, then dfe-receiver's.
+///
+/// They are read ahead of any directive, so a column whose header predates
+/// them still records when DFE received the event rather than when it loaded.
+static RECEIVED_STAMPS: &[&str] = &["_timestamp_received", "_timestamp_receiver"];
+
+/// The keys `_timestamp_received` reads when its column carries no directive:
+/// the edge stamps, then the source's own spellings.
+static RECEIVED_SOURCES: &[&str] = &[
+    "_timestamp_received",
+    "_timestamp_receiver",
+    "timestamp_received",
+    "received_at",
+];
 
 /// Per-table extraction state derived from the schema and its directives.
 ///
@@ -168,18 +193,23 @@ impl HeaderExtractor {
     /// Resolve the source paths a column reads.
     ///
     /// Mirrors the branch order of `extract()`: the columns `ClickHouse`
-    /// generates, then `_timestamp`, then `@skip`, then `@source`/`@renamed`,
-    /// then the column-name rules.
+    /// generates, then `_timestamp` and `_timestamp_received`, then `@skip`,
+    /// then `@source`/`@renamed`, then the column-name rules.
     fn sources_for<'a>(&'a self, name: &'a str, renamed: &'a [String], skip: bool) -> Sources<'a> {
-        if matches!(
-            name,
-            "_uuid" | "_timestamp_load" | "_json" | "_timestamp_received"
-        ) {
+        if matches!(name, "_uuid" | "_timestamp_load" | "_json") {
             return Sources::None;
         }
         // _timestamp reads the payload ahead of any directive.
         if name == "_timestamp" {
             return Sources::Fixed(TIMESTAMP_SOURCES);
+        }
+        // _timestamp_received reads the edge stamps ahead of its directive.
+        if name == "_timestamp_received" {
+            return if renamed.is_empty() {
+                Sources::Fixed(RECEIVED_SOURCES)
+            } else {
+                Sources::FixedThen(RECEIVED_STAMPS, renamed)
+            };
         }
         if skip {
             return Sources::None;
@@ -328,10 +358,18 @@ impl HeaderExtractor {
                 continue;
             }
 
-            // _timestamp_received: always the current ingest time, not from source.
+            // _timestamp_received: the edge's receive stamp, else the ingest time.
             if name == "_timestamp_received" {
                 if self.metadata_enabled {
-                    map.insert(name.clone(), Value::String(fmt_ts(&now)));
+                    let directives = col_meta.get(table, name);
+                    let found = self
+                        .sources_for(name, &directives.renamed, false)
+                        .try_each(|path| take_path(&mut parsed, path, name, &mut map, contended));
+                    if found && !map.get(name.as_str()).is_some_and(Value::is_null) {
+                        normalise_datetime(&mut map, name);
+                    } else {
+                        map.insert(name.clone(), Value::String(fmt_ts(&now)));
+                    }
                 }
                 continue;
             }
@@ -663,6 +701,123 @@ mod tests {
         if let Some(Value::String(ts)) = map.get("_timestamp_received") {
             assert!(ts.len() >= 19, "timestamp must be at least 19 chars: {ts}");
         }
+    }
+
+    /// `_timestamp_received` for one payload, through a table whose column
+    /// carries `directive` as its `@renamed` list, or none.
+    fn received_for(raw: &[u8], directive: Option<&str>) -> Option<Value> {
+        use crate::column_meta::ColumnDirectivesEntry;
+        use rustc_hash::FxHashMap;
+
+        let mut config = ColumnDirectivesConfig::default();
+        if let Some(renamed) = directive {
+            let mut table_cols = FxHashMap::default();
+            table_cols.insert(
+                "_timestamp_received".to_string(),
+                ColumnDirectivesEntry {
+                    renamed: Some(renamed.to_string()),
+                    ..Default::default()
+                },
+            );
+            config.tables.insert("dfe.events".to_string(), table_cols);
+        }
+        let schema = make_schema(&["_timestamp_received", "event"]);
+        default_extractor()
+            .extract(
+                raw,
+                "dfe.events",
+                &schema,
+                &ColumnMetaCache::new(config),
+                None,
+            )
+            .fields
+            .remove("_timestamp_received")
+    }
+
+    #[test]
+    fn timestamp_received_takes_the_fetcher_stamp_234() {
+        // dfe-fetcher stamps epoch milliseconds; the coercer converts the number.
+        let raw = br#"{"event":"x","_timestamp_received":1759700000123,"_timestamp_receiver":1759700099999}"#;
+        assert_eq!(
+            received_for(raw, None),
+            Some(Value::from(1_759_700_000_123_u64))
+        );
+    }
+
+    #[test]
+    fn timestamp_received_takes_the_receiver_stamp_when_no_fetcher_stamp_234() {
+        let raw = br#"{"event":"x","_timestamp_receiver":1759700099999}"#;
+        assert_eq!(
+            received_for(raw, None),
+            Some(Value::from(1_759_700_099_999_u64))
+        );
+    }
+
+    #[test]
+    fn timestamp_received_normalises_a_source_rfc3339_stamp_234() {
+        let raw = br#"{"event":"x","received_at":"2024-01-01T00:00:00.250Z"}"#;
+        assert_eq!(
+            received_for(raw, None),
+            Some(Value::String("2024-01-01 00:00:00.250".into()))
+        );
+    }
+
+    #[test]
+    fn timestamp_received_edge_stamp_beats_an_older_header_directive_234() {
+        // The 1.0.0 header names neither edge stamp; the edge stamp still wins.
+        let raw = br#"{"event":"x","received_at":"2024-01-01T00:00:00Z","_timestamp_received":1759700000123}"#;
+        let directive = Some("first(timestamp_received/received_at)");
+        assert_eq!(
+            received_for(raw, directive),
+            Some(Value::from(1_759_700_000_123_u64))
+        );
+
+        // With no edge stamp the directive's own fields still apply.
+        let raw = br#"{"event":"x","received_at":"2024-01-01T00:00:00Z"}"#;
+        assert_eq!(
+            received_for(raw, directive),
+            Some(Value::String("2024-01-01 00:00:00.000".into()))
+        );
+    }
+
+    #[test]
+    fn timestamp_received_falls_back_to_now_without_a_stamp_234() {
+        let before = Utc::now() - chrono::Duration::seconds(5);
+        let payloads: [&[u8]; 2] = [
+            br#"{"event":"x"}"#,
+            br#"{"event":"x","_timestamp_received":null}"#,
+        ];
+        for raw in payloads {
+            let Some(Value::String(ts)) = received_for(raw, None) else {
+                panic!(
+                    "no ingest-time fallback for {}",
+                    String::from_utf8_lossy(raw)
+                );
+            };
+            let parsed = chrono::NaiveDateTime::parse_from_str(&ts, "%Y-%m-%d %H:%M:%S%.3f")
+                .expect("ClickHouse text form")
+                .and_utc();
+            assert!(parsed >= before, "{ts} is not the ingest time");
+        }
+    }
+
+    #[test]
+    fn timestamp_received_stamp_is_not_taken_from_another_column_234() {
+        // A meta column reading the same key gets its own copy of it.
+        let extractor = default_extractor();
+        let raw = br#"{"received_at":"2024-01-01T00:00:00Z"}"#;
+        let schema = make_schema(&["_timestamp_received", "received_at"]);
+        let map = extractor
+            .extract(raw, "dfe.events", &schema, &empty_col_meta(), None)
+            .fields;
+        assert_eq!(
+            map.get("_timestamp_received"),
+            Some(&Value::String("2024-01-01 00:00:00.000".into()))
+        );
+        assert_eq!(
+            map.get("received_at"),
+            Some(&Value::String("2024-01-01T00:00:00Z".into()))
+        );
     }
 
     #[test]

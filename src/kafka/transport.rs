@@ -664,6 +664,8 @@ mod memory_adapter {
 ///
 /// The orchestrator uses this instead of a concrete adapter type, making the
 /// pipeline transport-agnostic at runtime.
+// One backend lives for the whole process, so the larger variant's size is paid once.
+#[allow(clippy::large_enum_variant)]
 pub enum TransportBackend {
     /// Kafka transport (production, default)
     Kafka(TransportAdapter),
