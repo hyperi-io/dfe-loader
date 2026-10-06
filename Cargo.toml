@@ -33,7 +33,7 @@ tokio-util = { version = ">=0.7.19, <0.8", features = ["rt"] }
 
 # Shared library with transport abstraction. The floor is the first release whose
 # contract carries no vendor defaults, so the app names its own.
-scalo = { version = "2.14.0", features = ["config-schema", "transport-kafka", "transport-grpc", "dlq-kafka", "config", "config-reload", "deployment", "version-check", "scaling", "cli-service", "top", "logger", "metrics", "service-metrics", "expression", "memory", "worker-batch", "governor", "secrets", "sink-stack"] }
+scalo = { version = "2.14.1", features = ["config-schema", "transport-kafka", "transport-grpc", "dlq-kafka", "config", "config-reload", "deployment", "version-check", "scaling", "cli-service", "top", "logger", "metrics", "service-metrics", "expression", "memory", "worker-batch", "governor", "secrets", "sink-stack"] }
 
 # Steps scalo's jittered retry schedule (sink_stack backoff). Range MUST track
 # scalo's: BackoffBuilder only applies to the ExponentialBuilder scalo returns.
@@ -63,7 +63,7 @@ clap = { version = ">=4.6.7, <5", features = ["derive", "env"] }
 dotenvy = ">=0.15.7, <0.16"
 
 # Error handling
-thiserror = ">=2.0.20, <3"
+thiserror = ">=2.0.21, <3"
 
 # Logging & metrics
 tracing = ">=0.1.44, <0.2"
@@ -117,7 +117,7 @@ rdkafka = { version = ">=0.39.0, <0.40", features = ["dynamic-linking"], optiona
 # Testing
 criterion = { version = ">=0.8.2, <0.9", features = ["html_reports"] }
 proptest = ">=1.11.0, <2"
-test-case = ">=3.3.1, <4"
+test-case = ">=3.4.0, <4"
 
 # Blocking HTTP for sync test reachability probes (skip_if_no_clickhouse macro).
 # Adds the `blocking` feature to the reqwest already-pinned by the lib.
@@ -137,7 +137,7 @@ clickhouse = { version = ">=0.15.0, <0.16", features = ["lz4", "time", "rustls-t
 time = ">=0.3.55, <0.4"
 
 # Async test utilities
-tokio-test = ">=0.4.5, <0.5"
+tokio-test = ">=0.4.6, <0.5"
 tempfile = ">=3.27.0, <4"
 
 [[bench]]
