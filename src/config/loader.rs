@@ -45,7 +45,7 @@ pub use super::pipeline::*;
 /// - `payload.pipeline_mode` — pipeline path chosen at startup
 /// - `metrics.*` — HTTP metrics server binds at startup
 /// - `logging.*` — tracing subscriber installed at startup
-/// - `scaling.*` / `keda.*` — scaling pressure built at startup
+/// - `scaling.*` — scaling pressure built at startup
 /// - `hot_reload.*` — watcher config set at startup
 /// - `schema.*` — schema cache created at startup
 /// - `geoip.*` — MMDB readers opened at startup
@@ -53,11 +53,9 @@ pub use super::pipeline::*;
 /// - `column_directives.*` — column directive cache built at startup
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
-#[derive(Default)]
 pub struct Config {
     // --- Requires restart (connections/state established at startup) ---
     /// Transport backend: "kafka" (default) or "grpc". **Restart required.**
-    #[serde(default = "default_transport")]
     pub transport: String,
     /// Kafka consumer config. **Restart required.**
     pub kafka: KafkaConfig,
@@ -81,8 +79,6 @@ pub struct Config {
     pub column_directives: crate::column_meta::ColumnDirectivesConfig,
     /// Hot-reload watcher config. **Restart required.**
     pub hot_reload: HotReloadConfig,
-    /// KEDA autoscaling config. **Restart required.**
-    pub keda: KedaConfig,
     /// Scaling pressure config. **Restart required.**
     pub scaling: ScalingConfig,
     /// Batch processing engine config (SIMD parse, pre-route, parallelism). **Restart required.**
@@ -118,6 +114,37 @@ pub const TRANSPORT_GRPC: &str = "grpc";
 
 fn default_transport() -> String {
     TRANSPORT_KAFKA.to_string()
+}
+
+// Written out because a derived Default gives `transport` an empty string, not the bus.
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            transport: default_transport(),
+            kafka: Default::default(),
+            grpc: Default::default(),
+            clickhouse: Default::default(),
+            payload: Default::default(),
+            metrics: Default::default(),
+            logging: Default::default(),
+            schema: Default::default(),
+            geoip: Default::default(),
+            computed_columns: Default::default(),
+            column_directives: Default::default(),
+            hot_reload: Default::default(),
+            scaling: Default::default(),
+            batch_processing: Default::default(),
+            routing: Default::default(),
+            buffer: Default::default(),
+            memory: Default::default(),
+            timestamp_dq: Default::default(),
+            field_sanitization: Default::default(),
+            metadata: Default::default(),
+            coercion: Default::default(),
+            field_mapping: Default::default(),
+            enrichment: Default::default(),
+        }
+    }
 }
 
 impl Config {
@@ -553,8 +580,9 @@ impl Config {
     /// (Dockerfile, Helm chart, Compose fragment).
     pub fn deployment_contract() -> scalo::deployment::DeploymentContract {
         use scalo::deployment::{
-            DeploymentContract, HealthContract, ImageProfile, NativeDepsContract, OciLabels,
-            PortContract, SecretEnvContract, SecretGroupContract, base_image_from_cascade,
+            CONTRACT_SCHEMA_VERSION, DeploymentContract, HealthContract, ImageProfile,
+            NativeDepsContract, OciLabels, PortCondition, PortContract, ResourceList,
+            ResourcesContract, SecurityContract, WritablePath, base_image_from_cascade,
             image_registry_from_cascade,
         };
 
@@ -565,16 +593,15 @@ impl Config {
             image_registry_from_cascade().unwrap_or_else(|| "ghcr.io/hyperi-io".into());
 
         DeploymentContract {
-            schema_version: 3,
+            schema_version: CONTRACT_SCHEMA_VERSION,
             app_name: "dfe-loader".into(),
             base_image: base_image.clone(),
             binary_name: "dfe-loader".into(),
             description: "High-performance Kafka to ClickHouse data loader".into(),
             metrics_port: 9090,
             health: HealthContract {
-                liveness_path: "/livez".into(),
-                readiness_path: "/readyz".into(),
-                metrics_path: "/metrics".into(),
+                startup_budget_seconds: 60,
+                ..HealthContract::default()
             },
             env_prefix: "DFE_LOADER".into(),
             metric_prefix: "loader".into(),
@@ -584,35 +611,12 @@ impl Config {
             extra_ports: vec![
                 PortContract::tcp("push", 6000)
                     .when_equals("config.transport", TRANSPORT_GRPC)
-                    .bound_from("grpc.listen"),
+                    .bound_from("grpc.listen")
+                    .app_protocol("kubernetes.io/h2c"),
             ],
             unbound_listen_paths: vec![],
             entrypoint_args: vec!["--config".into(), "/etc/dfe/loader.yaml".into()],
-            secrets: vec![
-                SecretGroupContract {
-                    group_name: "kafka".into(),
-                    env_vars: vec![
-                        SecretEnvContract {
-                            env_var: "DFE_LOADER__KAFKA__SASL__USERNAME".into(),
-                            key_name: "username".into(),
-                            secret_key: "kafka-username".into(),
-                        },
-                        SecretEnvContract {
-                            env_var: "DFE_LOADER__KAFKA__SASL__PASSWORD".into(),
-                            key_name: "password".into(),
-                            secret_key: "kafka-password".into(),
-                        },
-                    ],
-                },
-                SecretGroupContract {
-                    group_name: "clickhouse".into(),
-                    env_vars: vec![SecretEnvContract {
-                        env_var: "DFE_LOADER__CLICKHOUSE__PASSWORD".into(),
-                        key_name: "password".into(),
-                        secret_key: "clickhouse-password".into(),
-                    }],
-                },
-            ],
+            secrets: Self::secrets(),
             // Derived from Config::default(), NOT hand-authored: a json! literal
             // is not type-checked against the config structs, so it drifts from
             // (and can contradict) the real defaults and fails config-check on
@@ -659,11 +663,71 @@ impl Config {
             // pipeline transform stages.
             config_schema: Some(scalo::deployment::config_schema_json::<crate::config::Config>()),
             capabilities: Self::capabilities(),
+            // GeoIP enrichment downloads its databases here, and the root filesystem is read-only.
+            writable_paths: vec![
+                WritablePath::new("geoip", GEOIP_DATA_DIR)
+                    .size_limit("1Gi")
+                    .when(PortCondition::Equals {
+                        path: "config.geoip.enabled".into(),
+                        value: "true".into(),
+                    }),
+            ],
+            termination_grace_seconds: 45,
+            resources: ResourcesContract {
+                requests: ResourceList {
+                    cpu: "200m".into(),
+                    memory: "256Mi".into(),
+                },
+                limits: ResourceList {
+                    cpu: "1".into(),
+                    memory: "512Mi".into(),
+                },
+            },
+            security: SecurityContract::default(),
+            singleton: false,
         }
     }
 
-    /// KEDA half of the contract, from this crate's own [`KedaConfig`] defaults
-    /// so the chart contract test compares against the documented numbers.
+    /// The Secrets the chart mounts as env vars.
+    ///
+    /// figment's `__` nesting in [`Config::load`] reads these into
+    /// `kafka.sasl.username`, `kafka.sasl.password` and `clickhouse.password`.
+    fn secrets() -> Vec<scalo::deployment::SecretGroupContract> {
+        use scalo::deployment::{SecretEnvContract, SecretGroupContract};
+
+        let env = |env_var: &str, key_name: &str, secret_key: &str| SecretEnvContract {
+            env_var: env_var.into(),
+            key_name: key_name.into(),
+            secret_key: secret_key.into(),
+        };
+        vec![
+            SecretGroupContract::new(
+                "kafka",
+                vec![
+                    env(
+                        "DFE_LOADER__KAFKA__SASL__USERNAME",
+                        "username",
+                        "kafka-username",
+                    ),
+                    env(
+                        "DFE_LOADER__KAFKA__SASL__PASSWORD",
+                        "password",
+                        "kafka-password",
+                    ),
+                ],
+            ),
+            SecretGroupContract::new(
+                "clickhouse",
+                vec![env(
+                    "DFE_LOADER__CLICKHOUSE__PASSWORD",
+                    "password",
+                    "clickhouse-password",
+                )],
+            ),
+        ]
+    }
+
+    /// KEDA half of the contract, from this crate's own [`KedaConfig`] defaults.
     fn keda_contract() -> scalo::deployment::KedaContract {
         use scalo::deployment::{KafkaLagTrigger, KedaContract};
 
@@ -1460,18 +1524,21 @@ kafka:
         assert_eq!(config.logging.format, "json");
     }
 
+    /// The contract publishes `Config::default()` as its default config, which must
+    /// name the transport an empty config file gets.
     #[test]
-    fn test_default_transport_via_serde() {
-        // Config::default() uses #[derive(Default)] which gives String::default()="".
-        // The "kafka" default is ONLY applied via serde's #[serde(default = "...")].
-        // This is intentional — Default and serde default are separate paths.
-        let default_cfg = Config::default();
-        assert_eq!(default_cfg.transport, "", "Rust Default trait gives empty");
+    fn test_default_transport_is_kafka() {
+        assert_eq!(Config::default().transport, TRANSPORT_KAFKA);
 
-        // But parsing via serde applies the "kafka" default
         let yaml = "kafka:\n  brokers: [\"x:9092\"]\n";
         let parsed: Config = serde_yaml_ng::from_str(yaml).unwrap();
-        assert_eq!(parsed.transport, "kafka", "serde default applies 'kafka'");
+        assert_eq!(parsed.transport, TRANSPORT_KAFKA);
+
+        let contract = Config::deployment_contract();
+        let defaults = contract
+            .default_config
+            .expect("contract carries the defaults");
+        assert_eq!(defaults["transport"], TRANSPORT_KAFKA);
     }
 
     // ========================================================================
@@ -2049,6 +2116,44 @@ logging:
         );
     }
 
+    /// A stored config still carrying the `keda:` block the chart never read: it
+    /// loads, and the block is ignored.
+    #[test]
+    fn keda_block_from_an_older_config_still_loads() {
+        let yaml = "keda:\n  max_replicas: 40\nbuffer:\n  flush_rows: 123\n";
+        let config: Config = serde_yaml_ng::from_str(yaml).expect("the removed block is ignored");
+        assert_eq!(config.buffer.flush_rows, 123);
+    }
+
+    /// The downloader writes to `geoip.auto_download.data_dir` under a read-only
+    /// root, so a writable path must cover it exactly while `GeoIP` is on.
+    #[test]
+    fn the_geoip_downloader_has_somewhere_to_write_while_geoip_is_on() {
+        let contract = Config::deployment_contract();
+        let defaults = contract
+            .default_config
+            .as_ref()
+            .expect("contract carries the defaults");
+        let data_dir = defaults
+            .pointer("/geoip/auto_download/data_dir")
+            .and_then(serde_json::Value::as_str)
+            .expect("the defaults name a geoip data_dir");
+
+        assert!(contract.security.read_only_root_filesystem);
+        let geoip_on = scalo::deployment::PortCondition::Equals {
+            path: "config.geoip.enabled".into(),
+            value: "true".into(),
+        };
+        assert!(
+            contract.writable_paths.iter().any(|writable| {
+                writable.when.as_ref() == Some(&geoip_on)
+                    && std::path::Path::new(data_dir).starts_with(&writable.path)
+            }),
+            "no writable path gated on geoip covers {data_dir}: {:?}",
+            contract.writable_paths
+        );
+    }
+
     /// Committed reflectable artefacts under docs/ must not drift. Regenerate
     /// with `dfe-loader config-schema --dir docs`.
     #[test]
@@ -2060,7 +2165,10 @@ logging:
     #[test]
     fn test_deployment_contract_basic_fields() {
         let contract = Config::deployment_contract();
-        assert_eq!(contract.schema_version, 3);
+        assert_eq!(
+            contract.schema_version,
+            scalo::deployment::CONTRACT_SCHEMA_VERSION
+        );
         assert_eq!(contract.app_name, "dfe-loader");
         assert_eq!(contract.binary_name, "dfe-loader");
         // base_image is cascade-resolved (deployment.base_image config/env wins,

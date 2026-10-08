@@ -2093,7 +2093,7 @@ fn memory_guard_config(config: &Config) -> MemoryGuardConfig {
 //   payload.pipeline_mode — pipeline path chosen at startup
 //   metrics.*             — HTTP metrics server binds at startup
 //   logging.*             — tracing subscriber installed at startup
-//   scaling.* / keda.*    — scaling pressure built at startup
+//   scaling.*             — scaling pressure built at startup
 //   hot_reload.*          — watcher config set at startup
 //   schema.*              — schema cache created at startup
 //   geoip.*               — MMDB readers opened at startup
@@ -2129,9 +2129,6 @@ fn warn_restart_required(old: &Config, new: &Config) {
     }
     if old.scaling != new.scaling {
         warn!("scaling config changed — requires restart to take effect");
-    }
-    if old.keda != new.keda {
-        warn!("keda config changed — requires restart to take effect");
     }
     if old.hot_reload != new.hot_reload {
         warn!("hot_reload config changed — requires restart to take effect");

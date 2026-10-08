@@ -108,7 +108,6 @@ NOT a transform stage, NOT a schema manager. Its only outbound topic is the DLQ.
 | `src/routing/`, `src/transform/`, `src/enrich/` | Routing, coercion and capture, enrichment |
 | `src/buffer/`, `src/clickhouse/` | Per-table buffers; query client, schema cache, inserter |
 | `src/clickhouse_ext/` | Dynamic insert: runtime type parser, RowBinary encoder |
-| `chart/` | Helm chart, generated from the deployment contract and committed |
 | `tests/` | `smoke.rs`, `integration/`, `e2e/` -- see `tests/TESTING.md` |
 
 ### Commands that prove a change
@@ -127,22 +126,21 @@ Green lies three ways: `skip_if_no_clickhouse!()` and `skip_if_no_kafka!()` retu
 
 | Don't | Do | Why |
 |-------|----|-----|
-| Bump scalo and commit without regenerating the chart | `dfe-loader --emit-helm chart` | `committed_chart_matches_the_generator` (`tests/integration/deployment.rs:250`) compares `chart/` to the generator file by file. A failure is the guard working -- dfe-fetcher shipped a chart missing `keda-triggerauth.yaml` that its ScaledObject referenced, and never scaled (dfe-fetcher#71) |
-| Gate a test behind a cargo feature without adding it to `.hyperi-ci.yaml` | Add `default,<feature>` to the feature-set list | `default = []` (`Cargo.toml:327`), so it compiles out of every CI run and CI still reports green. `helm_contract.rs:106` asserts `transport-memory` and `testcontainers` stay listed |
+| Bump scalo and leave `release.helm.library` behind | Move `release.helm.library` in `.hyperi-ci.yaml` to the same scalo version | The release assembles the chart from the emitted contract on that scalo-service version, and a scalo-service release ships the schema for only the contract version its scalo release writes |
+| Gate a test behind a cargo feature without adding it to `.hyperi-ci.yaml` | Add `default,<feature>` to the feature-set list | `default = []` (`Cargo.toml:302`), so it compiles out of every CI run and CI still reports green. `helm_contract.rs:64` asserts `transport-memory` and `testcontainers` stay listed |
 | Inject a nested config key as `DFE_LOADER_SECTION_FIELD` | `DFE_LOADER__SECTION__FIELD` | figment strips exactly `DFE_LOADER_`, so it arrived as `_kafka.sasl.username`, matched no field and was dropped silently. Pods ran with no SASL and an empty ClickHouse password (`tests/integration/config_reachability.rs`) |
 | Set `clickhouse.protocol: native` | `http`, on an 8123-family port | The pinned fork has no TCP row fetch, so schema queries stall silently and messages back up pending schema (#115). `validate()` rejects it by name |
 | Name `clickhouse.tls.ca_cert_file`, `cert_file`, `key_file` or `skip_verify` | Set `tls.enabled`, mount the CA into the trust store | Only `enabled` reaches a client. The rest parsed and did nothing, so `validate()` now fails naming them |
-| Widen the `cel` range past scalo's | Keep it on `>=0.13, <0.14` | `cel::Program` crosses the scalo boundary. Wider resolves two semver-incompatible `cel` crates and `Program` stops being the same type (`Cargo.toml:41-45`) |
-| Pin the `clickhouse` fork by branch | Pin by `rev` or tag | The `hyperi-port/*` chain is force-pushed, so a branch pin rots with no warning (`Cargo.toml:313-321`) |
+| Widen the `cel` range past scalo's | Keep it on `>=0.14.5, <0.15` | `cel::Program` crosses the scalo boundary. Wider resolves two semver-incompatible `cel` crates and `Program` stops being the same type (`Cargo.toml:46-51`) |
+| Pin the `clickhouse` fork by branch | Pin by `rev` or tag | The `hyperi-port/*` chain is force-pushed, so a branch pin rots with no warning (`Cargo.toml:287-298`) |
 | Mechanically sync dfe-engine's loader validation to `Config::validate()` | Read both, keep the divergence | dfe-engine scopes the broker check to the Kafka transport and adds a `grpc.listen` check this side lacks. A blind sync rejects valid gRPC-only configs at author time |
 
 ### Where this sits
 
 Inbound, declared in `dfe-infra/suite.yaml`:
 
-- **scalo-rs -> dfe-loader** (`cargo-dep`) -- `Cargo.toml:35` takes `scalo` by range for transports, config cascade, CLI, metrics, deployment contract and DLQ. A scalo release reaches this repo here.
-- **scalo-rs -> dfe-loader** (`generated-file`, lockstep) -- `Dockerfile` is emitted by `scalo::deployment::generate_dockerfile()` at schema version 3. Regenerate and commit the diff.
-
+- **scalo-rs -> dfe-loader** (`cargo-dep`) -- `Cargo.toml:36` takes `scalo` by range for transports, config cascade, CLI, metrics, deployment contract and DLQ. A scalo release reaches this repo here.
+- **scalo-rs -> dfe-loader** (`generated-file`, lockstep) -- `Dockerfile` is emitted by `scalo::deployment::generate_dockerfile()` at schema version 4. Regenerate and commit the diff.
 Outbound, so what a change here can break:
 
 - **dfe-loader -> dfe-infra** (`image-pin`, lockstep) -- `dfe-infra/helm/charts/dfe-loader/Chart.yaml:6` pins this image as tag plus digest.
