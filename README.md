@@ -127,12 +127,12 @@ Green lies three ways: `skip_if_no_clickhouse!()` and `skip_if_no_kafka!()` retu
 | Don't | Do | Why |
 |-------|----|-----|
 | Bump scalo and leave `release.helm.library` behind | Move `release.helm.library` in `.hyperi-ci.yaml` to the same scalo version | The release assembles the chart from the emitted contract on that scalo-service version, and a scalo-service release ships the schema for only the contract version its scalo release writes |
-| Gate a test behind a cargo feature without adding it to `.hyperi-ci.yaml` | Add `default,<feature>` to the feature-set list | `default = []` (`Cargo.toml:302`), so it compiles out of every CI run and CI still reports green. `helm_contract.rs:64` asserts `transport-memory` and `testcontainers` stay listed |
+| Gate a test behind a cargo feature without adding it to `.hyperi-ci.yaml` | Add `default,<feature>` to the feature-set list | `default = []` (`Cargo.toml:304`), so it compiles out of every CI run and CI still reports green. `helm_contract.rs:64` asserts `transport-memory` and `testcontainers` stay listed |
 | Inject a nested config key as `DFE_LOADER_SECTION_FIELD` | `DFE_LOADER__SECTION__FIELD` | figment strips exactly `DFE_LOADER_`, so it arrived as `_kafka.sasl.username`, matched no field and was dropped silently. Pods ran with no SASL and an empty ClickHouse password (`tests/integration/config_reachability.rs`) |
 | Set `clickhouse.protocol: native` | `http`, on an 8123-family port | The pinned fork has no TCP row fetch, so schema queries stall silently and messages back up pending schema (#115). `validate()` rejects it by name |
 | Name `clickhouse.tls.ca_cert_file`, `cert_file`, `key_file` or `skip_verify` | Set `tls.enabled`, mount the CA into the trust store | Only `enabled` reaches a client. The rest parsed and did nothing, so `validate()` now fails naming them |
 | Widen the `cel` range past scalo's | Keep it on `>=0.14.5, <0.15` | `cel::Program` crosses the scalo boundary. Wider resolves two semver-incompatible `cel` crates and `Program` stops being the same type (`Cargo.toml:46-51`) |
-| Pin the `clickhouse` fork by branch | Pin by `rev` or tag | The `hyperi-port/*` chain is force-pushed, so a branch pin rots with no warning (`Cargo.toml:287-298`) |
+| Pin the `clickhouse` fork by branch | Pin by `rev` or tag | The `hyperi-port/*` chain is force-pushed, so a branch pin rots with no warning (`Cargo.toml:289-300`) |
 | Mechanically sync dfe-engine's loader validation to `Config::validate()` | Read both, keep the divergence | dfe-engine scopes the broker check to the Kafka transport and adds a `grpc.listen` check this side lacks. A blind sync rejects valid gRPC-only configs at author time |
 
 ### Where this sits

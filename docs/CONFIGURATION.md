@@ -17,7 +17,7 @@ layers win. Every setting has a safe default, so an empty config boots.
 flowchart TB
     CLI["1. CLI args (--clickhouse.protocol=http)"]
     ENV["2. ENV (DFE_LOADER_CLICKHOUSE__PROTOCOL=http)"]
-    DOTENV["3. .env (gitignored)"]
+    DOTENV["3. ./.env in the working directory (gitignored)"]
     ENVYAML["4. settings.{env}.yaml"]
     YAML["5. settings.yaml"]
     DEF["6. defaults.yaml"]
@@ -27,6 +27,8 @@ flowchart TB
 ```
 
 ENV names are auto-derived: `clickhouse.protocol` -> `DFE_LOADER_CLICKHOUSE__PROTOCOL` (a double underscore for each level of nesting).
+
+Only the `.env` in the working directory is read. A `.env` in a parent directory belongs to another project and is never loaded.
 
 The scaling gate (`scaling.enabled`, `scaling.memory_gate_threshold`) is read by
 scalo's own cascade, which discovers `defaults.yaml` / `settings.yaml` but never

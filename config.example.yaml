@@ -4,7 +4,7 @@
 # Configuration cascade (highest to lowest priority):
 #   1. CLI args (--config, --host, etc.)
 #   2. Environment variables (DFE_LOADER_KAFKA_BROKERS, etc.)
-#   3. .env file
+#   3. .env file in the working directory (never a parent's)
 #   4. settings.{env}.yaml
 #   5. settings.yaml
 #   6. defaults.yaml

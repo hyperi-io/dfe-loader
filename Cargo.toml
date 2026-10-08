@@ -60,7 +60,6 @@ csv = ">=1.4.0, <2"  # CSV remap file parsing (ecs-mapper format compatible)
 # Configuration
 figment = { version = ">=0.10.19, <0.11", features = ["env"] }
 clap = { version = ">=4.6.7, <5", features = ["derive", "env"] }
-dotenvy = ">=0.15.7, <0.16"
 
 # Error handling
 thiserror = ">=2.0.21, <3"
@@ -139,6 +138,9 @@ time = ">=0.3.55, <0.4"
 # Async test utilities
 tokio-test = ">=0.4.6, <0.5"
 tempfile = ">=3.27.0, <4"
+
+# The repo's own .env for live-service tests and benches. The binary's .env is read by scalo's cascade.
+dotenvy = ">=0.15.7, <0.16"
 
 [[bench]]
 name = "json_parsing"

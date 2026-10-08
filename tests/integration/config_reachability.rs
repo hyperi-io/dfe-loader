@@ -337,3 +337,56 @@ fn env_cascade_forms_reach_the_config() {
         assert_eq!(config.routing.default_table, "from_flag");
     }
 }
+
+/// `config-check` run by the binary from `dir`, returning what it printed.
+fn config_check_in(dir: &std::path::Path) -> String {
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_dfe-loader"))
+        .arg("config-check")
+        .current_dir(dir)
+        .env_remove("DFE_LOADER_CONFIG")
+        .env_remove("DFE_LOADER_ROUTING_DEFAULT_DB")
+        .env_remove("DFE_LOADER_ROUTING_DEFAULT_TABLE")
+        .output()
+        .expect("the binary runs");
+    let printed = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(out.status.success(), "config-check failed:\n{printed}");
+    printed
+}
+
+/// The binary reads the `.env` in its working directory and no other.
+///
+/// A `.env` in a parent directory belongs to whatever project sits above, so a
+/// search up the tree loads another project's settings and credentials.
+#[test]
+fn a_dotenv_in_a_parent_directory_is_not_loaded() {
+    let root = tempfile::TempDir::new().expect("tempdir");
+    let project = root.path().join("project");
+    std::fs::create_dir(&project).expect("project dir");
+    std::fs::write(
+        root.path().join(".env"),
+        "DFE_LOADER_ROUTING_DEFAULT_DB=from_parent_dotenv\n",
+    )
+    .expect("parent .env");
+
+    let printed = config_check_in(&project);
+    assert!(
+        !printed.contains("from_parent_dotenv"),
+        "a .env in the parent directory reached the config"
+    );
+
+    // The project's own .env still loads.
+    std::fs::write(
+        project.join(".env"),
+        "DFE_LOADER_ROUTING_DEFAULT_TABLE=from_project_dotenv\n",
+    )
+    .expect("project .env");
+    let printed = config_check_in(&project);
+    assert!(
+        printed.contains("from_project_dotenv"),
+        "the project's own .env did not reach the config"
+    );
+    assert!(
+        !printed.contains("from_parent_dotenv"),
+        "a .env in the parent directory reached the config"
+    );
+}

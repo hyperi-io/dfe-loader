@@ -8,7 +8,7 @@
 //!   2. Explicit flat env overrides (`DFE_LOADER_KAFKA_BROKERS`, etc.)
 //!   3. Figment env vars, `__` nesting, either separator after the prefix
 //!      (`DFE_LOADER__KAFKA__BROKERS` or `DFE_LOADER_KAFKA__BROKERS`)
-//!   4. .env file (via dotenvy)
+//!   4. `./.env` in the working directory, read by scalo's cascade at startup
 //!   5. Config file specified by --config or `DFE_LOADER_CONFIG`
 //!   6. Hard-coded defaults
 
@@ -409,13 +409,11 @@ impl Config {
     /// 2. Explicit flat env overrides (`DFE_LOADER_KAFKA_BROKERS`, etc.)
     /// 3. Figment env vars with `__` nesting — `DFE_LOADER__KAFKA__SASL__USERNAME`
     ///    (chart / deployment-contract form) or `DFE_LOADER_KAFKA__SASL__USERNAME`
-    /// 4. `.env` file (via dotenvy)
+    /// 4. `.env` file: the binary's `load_config` seeds scalo's cascade first,
+    ///    which reads `./.env` and no parent directory's
     /// 5. Config file (YAML, specified by `--config` or auto-detected)
     /// 6. Hard-coded defaults
     pub fn load(config_path: Option<&str>) -> Result<Self> {
-        // Load .env file if present (before any env var reading)
-        let _ = dotenvy::dotenv();
-
         // 1. Start with hard-coded defaults
         let mut config = Config::default();
 
