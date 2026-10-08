@@ -218,6 +218,10 @@ pub enum GeoIpProvider {
     Custom,
 }
 
+/// Where the downloaded `GeoIP` databases go by default, and where the deployment
+/// contract mounts a writable volume for them.
+pub(crate) const GEOIP_DATA_DIR: &str = "/var/lib/dfe/geoip";
+
 /// Auto-download settings for `GeoIP` databases
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
@@ -245,7 +249,7 @@ impl Default for AutoDownloadConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            data_dir: "/var/lib/dfe/geoip".into(),
+            data_dir: GEOIP_DATA_DIR.into(),
             maxmind_account_id: None,
             maxmind_license_key: None,
             ipinfo_token: None,
@@ -792,16 +796,13 @@ impl Default for MetadataConfig {
 // KEDA Autoscaling Configuration
 // ============================================================================
 
-/// KEDA autoscaling thresholds (deployment-level config).
+/// KEDA autoscaling thresholds the deployment contract publishes.
 ///
-/// CHART-GENERATION ONLY. These defaults feed the deployment contract, and the
-/// chart contract test validates chart/values.yaml against them. The loader
-/// process itself reads NO field of this section: KEDA scales the deployment
+/// Not part of [`Config`](crate::config::Config): KEDA scales the deployment
 /// from the `ScaledObject` the chart renders, so the value that moves a
-/// threshold is the chart's `keda.*` (via `--set` or a values overlay), and a
-/// `keda:` block in the pod's own config file or a `DFE_LOADER__KEDA__*` env var
-/// changes nothing. The runtime scaling signal those thresholds read is
-/// [`ScalingConfig`], which the pod does load.
+/// threshold is the chart's `keda.*`, and a `keda:` block in the pod's own
+/// config file changes nothing. The runtime scaling signal those thresholds
+/// read is [`ScalingConfig`], which the pod does load.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct KedaConfig {

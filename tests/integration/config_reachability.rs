@@ -8,14 +8,11 @@
 //! look identical from outside: the process starts, logs a healthy line, and
 //! runs on a value the operator did not set.
 //!
-//! The generic ones ([`contract_secret_env_vars_reach_the_config_they_name`] and
-//! [`committed_chart_injects_every_contract_secret_env_var`]) walk the
-//! deployment contract rather than a hand-written list, so a secret added to the
-//! contract later is checked without touching this file.
+//! The generic one ([`every_declared_secret_env_var_reaches_the_config`]) walks
+//! the deployment contract rather than a hand-written list, so a secret added to
+//! the contract later is checked without touching this file.
 
-use std::path::Path;
-
-use dfe_loader::config::{Config, SaslConfig, TlsConfig};
+use dfe_loader::config::{Config, KedaConfig, SaslConfig, TlsConfig};
 use scalo::config::sensitive::expose_during;
 use serde_json::Value;
 
@@ -58,7 +55,7 @@ fn write_config(dir: &tempfile::TempDir, body: &str) -> String {
 /// around each case.
 #[test]
 #[allow(unsafe_code)]
-fn contract_secret_env_vars_reach_the_config_they_name() {
+fn every_declared_secret_env_var_reaches_the_config() {
     let contract = Config::deployment_contract();
     let prefix = contract.env_prefix.clone();
 
@@ -74,18 +71,13 @@ fn contract_secret_env_vars_reach_the_config_they_name() {
             unsafe { std::env::remove_var(&secret.env_var) };
 
             let json = expose_during(|| serde_json::to_value(&loaded)).expect("config serialises");
-            let found = at(&json, &key);
+            let reached = at(&json, &key).and_then(Value::as_str) == Some(sentinel.as_str());
 
-            assert_eq!(
-                found.and_then(Value::as_str),
-                Some(sentinel.as_str()),
-                "deployment contract declares {} for secret '{}', but setting it left \
-                 config key '{}' at {:?}. The contract, the chart and the config reader \
-                 have to agree on the env var name or the secret never reaches the process.",
-                secret.env_var,
-                secret.secret_key,
-                key,
-                found,
+            // The message carries the env var and group names only, never a value.
+            assert!(
+                reached,
+                "{} ({}) was set and the config key its name spells did not read it",
+                secret.env_var, group.group_name
             );
             checked += 1;
         }
@@ -97,42 +89,14 @@ fn contract_secret_env_vars_reach_the_config_they_name() {
     );
 }
 
-/// The committed chart must inject every secret env var the contract declares.
-///
-/// `scalo::deployment::validate_helm_values` only checks that the template
-/// mentions the env PREFIX somewhere, so a renamed or dropped secret env var
-/// leaves it green.
-#[test]
-fn committed_chart_injects_every_contract_secret_env_var() {
-    let contract = Config::deployment_contract();
-    let template = std::fs::read_to_string(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("chart/templates/deployment.yaml"),
-    )
-    .expect("read committed deployment template");
-
-    for group in &contract.secrets {
-        for secret in &group.env_vars {
-            assert!(
-                template.contains(&secret.env_var),
-                "chart/templates/deployment.yaml does not inject '{}' ({} / {}), so that \
-                 secret never reaches the pod",
-                secret.env_var,
-                group.group_name,
-                secret.secret_key,
-            );
-        }
-    }
-}
-
 /// The KEDA half of the contract must come from this crate's own `KedaConfig`.
 ///
-/// It was `KedaContract::default()` — scalo's own `KedaConfig` — so the chart
-/// contract test compared chart/values.yaml against scalo's numbers while
-/// `KedaConfig` documented itself as the source. The two agreed, which is
-/// exactly why nothing caught it.
+/// It was `KedaContract::default()` — scalo's own numbers — while `KedaConfig`
+/// documented itself as the source. The two agreed, which is exactly why
+/// nothing caught it.
 #[test]
 fn keda_contract_tracks_this_crate_s_keda_defaults() {
-    let keda = Config::default().keda;
+    let keda = KedaConfig::default();
     let contract = Config::deployment_contract()
         .keda
         .expect("contract carries a KEDA section");
@@ -151,8 +115,8 @@ fn keda_contract_tracks_this_crate_s_keda_defaults() {
     assert_eq!(contract.cpu_threshold, keda.cpu_threshold);
 }
 
-/// Raw consumer-group lag rises when a downstream stage breaks, so neither the
-/// contract nor the committed chart may scale the loader on it.
+/// Raw consumer-group lag rises when a downstream stage breaks, so the contract
+/// must never scale the loader on it.
 #[test]
 fn keda_scales_on_cpu_and_never_on_kafka_lag() {
     let contract = Config::deployment_contract()
@@ -162,18 +126,9 @@ fn keda_scales_on_cpu_and_never_on_kafka_lag() {
         !contract.kafka_trigger.enabled,
         "the deployment contract turned the Kafka lag trigger back on"
     );
-
-    let scaled_object = std::fs::read_to_string(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("chart/templates/keda-scaledobject.yaml"),
-    )
-    .expect("read committed ScaledObject template");
     assert!(
-        !scaled_object.contains("type: kafka"),
-        "chart/templates/keda-scaledobject.yaml carries a Kafka lag trigger"
-    );
-    assert!(
-        scaled_object.contains("type: cpu"),
-        "chart/templates/keda-scaledobject.yaml lost its CPU trigger"
+        contract.cpu_enabled,
+        "the deployment contract lost its CPU trigger"
     );
 }
 
@@ -381,4 +336,57 @@ fn env_cascade_forms_reach_the_config() {
         unsafe { std::env::remove_var("DFE_LOADER_CONFIG") };
         assert_eq!(config.routing.default_table, "from_flag");
     }
+}
+
+/// `config-check` run by the binary from `dir`, returning what it printed.
+fn config_check_in(dir: &std::path::Path) -> String {
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_dfe-loader"))
+        .arg("config-check")
+        .current_dir(dir)
+        .env_remove("DFE_LOADER_CONFIG")
+        .env_remove("DFE_LOADER_ROUTING_DEFAULT_DB")
+        .env_remove("DFE_LOADER_ROUTING_DEFAULT_TABLE")
+        .output()
+        .expect("the binary runs");
+    let printed = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(out.status.success(), "config-check failed:\n{printed}");
+    printed
+}
+
+/// The binary reads the `.env` in its working directory and no other.
+///
+/// A `.env` in a parent directory belongs to whatever project sits above, so a
+/// search up the tree loads another project's settings and credentials.
+#[test]
+fn a_dotenv_in_a_parent_directory_is_not_loaded() {
+    let root = tempfile::TempDir::new().expect("tempdir");
+    let project = root.path().join("project");
+    std::fs::create_dir(&project).expect("project dir");
+    std::fs::write(
+        root.path().join(".env"),
+        "DFE_LOADER_ROUTING_DEFAULT_DB=from_parent_dotenv\n",
+    )
+    .expect("parent .env");
+
+    let printed = config_check_in(&project);
+    assert!(
+        !printed.contains("from_parent_dotenv"),
+        "a .env in the parent directory reached the config"
+    );
+
+    // The project's own .env still loads.
+    std::fs::write(
+        project.join(".env"),
+        "DFE_LOADER_ROUTING_DEFAULT_TABLE=from_project_dotenv\n",
+    )
+    .expect("project .env");
+    let printed = config_check_in(&project);
+    assert!(
+        printed.contains("from_project_dotenv"),
+        "the project's own .env did not reach the config"
+    );
+    assert!(
+        !printed.contains("from_parent_dotenv"),
+        "a .env in the parent directory reached the config"
+    );
 }

@@ -75,7 +75,8 @@ impl ServiceApp for App {
         // Seed scalo's cascade first: while it is unset every `from_cascade()`
         // reader -- scaling.*, worker_pool.*, batch_processing.*,
         // self_regulation.*, version_check.* -- resolves to its hard-coded
-        // default and no env var moves it (#160).
+        // default and no env var moves it (#160). The seed is also what reads
+        // ./.env into the environment Config::load reads.
         if let Err(e) = scalo::config::setup(self.common.to_config_options(self.env_prefix())) {
             // The cascade is a OnceLock; a second load keeps the first seed.
             debug!(error = %e, "scalo config cascade already seeded");

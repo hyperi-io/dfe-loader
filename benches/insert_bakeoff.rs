@@ -115,7 +115,8 @@ struct BenchEnv {
 
 impl BenchEnv {
     fn from_env() -> Option<Self> {
-        dotenvy::dotenv().ok();
+        // The repo's own .env only: dotenvy::dotenv() would load the first .env in any parent.
+        let _ = dotenvy::from_path(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(".env"));
         let host = env::var("CLICKHOUSE_HOST").ok()?;
         if host.is_empty() {
             return None;

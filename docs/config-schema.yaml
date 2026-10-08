@@ -23,7 +23,7 @@ description: |-
   - `payload.pipeline_mode` — pipeline path chosen at startup
   - `metrics.*` — HTTP metrics server binds at startup
   - `logging.*` — tracing subscriber installed at startup
-  - `scaling.*` / `keda.*` — scaling pressure built at startup
+  - `scaling.*` — scaling pressure built at startup
   - `hot_reload.*` — watcher config set at startup
   - `schema.*` — schema cache created at startup
   - `geoip.*` — MMDB readers opened at startup
@@ -140,19 +140,6 @@ properties:
       enabled: false
       poll_interval_secs: 5
       debounce_ms: 500
-  keda:
-    description: KEDA autoscaling config. **Restart required.**
-    $ref: '#/$defs/KedaConfig'
-    default:
-      enabled: true
-      min_replicas: 1
-      max_replicas: 10
-      polling_interval: 15
-      cooldown_period: 300
-      kafka_lag_threshold: 1000
-      activation_lag_threshold: 0
-      cpu_enabled: true
-      cpu_threshold: 80
   scaling:
     description: Scaling pressure config. **Restart required.**
     $ref: '#/$defs/ScalingConfig'
@@ -411,7 +398,6 @@ $defs:
       password:
         type: string
         x-scalo-secret: true
-        x-dfe-secret: true
         writeOnly: true
         default: '***REDACTED***'
       oauth_token_endpoint:
@@ -432,7 +418,6 @@ $defs:
         - string
         - 'null'
         x-scalo-secret: true
-        x-dfe-secret: true
         writeOnly: true
         default: null
       oauth_scope:
@@ -465,7 +450,6 @@ $defs:
         - string
         - 'null'
         x-scalo-secret: true
-        x-dfe-secret: true
         writeOnly: true
         default: null
       aws_session_token:
@@ -474,7 +458,6 @@ $defs:
         - string
         - 'null'
         x-scalo-secret: true
-        x-dfe-secret: true
         writeOnly: true
         default: null
       aws_profile:
@@ -613,7 +596,6 @@ $defs:
       password:
         type: string
         x-scalo-secret: true
-        x-dfe-secret: true
         writeOnly: true
         default: '***REDACTED***'
       protocol:
@@ -835,7 +817,6 @@ $defs:
         - string
         - 'null'
         x-scalo-secret: true
-        x-dfe-secret: true
         writeOnly: true
         default: null
       max_age_days:
@@ -951,67 +932,6 @@ $defs:
         format: uint64
         minimum: 0
         default: 500
-  KedaConfig:
-    description: |-
-      KEDA autoscaling thresholds (deployment-level config).
-
-      CHART-GENERATION ONLY. These defaults feed the deployment contract, and the
-      chart contract test validates chart/values.yaml against them. The loader
-      process itself reads NO field of this section: KEDA scales the deployment
-      from the `ScaledObject` the chart renders, so the value that moves a
-      threshold is the chart's `keda.*` (via `--set` or a values overlay), and a
-      `keda:` block in the pod's own config file or a `DFE_LOADER__KEDA__*` env var
-      changes nothing. The runtime scaling signal those thresholds read is
-      [`ScalingConfig`], which the pod does load.
-    type: object
-    properties:
-      enabled:
-        type: boolean
-        default: true
-      min_replicas:
-        type: integer
-        format: uint32
-        minimum: 0
-        default: 1
-      max_replicas:
-        type: integer
-        format: uint32
-        minimum: 0
-        default: 10
-      polling_interval:
-        description: Seconds between KEDA polling the scaler
-        type: integer
-        format: uint32
-        minimum: 0
-        default: 15
-      cooldown_period:
-        description: Seconds before scale-down after load drops
-        type: integer
-        format: uint32
-        minimum: 0
-        default: 300
-      kafka_lag_threshold:
-        description: Scale when consumer group lag exceeds this per partition
-        type: integer
-        format: uint64
-        minimum: 0
-        default: 1000
-      activation_lag_threshold:
-        description: Wake from zero replicas when lag exceeds this
-        type: integer
-        format: uint64
-        minimum: 0
-        default: 0
-      cpu_enabled:
-        description: Enable CPU-based scaling trigger
-        type: boolean
-        default: true
-      cpu_threshold:
-        description: CPU utilisation percentage threshold
-        type: integer
-        format: uint32
-        minimum: 0
-        default: 80
   ScalingConfig:
     description: |-
       Scaling pressure configuration for KEDA autoscaling.
