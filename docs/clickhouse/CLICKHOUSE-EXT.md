@@ -69,20 +69,20 @@ other rows. See [INSERT-FORMATS.md](INSERT-FORMATS.md#when-the-schema-drifts).
 
 ## Consuming the fork
 
-The fork is patched in via `[patch.crates-io]` in `Cargo.toml`, pinned to an
-**immutable git tag**, never a branch.
+The fork is patched in via `[patch.crates-io]` in `Cargo.toml`, pinned by
+**rev** to the tip of its `hyperi-port/06d-tcp-tls-new` branch, never by branch
+name.
 
 ```toml
 [patch.crates-io]
-clickhouse = { git = "https://github.com/hyperi-io/clickhouse-rs.git", tag = "<consumer-pin-tag>" }
+clickhouse = { git = "https://github.com/hyperi-io/clickhouse-rs.git", rev = "<commit sha>" }
 ```
 
-The `hyperi-port/*` branches are force-pushed on every cascade (bug fixes fold
-into the existing branches by design), so a branch pin floats and old lockfiles
-rot once the orphaned commit is collected. A tag keeps its commit alive across
-those re-pushes, so a consumer pin stays reproducible and only moves when the
-tag is deliberately bumped. Bump = repoint the tag + `cargo update -p
-clickhouse`.
+No tag points at that commit. The `hyperi-port/*` branches were force-pushed on
+every cascade, which would orphan a branch-only rev once git collected it. The
+fork repo is now archived and read-only, so the branch can no longer move and
+the pinned rev stays reachable. It also means no fix can land on the fork:
+retiring the patch for crates.io `clickhouse` is the only way forward (#133).
 
 ## What stays out of clickhouse_ext
 
