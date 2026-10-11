@@ -3,15 +3,13 @@
 
 //! Deployment artifact generation tests
 //!
-//! Verifies that generated Dockerfile and Helm chart match the contract values.
+//! Verifies that the generated Dockerfile and compose fragment match the
+//! contract values.
 
 use std::path::Path;
 
 use dfe_loader::config::Config;
-use scalo::deployment::{
-    generate_chart, generate_compose_fragment, generate_dockerfile, validate_dockerfile,
-    validate_helm_values,
-};
+use scalo::deployment::{generate_compose_fragment, generate_dockerfile, validate_dockerfile};
 
 fn contract() -> scalo::deployment::DeploymentContract {
     Config::deployment_contract()
@@ -53,89 +51,26 @@ fn test_generated_dockerfile_matches_existing() {
     );
 }
 
+/// The library chart injects each secret env var the contract declares, and
+/// `Config::load` reads exactly these names.
 #[test]
-fn test_generated_chart_structure() {
+fn test_contract_declares_secret_env_vars() {
     let contract = contract();
-    let dir = tempfile::tempdir().unwrap();
-    generate_chart(&contract, dir.path(), None).unwrap();
-
-    // Chart.yaml
-    let chart = std::fs::read_to_string(dir.path().join("Chart.yaml")).unwrap();
-    assert!(chart.contains("name: dfe-loader"));
-    assert!(chart.contains("description: High-performance Kafka to ClickHouse data loader"));
-
-    // values.yaml
-    let values = std::fs::read_to_string(dir.path().join("values.yaml")).unwrap();
-    assert!(values.contains("repository: ghcr.io/hyperi-io/dfe-loader"));
-    assert!(values.contains("port: 9090"));
-
-    // Secret sections
-    assert!(
-        values.contains("kafka:"),
-        "Should have kafka secret section"
-    );
-    assert!(
-        values.contains("clickhouse:"),
-        "Should have clickhouse secret section"
-    );
-    assert!(
-        values.contains("existingSecret:"),
-        "Should support existing secrets"
-    );
-
-    // KEDA section
-    assert!(values.contains("keda:"), "Should have KEDA section");
-
-    // templates/
-    let templates = dir.path().join("templates");
-    assert!(templates.join("_helpers.tpl").exists());
-    assert!(templates.join("deployment.yaml").exists());
-    assert!(templates.join("service.yaml").exists());
-    assert!(templates.join("serviceaccount.yaml").exists());
-    assert!(templates.join("configmap.yaml").exists());
-    assert!(templates.join("secret.yaml").exists());
-    assert!(templates.join("hpa.yaml").exists());
-    assert!(templates.join("keda-scaledobject.yaml").exists());
-    assert!(templates.join("keda-triggerauth.yaml").exists());
-    assert!(templates.join("NOTES.txt").exists());
-}
-
-#[test]
-fn test_generated_chart_helpers() {
-    let contract = contract();
-    let dir = tempfile::tempdir().unwrap();
-    generate_chart(&contract, dir.path(), None).unwrap();
-
-    let helpers = std::fs::read_to_string(dir.path().join("templates/_helpers.tpl")).unwrap();
-    assert!(
-        helpers.contains("kafkaSecretName"),
-        "Should have kafka secret helper"
-    );
-    assert!(
-        helpers.contains("clickhouseSecretName"),
-        "Should have clickhouse secret helper"
-    );
-}
-
-#[test]
-fn test_generated_deployment_has_env_vars() {
-    let contract = contract();
-    let dir = tempfile::tempdir().unwrap();
-    generate_chart(&contract, dir.path(), None).unwrap();
-
-    let deploy = std::fs::read_to_string(dir.path().join("templates/deployment.yaml")).unwrap();
-    assert!(
-        deploy.contains("DFE_LOADER__KAFKA__SASL__USERNAME"),
-        "Should inject kafka username env"
-    );
-    assert!(
-        deploy.contains("DFE_LOADER__KAFKA__SASL__PASSWORD"),
-        "Should inject kafka password env"
-    );
-    assert!(
-        deploy.contains("DFE_LOADER__CLICKHOUSE__PASSWORD"),
-        "Should inject clickhouse password env"
-    );
+    let env_vars: Vec<&str> = contract
+        .secrets
+        .iter()
+        .flat_map(|group| group.env_vars.iter().map(|env| env.env_var.as_str()))
+        .collect();
+    for name in [
+        "DFE_LOADER__KAFKA__SASL__USERNAME",
+        "DFE_LOADER__KAFKA__SASL__PASSWORD",
+        "DFE_LOADER__CLICKHOUSE__PASSWORD",
+    ] {
+        assert!(
+            env_vars.contains(&name),
+            "contract should declare {name}: {env_vars:?}"
+        );
+    }
 }
 
 #[test]
@@ -168,20 +103,6 @@ fn test_validate_generated_dockerfile() {
     );
 }
 
-#[test]
-fn test_validate_generated_chart() {
-    let contract = contract();
-    let dir = tempfile::tempdir().unwrap();
-    generate_chart(&contract, dir.path(), None).unwrap();
-
-    // Generated chart should pass validation against its own contract
-    let result = validate_helm_values(&contract, dir.path().to_str().unwrap());
-    assert!(
-        result.is_ok(),
-        "Generated chart should validate: {result:?}"
-    );
-}
-
 /// Write generated artifacts to .tmp/ for manual comparison.
 /// Run with: cargo test --test deployment -- `write_artifacts` --ignored --nocapture
 #[test]
@@ -198,11 +119,6 @@ fn write_artifacts_to_tmp() {
     // Compose fragment
     let compose = generate_compose_fragment(&contract);
     std::fs::write(base.join("compose.service.yaml"), &compose).unwrap();
-
-    // Helm chart
-    let chart_dir = base.join("chart");
-    let _ = std::fs::remove_dir_all(&chart_dir);
-    generate_chart(&contract, &chart_dir, None).unwrap();
 
     eprintln!("Generated artifacts written to: {}", base.display());
 }

@@ -143,7 +143,7 @@ Inbound, declared in `dfe-infra/suite.yaml`:
 - **scalo-rs -> dfe-loader** (`generated-file`, lockstep) -- `Dockerfile` is emitted by `scalo::deployment::generate_dockerfile()` at schema version 4. Regenerate and commit the diff.
 Outbound, so what a change here can break:
 
-- **dfe-loader -> dfe-infra** (`image-pin`, lockstep) -- `dfe-infra/helm/charts/dfe-loader/Chart.yaml:6` pins this image as tag plus digest.
+- **dfe-loader -> dfe-infra** (`image-pin`, lockstep) -- `dfe-infra/versions.yaml` pins this image and the thin chart released here, and Argo deploys that published chart.
 - **dfe-loader -> dfe-engine** (`mirrored-logic`) -- dfe-engine hand-reimplements this repo's config validation in `plugins_builtin/loader.py` to catch errors when it authors a config. Nothing is copied, so no script compares them.
 
 Runtime, not build edges: dfe-engine's `dfe-schema` entry point creates every destination table before the loader can insert, and producers reach the loader over Kafka (`*_land` / `*_load` topics) or direct gRPC (default topic `main_land`) -- in the suite that producer is dfe-receiver.
