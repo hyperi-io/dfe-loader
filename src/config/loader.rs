@@ -575,13 +575,14 @@ impl Config {
     /// Build a deployment contract from loader config defaults.
     ///
     /// Apps provide ~20% customisation; scalo generates ~80% boilerplate
-    /// (Dockerfile, Helm chart, Compose fragment).
+    /// (Dockerfile, Compose fragment), and the release assembles the thin
+    /// chart from this contract.
     pub fn deployment_contract() -> scalo::deployment::DeploymentContract {
         use scalo::deployment::{
             CONTRACT_SCHEMA_VERSION, DeploymentContract, HealthContract, ImageProfile,
             NativeDepsContract, OciLabels, PortCondition, PortContract, ResourceList,
-            ResourcesContract, SecurityContract, WritablePath, base_image_from_cascade,
-            image_registry_from_cascade,
+            ResourcesContract, SecurityContract, ServiceAccount, WritablePath,
+            base_image_from_cascade, image_registry_from_cascade,
         };
 
         // A deployment.* cascade key (or env) wins over the base image and registry
@@ -683,6 +684,7 @@ impl Config {
             },
             security: SecurityContract::default(),
             singleton: false,
+            service_account: ServiceAccount::Own,
         }
     }
 

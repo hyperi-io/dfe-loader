@@ -160,18 +160,6 @@ fn smoke_deployment_contract() {
     );
 }
 
-/// Helm chart generates from contract without panicking.
-#[test]
-fn smoke_helm_generation() {
-    let contract = Config::deployment_contract();
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let result = scalo::deployment::generate_chart(&contract, tmp.path(), None);
-    assert!(
-        result.is_ok(),
-        "chart generation should succeed: {result:?}"
-    );
-}
-
 /// Dockerfile generates from contract without panicking.
 #[test]
 fn smoke_dockerfile_generation() {

@@ -39,10 +39,6 @@ struct App {
     #[command(subcommand)]
     command: Option<StandardCommand>,
 
-    /// Generate Helm chart from deployment contract and exit (default output: ./chart)
-    #[arg(long, value_name = "DIR", default_missing_value = "chart", num_args = 0..=1)]
-    emit_helm: Option<PathBuf>,
-
     /// Generate Dockerfile from deployment contract and exit (default output: ./Dockerfile)
     #[arg(long, value_name = "FILE", default_missing_value = "Dockerfile", num_args = 0..=1)]
     emit_dockerfile: Option<PathBuf>,
@@ -314,16 +310,6 @@ async fn main() {
     }
 
     let app = App::parse();
-
-    if let Some(output) = &app.emit_helm {
-        let contract = Config::deployment_contract();
-        if let Err(e) = scalo::deployment::generate_chart(&contract, output, None) {
-            eprintln!("fatal: {e}");
-            std::process::exit(1);
-        }
-        println!("Helm chart generated at {}", output.display());
-        return;
-    }
 
     if let Some(output) = &app.emit_dockerfile {
         let contract = Config::deployment_contract();
