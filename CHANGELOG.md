@@ -3,6 +3,13 @@
 Rendered by CI and committed back at the end of a release -- do not edit by
 hand. Release notes also appear on the GitHub Releases page, one per tag.
 
+## [1.18.48](https://github.com/hyperi-io/dfe-loader/compare/v1.18.47...v1.18.48) (2026-10-11)
+
+### Bug Fixes
+
+* move to scalo 2.14.6, drop --emit-helm ([42ffeef](https://github.com/hyperi-io/dfe-loader/commit/42ffeef22e444467888b9ef9d9a92fe418c1da33))
+* pass the release app key to the release tail ([#244](https://github.com/hyperi-io/dfe-loader/issues/244)) ([d3b93e7](https://github.com/hyperi-io/dfe-loader/commit/d3b93e78415d268c64929fddd62c0fad578b97c7))
+
 ## [1.18.13](https://github.com/hyperi-io/dfe-loader/compare/v1.18.12...v1.18.13) (2026-08-03)
 
 ## [1.18.12](https://github.com/hyperi-io/dfe-loader/compare/v1.18.11...v1.18.12) (2026-07-30)
