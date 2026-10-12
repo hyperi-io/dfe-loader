@@ -280,7 +280,9 @@ fn start_loader(config: Config) -> (CancellationToken, JoinHandle<()>) {
     let mut orchestrator = Orchestrator::new(config);
     let shutdown = orchestrator.shutdown_token();
     let loader = tokio::spawn(async move {
-        let _ = orchestrator.run().await;
+        if let Err(error) = orchestrator.run().await {
+            tracing::error!(%error, "the loader stopped with an error");
+        }
     });
     (shutdown, loader)
 }

@@ -157,7 +157,9 @@ async fn a_partition_moved_mid_buffer_lands_each_row_once() {
     let first_guard = Arc::clone(first.memory_guard());
     let stop_first = first.shutdown_token();
     let first = tokio::spawn(async move {
-        let _ = first.run().await;
+        if let Err(error) = first.run().await {
+            tracing::error!(%error, "the first loader stopped with an error");
+        }
     });
     let deadline = tokio::time::Instant::now() + BUDGET;
     let mut buffered = 0.0;
@@ -183,7 +185,9 @@ async fn a_partition_moved_mid_buffer_lands_each_row_once() {
     let second_guard = Arc::clone(second.memory_guard());
     let stop_second = second.shutdown_token();
     let second = tokio::spawn(async move {
-        let _ = second.run().await;
+        if let Err(error) = second.run().await {
+            tracing::error!(%error, "the second loader stopped with an error");
+        }
     });
     let taken_over = settled_rows(&clickhouse, &table).await;
 
