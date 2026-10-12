@@ -3,6 +3,13 @@
 Rendered by CI and committed back at the end of a release -- do not edit by
 hand. Release notes also appear on the GitHub Releases page, one per tag.
 
+## [1.18.50](https://github.com/hyperi-io/dfe-loader/compare/v1.18.49...v1.18.50) (2026-10-12)
+
+### Bug Fixes
+
+* bound ClickHouse requests, close idle sockets ([#249](https://github.com/hyperi-io/dfe-loader/issues/249)) ([4673b76](https://github.com/hyperi-io/dfe-loader/commit/4673b76ce9cdf3110ed60969a00e84fd242e89cb))
+* widen the ClickHouse query bound until reads answer ([#250](https://github.com/hyperi-io/dfe-loader/issues/250)) ([b081924](https://github.com/hyperi-io/dfe-loader/commit/b081924d9ed308bea89e213bbe88c86d0039b410))
+
 ## [1.18.49](https://github.com/hyperi-io/dfe-loader/compare/v1.18.48...v1.18.49) (2026-10-12)
 
 ### Bug Fixes
