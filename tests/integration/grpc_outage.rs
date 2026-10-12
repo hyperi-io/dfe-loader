@@ -1324,3 +1324,84 @@ async fn a_row_clickhouse_refuses_for_its_data_is_dead_lettered_and_the_rest_lan
         "the dead letter does not carry the server's refusal: {reason}"
     );
 }
+
+/// A loopback proxy to `ClickHouse` HTTP that holds every connection opening
+/// with anything but an INSERT for `delay` before passing it on, so every read
+/// the loader makes on a fresh connection answers that much later.
+async fn slow_read_proxy(upstream: String, delay: Duration) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = TcpListener::bind(("127.0.0.1", free_port()))
+        .await
+        .expect("bind proxy");
+    let address = listener.local_addr().expect("proxy addr").to_string();
+    tokio::spawn(async move {
+        while let Ok((mut client, _)) = listener.accept().await {
+            let upstream = upstream.clone();
+            tokio::spawn(async move {
+                let mut head = vec![0_u8; 4096];
+                let Ok(n) = client.read(&mut head).await else {
+                    return;
+                };
+                head.truncate(n);
+                if !String::from_utf8_lossy(&head).contains("query=INSERT") {
+                    tokio::time::sleep(delay).await;
+                }
+                let Ok(mut server) = TcpStream::connect(&upstream).await else {
+                    return;
+                };
+                if server.write_all(&head).await.is_err() {
+                    return;
+                }
+                let _ = tokio::io::copy_bidirectional(&mut client, &mut server).await;
+            });
+        }
+    });
+    address
+}
+
+/// How long the slow-read proxy holds a read in the slow-schema test.
+const SLOW_READ: Duration = Duration::from_secs(3);
+
+/// The loader's request bound in the slow-schema test: below `SLOW_READ`.
+const SHORT_REQUEST_TIMEOUT_MS: u64 = 2_000;
+
+#[tokio::test]
+async fn every_record_lands_when_schema_reads_answer_slower_than_the_request_bound() {
+    let infra = TestInfrastructure::new(test_name!(), true, false).await;
+    let clickhouse = clickhouse_address(&infra).await;
+    let direct = query_client(&clickhouse);
+    let proxy = slow_read_proxy(clickhouse.clone(), SLOW_READ).await;
+
+    let table = unique_table_name("grpc_slow_schema");
+    create_id_table(&direct, &table, "").await;
+
+    let listen_port = free_port();
+    let mut config = grpc_loader(listen_port, proxy, &table);
+    config.clickhouse.request_timeout_ms = SHORT_REQUEST_TIMEOUT_MS;
+    let (shutdown, loader, client) = start_loader(config, listen_port).await;
+
+    let settle = tokio::time::Instant::now() + Duration::from_secs(60);
+    let (accepted, refused) = push_ids(&client, 0..BEFORE, settle, id_payload).await;
+    let landed = wait_landed(&clickhouse, &table, &accepted, LANDING_BUDGET).await;
+
+    shutdown.cancel();
+    let _ = tokio::time::timeout(Duration::from_secs(30), loader).await;
+    let _ = direct
+        .execute(&format!("DROP TABLE IF EXISTS default.{table}"))
+        .await;
+
+    assert_eq!(
+        accepted.len() as u64,
+        BEFORE,
+        "with every schema read {SLOW_READ:?} slow against a {SHORT_REQUEST_TIMEOUT_MS} ms \
+         bound the listener accepted {} of {BEFORE} records in 60 s, after {refused} retries: \
+         the bound never let the schema fetch finish",
+        accepted.len()
+    );
+    let missing: Vec<u64> = accepted.difference(&landed).copied().collect();
+    assert!(
+        missing.is_empty(),
+        "accepted records never landed: {missing:?}"
+    );
+}

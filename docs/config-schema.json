@@ -62,7 +62,7 @@
         "tables": [],
         "tls": null,
         "connect_timeout_ms": 5000,
-        "request_timeout_ms": 30000,
+        "request_timeout_ms": 60000,
         "insert_timeout_ms": 60000
       }
     },
@@ -707,11 +707,11 @@
           "default": 5000
         },
         "request_timeout_ms": {
-          "description": "Bound on a query, and on an insert waiting to hand over its next chunk,\nin milliseconds.",
+          "description": "Starting bound on a query, which doubles after each timed-out query up to\n300 s, and bound on an insert waiting to hand over its next chunk, in\nmilliseconds.",
           "type": "integer",
           "format": "uint64",
           "minimum": 0,
-          "default": 30000
+          "default": 60000
         },
         "insert_timeout_ms": {
           "description": "Bound on an insert waiting for the server's answer once its rows are\nsent, in milliseconds. A timed-out batch is held and retried.",

@@ -180,8 +180,9 @@ pub struct ClickHouseConfig {
     pub tls: Option<TlsConfig>,
     /// Bound on opening a TCP connection to `ClickHouse`, in milliseconds.
     pub connect_timeout_ms: u64,
-    /// Bound on a query, and on an insert waiting to hand over its next chunk,
-    /// in milliseconds.
+    /// Starting bound on a query, which doubles after each timed-out query up to
+    /// 300 s, and bound on an insert waiting to hand over its next chunk, in
+    /// milliseconds.
     pub request_timeout_ms: u64,
     /// Bound on an insert waiting for the server's answer once its rows are
     /// sent, in milliseconds. A timed-out batch is held and retried.
@@ -1635,11 +1636,11 @@ kafka:
     }
 
     #[test]
-    fn the_default_clickhouse_timeouts_are_5_s_connect_30_s_request_60_s_insert() {
+    fn the_default_clickhouse_timeouts_are_5_s_connect_60_s_request_60_s_insert() {
         let client_cfg: crate::clickhouse::ClickHouseConfig = (&ClickHouseConfig::default()).into();
         let secs = std::time::Duration::from_secs;
         assert_eq!(client_cfg.connect_timeout(), secs(5));
-        assert_eq!(client_cfg.timeouts().request, secs(30));
+        assert_eq!(client_cfg.timeouts().request, secs(60));
         assert_eq!(client_cfg.timeouts().insert, secs(60));
     }
 

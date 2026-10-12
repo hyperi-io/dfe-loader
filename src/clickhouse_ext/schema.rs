@@ -23,6 +23,7 @@ use clickhouse::Client;
 
 use super::encode::ColumnDef;
 use super::error::DynamicError;
+use crate::clickhouse::client_http::ReadBound;
 
 /// Resolved schema for a single table -- an ordered list of columns plus a
 /// name index for O(1) lookup during encoding.
@@ -122,14 +123,15 @@ struct SysColumn {
 ///
 /// # Errors
 ///
-/// Returns [`DynamicError::SchemaFetch`] if the query fails or runs past
-/// `timeout`, or [`DynamicError::EmptySchema`] if the table has no columns (or
-/// does not exist).
+/// Returns [`DynamicError::SchemaFetch`] if the query fails,
+/// [`DynamicError::TimedOut`] if it runs past `bound`, or
+/// [`DynamicError::EmptySchema`] if the table has no columns (or does not
+/// exist).
 pub async fn fetch_dynamic_schema(
     client: &Client,
     database: &str,
     table: &str,
-    timeout: Duration,
+    bound: &ReadBound,
 ) -> Result<DynamicSchema, DynamicError> {
     let full_table = format!("{database}.{table}");
 
@@ -143,17 +145,15 @@ pub async fn fetch_dynamic_schema(
         .bind(database)
         .bind(table)
         .fetch_all::<SysColumn>();
-    let rows = crate::clickhouse::client_http::bounded(timeout, query)
-        .await
-        .map_err(|source| match source {
-            clickhouse::error::Error::TimedOut => DynamicError::TimedOut {
-                table: full_table.clone(),
-            },
-            source => DynamicError::SchemaFetch {
-                table: full_table.clone(),
-                source,
-            },
-        })?;
+    let rows = bound.run(query).await.map_err(|source| match source {
+        clickhouse::error::Error::TimedOut => DynamicError::TimedOut {
+            table: full_table.clone(),
+        },
+        source => DynamicError::SchemaFetch {
+            table: full_table.clone(),
+            source,
+        },
+    })?;
 
     if rows.is_empty() {
         return Err(DynamicError::EmptySchema { table: full_table });

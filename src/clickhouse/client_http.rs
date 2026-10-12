@@ -24,6 +24,7 @@
 
 use std::future::Future;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use hyper_rustls::HttpsConnectorBuilder;
@@ -47,6 +48,10 @@ const TCP_KEEPALIVE: Duration = Duration::from_secs(60);
 /// connection before the server times it out and logs an error for it.
 const POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// Widened reads stop at the 300 s `ClickHouse` gives its own socket reads and
+/// writes by default.
+const READ_BOUND_CEILING: Duration = Duration::from_secs(300);
+
 /// `ClickHouse` client for DDL, schema queries, and health checks.
 ///
 /// Wraps a single `clickhouse::Client` (HTTP or TCP per config). Data inserts
@@ -57,8 +62,10 @@ pub struct ClickHouseQueryClient {
     ch_client: clickhouse::Client,
     /// Database name.
     database: String,
-    /// Bounds on each query and insert.
+    /// Bounds on each insert.
     timeouts: Timeouts,
+    /// Bound on each query, shared with the inserter's schema reads.
+    read_bound: Arc<ReadBound>,
 }
 
 /// Run `request`, failing it with `TimedOut` once `bound` passes.
@@ -69,6 +76,67 @@ pub(crate) async fn bounded<T>(
     tokio::time::timeout(bound, request)
         .await
         .unwrap_or(Err(clickhouse::error::Error::TimedOut))
+}
+
+/// The bound on `ClickHouse` reads, which widens while reads keep timing out.
+///
+/// A fixed bound below how long a slow but working server takes would fail
+/// every attempt at a schema read, and nothing waiting on that schema would
+/// ever land. So a read that times out doubles the bound for the next one, up
+/// to 300 s, and a read answered in under half the next narrower bound steps
+/// it back down.
+#[derive(Debug)]
+pub struct ReadBound {
+    base: Duration,
+    ceiling: Duration,
+    level: AtomicU32,
+}
+
+impl ReadBound {
+    /// A bound that starts at `base` and widens no further than the ceiling, or
+    /// than `base` itself if that is larger.
+    #[must_use]
+    pub fn new(base: Duration) -> Self {
+        Self {
+            base,
+            ceiling: READ_BOUND_CEILING.max(base),
+            level: AtomicU32::new(0),
+        }
+    }
+
+    /// The bound the next read runs under.
+    #[must_use]
+    pub fn current(&self) -> Duration {
+        self.at(self.level.load(Ordering::Relaxed))
+    }
+
+    fn at(&self, level: u32) -> Duration {
+        self.base
+            .checked_mul(1_u32.checked_shl(level).unwrap_or(u32::MAX))
+            .unwrap_or(self.ceiling)
+            .min(self.ceiling)
+    }
+
+    /// Run `read` under the current bound, widening it after a timeout and
+    /// narrowing it after a quick answer.
+    pub async fn run<T>(
+        &self,
+        read: impl Future<Output = clickhouse::error::Result<T>>,
+    ) -> clickhouse::error::Result<T> {
+        let level = self.level.load(Ordering::Relaxed);
+        let started = tokio::time::Instant::now();
+        let result = bounded(self.at(level), read).await;
+        if matches!(result, Err(clickhouse::error::Error::TimedOut)) {
+            if self.at(level) < self.ceiling {
+                self.level.fetch_max(level + 1, Ordering::Relaxed);
+            }
+        } else if level > 0 && started.elapsed() <= self.at(level - 1) / 2 {
+            let _ =
+                self.level
+                    .compare_exchange(level, level - 1, Ordering::Relaxed, Ordering::Relaxed);
+        }
+        result
+    }
 }
 
 /// Open an insert sink for `sql` on `client`, bounded by `timeouts`.
@@ -226,11 +294,19 @@ impl ClickHouseQueryClient {
     /// Returns an error if the config has no hosts.
     pub fn new(config: &ClickHouseConfig) -> Result<Self> {
         let ch_client = build_client(config)?;
+        let timeouts = config.timeouts();
         Ok(Self {
             ch_client,
             database: config.database.clone(),
-            timeouts: config.timeouts(),
+            timeouts,
+            read_bound: Arc::new(ReadBound::new(timeouts.request)),
         })
+    }
+
+    /// The bound on queries, for the inserter's schema reads to share.
+    #[must_use]
+    pub fn read_bound(&self) -> Arc<ReadBound> {
+        Arc::clone(&self.read_bound)
     }
 
     /// Execute a DDL or DML statement (CREATE, DROP, ALTER, TRUNCATE, etc.).
@@ -239,7 +315,8 @@ impl ClickHouseQueryClient {
     ///
     /// Returns an error if the query fails.
     pub async fn execute(&self, sql: &str) -> Result<()> {
-        bounded(self.timeouts.request, self.ch_client.query(sql).execute())
+        self.read_bound
+            .run(self.ch_client.query(sql).execute())
             .await
             .map_err(|e| ClickHouseError::Query(format!("{e}")))?;
         Ok(())
@@ -266,12 +343,13 @@ impl ClickHouseQueryClient {
             escape_string(&tbl)
         );
 
-        let rows: Vec<SystemColumn> = bounded(
-            self.timeouts.request,
-            self.ch_client.query(&sql).fetch_all(),
-        )
-        .await
-        .map_err(|e| ClickHouseError::Schema(format!("Failed to fetch schema for {table}: {e}")))?;
+        let rows: Vec<SystemColumn> = self
+            .read_bound
+            .run(self.ch_client.query(&sql).fetch_all())
+            .await
+            .map_err(|e| {
+                ClickHouseError::Schema(format!("Failed to fetch schema for {table}: {e}"))
+            })?;
 
         // The query succeeded and system.columns has nothing: the table really is
         // absent. Distinct from Schema above, which a transient outage produces.
@@ -315,12 +393,11 @@ impl ClickHouseQueryClient {
             escape_string(&tbl)
         );
 
-        let rows: Vec<SingleString> = bounded(
-            self.timeouts.request,
-            self.ch_client.query(&sql).fetch_all(),
-        )
-        .await
-        .map_err(|e| ClickHouseError::Schema(format!("Failed to fetch table comment: {e}")))?;
+        let rows: Vec<SingleString> = self
+            .read_bound
+            .run(self.ch_client.query(&sql).fetch_all())
+            .await
+            .map_err(|e| ClickHouseError::Schema(format!("Failed to fetch table comment: {e}")))?;
 
         Ok(rows.into_iter().next().map(|r| r.value).unwrap_or_default())
     }
@@ -346,12 +423,13 @@ impl ClickHouseQueryClient {
             comment: String,
         }
 
-        let rows: Vec<NameComment> = bounded(
-            self.timeouts.request,
-            self.ch_client.query(&sql).fetch_all(),
-        )
-        .await
-        .map_err(|e| ClickHouseError::Schema(format!("Failed to fetch column comments: {e}")))?;
+        let rows: Vec<NameComment> = self
+            .read_bound
+            .run(self.ch_client.query(&sql).fetch_all())
+            .await
+            .map_err(|e| {
+                ClickHouseError::Schema(format!("Failed to fetch column comments: {e}"))
+            })?;
 
         let mut comments = FxHashMap::default();
         for row in rows {
@@ -380,12 +458,11 @@ impl ClickHouseQueryClient {
             escape_string(&self.database)
         );
 
-        let rows: Vec<TableName> = bounded(
-            self.timeouts.request,
-            self.ch_client.query(&sql).fetch_all(),
-        )
-        .await
-        .map_err(|e| ClickHouseError::Schema(format!("Failed to list tables: {e}")))?;
+        let rows: Vec<TableName> = self
+            .read_bound
+            .run(self.ch_client.query(&sql).fetch_all())
+            .await
+            .map_err(|e| ClickHouseError::Schema(format!("Failed to list tables: {e}")))?;
 
         Ok(rows.into_iter().map(|r| r.name).collect())
     }
@@ -417,24 +494,21 @@ impl ClickHouseQueryClient {
             None => format!("SELECT COUNT(*) AS _dfe_count FROM {fq_table}"),
         };
 
-        let row: CountRow = bounded(
-            self.timeouts.request,
-            self.ch_client.query(&sql).fetch_one(),
-        )
-        .await
-        .map_err(|e| ClickHouseError::Query(format!("{e}")))?;
+        let row: CountRow = self
+            .read_bound
+            .run(self.ch_client.query(&sql).fetch_one())
+            .await
+            .map_err(|e| ClickHouseError::Query(format!("{e}")))?;
 
         Ok(row.count as usize)
     }
 
     /// Health check — executes `SELECT 1`.
     pub async fn health_check(&self) -> Result<()> {
-        bounded(
-            self.timeouts.request,
-            self.ch_client.query("SELECT 1").execute(),
-        )
-        .await
-        .map_err(|e| ClickHouseError::Connection(format!("Health check failed: {e}")))?;
+        self.read_bound
+            .run(self.ch_client.query("SELECT 1").execute())
+            .await
+            .map_err(|e| ClickHouseError::Connection(format!("Health check failed: {e}")))?;
         Ok(())
     }
 
@@ -1056,6 +1130,65 @@ mod tests {
             }
         }
         (listener, queued, addr)
+    }
+
+    /// A read the server answers after `delay`.
+    async fn read_answered_after(delay: Duration) -> clickhouse::error::Result<()> {
+        tokio::time::sleep(delay).await;
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_read_slower_than_the_bound_lands_on_the_next_attempt() {
+        let bound = ReadBound::new(Duration::from_secs(2));
+
+        let first = bound.run(read_answered_after(Duration::from_secs(3))).await;
+        let second = bound.run(read_answered_after(Duration::from_secs(3))).await;
+
+        assert!(
+            matches!(first, Err(clickhouse::error::Error::TimedOut)),
+            "a 3 s read under a 2 s bound answered: {first:?}"
+        );
+        assert!(second.is_ok(), "the widened bound timed the read out again");
+        assert_eq!(
+            bound.current(),
+            Duration::from_secs(4),
+            "a read that still needs 3 s narrowed the bound it only just fits"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_read_that_never_answers_widens_the_bound_no_further_than_the_ceiling() {
+        let bound = ReadBound::new(Duration::from_secs(60));
+        let mut seen = Vec::new();
+        for _ in 0..5 {
+            let _ = bound
+                .run(std::future::pending::<clickhouse::error::Result<()>>())
+                .await;
+            seen.push(bound.current().as_secs());
+        }
+        assert_eq!(seen, vec![120, 240, 300, 300, 300]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_quick_answer_narrows_a_widened_bound() {
+        let bound = ReadBound::new(Duration::from_secs(2));
+        let _ = bound.run(read_answered_after(Duration::from_secs(3))).await;
+        assert_eq!(bound.current(), Duration::from_secs(4));
+
+        let quick = bound
+            .run(read_answered_after(Duration::from_millis(100)))
+            .await;
+
+        assert!(quick.is_ok());
+        assert_eq!(bound.current(), Duration::from_secs(2));
+    }
+
+    #[test]
+    fn a_base_above_the_ceiling_is_its_own_ceiling() {
+        let bound = ReadBound::new(Duration::from_secs(400));
+        assert_eq!(bound.current(), Duration::from_secs(400));
+        assert_eq!(bound.at(5), Duration::from_secs(400));
     }
 
     #[tokio::test]
