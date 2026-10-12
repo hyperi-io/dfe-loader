@@ -44,7 +44,7 @@ use tracing::{debug, error, info, trace, warn};
 
 use crate::Result;
 use crate::buffer::{FlushBatch, KafkaOffset};
-use crate::clickhouse::client_http::{escape_identifier, insert_sink};
+use crate::clickhouse::client_http::{ReadBound, escape_identifier, insert_sink};
 use crate::clickhouse::config::{InsertFormat, Timeouts};
 use crate::clickhouse::error::{
     ErrorCategory, classify_dynamic_error, classify_json_insert_error, is_schema_drift_error,
@@ -293,8 +293,10 @@ pub struct Inserter {
     /// Whether a schema-drift insert error drops the cached schema
     /// (`schema.refresh_on_error`).
     refresh_on_error: bool,
-    /// Bounds on schema fetches and inserts.
+    /// Bounds on inserts.
     timeouts: Timeouts,
+    /// Bound on schema reads, shared with `http_client`.
+    read_bound: Arc<ReadBound>,
 }
 
 impl Inserter {
@@ -315,6 +317,7 @@ impl Inserter {
         };
 
         Self {
+            read_bound: http_client.read_bound(),
             http_client,
             ch_client,
             dynamic_schema_cache: crate::clickhouse_ext::DynamicSchemaCache::new(
@@ -334,14 +337,15 @@ impl Inserter {
         }
     }
 
-    /// Set the bounds on schema fetches and inserts (`clickhouse.request_timeout_ms`
-    /// and `clickhouse.insert_timeout_ms`).
+    /// Set the bounds on inserts (`clickhouse.request_timeout_ms` and
+    /// `clickhouse.insert_timeout_ms`). Schema reads run under the query
+    /// client's widening bound.
     pub fn with_timeouts(mut self, timeouts: Timeouts) -> Self {
         self.timeouts = timeouts;
         self
     }
 
-    /// The bounds on schema fetches and inserts.
+    /// The bounds on inserts.
     #[cfg(test)]
     pub(crate) fn timeouts(&self) -> Timeouts {
         self.timeouts
@@ -472,7 +476,7 @@ impl Inserter {
                     &self.ch_client,
                     db,
                     tbl,
-                    self.timeouts.request,
+                    &self.read_bound,
                 )
                 .await
                 {
@@ -507,7 +511,7 @@ impl Inserter {
         let Some(encoded_against) = encoded_against else {
             return false;
         };
-        crate::clickhouse_ext::fetch_dynamic_schema(&self.ch_client, db, tbl, self.timeouts.request)
+        crate::clickhouse_ext::fetch_dynamic_schema(&self.ch_client, db, tbl, &self.read_bound)
             .await
             .is_ok_and(|now| now.same_columns(encoded_against))
     }
@@ -586,7 +590,8 @@ impl Inserter {
                 Arc::clone(&self.dynamic_schema_cache),
             )
             .refresh_on_error(self.refresh_on_error)
-            .with_timeouts(self.timeouts);
+            .with_timeouts(self.timeouts)
+            .with_read_bound(Arc::clone(&self.read_bound));
 
             let mut write_failed = false;
             for (i, row) in rows.iter().enumerate() {

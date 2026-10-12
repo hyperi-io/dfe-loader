@@ -164,8 +164,9 @@ pub struct ClickHouseConfig {
     #[serde(default = "default_connect_timeout")]
     pub connect_timeout_ms: u64,
 
-    /// Bound on a query, and on an insert waiting to hand over its next chunk,
-    /// in milliseconds.
+    /// Starting bound on a query, which doubles after each timed-out query up to
+    /// 300 s, and bound on an insert waiting to hand over its next chunk, in
+    /// milliseconds.
     #[serde(default = "default_request_timeout")]
     pub request_timeout_ms: u64,
 
@@ -203,8 +204,10 @@ pub(crate) const fn default_connect_timeout() -> u64 {
     5000
 }
 
+/// A schema read on a loaded server can take tens of seconds, and every timed-out
+/// first try costs that wait before the widened one starts.
 pub(crate) const fn default_request_timeout() -> u64 {
-    30000
+    60000
 }
 
 /// 60 s is ~270x the ClickHouse CPU cost of a 20,000-row flush at a measured
@@ -218,7 +221,8 @@ pub(crate) const fn default_insert_timeout() -> u64 {
 /// Client-side bounds on `ClickHouse` requests.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Timeouts {
-    /// Bound on a query, and on an insert waiting to hand over its next chunk.
+    /// Starting bound on a query, and bound on an insert waiting to hand over
+    /// its next chunk.
     pub request: std::time::Duration,
     /// Bound on an insert waiting for the server's answer once its rows are sent.
     pub insert: std::time::Duration,
@@ -426,7 +430,7 @@ mod tests {
         assert_eq!(config.password, "");
         assert!(!config.tls);
         assert_eq!(config.connect_timeout_ms, 5000);
-        assert_eq!(config.request_timeout_ms, 30000);
+        assert_eq!(config.request_timeout_ms, 60000);
         assert_eq!(config.insert_timeout_ms, 60000);
         assert_eq!(config.connect_timeout(), std::time::Duration::from_secs(5));
         assert_eq!(config.timeouts(), Timeouts::default());

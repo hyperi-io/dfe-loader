@@ -39,7 +39,7 @@ use super::encode::{ColumnDef, DynamicRow};
 use super::error::DynamicError;
 use super::schema::{DynamicSchema, DynamicSchemaCache, fetch_dynamic_schema};
 use crate::clickhouse::Timeouts;
-use crate::clickhouse::client_http::insert_sink;
+use crate::clickhouse::client_http::{ReadBound, insert_sink};
 
 /// The clickhouse-rs setting that makes the server read a length-prefixed
 /// string as a JSON value, which is how the dynamic encoder writes JSON
@@ -108,8 +108,10 @@ pub struct DynamicInsert {
     rows_written: u64,
     /// Whether a schema-mismatch error at `end` drops the cached schema.
     refresh_on_error: bool,
-    /// Bounds on the schema fetch and the insert.
+    /// Bounds on the insert.
     timeouts: Timeouts,
+    /// Bound on the schema fetch.
+    read_bound: Arc<ReadBound>,
 }
 
 impl DynamicInsert {
@@ -131,13 +133,20 @@ impl DynamicInsert {
             rows_written: 0,
             refresh_on_error: true,
             timeouts: Timeouts::default(),
+            read_bound: Arc::new(ReadBound::new(Timeouts::default().request)),
         }
     }
 
-    /// Set the bounds on the schema fetch and the insert (default
-    /// [`Timeouts::default`]).
+    /// Set the bounds on the insert (default [`Timeouts::default`]).
     pub fn with_timeouts(mut self, timeouts: Timeouts) -> Self {
         self.timeouts = timeouts;
+        self
+    }
+
+    /// Share the bound the schema fetch runs under, so a timeout here widens
+    /// the next read anywhere it is shared.
+    pub fn with_read_bound(mut self, read_bound: Arc<ReadBound>) -> Self {
+        self.read_bound = read_bound;
         self
     }
 
@@ -162,13 +171,9 @@ impl DynamicInsert {
         let schema = if let Some(cached) = self.schema_cache.get(&full) {
             cached
         } else {
-            let fetched = fetch_dynamic_schema(
-                &self.client,
-                &self.database,
-                &self.table,
-                self.timeouts.request,
-            )
-            .await?;
+            let fetched =
+                fetch_dynamic_schema(&self.client, &self.database, &self.table, &self.read_bound)
+                    .await?;
             self.schema_cache.insert(&full, fetched.clone());
             fetched
         };

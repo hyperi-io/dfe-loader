@@ -83,10 +83,12 @@ See [clickhouse/TLS.md](clickhouse/TLS.md).
 | Setting | Default | Bounds |
 |---------|---------|--------|
 | `clickhouse.connect_timeout_ms` | `5000` | opening a TCP connection |
-| `clickhouse.request_timeout_ms` | `30000` | every query (schema reads, health), and an insert waiting to hand over its next chunk |
+| `clickhouse.request_timeout_ms` | `60000` | the first try of every query (schema reads, health), and an insert waiting to hand over its next chunk. A query that times out doubles the bound for the next one, up to 300 s, so a slow but working ClickHouse still answers; a quick answer narrows it again |
 | `clickhouse.insert_timeout_ms` | `60000` | an insert waiting for the server's answer once its rows are sent |
 
-A timed-out insert is held and sent again on a later flush, and its Kafka offset stays uncommitted until it lands. 60 s is about 270x the ClickHouse CPU cost of the largest default flush (20,000 rows at a measured 91,000 rows per CPU-second), and two rounds of timed-out concurrent inserts still fit Kafka's 300 s `max.poll.interval.ms`, which a blocked flush cycle counts against. Idle connections close on the client side after 2 s.
+A timed-out insert is held and sent again on a later flush, and its Kafka offset stays uncommitted until it lands. 60 s is about 270x the ClickHouse CPU cost of the largest default flush (20,000 rows at a measured 91,000 rows per CPU-second), and two rounds of timed-out concurrent inserts still fit Kafka's 300 s `max.poll.interval.ms`, which a blocked flush cycle counts against. Through a full outage the query bound widens, so an insert that first has to read its table's schema can hold one flush cycle past that limit; the consumer then rejoins with the batch's offsets still uncommitted.
+
+Idle connections close on the client side after 2 s.
 
 ### Capture (what gets stored)
 
