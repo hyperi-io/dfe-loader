@@ -488,11 +488,6 @@ impl Metrics {
         self.dfe.pipeline_ready(ready);
     }
 
-    /// Update scaling pressure.
-    pub fn set_scaling_pressure(&self, pressure: f64) {
-        self.dfe.scaling_pressure(pressure);
-    }
-
     /// Update memory usage from `MemoryGuard`.
     pub fn set_memory_usage(&self, current_bytes: u64, limit_bytes: u64) {
         self.memory_used.set(current_bytes as f64);
@@ -1018,14 +1013,6 @@ mod tests {
         let m = test_metrics();
         m.set_pipeline_ready(true);
         m.set_pipeline_ready(false);
-    }
-
-    #[test]
-    fn metrics_set_scaling_pressure_boundaries() {
-        let m = test_metrics();
-        m.set_scaling_pressure(0.0);
-        m.set_scaling_pressure(0.5);
-        m.set_scaling_pressure(1.0);
     }
 
     #[test]
