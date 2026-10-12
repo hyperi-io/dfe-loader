@@ -146,6 +146,10 @@ rcgen = ">=0.14.10, <0.15"
 
 # Async test utilities
 tokio-test = ">=0.4.6, <0.5"
+
+# Sends the loader's tracing output through the test harness's capture. Same
+# range as the copy scalo resolves, so cargo unifies to one.
+tracing-subscriber = { version = ">=0.3.23, <0.4", features = ["env-filter"] }
 tempfile = ">=3.27.0, <4"
 
 # The repo's own .env for live-service tests and benches. The binary's .env is read by scalo's cascade.
