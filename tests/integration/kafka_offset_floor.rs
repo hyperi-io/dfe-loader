@@ -17,7 +17,7 @@
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use dfe_loader::clickhouse::InsertFormat;
@@ -132,6 +132,86 @@ impl ReadRefusingProxy {
 
     fn allow_reads(&self) {
         self.refuse.store(false, Ordering::SeqCst);
+    }
+}
+
+/// A loopback proxy to `ClickHouse` HTTP that can stall: every connection opened
+/// while stalled is held open and never answered, so a request on it ends only
+/// at the loader's own bound. Counts the inserts it has stalled.
+struct StallingProxy {
+    port: u16,
+    stall: Arc<AtomicBool>,
+    stalled_inserts: Arc<AtomicUsize>,
+    cut: watch::Sender<u64>,
+}
+
+impl StallingProxy {
+    async fn start(upstream: String) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind proxy");
+        let port = listener.local_addr().expect("proxy addr").port();
+        let stall = Arc::new(AtomicBool::new(false));
+        let stalled_inserts = Arc::new(AtomicUsize::new(0));
+        let (cut, _) = watch::channel(0_u64);
+
+        let accept_stall = Arc::clone(&stall);
+        let accept_count = Arc::clone(&stalled_inserts);
+        let accept_cut = cut.clone();
+        tokio::spawn(async move {
+            while let Ok((client, _)) = listener.accept().await {
+                let stall = Arc::clone(&accept_stall);
+                let count = Arc::clone(&accept_count);
+                let upstream = upstream.clone();
+                let mut cut_rx = accept_cut.subscribe();
+                tokio::spawn(async move {
+                    let mut client = client;
+                    if stall.load(Ordering::SeqCst) {
+                        let mut head = Vec::new();
+                        if read_request_line(&mut client, &mut head)
+                            .await
+                            .is_some_and(|line| line.contains("query=INSERT"))
+                        {
+                            count.fetch_add(1, Ordering::SeqCst);
+                        }
+                        let _ = cut_rx.changed().await;
+                        return;
+                    }
+                    let Ok(mut server) = TcpStream::connect(&upstream).await else {
+                        return;
+                    };
+                    tokio::select! {
+                        _ = tokio::io::copy_bidirectional(&mut client, &mut server) => {}
+                        _ = cut_rx.changed() => {}
+                    }
+                });
+            }
+        });
+
+        Self {
+            port,
+            stall,
+            stalled_inserts,
+            cut,
+        }
+    }
+
+    fn address(&self) -> String {
+        format!("127.0.0.1:{}", self.port)
+    }
+
+    /// Sever every open connection and hold every new one unanswered.
+    fn stall(&self) {
+        self.stall.store(true, Ordering::SeqCst);
+        self.cut.send_modify(|n| *n += 1);
+    }
+
+    /// Release the held connections and forward again.
+    fn resume(&self) {
+        self.stall.store(false, Ordering::SeqCst);
+        self.cut.send_modify(|n| *n += 1);
+    }
+
+    fn stalled_inserts(&self) -> usize {
+        self.stalled_inserts.load(Ordering::SeqCst)
     }
 }
 
@@ -574,6 +654,85 @@ async fn a_batch_whose_insert_failed_holds_the_commit_below_it_until_it_lands() 
     assert!(
         after >= Some(last + 1),
         "the watermark never moved past the held batch once it landed: {after:?}"
+    );
+}
+
+/// How long an insert waits for `ClickHouse`'s answer in the stalled-insert test.
+const SHORT_INSERT_TIMEOUT_MS: u64 = 2_000;
+
+/// How long the stalled-insert test waits for the loader to retry a stalled
+/// insert: several insert bounds plus the hold's retry schedule.
+const RETRY_SEEN: Duration = Duration::from_secs(45);
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_insert_clickhouse_never_answers_times_out_and_is_held_until_it_lands() {
+    let infra = TestInfrastructure::new(test_name!(), true, true).await;
+    let clickhouse = clickhouse_address(&infra).await;
+    let bootstrap = kafka_bootstrap(&infra).await;
+    let direct = query_client(&clickhouse);
+    let proxy = StallingProxy::start(clickhouse.clone()).await;
+
+    let landing = unique_table_name("kafka_stall_landing");
+    direct
+        .execute(&format!(
+            "CREATE TABLE default.{landing} (id UInt64) ENGINE = MergeTree() ORDER BY id"
+        ))
+        .await
+        .expect("create table");
+    let topic = format!("stall-{landing}");
+    let group = format!("dfe-{landing}");
+    ensure_topic(&bootstrap, &topic).await;
+
+    let mut config = kafka_loader(&bootstrap, &topic, &group, proxy.address(), &landing);
+    config.clickhouse.insert_timeout_ms = SHORT_INSERT_TIMEOUT_MS;
+    config.clickhouse.request_timeout_ms = SHORT_INSERT_TIMEOUT_MS;
+    let (shutdown, loader) = start_loader(config);
+    let producer = make_producer(&bootstrap);
+    wait_for_loader(&producer, &topic, &clickhouse, &landing).await;
+
+    // From here ClickHouse takes every request and answers none.
+    proxy.stall();
+    let held = produce(&producer, &topic, r#"{"id":1}"#).await;
+
+    // A second stalled insert means the first ended at the loader's bound and
+    // the held batch was sent again.
+    let deadline = tokio::time::Instant::now() + RETRY_SEEN;
+    while proxy.stalled_inserts() < 2 && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    let stalled_inserts = proxy.stalled_inserts();
+    let while_held = highest_committed_over_watch(&bootstrap, &group, &topic).await;
+
+    // Once ClickHouse answers again the held batch lands, and a record after it
+    // moves the watermark past both.
+    proxy.resume();
+    let held_landed = wait_landed(&clickhouse, &landing, &BTreeSet::from([1]), RECOVERY).await;
+    let last = produce(&producer, &topic, r#"{"id":2}"#).await;
+    let after = wait_committed(&bootstrap, &group, &topic, last + 1).await;
+
+    shutdown.cancel();
+    let _ = tokio::time::timeout(Duration::from_secs(30), loader).await;
+    let _ = direct
+        .execute(&format!("DROP TABLE IF EXISTS default.{landing}"))
+        .await;
+
+    assert!(
+        stalled_inserts >= 2,
+        "the loader sent {stalled_inserts} insert(s) into the stall in {RETRY_SEEN:?}: an \
+         unanswered insert never reached its {SHORT_INSERT_TIMEOUT_MS} ms bound"
+    );
+    assert!(
+        while_held.is_none_or(|next| next <= held),
+        "the group committed {while_held:?} while the batch holding offset {held} had not \
+         landed: a crash then would have lost it"
+    );
+    assert!(
+        held_landed.contains(&1),
+        "the timed-out batch never landed once ClickHouse answered again"
+    );
+    assert!(
+        after >= Some(last + 1),
+        "the watermark never moved past the timed-out batch once it landed: {after:?}"
     );
 }
 

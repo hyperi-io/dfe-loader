@@ -29,6 +29,8 @@ pub enum DynamicError {
     },
     /// Table has no columns (or does not exist).
     EmptySchema { table: String },
+    /// A schema fetch or insert ran past its client-side bound.
+    TimedOut { table: String },
 }
 
 impl fmt::Display for DynamicError {
@@ -48,6 +50,9 @@ impl fmt::Display for DynamicError {
             }
             Self::EmptySchema { table } => {
                 write!(f, "table '{table}' has no columns or does not exist")
+            }
+            Self::TimedOut { table } => {
+                write!(f, "request to ClickHouse for '{table}' timed out")
             }
         }
     }

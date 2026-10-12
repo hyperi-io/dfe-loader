@@ -2349,7 +2349,9 @@ fn build_inserter(
     http_client: Arc<ClickHouseQueryClient>,
     ch_client: clickhouse::Client,
 ) -> Inserter {
+    let ch_config: crate::clickhouse::ClickHouseConfig = (&config.clickhouse).into();
     Inserter::new(http_client, ch_client, InserterConfig::default())
+        .with_timeouts(ch_config.timeouts())
         .with_insert_format(config.clickhouse.insert_format)
         .with_refresh_on_error(config.schema.refresh_on_error)
         .with_schema_ttl(Duration::from_secs(config.schema.cache_ttl_secs))
@@ -4212,6 +4214,23 @@ mod tests {
             "schema.cache_ttl_secs must reach the RowBinary encoder's cache"
         );
         assert!(!inserter.refreshes_on_error());
+    }
+
+    #[test]
+    fn the_clickhouse_timeouts_reach_the_inserter() {
+        let mut config = Config::default();
+        config.clickhouse.request_timeout_ms = 1_500;
+        config.clickhouse.insert_timeout_ms = 2_500;
+
+        let inserter = inserter_for(&config);
+
+        assert_eq!(
+            inserter.timeouts(),
+            crate::clickhouse::Timeouts {
+                request: Duration::from_millis(1_500),
+                insert: Duration::from_millis(2_500),
+            }
+        );
     }
 
     #[test]

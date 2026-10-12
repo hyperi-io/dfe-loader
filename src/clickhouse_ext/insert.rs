@@ -38,6 +38,8 @@ use clickhouse::Client;
 use super::encode::{ColumnDef, DynamicRow};
 use super::error::DynamicError;
 use super::schema::{DynamicSchema, DynamicSchemaCache, fetch_dynamic_schema};
+use crate::clickhouse::Timeouts;
+use crate::clickhouse::client_http::insert_sink;
 
 /// The clickhouse-rs setting that makes the server read a length-prefixed
 /// string as a JSON value, which is how the dynamic encoder writes JSON
@@ -106,6 +108,8 @@ pub struct DynamicInsert {
     rows_written: u64,
     /// Whether a schema-mismatch error at `end` drops the cached schema.
     refresh_on_error: bool,
+    /// Bounds on the schema fetch and the insert.
+    timeouts: Timeouts,
 }
 
 impl DynamicInsert {
@@ -126,7 +130,15 @@ impl DynamicInsert {
             sink: None,
             rows_written: 0,
             refresh_on_error: true,
+            timeouts: Timeouts::default(),
         }
+    }
+
+    /// Set the bounds on the schema fetch and the insert (default
+    /// [`Timeouts::default`]).
+    pub fn with_timeouts(mut self, timeouts: Timeouts) -> Self {
+        self.timeouts = timeouts;
+        self
     }
 
     /// Set whether a schema-mismatch error at [`end`][Self::end] drops the
@@ -150,7 +162,13 @@ impl DynamicInsert {
         let schema = if let Some(cached) = self.schema_cache.get(&full) {
             cached
         } else {
-            let fetched = fetch_dynamic_schema(&self.client, &self.database, &self.table).await?;
+            let fetched = fetch_dynamic_schema(
+                &self.client,
+                &self.database,
+                &self.table,
+                self.timeouts.request,
+            )
+            .await?;
             self.schema_cache.insert(&full, fetched.clone());
             fetched
         };
@@ -209,7 +227,7 @@ impl DynamicInsert {
         if schema.has_json_columns() {
             client = client.with_setting(JSON_AS_STRING_SETTING, "1");
         }
-        let mut sink = client.insert_formatted_with(sql).buffered();
+        let mut sink = insert_sink(&client, sql, self.timeouts).buffered();
         sink.write_buffered(&names_and_types_header(&columns));
 
         self.sink = Some(sink);
@@ -296,11 +314,17 @@ impl DynamicInsert {
     ///
     /// # Errors
     ///
-    /// Returns [`DynamicError`] if the server rejects the insert.
+    /// Returns [`DynamicError`] if the server rejects the insert, or
+    /// [`DynamicError::TimedOut`] if its answer does not arrive within the bound.
     pub async fn end(mut self) -> Result<u64, DynamicError> {
         if let Some(mut sink) = self.sink.take()
             && let Err(e) = sink.end().await
         {
+            if matches!(e, clickhouse::error::Error::TimedOut) {
+                return Err(DynamicError::TimedOut {
+                    table: self.full_table(),
+                });
+            }
             let err = classify_error(&self.full_table(), &e);
             if self.refresh_on_error && matches!(err, DynamicError::SchemaMismatch { .. }) {
                 self.schema_cache.invalidate(&self.full_table());

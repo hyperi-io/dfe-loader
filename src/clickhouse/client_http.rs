@@ -22,17 +22,30 @@
 //! - Table existence checks
 //! - Health checks (ping)
 
+use std::future::Future;
 use std::sync::Arc;
+use std::time::Duration;
 
+use hyper_rustls::HttpsConnectorBuilder;
+use hyper_util::client::legacy::Client as HyperClient;
+use hyper_util::client::legacy::connect::HttpConnector;
+use hyper_util::rt::{TokioExecutor, TokioTimer};
 use rustc_hash::FxHashMap;
 use serde::Deserialize;
 
-use super::config::ClickHouseConfig;
+use super::config::{ClickHouseConfig, Timeouts};
 use super::error::ClickHouseError;
 use super::types::{ColumnInfo, ParsedType, TableSchema};
 
 /// Result type for `ClickHouse` operations.
 pub type Result<T> = std::result::Result<T, ClickHouseError>;
+
+/// TCP keepalive interval on `ClickHouse` connections.
+const TCP_KEEPALIVE: Duration = Duration::from_secs(60);
+
+/// Shorter than `ClickHouse`'s keep-alive timeout, so the client closes an idle
+/// connection before the server times it out and logs an error for it.
+const POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// `ClickHouse` client for DDL, schema queries, and health checks.
 ///
@@ -44,6 +57,58 @@ pub struct ClickHouseQueryClient {
     ch_client: clickhouse::Client,
     /// Database name.
     database: String,
+    /// Bounds on each query and insert.
+    timeouts: Timeouts,
+}
+
+/// Run `request`, failing it with `TimedOut` once `bound` passes.
+pub(crate) async fn bounded<T>(
+    bound: Duration,
+    request: impl Future<Output = clickhouse::error::Result<T>>,
+) -> clickhouse::error::Result<T> {
+    tokio::time::timeout(bound, request)
+        .await
+        .unwrap_or(Err(clickhouse::error::Error::TimedOut))
+}
+
+/// Open an insert sink for `sql` on `client`, bounded by `timeouts`.
+pub(crate) fn insert_sink(
+    client: &clickhouse::Client,
+    sql: String,
+    timeouts: Timeouts,
+) -> clickhouse::insert_formatted::InsertFormatted {
+    client
+        .insert_formatted_with(sql)
+        .with_timeouts(Some(timeouts.request), Some(timeouts.insert))
+}
+
+/// The HTTP client a `clickhouse::Client` sends through.
+///
+/// HTTPS verifies the server's certificate and host name against the system
+/// trust store, which honours `SSL_CERT_FILE` and `SSL_CERT_DIR`.
+fn http_transport(config: &ClickHouseConfig) -> Result<clickhouse::Client> {
+    let mut connector = HttpConnector::new();
+    connector.set_keepalive(Some(TCP_KEEPALIVE));
+    connector.set_connect_timeout(Some(config.connect_timeout()));
+    let mut pool = HyperClient::builder(TokioExecutor::new());
+    // hyper-util evicts idle connections only when the pool has a timer.
+    pool.pool_timer(TokioTimer::new())
+        .pool_idle_timeout(POOL_IDLE_TIMEOUT);
+    if !config.tls {
+        return Ok(clickhouse::Client::with_http_client(pool.build(connector)));
+    }
+    connector.enforce_http(false);
+    let https = HttpsConnectorBuilder::new()
+        .with_provider_and_native_roots(rustls::crypto::aws_lc_rs::default_provider())
+        .map_err(|e| {
+            ClickHouseError::Connection(format!(
+                "no CA certificate could be read from the system trust store: {e}"
+            ))
+        })?
+        .https_only()
+        .enable_http1()
+        .wrap_connector(connector);
+    Ok(clickhouse::Client::with_http_client(pool.build(https)))
 }
 
 /// Connection-pool statistics for the native TCP transport.
@@ -70,8 +135,9 @@ pub struct PoolStats {
 ///
 /// # Errors
 ///
-/// Returns an error if the config has no hosts.
-pub(crate) fn build_client(config: &ClickHouseConfig) -> Result<clickhouse::Client> {
+/// Returns an error if the config has no hosts, or if TLS is on and no CA
+/// certificate can be read from the system trust store.
+pub fn build_client(config: &ClickHouseConfig) -> Result<clickhouse::Client> {
     use super::config::Transport;
 
     let endpoint = config
@@ -81,7 +147,7 @@ pub(crate) fn build_client(config: &ClickHouseConfig) -> Result<clickhouse::Clie
     let client = match config.transport {
         Transport::Http => {
             let scheme = if config.tls { "https" } else { "http" };
-            let mut c = clickhouse::Client::default()
+            let mut c = http_transport(config)?
                 .with_url(format!("{scheme}://{endpoint}"))
                 .with_user(&config.username)
                 .with_database(&config.database);
@@ -163,6 +229,7 @@ impl ClickHouseQueryClient {
         Ok(Self {
             ch_client,
             database: config.database.clone(),
+            timeouts: config.timeouts(),
         })
     }
 
@@ -172,9 +239,7 @@ impl ClickHouseQueryClient {
     ///
     /// Returns an error if the query fails.
     pub async fn execute(&self, sql: &str) -> Result<()> {
-        self.ch_client
-            .query(sql)
-            .execute()
+        bounded(self.timeouts.request, self.ch_client.query(sql).execute())
             .await
             .map_err(|e| ClickHouseError::Query(format!("{e}")))?;
         Ok(())
@@ -201,10 +266,12 @@ impl ClickHouseQueryClient {
             escape_string(&tbl)
         );
 
-        let rows: Vec<SystemColumn> =
-            self.ch_client.query(&sql).fetch_all().await.map_err(|e| {
-                ClickHouseError::Schema(format!("Failed to fetch schema for {table}: {e}"))
-            })?;
+        let rows: Vec<SystemColumn> = bounded(
+            self.timeouts.request,
+            self.ch_client.query(&sql).fetch_all(),
+        )
+        .await
+        .map_err(|e| ClickHouseError::Schema(format!("Failed to fetch schema for {table}: {e}")))?;
 
         // The query succeeded and system.columns has nothing: the table really is
         // absent. Distinct from Schema above, which a transient outage produces.
@@ -248,10 +315,12 @@ impl ClickHouseQueryClient {
             escape_string(&tbl)
         );
 
-        let rows: Vec<SingleString> =
-            self.ch_client.query(&sql).fetch_all().await.map_err(|e| {
-                ClickHouseError::Schema(format!("Failed to fetch table comment: {e}"))
-            })?;
+        let rows: Vec<SingleString> = bounded(
+            self.timeouts.request,
+            self.ch_client.query(&sql).fetch_all(),
+        )
+        .await
+        .map_err(|e| ClickHouseError::Schema(format!("Failed to fetch table comment: {e}")))?;
 
         Ok(rows.into_iter().next().map(|r| r.value).unwrap_or_default())
     }
@@ -277,9 +346,12 @@ impl ClickHouseQueryClient {
             comment: String,
         }
 
-        let rows: Vec<NameComment> = self.ch_client.query(&sql).fetch_all().await.map_err(|e| {
-            ClickHouseError::Schema(format!("Failed to fetch column comments: {e}"))
-        })?;
+        let rows: Vec<NameComment> = bounded(
+            self.timeouts.request,
+            self.ch_client.query(&sql).fetch_all(),
+        )
+        .await
+        .map_err(|e| ClickHouseError::Schema(format!("Failed to fetch column comments: {e}")))?;
 
         let mut comments = FxHashMap::default();
         for row in rows {
@@ -308,12 +380,12 @@ impl ClickHouseQueryClient {
             escape_string(&self.database)
         );
 
-        let rows: Vec<TableName> = self
-            .ch_client
-            .query(&sql)
-            .fetch_all()
-            .await
-            .map_err(|e| ClickHouseError::Schema(format!("Failed to list tables: {e}")))?;
+        let rows: Vec<TableName> = bounded(
+            self.timeouts.request,
+            self.ch_client.query(&sql).fetch_all(),
+        )
+        .await
+        .map_err(|e| ClickHouseError::Schema(format!("Failed to list tables: {e}")))?;
 
         Ok(rows.into_iter().map(|r| r.name).collect())
     }
@@ -345,23 +417,24 @@ impl ClickHouseQueryClient {
             None => format!("SELECT COUNT(*) AS _dfe_count FROM {fq_table}"),
         };
 
-        let row: CountRow = self
-            .ch_client
-            .query(&sql)
-            .fetch_one()
-            .await
-            .map_err(|e| ClickHouseError::Query(format!("{e}")))?;
+        let row: CountRow = bounded(
+            self.timeouts.request,
+            self.ch_client.query(&sql).fetch_one(),
+        )
+        .await
+        .map_err(|e| ClickHouseError::Query(format!("{e}")))?;
 
         Ok(row.count as usize)
     }
 
     /// Health check — executes `SELECT 1`.
     pub async fn health_check(&self) -> Result<()> {
-        self.ch_client
-            .query("SELECT 1")
-            .execute()
-            .await
-            .map_err(|e| ClickHouseError::Connection(format!("Health check failed: {e}")))?;
+        bounded(
+            self.timeouts.request,
+            self.ch_client.query("SELECT 1").execute(),
+        )
+        .await
+        .map_err(|e| ClickHouseError::Connection(format!("Health check failed: {e}")))?;
         Ok(())
     }
 
@@ -408,7 +481,7 @@ impl ClickHouseQueryClient {
             escape_identifier(&db),
             escape_identifier(&tbl)
         );
-        let mut insert = self.ch_client.insert_formatted_with(sql).buffered();
+        let mut insert = insert_sink(&self.ch_client, sql, self.timeouts).buffered();
 
         insert.write_buffered(&body);
 
@@ -918,5 +991,154 @@ mod tests {
             ..Default::default()
         };
         assert!(ClickHouseQueryClient::new(&config).is_ok());
+    }
+
+    // ============================================================
+    // Connection bounds, against loopback servers that misbehave
+    // ============================================================
+
+    use std::net::SocketAddr;
+    use std::time::{Duration, Instant};
+
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, TcpSocket, TcpStream};
+
+    /// An HTTP config pointing at `addr` with the given connect and request bounds.
+    fn http_config(addr: SocketAddr, connect_ms: u64, request_ms: u64) -> ClickHouseConfig {
+        ClickHouseConfig {
+            hosts: vec![addr.to_string()],
+            transport: super::super::config::Transport::Http,
+            database: "default".to_string(),
+            connect_timeout_ms: connect_ms,
+            request_timeout_ms: request_ms,
+            ..Default::default()
+        }
+    }
+
+    /// Reads one request with a `Content-Length` body, so nothing is left unread.
+    async fn read_request(socket: &mut TcpStream) {
+        let mut request = Vec::new();
+        let mut chunk = [0u8; 1024];
+        let head_end = loop {
+            let n = socket.read(&mut chunk).await.unwrap();
+            assert!(n > 0, "client closed before sending a request");
+            request.extend_from_slice(&chunk[..n]);
+            if let Some(pos) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                break pos + 4;
+            }
+        };
+        let head = String::from_utf8_lossy(&request[..head_end]).to_ascii_lowercase();
+        let body_len: usize = head
+            .lines()
+            .find_map(|line| line.strip_prefix("content-length:"))
+            .map_or(0, |v| v.trim().parse().unwrap());
+        while request.len() < head_end + body_len {
+            let n = socket.read(&mut chunk).await.unwrap();
+            assert!(n > 0, "client closed mid-request");
+            request.extend_from_slice(&chunk[..n]);
+        }
+    }
+
+    /// A listener whose accept queue is full, so the kernel drops every further
+    /// SYN and a connect to it never completes. The returned streams keep it full.
+    async fn listener_that_never_completes_a_connect() -> (TcpListener, Vec<TcpStream>, SocketAddr)
+    {
+        let socket = TcpSocket::new_v4().unwrap();
+        socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let listener = socket.listen(1).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut queued = Vec::new();
+        for _ in 0..4 {
+            if let Ok(Ok(stream)) =
+                tokio::time::timeout(Duration::from_millis(300), TcpStream::connect(addr)).await
+            {
+                queued.push(stream);
+            }
+        }
+        (listener, queued, addr)
+    }
+
+    #[tokio::test]
+    async fn an_idle_connection_closes_about_two_seconds_after_its_last_request() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            read_request(&mut socket).await;
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+                .await
+                .unwrap();
+            let answered = Instant::now();
+            // A zero-byte read is the client closing its end.
+            let mut byte = [0u8; 1];
+            let read = socket.read(&mut byte).await.unwrap();
+            (read, answered.elapsed())
+        });
+
+        let client = build_client(&http_config(addr, 5_000, 30_000)).unwrap();
+        client.query("SELECT 1").execute().await.unwrap();
+
+        let (read, idle) = tokio::time::timeout(Duration::from_secs(8), server)
+            .await
+            .expect("the pool kept an idle connection open for 8 s")
+            .unwrap();
+        assert_eq!(read, 0, "the client sent more bytes instead of closing");
+        assert!(
+            idle >= Duration::from_millis(1_500) && idle <= Duration::from_millis(5_000),
+            "an idle connection closed after {idle:?}, not about 2 s"
+        );
+        // Dropping the client also closes the pool, so it must outlive the wait above.
+        drop(client);
+    }
+
+    #[tokio::test]
+    async fn connect_timeout_bounds_a_connect_that_never_completes() {
+        let (_listener, _queued, addr) = listener_that_never_completes_a_connect().await;
+        let client = build_client(&http_config(addr, 300, 30_000)).unwrap();
+
+        let started = Instant::now();
+        let result =
+            tokio::time::timeout(Duration::from_secs(10), client.query("SELECT 1").execute())
+                .await
+                .expect(
+                    "a connect to a full accept queue ran past 10 s with a 300 ms connect timeout",
+                );
+        let elapsed = started.elapsed();
+
+        assert!(
+            result.is_err(),
+            "a connect that never completed reported success"
+        );
+        assert!(
+            elapsed >= Duration::from_millis(250) && elapsed < Duration::from_secs(3),
+            "the connect gave up after {elapsed:?}, not at its 300 ms bound"
+        );
+    }
+
+    #[tokio::test]
+    async fn request_timeout_bounds_a_query_the_server_never_answers() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let _server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            read_request(&mut socket).await;
+            // Holds the connection open and never answers.
+            let mut byte = [0u8; 1];
+            let _ = socket.read(&mut byte).await;
+        });
+        let client = ClickHouseQueryClient::new(&http_config(addr, 5_000, 300)).unwrap();
+
+        let started = Instant::now();
+        let result = tokio::time::timeout(Duration::from_secs(10), client.health_check())
+            .await
+            .expect("a query the server never answered ran past 10 s with a 300 ms bound");
+        let elapsed = started.elapsed();
+
+        assert!(result.is_err(), "an unanswered query reported success");
+        assert!(
+            elapsed >= Duration::from_millis(250) && elapsed < Duration::from_secs(3),
+            "the query gave up after {elapsed:?}, not at its 300 ms bound"
+        );
     }
 }
