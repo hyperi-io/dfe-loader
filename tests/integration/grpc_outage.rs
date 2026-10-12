@@ -19,8 +19,8 @@
 
 use std::collections::BTreeSet;
 use std::path::Path;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use dfe_loader::clickhouse::config::{ClickHouseConfig, Transport};
@@ -101,15 +101,39 @@ const PENDING_SENDERS: usize = 5;
 /// outgoing connection could take a port between the pick and the bind.
 const TEST_PORTS: std::ops::Range<u16> = 9_000..10_240;
 
-/// A loopback port in [`TEST_PORTS`] nothing listens on, searched from a point
-/// this process picks so tests running at once start apart.
+/// One marker socket per port this process has handed out, held until it exits.
+static HANDED_OUT: Mutex<Vec<std::net::TcpListener>> = Mutex::new(Vec::new());
+
+/// A loopback port in [`TEST_PORTS`] nothing listens on and no other test
+/// process has been handed.
+///
+/// Probing the port is not enough: the loader binds it a moment later, and a
+/// test process started beside this one (consecutive pids search from
+/// consecutive ports) probes it free too. So a port is also claimed by binding
+/// a marker socket one range-width above it, which only one process can do.
 pub(super) fn free_port() -> u16 {
     let span = TEST_PORTS.end - TEST_PORTS.start;
     let start = (std::process::id() % u32::from(span)) as u16;
     (0..span)
         .map(|i| TEST_PORTS.start + (start + i) % span)
-        .find(|&port| std::net::TcpListener::bind(("127.0.0.1", port)).is_ok())
+        .find(|&port| {
+            let Ok(marker) = std::net::TcpListener::bind(("127.0.0.1", port + span)) else {
+                return false;
+            };
+            if std::net::TcpListener::bind(("127.0.0.1", port)).is_err() {
+                return false;
+            }
+            HANDED_OUT.lock().expect("port marker list").push(marker);
+            true
+        })
         .expect("a free loopback port below 10240")
+}
+
+/// Two picks made before either port is bound differ, as they must for two test
+/// processes picking at once.
+#[test]
+fn a_port_is_handed_out_once() {
+    assert_ne!(free_port(), free_port());
 }
 
 /// A loopback TCP proxy that can refuse and cut every connection on demand.
@@ -409,7 +433,9 @@ pub(super) async fn start(
 ) -> (CancellationToken, JoinHandle<()>, GrpcTransport) {
     let shutdown = orchestrator.shutdown_token();
     let loader = tokio::spawn(async move {
-        let _ = orchestrator.run().await;
+        if let Err(error) = orchestrator.run().await {
+            tracing::error!(%error, "the loader stopped with an error");
+        }
     });
     (shutdown, loader, client_for(listen_port).await)
 }

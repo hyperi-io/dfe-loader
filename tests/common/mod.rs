@@ -10,6 +10,7 @@
 
 pub mod containers;
 pub mod metrics;
+pub mod test_logging;
 
 use std::env;
 use std::net::ToSocketAddrs;
