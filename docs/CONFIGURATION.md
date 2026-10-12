@@ -46,7 +46,7 @@ file drives the loader's own weights and is reported as a mismatch at startup.
 
 | Setting | Values | Effect |
 |---------|--------|--------|
-| `clickhouse.protocol` | `http` (default), `native` | HTTP (8123/8543). `native` is refused at startup: the pinned client has no TCP row fetch, and the native insert sink waits on clickhouse-rs#15 |
+| `clickhouse.protocol` | `http` (default), `native` | HTTP (8123), HTTPS (8443). `native` is refused at startup: the pinned client has no TCP row fetch, and the native insert sink waits on clickhouse-rs#15 |
 | `clickhouse.insert_format` | `row_binary` (default), `json_each_row` | binary (server skips JSON parsing) vs self-describing JSON |
 | `clickhouse.hosts` | list | multi-host failover (native pool round-robins, skips a refusing endpoint) |
 | `clickhouse.database` | string, `dfe` (default) | database the connection targets -- DDL, schema reflection, and any table name that arrives without a `db.` prefix |
@@ -69,19 +69,24 @@ Both formats insert over HTTP -- see
 
 ### Transport security (TLS, private CAs)
 
-One trust mechanism covers both transports. By default a TLS connection trusts
-the OS native root store plus the compiled Mozilla (webpki) bundle. Internal
-clusters behind a private CA are supported by pointing at the CA PEM -- no proxy
-termination, no `InsecureSkipVerify`.
+HTTPS verifies the server's certificate and host name against the container's system trust store. A private CA is trusted by adding it to that store, or by pointing `SSL_CERT_FILE` (or `SSL_CERT_DIR`) at a bundle that holds it -- there is no CA path in the loader config and no way to turn verification off.
 
 | Setting | Values | Effect |
 |---------|--------|--------|
-| `clickhouse.tls` | bool | TLS for the connection (HTTPS 8543 / secure native 9440) |
-| `clickhouse.tls_ca_file` | path | private CA PEM (may bundle many certs; all are loaded). Augments native + webpki |
-| `clickhouse.tls_ca_exclusive` | bool | trust ONLY `tls_ca_file`, ignore native + webpki |
+| `clickhouse.tls.enabled` | bool | HTTPS for the connection. When `clickhouse.tls` is absent, a host on 8443/9440 or under `clickhouse.cloud` turns it on |
+| `clickhouse.tls.ca_cert_file`, `cert_file`, `key_file`, `skip_verify` | -- | refused at startup: no client reads them |
 
-A CA file with no usable certificate is a hard error (it never silently falls
-back to public roots). See [clickhouse/TLS.md](clickhouse/TLS.md).
+See [clickhouse/TLS.md](clickhouse/TLS.md).
+
+### ClickHouse timeouts
+
+| Setting | Default | Bounds |
+|---------|---------|--------|
+| `clickhouse.connect_timeout_ms` | `5000` | opening a TCP connection |
+| `clickhouse.request_timeout_ms` | `30000` | every query (schema reads, health), and an insert waiting to hand over its next chunk |
+| `clickhouse.insert_timeout_ms` | `60000` | an insert waiting for the server's answer once its rows are sent |
+
+A timed-out insert is held and sent again on a later flush, and its Kafka offset stays uncommitted until it lands. 60 s is about 270x the ClickHouse CPU cost of the largest default flush (20,000 rows at a measured 91,000 rows per CPU-second), and two rounds of timed-out concurrent inserts still fit Kafka's 300 s `max.poll.interval.ms`, which a blocked flush cycle counts against. Idle connections close on the client side after 2 s.
 
 ### Capture (what gets stored)
 
@@ -119,9 +124,9 @@ Config hot-reloads on change. Some fields are safe to apply live; some require a
 restart and are logged as a warning rather than silently applied:
 
 - **Restart-required:** `clickhouse.protocol`, ClickHouse URL/hosts,
-  `clickhouse.insert_format`, TLS settings (`tls`, `tls_ca_file`,
-  `tls_ca_exclusive`), Kafka connection -- all of these are baked into the
-  `Client` at build time.
+  `clickhouse.insert_format`, `clickhouse.tls.enabled`, the
+  `clickhouse.*_timeout_ms` bounds, Kafka connection -- all of these are baked
+  into the `Client` at build time.
 - **Safe to reload:** buffer thresholds, capture modes, enrichment toggles,
   routing rules.
 

@@ -122,17 +122,18 @@ struct SysColumn {
 ///
 /// # Errors
 ///
-/// Returns [`DynamicError::SchemaFetch`] if the query fails, or
-/// [`DynamicError::EmptySchema`] if the table has no columns (or does not
-/// exist).
+/// Returns [`DynamicError::SchemaFetch`] if the query fails or runs past
+/// `timeout`, or [`DynamicError::EmptySchema`] if the table has no columns (or
+/// does not exist).
 pub async fn fetch_dynamic_schema(
     client: &Client,
     database: &str,
     table: &str,
+    timeout: Duration,
 ) -> Result<DynamicSchema, DynamicError> {
     let full_table = format!("{database}.{table}");
 
-    let rows = client
+    let query = client
         .query(
             "SELECT name, type AS col_type, default_kind \
              FROM system.columns \
@@ -141,11 +142,17 @@ pub async fn fetch_dynamic_schema(
         )
         .bind(database)
         .bind(table)
-        .fetch_all::<SysColumn>()
+        .fetch_all::<SysColumn>();
+    let rows = crate::clickhouse::client_http::bounded(timeout, query)
         .await
-        .map_err(|source| DynamicError::SchemaFetch {
-            table: full_table.clone(),
-            source,
+        .map_err(|source| match source {
+            clickhouse::error::Error::TimedOut => DynamicError::TimedOut {
+                table: full_table.clone(),
+            },
+            source => DynamicError::SchemaFetch {
+                table: full_table.clone(),
+                source,
+            },
         })?;
 
     if rows.is_empty() {

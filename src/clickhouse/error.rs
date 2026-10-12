@@ -167,7 +167,8 @@ pub fn classify_dynamic_error(err: &crate::clickhouse_ext::DynamicError) -> Erro
         DynamicError::SchemaFetch { .. }
         | DynamicError::UnsupportedType { .. }
         | DynamicError::EmptySchema { .. }
-        | DynamicError::SchemaMismatch { .. } => ErrorCategory::Transient,
+        | DynamicError::SchemaMismatch { .. }
+        | DynamicError::TimedOut { .. } => ErrorCategory::Transient,
     }
 }
 

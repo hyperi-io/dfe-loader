@@ -39,7 +39,7 @@ pub mod schema;
 
 // Re-export core types
 pub use client_http::{ClickHouseQueryClient, PoolStats, SharedQueryClient};
-pub use config::{ClickHouseConfig, InsertFormat, Transport, host_implies_tls};
+pub use config::{ClickHouseConfig, InsertFormat, Timeouts, Transport, host_implies_tls};
 pub use error::{ClickHouseError, ErrorCategory};
 pub use types::{
     ColumnInfo, NULL_STRINGS, ParsedType, ParsedTypeExt, TableSchema, default_value_for_category,

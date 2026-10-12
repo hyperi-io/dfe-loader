@@ -178,6 +178,14 @@ pub struct ClickHouseConfig {
     pub insert_format: crate::clickhouse::InsertFormat,
     pub tables: Vec<String>,
     pub tls: Option<TlsConfig>,
+    /// Bound on opening a TCP connection to `ClickHouse`, in milliseconds.
+    pub connect_timeout_ms: u64,
+    /// Bound on a query, and on an insert waiting to hand over its next chunk,
+    /// in milliseconds.
+    pub request_timeout_ms: u64,
+    /// Bound on an insert waiting for the server's answer once its rows are
+    /// sent, in milliseconds. A timed-out batch is held and retried.
+    pub insert_timeout_ms: u64,
 }
 
 impl Default for ClickHouseConfig {
@@ -193,6 +201,9 @@ impl Default for ClickHouseConfig {
             insert_format: crate::clickhouse::InsertFormat::default(),
             tables: Vec::new(),
             tls: None,
+            connect_timeout_ms: crate::clickhouse::config::default_connect_timeout(),
+            request_timeout_ms: crate::clickhouse::config::default_request_timeout(),
+            insert_timeout_ms: crate::clickhouse::config::default_insert_timeout(),
         }
     }
 }
@@ -224,9 +235,10 @@ impl From<&ClickHouseConfig> for crate::clickhouse::ClickHouseConfig {
             username: cfg.username.clone(),
             password: cfg.password.expose().to_string(),
             tls,
-            connect_timeout_ms: 5000,  // Default timeout
-            request_timeout_ms: 30000, // Default timeout
-            compression: true,         // Enable by default for HTTP
+            connect_timeout_ms: cfg.connect_timeout_ms,
+            request_timeout_ms: cfg.request_timeout_ms,
+            insert_timeout_ms: cfg.insert_timeout_ms,
+            compression: true, // Enable by default for HTTP
         }
     }
 }
@@ -511,6 +523,18 @@ impl Config {
             return Err(crate::Error::Config(
                 "At least one ClickHouse host must be configured".into(),
             ));
+        }
+        // A zero bound fails every request before it is sent.
+        for (name, value) in [
+            ("connect_timeout_ms", self.clickhouse.connect_timeout_ms),
+            ("request_timeout_ms", self.clickhouse.request_timeout_ms),
+            ("insert_timeout_ms", self.clickhouse.insert_timeout_ms),
+        ] {
+            if value == 0 {
+                return Err(crate::Error::Config(format!(
+                    "clickhouse.{name} must be greater than 0"
+                )));
+            }
         }
         // Of the borrowed Kafka TlsConfig shape only `enabled` reaches a client.
         if let Some(ref tls) = self.clickhouse.tls {
@@ -1556,6 +1580,7 @@ kafka:
             insert_format: crate::clickhouse::InsertFormat::default(),
             tables: vec!["events".to_string()],
             tls: None,
+            ..ClickHouseConfig::default()
         };
         let client_cfg: crate::clickhouse::ClickHouseConfig = (&cfg).into();
         assert_eq!(client_cfg.hosts, vec!["ch:9000"]);
@@ -1580,12 +1605,63 @@ kafka:
             insert_format: crate::clickhouse::InsertFormat::default(),
             tables: vec![],
             tls: None,
+            ..ClickHouseConfig::default()
         };
         let client_cfg: crate::clickhouse::ClickHouseConfig = (&cfg).into();
         assert!(matches!(
             client_cfg.transport,
             crate::clickhouse::Transport::Http
         ));
+    }
+
+    #[test]
+    fn the_clickhouse_timeouts_reach_the_client_config() {
+        let cfg = ClickHouseConfig {
+            connect_timeout_ms: 1_234,
+            request_timeout_ms: 5_678,
+            insert_timeout_ms: 91_011,
+            ..ClickHouseConfig::default()
+        };
+        let client_cfg: crate::clickhouse::ClickHouseConfig = (&cfg).into();
+        let ms = std::time::Duration::from_millis;
+        assert_eq!(client_cfg.connect_timeout(), ms(1_234));
+        assert_eq!(
+            client_cfg.timeouts(),
+            crate::clickhouse::Timeouts {
+                request: ms(5_678),
+                insert: ms(91_011),
+            }
+        );
+    }
+
+    #[test]
+    fn the_default_clickhouse_timeouts_are_5_s_connect_30_s_request_60_s_insert() {
+        let client_cfg: crate::clickhouse::ClickHouseConfig = (&ClickHouseConfig::default()).into();
+        let secs = std::time::Duration::from_secs;
+        assert_eq!(client_cfg.connect_timeout(), secs(5));
+        assert_eq!(client_cfg.timeouts().request, secs(30));
+        assert_eq!(client_cfg.timeouts().insert, secs(60));
+    }
+
+    #[test]
+    fn a_zero_clickhouse_timeout_fails_validation() {
+        for key in [
+            "connect_timeout_ms",
+            "request_timeout_ms",
+            "insert_timeout_ms",
+        ] {
+            let mut config = Config::default();
+            match key {
+                "connect_timeout_ms" => config.clickhouse.connect_timeout_ms = 0,
+                "request_timeout_ms" => config.clickhouse.request_timeout_ms = 0,
+                _ => config.clickhouse.insert_timeout_ms = 0,
+            }
+            let err = config.validate().unwrap_err().to_string();
+            assert!(
+                err.contains(&format!("clickhouse.{key}")),
+                "a zero {key} was not named: {err}"
+            );
+        }
     }
 
     #[test]

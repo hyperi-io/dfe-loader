@@ -84,6 +84,8 @@ fork repo is now archived and read-only, so the branch can no longer move and
 the pinned rev stays reachable. It also means no fix can land on the fork:
 retiring the patch for crates.io `clickhouse` is the only way forward (#133).
 
+The HTTP client is the loader's own. `build_client` in `src/clickhouse/client_http.rs` hands the fork a hyper client through `Client::with_http_client`, carrying the pool timer that closes idle connections after 2 s, the connect timeout and HTTPS verified against the system trust store. Queries and inserts carry the request and insert timeouts on top. #133 still stands for the rest of the fork.
+
 ## What stays out of clickhouse_ext
 
 - The transport, pool, handshake, and Native block framing -- those are the

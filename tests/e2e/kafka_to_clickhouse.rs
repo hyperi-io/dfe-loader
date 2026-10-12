@@ -188,6 +188,7 @@ fn ch_config_from_env() -> ClickHouseConfig {
         } else {
             None
         },
+        ..Default::default()
     }
 }
 

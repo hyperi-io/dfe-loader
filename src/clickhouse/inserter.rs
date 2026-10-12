@@ -44,8 +44,8 @@ use tracing::{debug, error, info, trace, warn};
 
 use crate::Result;
 use crate::buffer::{FlushBatch, KafkaOffset};
-use crate::clickhouse::client_http::escape_identifier;
-use crate::clickhouse::config::InsertFormat;
+use crate::clickhouse::client_http::{escape_identifier, insert_sink};
+use crate::clickhouse::config::{InsertFormat, Timeouts};
 use crate::clickhouse::error::{
     ErrorCategory, classify_dynamic_error, classify_json_insert_error, is_schema_drift_error,
     retries, server_code,
@@ -293,6 +293,8 @@ pub struct Inserter {
     /// Whether a schema-drift insert error drops the cached schema
     /// (`schema.refresh_on_error`).
     refresh_on_error: bool,
+    /// Bounds on schema fetches and inserts.
+    timeouts: Timeouts,
 }
 
 impl Inserter {
@@ -328,7 +330,21 @@ impl Inserter {
             schema_cache: None,
             coercer: None,
             refresh_on_error: true,
+            timeouts: Timeouts::default(),
         }
+    }
+
+    /// Set the bounds on schema fetches and inserts (`clickhouse.request_timeout_ms`
+    /// and `clickhouse.insert_timeout_ms`).
+    pub fn with_timeouts(mut self, timeouts: Timeouts) -> Self {
+        self.timeouts = timeouts;
+        self
+    }
+
+    /// The bounds on schema fetches and inserts.
+    #[cfg(test)]
+    pub(crate) fn timeouts(&self) -> Timeouts {
+        self.timeouts
     }
 
     /// Set the insert format.
@@ -452,7 +468,14 @@ impl Inserter {
         let schema = match self.dynamic_schema_cache.get(table) {
             Some(schema) => schema,
             None => {
-                match crate::clickhouse_ext::fetch_dynamic_schema(&self.ch_client, db, tbl).await {
+                match crate::clickhouse_ext::fetch_dynamic_schema(
+                    &self.ch_client,
+                    db,
+                    tbl,
+                    self.timeouts.request,
+                )
+                .await
+                {
                     Ok(fetched) => {
                         self.dynamic_schema_cache.insert(table, fetched.clone());
                         fetched
@@ -484,7 +507,7 @@ impl Inserter {
         let Some(encoded_against) = encoded_against else {
             return false;
         };
-        crate::clickhouse_ext::fetch_dynamic_schema(&self.ch_client, db, tbl)
+        crate::clickhouse_ext::fetch_dynamic_schema(&self.ch_client, db, tbl, self.timeouts.request)
             .await
             .is_ok_and(|now| now.same_columns(encoded_against))
     }
@@ -562,7 +585,8 @@ impl Inserter {
                 tbl,
                 Arc::clone(&self.dynamic_schema_cache),
             )
-            .refresh_on_error(self.refresh_on_error);
+            .refresh_on_error(self.refresh_on_error)
+            .with_timeouts(self.timeouts);
 
             let mut write_failed = false;
             for (i, row) in rows.iter().enumerate() {
@@ -586,6 +610,11 @@ impl Inserter {
                     insert.write_map(row).await
                 };
                 if let Err(e) = write_result {
+                    // Another attempt inside this cycle only keeps the event loop
+                    // blocked, so a timed-out fetch goes back to be held.
+                    if matches!(e, crate::clickhouse_ext::DynamicError::TimedOut { .. }) {
+                        return Err(crate::Error::ClickHouse(format!("RowBinary write: {e}")));
+                    }
                     // Schema mismatch — invalidate both fork and loader caches, then retry
                     if matches!(
                         e,
@@ -797,7 +826,7 @@ impl Inserter {
         for attempt in 0..=self.max_retries {
             // HTTP only, like the RowBinary path: `clickhouse.protocol: native`
             // is refused at startup, and the native sink waits on clickhouse-rs#15.
-            let mut insert = self.ch_client.insert_formatted_with(sql.clone());
+            let mut insert = insert_sink(&self.ch_client, sql.clone(), self.timeouts);
 
             // One INSERT carries one verdict, and which call surfaces it is an
             // accident of buffering: the fork queues the body on a channel, so
@@ -822,6 +851,12 @@ impl Inserter {
             };
 
             let message = format!("JSONEachRow insert: {e}");
+            // Another attempt inside this cycle only keeps the event loop
+            // blocked, so a timed-out insert goes back to be held.
+            if matches!(e, clickhouse::error::Error::TimedOut) {
+                warn!(table = %table, error = %e, "Insert timed out, returning the batch to be held");
+                return Err(crate::Error::ClickHouse(message));
+            }
             match classify_json_insert_error(&e) {
                 ErrorCategory::Data => {
                     debug!(
@@ -1271,6 +1306,103 @@ mod tests {
             result.disposition,
             BatchDisposition::Retry("connection reset by peer".to_string())
         );
+    }
+
+    /// A loopback server that takes every connection and never answers.
+    async fn server_that_never_answers() -> std::net::SocketAddr {
+        use tokio::io::AsyncReadExt;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut discard = [0u8; 4096];
+                    while matches!(socket.read(&mut discard).await, Ok(n) if n > 0) {}
+                });
+            }
+        });
+        addr
+    }
+
+    /// An inserter for `default.t` at `addr` with 300 ms bounds and the table's
+    /// schema already cached, so the insert is the first request it sends.
+    fn inserter_with_short_bounds(addr: std::net::SocketAddr, format: InsertFormat) -> Inserter {
+        let config = crate::clickhouse::ClickHouseConfig {
+            hosts: vec![addr.to_string()],
+            transport: crate::clickhouse::Transport::Http,
+            database: "default".to_string(),
+            request_timeout_ms: 300,
+            insert_timeout_ms: 300,
+            ..Default::default()
+        };
+        let http_client = Arc::new(ClickHouseQueryClient::new(&config).unwrap());
+        let ch_client = crate::clickhouse::client_http::build_client(&config).unwrap();
+        let inserter = Inserter::new(http_client, ch_client, InserterConfig::default())
+            .with_insert_format(format)
+            .with_timeouts(config.timeouts());
+        inserter.dynamic_schema_cache.insert(
+            "default.t",
+            crate::clickhouse_ext::DynamicSchema::from_columns(
+                "default.t",
+                vec![ColumnDef::with_default_kind("id", "UInt64", "")],
+            ),
+        );
+        inserter
+    }
+
+    #[tokio::test]
+    async fn an_insert_the_server_never_answers_comes_back_to_be_held_within_its_bound() {
+        for format in [InsertFormat::RowBinary, InsertFormat::JsonEachRow] {
+            let inserter = inserter_with_short_bounds(server_that_never_answers().await, format);
+            let batch = FlushBatch {
+                table: "default.t".into(),
+                rows: vec![
+                    serde_json::json!({ "id": 1 }).as_object().unwrap().clone(),
+                    serde_json::json!({ "id": 2 }).as_object().unwrap().clone(),
+                ],
+                offsets: vec![
+                    KafkaOffset::new("events", 0, 100),
+                    KafkaOffset::new("events", 0, 101),
+                ],
+                raw_payloads: Vec::new(),
+                reserved: vec![16, 16],
+            };
+
+            let started = std::time::Instant::now();
+            let result =
+                tokio::time::timeout(Duration::from_secs(10), inserter.insert_with_salvage(batch))
+                    .await
+                    .unwrap_or_else(|_| panic!("{format}: an unanswered insert ran past 10 s"));
+            let elapsed = started.elapsed();
+
+            assert!(
+                !result.is_settled(),
+                "{format}: an unanswered insert settled"
+            );
+            assert!(result.failed.is_empty(), "{format}: rows went to the DLQ");
+            let BatchDisposition::Retry(reason) = &result.disposition else {
+                panic!("{format}: expected a retry, got {:?}", result.disposition);
+            };
+            assert!(reason.contains("time"), "{format}: reason {reason}");
+            let held = result
+                .unsettled
+                .unwrap_or_else(|| panic!("{format}: the batch was not handed back to hold"));
+            assert_eq!(
+                held.rows.len(),
+                2,
+                "{format}: rows missing from the held batch"
+            );
+            assert_eq!(
+                held.offsets.iter().map(|o| o.offset).collect::<Vec<_>>(),
+                vec![100, 101],
+                "{format}: offsets missing from the held batch"
+            );
+            // One 300 ms attempt; retrying inside the cycle would take seconds.
+            assert!(
+                elapsed >= Duration::from_millis(250) && elapsed < Duration::from_secs(2),
+                "{format}: the insert came back after {elapsed:?}, not after one 300 ms bound"
+            );
+        }
     }
 
     #[test]

@@ -160,13 +160,19 @@ pub struct ClickHouseConfig {
     #[serde(default)]
     pub tls: bool,
 
-    /// Connection timeout in milliseconds.
+    /// Bound on opening a TCP connection to `ClickHouse`, in milliseconds.
     #[serde(default = "default_connect_timeout")]
     pub connect_timeout_ms: u64,
 
-    /// Request timeout in milliseconds.
+    /// Bound on a query, and on an insert waiting to hand over its next chunk,
+    /// in milliseconds.
     #[serde(default = "default_request_timeout")]
     pub request_timeout_ms: u64,
+
+    /// Bound on an insert waiting for the server's answer once its rows are
+    /// sent, in milliseconds.
+    #[serde(default = "default_insert_timeout")]
+    pub insert_timeout_ms: u64,
 
     /// Enable response compression (HTTP only).
     #[serde(default = "default_compression")]
@@ -193,12 +199,38 @@ pub fn host_implies_tls(host: &str) -> bool {
         .is_some_and(|port| matches!(port, 8443 | 9440))
 }
 
-const fn default_connect_timeout() -> u64 {
+pub(crate) const fn default_connect_timeout() -> u64 {
     5000
 }
 
-const fn default_request_timeout() -> u64 {
+pub(crate) const fn default_request_timeout() -> u64 {
     30000
+}
+
+/// 60 s is ~270x the ClickHouse CPU cost of a 20,000-row flush at a measured
+/// 91,000 rows per CPU-second, and two rounds of timed-out concurrent inserts
+/// still fit Kafka's 300 s `max.poll.interval.ms`, which a blocked flush cycle
+/// counts against.
+pub(crate) const fn default_insert_timeout() -> u64 {
+    60000
+}
+
+/// Client-side bounds on `ClickHouse` requests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Timeouts {
+    /// Bound on a query, and on an insert waiting to hand over its next chunk.
+    pub request: std::time::Duration,
+    /// Bound on an insert waiting for the server's answer once its rows are sent.
+    pub insert: std::time::Duration,
+}
+
+impl Default for Timeouts {
+    fn default() -> Self {
+        Self {
+            request: std::time::Duration::from_millis(default_request_timeout()),
+            insert: std::time::Duration::from_millis(default_insert_timeout()),
+        }
+    }
 }
 
 const fn default_compression() -> bool {
@@ -217,6 +249,7 @@ impl Default for ClickHouseConfig {
             tls: false,
             connect_timeout_ms: default_connect_timeout(),
             request_timeout_ms: default_request_timeout(),
+            insert_timeout_ms: default_insert_timeout(),
             compression: default_compression(),
         }
     }
@@ -275,6 +308,21 @@ impl ClickHouseConfig {
     pub fn with_tls(mut self, tls: bool) -> Self {
         self.tls = tls;
         self
+    }
+
+    /// Bound on opening a TCP connection.
+    #[must_use]
+    pub fn connect_timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(self.connect_timeout_ms)
+    }
+
+    /// The request and insert bounds.
+    #[must_use]
+    pub fn timeouts(&self) -> Timeouts {
+        Timeouts {
+            request: std::time::Duration::from_millis(self.request_timeout_ms),
+            insert: std::time::Duration::from_millis(self.insert_timeout_ms),
+        }
     }
 
     /// Get the first host (primary).
@@ -379,6 +427,9 @@ mod tests {
         assert!(!config.tls);
         assert_eq!(config.connect_timeout_ms, 5000);
         assert_eq!(config.request_timeout_ms, 30000);
+        assert_eq!(config.insert_timeout_ms, 60000);
+        assert_eq!(config.connect_timeout(), std::time::Duration::from_secs(5));
+        assert_eq!(config.timeouts(), Timeouts::default());
         assert!(config.compression);
     }
 

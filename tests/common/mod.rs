@@ -607,6 +607,7 @@ pub fn get_clickhouse_config() -> ClickHouseConfig {
         insert_format: dfe_loader::clickhouse::InsertFormat::default(),
         tables: Vec::new(),
         tls: None,
+        ..Default::default()
     }
 }
 

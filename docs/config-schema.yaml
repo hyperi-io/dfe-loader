@@ -78,6 +78,9 @@ properties:
       insert_format: rowbinary
       tables: []
       tls: null
+      connect_timeout_ms: 5000
+      request_timeout_ms: 30000
+      insert_timeout_ms: 60000
   payload:
     description: Payload pipeline mode. **Restart required.**
     $ref: '#/$defs/PayloadConfig'
@@ -617,6 +620,28 @@ $defs:
         - $ref: '#/$defs/TlsConfig'
         - type: 'null'
         default: null
+      connect_timeout_ms:
+        description: Bound on opening a TCP connection to `ClickHouse`, in milliseconds.
+        type: integer
+        format: uint64
+        minimum: 0
+        default: 5000
+      request_timeout_ms:
+        description: |-
+          Bound on a query, and on an insert waiting to hand over its next chunk,
+          in milliseconds.
+        type: integer
+        format: uint64
+        minimum: 0
+        default: 30000
+      insert_timeout_ms:
+        description: |-
+          Bound on an insert waiting for the server's answer once its rows are
+          sent, in milliseconds. A timed-out batch is held and retried.
+        type: integer
+        format: uint64
+        minimum: 0
+        default: 60000
   InsertFormat:
     description: |-
       Insert format for data writes.

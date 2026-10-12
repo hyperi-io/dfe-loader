@@ -147,6 +147,7 @@ mod testcontainers_impl {
                 insert_format: dfe_loader::clickhouse::InsertFormat::default(),
                 tables: Vec::new(),
                 tls: None,
+                ..Default::default()
             })
         }
 
@@ -223,6 +224,67 @@ mod testcontainers_impl {
             .expect("Failed to start ClickHouse container")
     }
 
+    /// ClickHouse's HTTPS port inside the container.
+    const CLICKHOUSE_HTTPS_PORT: u16 = 8443;
+
+    /// Server config that opens HTTPS on 8443 with the certificate copied in beside it.
+    const CLICKHOUSE_HTTPS_CONFIG: &str = r"<clickhouse>
+    <https_port>8443</https_port>
+    <openSSL>
+        <server>
+            <certificateFile>/etc/clickhouse-server/certs/server.crt</certificateFile>
+            <privateKeyFile>/etc/clickhouse-server/certs/server.key</privateKeyFile>
+            <verificationMode>none</verificationMode>
+            <loadDefaultCAFile>false</loadDefaultCAFile>
+        </server>
+    </openSSL>
+</clickhouse>
+";
+
+    /// Start ClickHouse serving HTTP on `http_host_port` and HTTPS with
+    /// `cert_pem` and `key_pem` on `https_host_port`.
+    ///
+    /// Both are mapped explicitly: one explicit mapping turns off publishing
+    /// the image's own ports, and the readiness probe needs 8123.
+    pub async fn start_clickhouse_https(
+        test: &str,
+        cert_pem: String,
+        key_pem: String,
+        http_host_port: u16,
+        https_host_port: u16,
+    ) -> ContainerAsync<ClickHouseImage> {
+        let name = crate::common::container_name(Some(test), "clickhouse");
+        crate::common::reap_stale(&name);
+        ClickHouseImage::default()
+            .with_tag(format!("{CLICKHOUSE_TAG}@{CLICKHOUSE_DIGEST}"))
+            .with_env_var("CLICKHOUSE_SKIP_USER_SETUP", "1")
+            .with_copy_to(
+                "/etc/clickhouse-server/config.d/dfe-https.xml",
+                CLICKHOUSE_HTTPS_CONFIG.as_bytes().to_vec(),
+            )
+            .with_copy_to(
+                "/etc/clickhouse-server/certs/server.crt",
+                cert_pem.into_bytes(),
+            )
+            .with_copy_to(
+                "/etc/clickhouse-server/certs/server.key",
+                key_pem.into_bytes(),
+            )
+            .with_mapped_port(http_host_port, CLICKHOUSE_PORT)
+            .with_mapped_port(
+                https_host_port,
+                testcontainers::core::ContainerPort::Tcp(CLICKHOUSE_HTTPS_PORT),
+            )
+            .with_container_name(&name)
+            .with_labels(crate::common::test_labels("clickhouse"))
+            .with_ready_conditions(vec![clickhouse_ready()])
+            .with_log_consumer(echo_logs(name.clone()))
+            .with_startup_timeout(Duration::from_secs(180))
+            .start()
+            .await
+            .expect("Failed to start ClickHouse container with HTTPS")
+    }
+
     /// Start Kafka container
     async fn start_kafka(test: &str) -> ContainerAsync<KafkaImage> {
         let name = crate::common::container_name(Some(test), "kafka");
@@ -293,3 +355,6 @@ mod testcontainers_impl {
 // reference it — hence the allow.
 #[allow(unused_imports)]
 pub use testcontainers_impl::TestInfrastructure;
+#[cfg(feature = "testcontainers")]
+#[allow(unused_imports)]
+pub use testcontainers_impl::start_clickhouse_https;

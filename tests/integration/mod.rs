@@ -6,6 +6,8 @@
 mod clickhouse;
 #[cfg(feature = "testcontainers")]
 mod clickhouse_inserter_e2e;
+#[cfg(feature = "testcontainers")]
+mod clickhouse_tls;
 mod coerce_integration;
 mod config;
 mod config_reachability;

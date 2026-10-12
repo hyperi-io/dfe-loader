@@ -85,11 +85,16 @@ flate2 = ">=1.1.10, <2"
 tar = ">=0.4.46, <0.5"
 
 # ClickHouse crate (HyperI fork with native TCP + unified client)
-# rustls-tls: HTTPS for HTTP transport
+# rustls-tls + rustls-tls-native-roots: HTTPS for clients built with Client::default()
 # native-transport + native-tls-rustls: native TCP with TLS
-# rustls-tls-native-roots: uses system trust store for internal CAs
 clickhouse = { version = ">=0.15.0, <0.16", features = ["lz4", "time", "rustls-tls", "rustls-tls-native-roots", "tcp", "native-tls-rustls", "inserter"] }
 time = ">=0.3.55, <0.4"
+
+# The HTTP client handed to clickhouse::Client::with_http_client: connect timeout,
+# idle-pool eviction and HTTPS verified against the system trust store.
+hyper-util = { version = ">=0.1.21, <0.2", features = ["client-legacy", "http1", "tokio"] }
+hyper-rustls = { version = ">=0.27.10, <0.28", default-features = false, features = ["http1", "tls12", "native-tokio", "aws-lc-rs"] }
+rustls = { version = ">=0.23.45, <0.24", default-features = false, features = ["std", "tls12", "aws_lc_rs"] }
 
 # Utilities
 uuid = { version = ">=1.27.0, <2", features = ["v4", "v7"] }
@@ -135,6 +140,9 @@ rdkafka = { version = ">=0.39.0, <0.40", features = ["dynamic-linking"] }
 # ClickHouse crate (HyperI fork) — integration tests need all features
 clickhouse = { version = ">=0.15.0, <0.16", features = ["lz4", "time", "rustls-tls", "rustls-tls-native-roots", "tcp", "native-tls-rustls", "inserter"] }
 time = ">=0.3.55, <0.4"
+
+# Private CA and server certificates for the TLS ClickHouse tests
+rcgen = ">=0.14.10, <0.15"
 
 # Async test utilities
 tokio-test = ">=0.4.6, <0.5"
