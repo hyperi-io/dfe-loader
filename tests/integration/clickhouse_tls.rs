@@ -112,7 +112,7 @@ async fn https_is_verified_against_the_system_trust_store() {
     std::fs::write(&other_bundle, other_ca.pem()).expect("write other CA bundle");
 
     trust(Some(&ca_bundle));
-    let trusted = select_one(&config("localhost", https_port, true)).await;
+    let with_its_ca = select_one(&config("localhost", https_port, true)).await;
     let query_client = ClickHouseQueryClient::new(&config("localhost", https_port, true))
         .expect("query client")
         .health_check()
@@ -127,8 +127,8 @@ async fn https_is_verified_against_the_system_trust_store() {
     let no_ca = select_one(&config("localhost", https_port, true)).await;
 
     assert!(
-        trusted.is_ok(),
-        "HTTPS was refused with the server's CA in the trust store: {trusted:?}"
+        with_its_ca.is_ok(),
+        "HTTPS was refused with the server's CA in the trust store: {with_its_ca:?}"
     );
     assert!(
         query_client.is_ok(),
