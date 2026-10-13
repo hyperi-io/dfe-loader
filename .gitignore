@@ -12,7 +12,7 @@ Thumbs.db
 # Local environment files (never commit -- contain secrets)
 .env
 .env.*
-!.env.example
+!.env*.example
 !.env.example.*
 
 # Logs and ad-hoc output
@@ -44,7 +44,8 @@ cobertura.xml
 # Git worktrees (local dev convenience)
 .worktrees/
 
-# AI tooling and local working files (not committed -- mirrored in .git/info/exclude)
+# Local working files (not committed)
+# Mirrored in .git/info/exclude.
 docs/superpowers/
 .mcp.json
 .ai-version
@@ -59,3 +60,8 @@ GEMINI.md
 .codex/
 .cursor/
 .gemini/
+.superpowers/
+.playwright-mcp/
+.hyperi-ai
+.kube/
+.secrets/
