@@ -14,6 +14,8 @@ yanked = "warn"
 maximum-db-staleness = "P90D"
 ignore = [
     { id = "RUSTSEC-2024-0436", reason = "paste is a compile-time proc-macro reached only through tikv-jemalloc-ctl, so it has no runtime exposure; drop when that chain moves to pastey, which cel already uses" },
+    # unsafe-libyaml arrives via figment and serde_yaml_ng; tracked in hyperi-io/scalo-rs#341.
+    { id = "RUSTSEC-2024-0449", reason = "unsafe-libyaml is unmaintained, not vulnerable; it parses only operator-supplied config YAML via serde_yaml and serde_yaml_ng (figment, scalo), never untrusted input; drop when scalo moves to a maintained YAML parser" },
 ]
 
 [licenses]
