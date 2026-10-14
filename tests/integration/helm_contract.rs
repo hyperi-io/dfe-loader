@@ -63,19 +63,18 @@ fn test_dockerfile_matches_contract() {
 #[test]
 fn test_ci_config_covers_test_gating_features() {
     let ci_path = Path::new(env!("CARGO_MANIFEST_DIR")).join(".hyperi-ci.yaml");
-    let content = std::fs::read_to_string(&ci_path).expect("Failed to read .hyperi-ci.yaml");
-    let ci: serde_yaml_ng::Value =
-        serde_yaml_ng::from_str(&content).expect("Failed to parse .hyperi-ci.yaml");
+    let ci: serde_json::Value = scalo::yaml::from_path(&ci_path, scalo::yaml::Profile::Config)
+        .expect("Failed to parse .hyperi-ci.yaml");
 
     // hyperi-ci cascade: test.rust.features wins, else quality.rust.features.
     let sets = ci["test"]["rust"]["features"]
-        .as_sequence()
-        .or_else(|| ci["quality"]["rust"]["features"].as_sequence())
+        .as_array()
+        .or_else(|| ci["quality"]["rust"]["features"].as_array())
         .expect("no rust feature-set list in .hyperi-ci.yaml");
 
     let covered = |feature: &str| {
         sets.iter()
-            .filter_map(serde_yaml_ng::Value::as_str)
+            .filter_map(serde_json::Value::as_str)
             .any(|s| s.split(',').any(|f| f.trim() == feature))
     };
 

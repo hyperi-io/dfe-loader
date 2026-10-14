@@ -202,8 +202,8 @@ fn load_yaml_str(
     default_action: MappingAction,
     origin: &str,
 ) -> crate::Result<Vec<FieldMappingRule>> {
-    let file: YamlRemapFile = serde_yaml_ng::from_str(content)
-        .map_err(|e| crate::Error::Config(format!("YAML parse error in '{origin}': {e}")))?;
+    let file: YamlRemapFile = scalo::yaml::from_str(content, origin, scalo::yaml::Profile::Data)
+        .map_err(|e| crate::Error::Config(format!("YAML parse error: {e}")))?;
 
     let rules = file
         .mappings

@@ -32,10 +32,6 @@ quality:
     - tool: osv-scanner
       id: GHSA-w9wp-h8wv-79jx
       reason: "CVE-2026-48504, opentelemetry_sdk 0.31.0 via scalo: unreachable, no Baggage propagator is registered in dfe-loader or scalo. Accepted risk in dfe-infra docs/THREAT-MODEL.md. Blocked on metrics-exporter-opentelemetry 0.2.1 requiring opentelemetry ^0.31; tracked in hyperi-io/scalo-rs#281."
-    # unsafe-libyaml arrives via figment and serde_yaml_ng; tracked in hyperi-io/scalo-rs#341.
-    - tool: osv-scanner
-      id: RUSTSEC-2024-0449
-      reason: "unsafe-libyaml is unmaintained, not vulnerable; it parses only operator-supplied config YAML via serde_yaml and serde_yaml_ng (figment, scalo), never untrusted input; drop when scalo moves to a maintained YAML parser"
   # Rust: test specific feature sets (avoids --all-features conflicts).
   # DFE policy 2026-04-17 — jemalloc only; mimalloc removed.
   rust:
@@ -75,7 +71,7 @@ release:
   helm:
     enabled: true
     contract: emit
-    library: "2.14.9"
+    library: "2.14.13"
   container:
     enabled: true
     dockerfile: Dockerfile

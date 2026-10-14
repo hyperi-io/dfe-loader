@@ -32,12 +32,12 @@ description: |-
 type: object
 properties:
   transport:
-    description: 'Transport backend: "kafka" (default) or "grpc". **Restart required.**'
+    description: "Transport backend: \"kafka\" (default) or \"grpc\". **Restart required.**"
     type: string
     default: kafka
   kafka:
     description: Kafka consumer config. **Restart required.**
-    $ref: '#/$defs/KafkaConfig'
+    $ref: "#/$defs/KafkaConfig"
     default:
       brokers:
       - localhost:9092
@@ -49,12 +49,12 @@ properties:
       tls: null
       allow_insecure_transport: false
       librdkafka_overrides:
-        statistics.interval.ms: '5000'
+        statistics.interval.ms: "5000"
       acknowledgements:
         enabled: true
   grpc:
     description: gRPC transport config. **Restart required.**
-    $ref: '#/$defs/GrpcConfig'
+    $ref: "#/$defs/GrpcConfig"
     default:
       listen: 0.0.0.0:6000
       recv_buffer_size: 10000
@@ -66,14 +66,14 @@ properties:
         enabled: true
       max_hold_ms: 13500
   clickhouse:
-    description: '`ClickHouse` connection config. **Restart required.**'
-    $ref: '#/$defs/ClickHouseConfig'
+    description: "`ClickHouse` connection config. **Restart required.**"
+    $ref: "#/$defs/ClickHouseConfig"
     default:
       hosts:
       - localhost:8123
       database: dfe
       username: default
-      password: '***REDACTED***'
+      password: "***REDACTED***"
       protocol: http
       insert_format: rowbinary
       tables: []
@@ -83,24 +83,24 @@ properties:
       insert_timeout_ms: 60000
   payload:
     description: Payload pipeline mode. **Restart required.**
-    $ref: '#/$defs/PayloadConfig'
+    $ref: "#/$defs/PayloadConfig"
     default:
       pipeline_mode: json_primary
   metrics:
     description: Metrics server config. **Restart required.**
-    $ref: '#/$defs/MetricsConfig'
+    $ref: "#/$defs/MetricsConfig"
     default:
       enabled: true
       address: 0.0.0.0:9090
   logging:
     description: Logging config. **Restart required.**
-    $ref: '#/$defs/LoggingConfig'
+    $ref: "#/$defs/LoggingConfig"
     default:
       level: info
       format: json
   schema:
     description: Schema cache config. **Restart required.**
-    $ref: '#/$defs/SchemaConfig'
+    $ref: "#/$defs/SchemaConfig"
     default:
       cache_ttl_secs: 300
       refresh_on_error: true
@@ -109,8 +109,8 @@ properties:
       pending_max_total: 10000
       pending_max_age_secs: 30
   geoip:
-    description: '`GeoIP` enrichment (MMDB readers). **Restart required.**'
-    $ref: '#/$defs/GeoIpConfig'
+    description: "`GeoIP` enrichment (MMDB readers). **Restart required.**"
+    $ref: "#/$defs/GeoIpConfig"
     default:
       enabled: false
       provider: db_ip_lite
@@ -126,26 +126,26 @@ properties:
       cache_capacity: 100000
   computed_columns:
     description: Computed columns cache. **Restart required.**
-    $ref: '#/$defs/ComputedColumnsConfig'
+    $ref: "#/$defs/ComputedColumnsConfig"
     default:
       columns: {}
       overrides: {}
   column_directives:
     description: Per-column directive config. **Restart required.**
-    $ref: '#/$defs/ColumnDirectivesConfig'
+    $ref: "#/$defs/ColumnDirectivesConfig"
     default:
       global: {}
       tables: {}
   hot_reload:
     description: Hot-reload watcher config. **Restart required.**
-    $ref: '#/$defs/HotReloadConfig'
+    $ref: "#/$defs/HotReloadConfig"
     default:
       enabled: false
       poll_interval_secs: 5
       debounce_ms: 500
   scaling:
     description: Scaling pressure config. **Restart required.**
-    $ref: '#/$defs/ScalingConfig'
+    $ref: "#/$defs/ScalingConfig"
     default:
       enabled: true
       memory_gate_threshold: 0.8
@@ -159,8 +159,10 @@ properties:
       saturation_insert_latency: 5.0
       saturation_errors: 100.0
   batch_processing:
-    description: Batch processing engine config (SIMD parse, pre-route, parallelism). **Restart required.**
-    $ref: '#/$defs/BatchProcessingConfig'
+    description: >-
+      Batch processing engine config (SIMD parse, pre-route, parallelism). **Restart
+      required.**
+    $ref: "#/$defs/BatchProcessingConfig"
     default:
       max_chunk_size: 10000
       routing_field: null
@@ -175,7 +177,7 @@ properties:
       - event_type
   routing:
     description: Routing rules and table mapping. **Hot-reloaded.**
-    $ref: '#/$defs/RoutingConfig'
+    $ref: "#/$defs/RoutingConfig"
     default:
       rules: []
       db_fields: []
@@ -201,20 +203,20 @@ properties:
         kafka_enabled: true
   buffer:
     description: Buffer flush thresholds. **Hot-reloaded.**
-    $ref: '#/$defs/BufferConfig'
+    $ref: "#/$defs/BufferConfig"
     default:
       flush_bytes: 1048576
       flush_rows: 20000
       flush_age_secs: 5
   memory:
     description: Memory limits. **Hot-reloaded.**
-    $ref: '#/$defs/MemoryConfig'
+    $ref: "#/$defs/MemoryConfig"
     default:
       limit_bytes: 0
       pressure_threshold: 0.8
   timestamp_dq:
     description: Timestamp data quality validation. **Hot-reloaded.**
-    $ref: '#/$defs/TimestampDqConfig'
+    $ref: "#/$defs/TimestampDqConfig"
     default:
       enabled: true
       max_future_seconds: 600
@@ -223,7 +225,7 @@ properties:
       correct_known_bad: true
   field_sanitization:
     description: Field name sanitisation. **Hot-reloaded.**
-    $ref: '#/$defs/FieldSanitizationConfig'
+    $ref: "#/$defs/FieldSanitizationConfig"
     default:
       strip_at_prefix: true
       handle_numeric_prefix: true
@@ -233,7 +235,7 @@ properties:
       collision_strategy: last_wins
   metadata:
     description: Common header injection, tags, _raw handling. **Hot-reloaded.**
-    $ref: '#/$defs/MetadataConfig'
+    $ref: "#/$defs/MetadataConfig"
     default:
       enabled: true
       inject_timestamp_load: true
@@ -263,15 +265,15 @@ properties:
       remove_routing_fields: true
   coercion:
     description: Type coercion config. **Hot-reloaded.**
-    $ref: '#/$defs/CoercionConfig'
+    $ref: "#/$defs/CoercionConfig"
     default:
       type_mappings: {}
       unknown_type_fallback: String
       null_handling: default
       null_strings:
-      - 'null'
-      - 'NULL'
-      - 'Null'
+      - "null"
+      - "NULL"
+      - "Null"
       - None
       - nil
       - undefined
@@ -280,7 +282,7 @@ properties:
       - NA
       - N/A
       - n/a
-      - NaN
+      - "NaN"
       default_timezone: UTC
       timezone_fields:
       - tags_collector_timezone
@@ -288,7 +290,7 @@ properties:
       strict: false
   field_mapping:
     description: Field mapping overrides. **Hot-reloaded.**
-    $ref: '#/$defs/FieldMappingConfig'
+    $ref: "#/$defs/FieldMappingConfig"
     default:
       enabled: false
       default_action: rename
@@ -297,7 +299,7 @@ properties:
       overrides: {}
   enrichment:
     description: IP enrichment field selection. **Hot-reloaded.**
-    $ref: '#/$defs/EnrichmentConfig'
+    $ref: "#/$defs/EnrichmentConfig"
     default:
       ip_fields:
       - src_ip
@@ -339,20 +341,20 @@ $defs:
           Ignored when `topics` is set.
         type:
         - string
-        - 'null'
+        - "null"
         default: null
       client_id:
         type: string
         default: dfe-loader
       sasl:
         anyOf:
-        - $ref: '#/$defs/SaslConfig'
-        - type: 'null'
+        - $ref: "#/$defs/SaslConfig"
+        - type: "null"
         default: null
       tls:
         anyOf:
-        - $ref: '#/$defs/TlsConfig'
-        - type: 'null'
+        - $ref: "#/$defs/TlsConfig"
+        - type: "null"
         default: null
       allow_insecure_transport:
         description: |-
@@ -370,14 +372,14 @@ $defs:
         additionalProperties:
           type: string
         default:
-          statistics.interval.ms: '5000'
+          statistics.interval.ms: "5000"
       acknowledgements:
         description: |-
           `enabled: true` (the default) commits an offset only once its row is in
           `ClickHouse` or the DLQ, so a crash re-delivers it. `enabled: false`
           commits each batch as it is received: a crash or a failed insert loses
           what was committed.
-        $ref: '#/$defs/AcknowledgementsConfig'
+        $ref: "#/$defs/AcknowledgementsConfig"
         default:
           enabled: true
   SaslConfig:
@@ -397,29 +399,29 @@ $defs:
         default: scram_sha_512
       username:
         type: string
-        default: ''
+        default: ""
       password:
         type: string
         x-scalo-secret: true
         writeOnly: true
-        default: '***REDACTED***'
+        default: "***REDACTED***"
       oauth_token_endpoint:
         description: OAuth token endpoint URL. Not wired — see the OAUTHBEARER note above.
         type:
         - string
-        - 'null'
+        - "null"
         default: null
       oauth_client_id:
         description: OAuth client ID. Not wired.
         type:
         - string
-        - 'null'
+        - "null"
         default: null
       oauth_client_secret:
         description: OAuth client secret. Not wired.
         type:
         - string
-        - 'null'
+        - "null"
         x-scalo-secret: true
         writeOnly: true
         default: null
@@ -427,31 +429,31 @@ $defs:
         description: OAuth scope (space-separated). Not wired.
         type:
         - string
-        - 'null'
+        - "null"
         default: null
       oauth_extensions:
         description: OAuth extensions (key=value pairs). Not wired.
         type:
         - string
-        - 'null'
+        - "null"
         default: null
       aws_region:
         description: AWS region for MSK IAM. Not wired — see the AWS MSK IAM note above.
         type:
         - string
-        - 'null'
+        - "null"
         default: null
       aws_access_key_id:
         description: AWS access key ID. Not wired.
         type:
         - string
-        - 'null'
+        - "null"
         default: null
       aws_secret_access_key:
         description: AWS secret access key. Not wired.
         type:
         - string
-        - 'null'
+        - "null"
         x-scalo-secret: true
         writeOnly: true
         default: null
@@ -459,7 +461,7 @@ $defs:
         description: AWS session token. Not wired.
         type:
         - string
-        - 'null'
+        - "null"
         x-scalo-secret: true
         writeOnly: true
         default: null
@@ -467,7 +469,7 @@ $defs:
         description: AWS profile name. Not wired.
         type:
         - string
-        - 'null'
+        - "null"
         default: null
   TlsConfig:
     type: object
@@ -478,17 +480,17 @@ $defs:
       ca_cert_file:
         type:
         - string
-        - 'null'
+        - "null"
         default: null
       cert_file:
         type:
         - string
-        - 'null'
+        - "null"
         default: null
       key_file:
         type:
         - string
-        - 'null'
+        - "null"
         default: null
       skip_verify:
         type: boolean
@@ -531,7 +533,7 @@ $defs:
           deployment contract declares, so the Service and the listener agree.
         type:
         - string
-        - 'null'
+        - "null"
         default: 0.0.0.0:6000
       recv_buffer_size:
         description: Receive buffer size (messages buffered from incoming RPCs).
@@ -568,7 +570,7 @@ $defs:
           failed insert answers `UNAVAILABLE` and the sender retries.
           `enabled: false` answers once the records are queued: a crash loses
           what was answered.
-        $ref: '#/$defs/AcknowledgementsConfig'
+        $ref: "#/$defs/AcknowledgementsConfig"
         default:
           enabled: true
       max_hold_ms:
@@ -600,7 +602,7 @@ $defs:
         type: string
         x-scalo-secret: true
         writeOnly: true
-        default: '***REDACTED***'
+        default: "***REDACTED***"
       protocol:
         type: string
         default: http
@@ -608,7 +610,7 @@ $defs:
         description: |-
           Row encoding for INSERT: `rowbinary` (default) or `jsoneachrow`. The
           documented spellings `row_binary` and `json_each_row` parse as aliases.
-        $ref: '#/$defs/InsertFormat'
+        $ref: "#/$defs/InsertFormat"
         default: rowbinary
       tables:
         type: array
@@ -617,8 +619,8 @@ $defs:
         default: []
       tls:
         anyOf:
-        - $ref: '#/$defs/TlsConfig'
-        - type: 'null'
+        - $ref: "#/$defs/TlsConfig"
+        - type: "null"
         default: null
       connect_timeout_ms:
         description: Bound on opening a TCP connection to `ClickHouse`, in milliseconds.
@@ -753,7 +755,7 @@ $defs:
         minimum: 0
         default: 30
   GeoIpConfig:
-    description: '`GeoIP` enrichment configuration'
+    description: "`GeoIP` enrichment configuration"
     type: object
     properties:
       enabled:
@@ -761,24 +763,24 @@ $defs:
         type: boolean
         default: false
       provider:
-        description: '`GeoIP` database provider'
-        $ref: '#/$defs/GeoIpProvider'
+        description: "`GeoIP` database provider"
+        $ref: "#/$defs/GeoIpProvider"
         default: db_ip_lite
       city_db_path:
         description: Explicit path to city MMDB file (overrides auto-download)
         type:
         - string
-        - 'null'
+        - "null"
         default: null
       asn_db_path:
         description: Explicit path to ASN MMDB file (overrides auto-download)
         type:
         - string
-        - 'null'
+        - "null"
         default: null
       auto_download:
         description: Auto-download settings
-        $ref: '#/$defs/AutoDownloadConfig'
+        $ref: "#/$defs/AutoDownloadConfig"
         default:
           enabled: true
           data_dir: /var/lib/dfe/geoip
@@ -793,18 +795,18 @@ $defs:
         minimum: 0
         default: 100000
   GeoIpProvider:
-    description: '`GeoIP` enrichment provider'
+    description: "`GeoIP` enrichment provider"
     oneOf:
     - description: DB-IP Lite — free, anonymous download, city-level, CC BY 4.0
       type: string
       const: db_ip_lite
-    - description: '`MaxMind` `GeoLite2` — free account required (`account_id` + `license_key`)'
+    - description: "`MaxMind` `GeoLite2` — free account required (`account_id` + `license_key`)"
       type: string
       const: max_mind_geo_lite2
     - description: IPLocate.io — free, anonymous, country + ASN only
       type: string
       const: ip_locate
-    - description: '`IPinfo` Lite — free token required, country + ASN only'
+    - description: "`IPinfo` Lite — free token required, country + ASN only"
       type: string
       const: ip_info_lite
     - description: sapics/ip-location-db — free CC0, country + ASN only
@@ -826,27 +828,27 @@ $defs:
         type: string
         default: /var/lib/dfe/geoip
       maxmind_account_id:
-        description: '`MaxMind` account ID (required for `max_mind_geo_lite2` provider)'
+        description: "`MaxMind` account ID (required for `max_mind_geo_lite2` provider)"
         type:
         - string
-        - 'null'
+        - "null"
         default: null
       maxmind_license_key:
-        description: '`MaxMind` license key (required for `max_mind_geo_lite2` provider)'
+        description: "`MaxMind` license key (required for `max_mind_geo_lite2` provider)"
         type:
         - string
-        - 'null'
+        - "null"
         default: null
       ipinfo_token:
-        description: '`IPinfo` token (required for `ip_info_lite` provider)'
+        description: "`IPinfo` token (required for `ip_info_lite` provider)"
         type:
         - string
-        - 'null'
+        - "null"
         x-scalo-secret: true
         writeOnly: true
         default: null
       max_age_days:
-        description: 'Max age in days before re-downloading (default: 30)'
+        description: "Max age in days before re-downloading (default: 30)"
         type: integer
         format: uint32
         minimum: 0
@@ -873,7 +875,7 @@ $defs:
           type: string
         default: {}
       overrides:
-        description: 'Per-table overrides. Key: "db.table", Value: column→expression map.'
+        description: "Per-table overrides. Key: \"db.table\", Value: column→expression map."
         type: object
         additionalProperties:
           type: object
@@ -889,18 +891,18 @@ $defs:
     type: object
     properties:
       global:
-        description: 'Global: applies to matching column names across all tables.'
+        description: "Global: applies to matching column names across all tables."
         type: object
         additionalProperties:
-          $ref: '#/$defs/ColumnDirectivesEntry'
+          $ref: "#/$defs/ColumnDirectivesEntry"
         default: {}
       tables:
-        description: 'Per-table: key is `"db.table"`.'
+        description: "Per-table: key is `\"db.table\"`."
         type: object
         additionalProperties:
           type: object
           additionalProperties:
-            $ref: '#/$defs/ColumnDirectivesEntry'
+            $ref: "#/$defs/ColumnDirectivesEntry"
         default: {}
   ColumnDirectivesEntry:
     description: Config entry for one column — all fields optional, only set fields take effect.
@@ -913,20 +915,20 @@ $defs:
       default:
         description: Default value when column is null or absent.
       renamed:
-        description: 'Source field: `"field"` or `"first(a/b/c)"`.'
+        description: "Source field: `\"field\"` or `\"first(a/b/c)\"`."
         type:
         - string
-        - 'null'
+        - "null"
       computed:
         description: CEL expression producing this column's value.
         type:
         - string
-        - 'null'
+        - "null"
       coerce:
         description: Type category override for coercion.
         type:
         - string
-        - 'null'
+        - "null"
   HotReloadConfig:
     description: |-
       Hot-reload configuration
@@ -943,7 +945,7 @@ $defs:
     type: object
     properties:
       enabled:
-        description: 'Enable config file watching (default: false)'
+        description: "Enable config file watching (default: false)"
         type: boolean
         default: false
       poll_interval_secs:
@@ -1034,17 +1036,17 @@ $defs:
         description: JSON field the pre-route reads before the full parse. Unset skips the pre-route.
         type:
         - string
-        - 'null'
+        - "null"
         default: null
       pre_route_filters:
         description: Pre-route filters, evaluated in order. The first match wins.
         type: array
         items:
-          $ref: '#/$defs/PreRouteFilterConfig'
+          $ref: "#/$defs/PreRouteFilterConfig"
         default: []
       parse_error_action:
         description: Action to take when a message fails JSON parsing.
-        $ref: '#/$defs/ParseErrorAction'
+        $ref: "#/$defs/ParseErrorAction"
         default: dlq
       known_fields:
         description: Fields to pre-extract at parse time for routing lookups.
@@ -1068,27 +1070,27 @@ $defs:
     - description: Route to DLQ if a required field is absent.
       type: object
       properties:
-        field:
-          description: Name of the required field.
-          type: string
         type:
           type: string
           const: drop_field_missing
+        field:
+          description: Name of the required field.
+          type: string
       required:
       - type
       - field
     - description: Route to DLQ if a field equals a specific value.
       type: object
       properties:
+        type:
+          type: string
+          const: dlq_field_value
         field:
           description: Name of the field to check.
           type: string
         value:
           description: Value that triggers DLQ routing.
           type: string
-        type:
-          type: string
-          const: dlq_field_value
       required:
       - type
       - field
@@ -1114,7 +1116,7 @@ $defs:
           Falls through to field-extraction routing if no rule matches.
         type: array
         items:
-          $ref: '#/$defs/RoutingRule'
+          $ref: "#/$defs/RoutingRule"
         default: []
       db_fields:
         description: |-
@@ -1154,7 +1156,7 @@ $defs:
           This field is extracted and stored as _`org_id`, regardless of routing behaviour
         type:
         - string
-        - 'null'
+        - "null"
         default: org_id
       org_routes:
         description: |-
@@ -1163,7 +1165,7 @@ $defs:
           Example: [{`org_id`: "acme"}, {`org_id`: "bigcorp", database: "`bigcorp_dfe`"}]
         type: array
         items:
-          $ref: '#/$defs/OrgRoute'
+          $ref: "#/$defs/OrgRoute"
         default: []
       source_to_table:
         description: |-
@@ -1174,10 +1176,10 @@ $defs:
           type: string
         default: {}
       mapping_file:
-        description: 'Legacy: mapping file path'
+        description: "Legacy: mapping file path"
         type:
         - string
-        - 'null'
+        - "null"
         default: null
       topic_suffixes:
         description: |-
@@ -1197,7 +1199,7 @@ $defs:
         default: false
       dlq:
         description: DLQ configuration
-        $ref: '#/$defs/DlqConfig'
+        $ref: "#/$defs/DlqConfig"
         default:
           enabled: true
           mode: cascade
@@ -1225,7 +1227,7 @@ $defs:
         description: Target database (optional — uses `default_db` if omitted)
         type:
         - string
-        - 'null'
+        - "null"
         default: null
     required:
     - when
@@ -1246,7 +1248,7 @@ $defs:
         description: Target database. If omitted, the `org_id` itself is used as the database name.
         type:
         - string
-        - 'null'
+        - "null"
         default: null
     required:
     - org_id
@@ -1257,7 +1259,7 @@ $defs:
         type: boolean
         default: true
       mode:
-        description: 'Backend mode: cascade (default), `fan_out`, `file_only`, `kafka_only`'
+        description: "Backend mode: cascade (default), `fan_out`, `file_only`, `kafka_only`"
         type: string
         default: cascade
       topic:
@@ -1288,7 +1290,7 @@ $defs:
           counted lost. Unset keeps scalo's default.
         type:
         - integer
-        - 'null'
+        - "null"
         format: uint64
         minimum: 0
   BufferConfig:
@@ -1405,13 +1407,13 @@ $defs:
         description: |-
           Controls how _json and _raw columns are populated.
           All modes extract promoted fields to schema columns.
-        $ref: '#/$defs/CaptureMode'
+        $ref: "#/$defs/CaptureMode"
         default: full
       table_capture_modes:
         description: Per-table capture mode overrides (table name → mode)
         type: object
         additionalProperties:
-          $ref: '#/$defs/CaptureMode'
+          $ref: "#/$defs/CaptureMode"
         default: {}
       capture_json:
         description: Store complete original Kafka message as JSON before transformation
@@ -1426,7 +1428,7 @@ $defs:
         type: boolean
         default: true
       raw_source_fields:
-        description: 'Source fields to try for rename (first match wins). Default: ["logoriginal"]'
+        description: "Source fields to try for rename (first match wins). Default: [\"logoriginal\"]"
         type: array
         items:
           type: string
@@ -1482,13 +1484,13 @@ $defs:
         NULL, so a JSON payload is never stored twice.
       type: string
       const: full
-    - description: '`_json` = NULL, `_raw` = entire Kafka payload as UTF-8 String'
+    - description: "`_json` = NULL, `_raw` = entire Kafka payload as UTF-8 String"
       type: string
       const: raw_only
-    - description: '`_json` = full payload (JSON type), `_raw` = NULL'
+    - description: "`_json` = full payload (JSON type), `_raw` = NULL"
       type: string
       const: json_only
-    - description: '`_json` = NULL, `_raw` = NULL -- only promoted schema fields'
+    - description: "`_json` = NULL, `_raw` = NULL -- only promoted schema fields"
       type: string
       const: extracted_only
   CoercionConfig:
@@ -1510,12 +1512,12 @@ $defs:
           type: string
         default: {}
       unknown_type_fallback:
-        description: 'Fallback coercer for unknown types (default: "String")'
+        description: "Fallback coercer for unknown types (default: \"String\")"
         type: string
         default: String
       null_handling:
         description: How to handle null values in non-nullable columns
-        $ref: '#/$defs/NullHandling'
+        $ref: "#/$defs/NullHandling"
         default: default
       null_strings:
         description: Strings to recognise as null (case-sensitive)
@@ -1523,9 +1525,9 @@ $defs:
         items:
           type: string
         default:
-        - 'null'
-        - 'NULL'
-        - 'Null'
+        - "null"
+        - "NULL"
+        - "Null"
         - None
         - nil
         - undefined
@@ -1534,7 +1536,7 @@ $defs:
         - NA
         - N/A
         - n/a
-        - NaN
+        - "NaN"
       default_timezone:
         description: Default timezone for naive timestamps (IANA name or +HH:MM)
         type: string
@@ -1551,7 +1553,7 @@ $defs:
         type: boolean
         default: true
       strict:
-        description: 'Strict mode: fail on any coercion error'
+        description: "Strict mode: fail on any coercion error"
         type: boolean
         default: false
   NullHandling:
@@ -1580,7 +1582,7 @@ $defs:
     type: object
     properties:
       enabled:
-        description: 'Master switch (default: false — no impact on existing pipelines)'
+        description: "Master switch (default: false — no impact on existing pipelines)"
         type: boolean
         default: false
       default_action:
@@ -1591,7 +1593,7 @@ $defs:
         type: string
         default: rename
       builtin:
-        description: 'Built-in mapping preset: "ecs", "cim", "beats", or "none"'
+        description: "Built-in mapping preset: \"ecs\", \"cim\", \"beats\", or \"none\""
         type: string
         default: none
       files:
@@ -1606,14 +1608,14 @@ $defs:
         description: Per-destination field action overrides
         type: object
         additionalProperties:
-          $ref: '#/$defs/FieldMappingOverride'
+          $ref: "#/$defs/FieldMappingOverride"
         default: {}
   FieldMappingOverride:
     description: Per-field override for mapping action
     type: object
     properties:
       action:
-        description: 'Action for this field: "rename" or "copy"'
+        description: "Action for this field: \"rename\" or \"copy\""
         type: string
     required:
     - action
@@ -1636,14 +1638,14 @@ $defs:
         - source_ip
       reputation:
         description: IP reputation enrichment (VPN, Tor, proxy, botnet detection)
-        $ref: '#/$defs/ReputationEnrichmentConfig'
+        $ref: "#/$defs/ReputationEnrichmentConfig"
         default:
           enabled: false
           cache_capacity: 100000
           blocklist_files: []
       risk_scoring:
         description: Risk scoring (weighted composite score from geo + reputation data)
-        $ref: '#/$defs/RiskScoringConfig'
+        $ref: "#/$defs/RiskScoringConfig"
         default:
           enabled: false
           preset: global

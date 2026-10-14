@@ -1181,13 +1181,13 @@
           "description": "Route to DLQ if a required field is absent.",
           "type": "object",
           "properties": {
-            "field": {
-              "description": "Name of the required field.",
-              "type": "string"
-            },
             "type": {
               "type": "string",
               "const": "drop_field_missing"
+            },
+            "field": {
+              "description": "Name of the required field.",
+              "type": "string"
             }
           },
           "required": [
@@ -1199,6 +1199,10 @@
           "description": "Route to DLQ if a field equals a specific value.",
           "type": "object",
           "properties": {
+            "type": {
+              "type": "string",
+              "const": "dlq_field_value"
+            },
             "field": {
               "description": "Name of the field to check.",
               "type": "string"
@@ -1206,10 +1210,6 @@
             "value": {
               "description": "Value that triggers DLQ routing.",
               "type": "string"
-            },
-            "type": {
-              "type": "string",
-              "const": "dlq_field_value"
             }
           },
           "required": [

@@ -415,6 +415,12 @@ fn apply_figment_env(config: &mut Config) -> Result<()> {
     Ok(())
 }
 
+/// Read and parse the YAML config file at `path` with scalo's config rules.
+fn parse_config_file(path: &str) -> Result<Config> {
+    scalo::yaml::from_path(path, scalo::yaml::Profile::Config)
+        .map_err(|e| crate::Error::Config(format!("invalid config file: {e}")))
+}
+
 impl Config {
     /// Load configuration with cascade (highest to lowest priority):
     ///
@@ -435,20 +441,13 @@ impl Config {
         let config_path = resolved.as_deref();
         if let Some(path) = config_path {
             if Path::new(path).exists() {
-                let content = std::fs::read_to_string(path)
-                    .map_err(|e| crate::Error::Config(format!("failed to read {path}: {e}")))?;
-                config = serde_yaml_ng::from_str(&content)
-                    .map_err(|e| crate::Error::Config(format!("failed to parse {path}: {e}")))?;
+                config = parse_config_file(path)?;
             }
         } else {
             // Try default config paths
             for path in &["config.yaml", "config.yml"] {
                 if Path::new(path).exists() {
-                    let content = std::fs::read_to_string(path)
-                        .map_err(|e| crate::Error::Config(format!("failed to read {path}: {e}")))?;
-                    config = serde_yaml_ng::from_str(&content).map_err(|e| {
-                        crate::Error::Config(format!("failed to parse {path}: {e}"))
-                    })?;
+                    config = parse_config_file(path)?;
                     break;
                 }
             }
@@ -1384,7 +1383,8 @@ kafka:
   librdkafka_overrides:
     statistics.interval.ms: "5000"
 "#;
-        let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        let config: Config =
+            scalo::yaml::from_str(yaml, "config.yaml", scalo::yaml::Profile::Config).unwrap();
         assert_eq!(
             config
                 .kafka
@@ -1408,7 +1408,8 @@ kafka:
   librdkafka_overrides:
     message.max.bytes: "2097152"
 "#;
-        let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        let config: Config =
+            scalo::yaml::from_str(yaml, "config.yaml", scalo::yaml::Profile::Config).unwrap();
         assert_eq!(
             config
                 .kafka
@@ -1556,7 +1557,8 @@ kafka:
         assert_eq!(Config::default().transport, TRANSPORT_KAFKA);
 
         let yaml = "kafka:\n  brokers: [\"x:9092\"]\n";
-        let parsed: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        let parsed: Config =
+            scalo::yaml::from_str(yaml, "config.yaml", scalo::yaml::Profile::Config).unwrap();
         assert_eq!(parsed.transport, TRANSPORT_KAFKA);
 
         let contract = Config::deployment_contract();
@@ -1683,7 +1685,8 @@ kafka:
     #[test]
     fn test_clickhouse_insert_format_from_yaml() {
         let yaml = "kafka:\n  brokers: [\"x:9092\"]\nclickhouse:\n  insert_format: json_each_row\n";
-        let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        let config: Config =
+            scalo::yaml::from_str(yaml, "config.yaml", scalo::yaml::Profile::Config).unwrap();
         assert_eq!(
             config.clickhouse.insert_format,
             crate::clickhouse::InsertFormat::JsonEachRow
@@ -1691,7 +1694,8 @@ kafka:
 
         // The spelling documented in docs/clickhouse/INSERT-FORMATS.md.
         let yaml = "clickhouse:\n  insert_format: row_binary\n";
-        let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        let config: Config =
+            scalo::yaml::from_str(yaml, "config.yaml", scalo::yaml::Profile::Config).unwrap();
         assert_eq!(
             config.clickhouse.insert_format,
             crate::clickhouse::InsertFormat::RowBinary
@@ -1704,7 +1708,12 @@ kafka:
             Config::default().clickhouse.insert_format,
             crate::clickhouse::InsertFormat::RowBinary
         );
-        let config: Config = serde_yaml_ng::from_str("clickhouse:\n  database: dfe\n").unwrap();
+        let config: Config = scalo::yaml::from_str(
+            "clickhouse:\n  database: dfe\n",
+            "config.yaml",
+            scalo::yaml::Profile::Config,
+        )
+        .unwrap();
         assert_eq!(
             config.clickhouse.insert_format,
             crate::clickhouse::InsertFormat::RowBinary
@@ -1841,7 +1850,8 @@ kafka:
     fn test_serde_parse_empty_yaml_uses_defaults() {
         // Empty YAML with #[serde(default)] on all fields → all defaults.
         // Bypass Config::load() to avoid parallel env var contamination.
-        let config: Config = serde_yaml_ng::from_str("").unwrap();
+        let config: Config =
+            scalo::yaml::from_str("", "config.yaml", scalo::yaml::Profile::Config).unwrap();
         // Every section should have its Default values
         assert_eq!(config.kafka.brokers, vec!["localhost:9092"]);
         assert_eq!(config.buffer.flush_rows, 20_000);
@@ -1854,7 +1864,8 @@ kafka:
         // Direct serde parsing (no env var interference) — verifies the
         // #[serde(default)] cascade works end-to-end for partial configs.
         let yaml = "buffer:\n  flush_rows: 12345\n";
-        let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        let config: Config =
+            scalo::yaml::from_str(yaml, "config.yaml", scalo::yaml::Profile::Config).unwrap();
         // Overridden field
         assert_eq!(config.buffer.flush_rows, 12345);
         // Untouched fields in the same section keep defaults
@@ -1873,7 +1884,8 @@ kafka:
   brokers: [localhost:9092]
   group: my-group
 ";
-        let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        let config: Config =
+            scalo::yaml::from_str(yaml, "config.yaml", scalo::yaml::Profile::Config).unwrap();
         assert_eq!(config.kafka.group, "my-group");
         // Other sections get defaults
         assert_eq!(config.buffer.flush_rows, 20_000);
@@ -1897,6 +1909,18 @@ kafka:
             result.is_err(),
             "Type mismatch in YAML must fail to deserialize"
         );
+    }
+
+    /// A key left blank on a text field fails the load at its line, rather than
+    /// reading as empty text.
+    #[test]
+    fn a_blank_text_value_fails_the_load_at_its_line() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let config_path = dir.path().join("blank.yaml");
+        std::fs::write(&config_path, "kafka:\n  group:\n").unwrap();
+
+        let err = parse_config_file(config_path.to_str().unwrap()).unwrap_err();
+        assert!(err.to_string().contains("line 2"), "{err}");
     }
 
     // ========================================================================
@@ -2128,7 +2152,8 @@ logging:
   level: "trace"
   format: "pretty"
 "#;
-        let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        let config: Config =
+            scalo::yaml::from_str(yaml, "config.yaml", scalo::yaml::Profile::Config).unwrap();
         assert_eq!(config.kafka.brokers, vec!["k1:9092", "k2:9092"]);
         assert_eq!(config.kafka.group, "merged-group");
         assert_eq!(config.kafka.topics, vec!["alpha", "beta"]);
@@ -2186,7 +2211,9 @@ logging:
     #[test]
     fn batch_processing_format_from_an_older_config_still_loads_219() {
         let yaml = "batch_processing:\n  format: msgpack\n  routing_field: _table\n";
-        let config: Config = serde_yaml_ng::from_str(yaml).expect("the removed key is ignored");
+        let config: Config =
+            scalo::yaml::from_str(yaml, "config.yaml", scalo::yaml::Profile::Config)
+                .expect("the removed key is ignored");
         assert_eq!(
             config.batch_processing.routing_field.as_deref(),
             Some("_table")
@@ -2198,7 +2225,9 @@ logging:
     #[test]
     fn keda_block_from_an_older_config_still_loads() {
         let yaml = "keda:\n  max_replicas: 40\nbuffer:\n  flush_rows: 123\n";
-        let config: Config = serde_yaml_ng::from_str(yaml).expect("the removed block is ignored");
+        let config: Config =
+            scalo::yaml::from_str(yaml, "config.yaml", scalo::yaml::Profile::Config)
+                .expect("the removed block is ignored");
         assert_eq!(config.buffer.flush_rows, 123);
     }
 

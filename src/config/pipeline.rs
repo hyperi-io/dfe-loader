@@ -1328,8 +1328,12 @@ mod tests {
 
     #[test]
     fn dlq_kafka_send_timeout_parses_from_yaml() {
-        let cfg: DlqConfig =
-            serde_yaml_ng::from_str("kafka_send_timeout_ms: 12000").expect("parse dlq yaml");
+        let cfg: DlqConfig = scalo::yaml::from_str(
+            "kafka_send_timeout_ms: 12000",
+            "config.yaml",
+            scalo::yaml::Profile::Config,
+        )
+        .expect("parse dlq yaml");
         assert_eq!(cfg.kafka_send_timeout_ms, Some(12_000));
     }
 
@@ -1523,7 +1527,9 @@ mod tests {
 
     #[test]
     fn capture_mode_json_only_round_trips() {
-        let parsed: CaptureMode = serde_yaml_ng::from_str("json_only").unwrap();
+        let parsed: CaptureMode =
+            scalo::yaml::from_str("json_only", "config.yaml", scalo::yaml::Profile::Config)
+                .unwrap();
         assert_eq!(parsed, CaptureMode::JsonOnly);
 
         let rendered = serde_json::to_string(&CaptureMode::JsonOnly).unwrap();
@@ -1534,7 +1540,8 @@ mod tests {
     fn schema_config_deserialises_partial_yaml() {
         // Only overriding cache_ttl_secs — new fields stay at defaults.
         let yaml = "cache_ttl_secs: 600\n";
-        let c: SchemaConfig = serde_yaml_ng::from_str(yaml).unwrap();
+        let c: SchemaConfig =
+            scalo::yaml::from_str(yaml, "config.yaml", scalo::yaml::Profile::Config).unwrap();
         assert_eq!(c.cache_ttl_secs, 600);
         assert_eq!(c.pre_warm_retry_secs, 60);
         assert_eq!(c.pending_max_per_table, 1000);
