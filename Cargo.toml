@@ -34,7 +34,7 @@ tokio-util = { version = ">=0.7.19, <0.8", features = ["rt"] }
 # Shared library with transport abstraction. The floor moves with
 # `release.helm.library` in .hyperi-ci.yaml: the library renders only the
 # contract version its scalo release writes.
-scalo = { version = "2.14.9", features = ["config-schema", "transport-kafka", "transport-grpc", "dlq-kafka", "config", "config-reload", "deployment", "version-check", "scaling", "cli-service", "top", "logger", "metrics", "service-metrics", "expression", "memory", "worker-batch", "governor", "secrets", "sink-stack"] }
+scalo = { version = "2.14.13", features = ["config-schema", "transport-kafka", "transport-grpc", "dlq-kafka", "config", "config-reload", "deployment", "version-check", "scaling", "cli-service", "top", "logger", "metrics", "service-metrics", "expression", "memory", "worker-batch", "governor", "secrets", "sink-stack"] }
 
 # Steps scalo's jittered retry schedule (sink_stack backoff). Range MUST track
 # scalo's: BackoffBuilder only applies to the ExponentialBuilder scalo returns.
@@ -55,7 +55,6 @@ cel = { version = ">=0.14.5, <0.15", features = ["json"] }
 sonic-rs = ">=0.5.10, <0.6"
 serde = { version = ">=1.0.229, <2", features = ["derive"] }
 serde_json = ">=1.0.151, <2"  # Fallback for complex cases
-serde_yaml_ng = ">=0.10, <0.11"  # YAML remap file parsing (maintained serde_yaml fork)
 csv = ">=1.4.0, <2"  # CSV remap file parsing (ecs-mapper format compatible)
 
 # Configuration

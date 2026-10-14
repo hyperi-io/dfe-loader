@@ -71,7 +71,7 @@ DURATION="${PGO_WORKLOAD_DURATION_SECS:-300}"
 # Both images equal dfe-infra versions.yaml (services.redpanda-version and
 # services.clickhouse-version), pinned by digest so a rebuilt tag cannot change
 # the server. Digests sit on their own lines: the Renovate regex stops at a colon.
-# renovate: datasource=docker depName=docker.redpanda.com/redpandadata/redpanda
+# renovate: datasource=docker depName=redpandadata/redpanda
 KAFKA_TAG="v26.2.3"
 KAFKA_DIGEST="sha256:9e83cfa99278f30d0133271c26bf670cd69c94ffa6ba0b42830dd0c3bd9dcfd9"
 # renovate: datasource=docker depName=clickhouse/clickhouse-server
