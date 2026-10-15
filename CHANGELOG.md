@@ -3,6 +3,12 @@
 Rendered by CI and committed back at the end of a release -- do not edit by
 hand. Release notes also appear on the GitHub Releases page, one per tag.
 
+## [1.18.52](https://github.com/hyperi-io/dfe-loader/compare/v1.18.51...v1.18.52) (2026-10-15)
+
+### Bug Fixes
+
+* rebuild on scalo 2.14.15 and rustls 0.23.46 ([7d73ddb](https://github.com/hyperi-io/dfe-loader/commit/7d73ddb712f46e84f4ff54dc276ce00e04641a00))
+
 ## [1.18.51](https://github.com/hyperi-io/dfe-loader/compare/v1.18.50...v1.18.51) (2026-10-14)
 
 ### Bug Fixes
