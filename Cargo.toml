@@ -29,7 +29,7 @@ required-features = ["pgo-driver"]
 [dependencies]
 # Async runtime
 tokio = { version = ">=1.53.2, <2", features = ["full"] }
-tokio-util = { version = ">=0.7.19, <0.8", features = ["rt"] }
+tokio-util = { version = ">=0.7.20, <0.8", features = ["rt"] }
 
 # Shared library with transport abstraction. The floor moves with
 # `release.helm.library` in .hyperi-ci.yaml: the library renders only the
