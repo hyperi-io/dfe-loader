@@ -41,6 +41,15 @@ use super::KafkaMessage;
 /// is set. scalo reads an empty include list as every topic on the broker.
 const LANDING_TOPIC_INCLUDE: &str = "_(land|load)$";
 
+/// A transport that failed to start: a config scalo refused is a
+/// [`Config`](crate::Error::Config) error, which no retry fixes.
+fn start_error(context: &str, e: TransportError) -> crate::Error {
+    match e {
+        TransportError::Config(_) => crate::Error::Config(format!("{context}: {e}")),
+        _ => crate::Error::Kafka(format!("{context}: {e}")),
+    }
+}
+
 /// A received block: the passing messages plus any inbound-filter DLQ entries.
 ///
 /// The DLQ entries are surfaced (never silently dropped) so the orchestrator
@@ -97,7 +106,7 @@ impl TransportAdapter {
 
         let transport = KafkaTransport::new(&transport_config)
             .await
-            .map_err(|e| crate::Error::Kafka(format!("Transport error: {e}")))?
+            .map_err(|e| start_error("Transport error", e))?
             .with_acknowledgements(config.acknowledgements);
 
         // Attach the self-regulation pause-partitions gate over the runtime's
@@ -403,7 +412,7 @@ impl GrpcTransportAdapter {
         let transport = builder
             .start()
             .await
-            .map_err(|e| crate::Error::Kafka(format!("gRPC transport error: {e}")))?;
+            .map_err(|e| start_error("gRPC transport error", e))?;
 
         Ok(Self {
             transport,

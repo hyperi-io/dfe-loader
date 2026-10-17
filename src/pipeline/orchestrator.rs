@@ -39,7 +39,7 @@ use crate::column_meta::{ColumnMetaCache, parse_directives};
 use crate::config::{Config, SharedConfig};
 use crate::kafka::transport::{PartitionRead, ReceivedBatch};
 use crate::kafka::{TransportAdapter, TransportBackend};
-use crate::metrics::Metrics;
+use crate::metrics::{Metrics, ServerState};
 use crate::routing::Router;
 use crate::transform::Transformer;
 use crate::transform::{ComputedColumnCache, FieldMappingCache, HeaderExtractor, MappingBuilder};
@@ -236,8 +236,77 @@ impl Orchestrator {
         self.shutdown.clone()
     }
 
+    /// Run the pipeline once `ClickHouse` accepts the loader's credentials,
+    /// marking `state` ready at that point.
+    ///
+    /// Nothing joins the consumer group or opens the listener before then, so a
+    /// loader that cannot write takes no partitions from one that can. A
+    /// shutdown first returns without starting the pipeline.
+    ///
+    /// # Errors
+    ///
+    /// Whatever [`run`](Self::run) returns, [`crate::Error::Config`] when the
+    /// `ClickHouse` config can never work, checked before the probe, or
+    /// [`crate::Error::ClickHouse`] when no `ClickHouse` client can be built.
+    pub async fn run_once_clickhouse_accepts(&mut self, state: &ServerState) -> Result<()> {
+        let ch_config = self.validated_clickhouse_config()?;
+        if state
+            .ready_once_clickhouse_accepts(&ch_config, &self.shutdown)
+            .await?
+        {
+            self.run_validated(ch_config).await
+        } else {
+            info!("Shutdown before ClickHouse accepted the loader, the pipeline never started");
+            Ok(())
+        }
+    }
+
     /// Run the pipeline until shutdown
     pub async fn run(&mut self) -> Result<()> {
+        let ch_config = self.validated_clickhouse_config()?;
+        self.run_validated(ch_config).await
+    }
+
+    /// The `ClickHouse` config, refused before anything connects when it can
+    /// never work (a transport/port mismatch, `JSONEachRow` over native).
+    fn validated_clickhouse_config(&self) -> Result<crate::clickhouse::ClickHouseConfig> {
+        let ch_config: crate::clickhouse::ClickHouseConfig = (&self.config.clickhouse).into();
+        for w in ch_config.validate().map_err(crate::Error::Config)? {
+            warn!("{}", w);
+        }
+        Ok(ch_config)
+    }
+
+    /// Build the transport, retrying a failure on the cascade's `sink_stack`
+    /// backoff until it starts, or `None` when `shutdown` fires first.
+    ///
+    /// A broker that is not up yet must not end the process. A config the
+    /// transport refuses never starts, so it is returned instead of retried.
+    async fn start_transport(&self) -> Result<Option<TransportBackend>> {
+        let (config, governor, guard) = (&self.config, self.governor.as_ref(), &self.memory_guard);
+        let started = super::startup::retry_until_shutdown(
+            &self.shutdown,
+            || TransportBackend::from_config(config, governor, Some(guard)),
+            |e| !matches!(e, crate::Error::Config(_)),
+            |e, attempts, retry_in| {
+                warn!(
+                    error = %e,
+                    attempts,
+                    retry_in = ?retry_in,
+                    "The transport could not start, retrying"
+                );
+                crate::metrics::count_retry(TRANSPORT_START_STAGE);
+            },
+        )
+        .await?;
+        Ok(started.map(|(transport, _)| transport))
+    }
+
+    /// Run the pipeline on a `ClickHouse` config that has passed validation.
+    async fn run_validated(
+        &mut self,
+        ch_config: crate::clickhouse::ClickHouseConfig,
+    ) -> Result<()> {
         info!("Starting pipeline orchestrator");
 
         // Initialize transport backend (Kafka based on config). When a
@@ -245,12 +314,10 @@ impl Orchestrator {
         // gate is attached to the receiver so intake brakes under memory pressure
         // (the gate is evaluated automatically inside recv). The outbound
         // ClickHouse insert drain is NEVER gated — gating the sink would deadlock.
-        let transport = TransportBackend::from_config(
-            &self.config,
-            self.governor.as_ref(),
-            Some(&self.memory_guard),
-        )
-        .await?;
+        let Some(transport) = self.start_transport().await? else {
+            info!("Shutdown before the transport started");
+            return Ok(());
+        };
         self.holds_answers = transport.holds_answers();
         self.commits_at_receipt =
             transport.commits_offsets() && !self.config.kafka.acknowledgements.enabled;
@@ -266,17 +333,6 @@ impl Orchestrator {
             "Transport initialized"
         );
         EffectiveGuarantee::of(transport.ack_control(), SinkConfirmation::Remote).publish();
-
-        // Validate ClickHouse config (transport/port mismatch, JSONEachRow+native)
-        let ch_config: crate::clickhouse::ClickHouseConfig = (&self.config.clickhouse).into();
-        match ch_config.validate() {
-            Err(e) => return Err(crate::Error::Config(e)),
-            Ok(warnings) => {
-                for w in warnings {
-                    warn!("{}", w);
-                }
-            }
-        }
 
         // Create HTTP client for DDL/schema queries
         let http_client = Arc::new(
@@ -2818,6 +2874,9 @@ async fn place_dead_letters(
 /// names it.
 const DLQ_STAGE: &str = "dlq";
 
+/// The `pipeline_retries_total` stage a failed transport start counts under.
+const TRANSPORT_START_STAGE: &str = "transport_start";
+
 /// How often a paused intake still runs pending-schema upkeep, so a buffer
 /// waiting on a schema drains once it resolves.
 const PAUSED_INTAKE_POLL: Duration = Duration::from_millis(100);
@@ -3003,6 +3062,85 @@ mod tests {
         let config = Config::default();
         let orchestrator = Orchestrator::new(config);
         assert_eq!(orchestrator.stats().messages_received, 0);
+    }
+
+    /// Loader state before anything has marked it ready.
+    fn not_ready_state() -> ServerState {
+        let manager =
+            scalo::metrics::MetricsManager::with_config(scalo::metrics::MetricsConfig::offline(""));
+        let scaling = Arc::new(ScalingPressure::new(
+            scalo::scaling::ScalingPressureConfig::default(),
+            vec![],
+        ));
+        ServerState::new(Metrics::new(&manager), scaling)
+    }
+
+    /// A port bound then released, so nothing answers on it.
+    fn closed_port() -> u16 {
+        std::net::TcpListener::bind("127.0.0.1:0")
+            .and_then(|l| l.local_addr())
+            .expect("a free loopback port")
+            .port()
+    }
+
+    #[tokio::test]
+    async fn a_clickhouse_config_that_can_never_work_is_refused_before_the_probe() {
+        let mut config = Config::default();
+        // HTTP on the native port: refused by validation, never fixed by a retry.
+        config.clickhouse.hosts = vec!["127.0.0.1:9000".to_string()];
+        let mut orchestrator = Orchestrator::new(config);
+        let state = not_ready_state();
+
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(5),
+            orchestrator.run_once_clickhouse_accepts(&state),
+        )
+        .await;
+
+        assert!(
+            matches!(outcome, Ok(Err(crate::Error::Config(_)))),
+            "an HTTP config on the native port was not refused at once"
+        );
+        assert!(!state.is_ready(), "an unusable config went ready");
+    }
+
+    #[tokio::test]
+    async fn a_broker_that_is_not_up_keeps_the_loader_waiting_until_shutdown() {
+        let mut config = Config::default();
+        // Empty topics auto-discover, whose metadata fetch fails with no broker.
+        config.kafka.brokers = vec![format!("127.0.0.1:{}", closed_port())];
+        config.kafka.allow_insecure_transport = true;
+        let mut orchestrator = Orchestrator::new(config);
+        let stop = orchestrator.shutdown_token();
+        // Past one 10 s metadata fetch, so a failed start has had time to end run().
+        let wait = Duration::from_secs(12);
+        tokio::spawn(async move {
+            tokio::time::sleep(wait).await;
+            stop.cancel();
+        });
+
+        let recorder = crate::metrics::counting::CountingRecorder::default();
+        let _local = metrics::set_default_local_recorder(&recorder);
+        let started = std::time::Instant::now();
+        let outcome = tokio::time::timeout(Duration::from_secs(60), orchestrator.run()).await;
+        let elapsed = started.elapsed();
+
+        assert!(
+            matches!(outcome, Ok(Ok(()))),
+            "the loader did not wait for its broker and stop cleanly at shutdown"
+        );
+        assert!(
+            elapsed >= wait,
+            "run() returned after {elapsed:?}, before the shutdown at {wait:?}"
+        );
+        assert!(
+            recorder.labelled(
+                crate::metrics::RETRIES_TOTAL,
+                "stage",
+                TRANSPORT_START_STAGE
+            ) >= 1,
+            "a failed transport start was never counted as a retry"
+        );
     }
 
     // ---- batched-array fan-out (#128) ----

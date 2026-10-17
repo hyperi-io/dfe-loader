@@ -573,6 +573,48 @@ impl ServerState {
     pub fn set_ready(&self, ready: bool) {
         self.ready
             .store(ready, std::sync::atomic::Ordering::Release);
+        self.metrics.set_pipeline_ready(ready);
+    }
+
+    /// Mark the loader ready once `ClickHouse` accepts its credentials and
+    /// answers the reads its schema lookups make.
+    ///
+    /// Logs each refusal with the server's answer and retries on the cascade's
+    /// `sink_stack` backoff until accepted or `shutdown` fires. Kafka is left
+    /// out, so one broker outage cannot pull every loader out of service.
+    ///
+    /// Returns `true` once accepted, `false` when `shutdown` fired first.
+    ///
+    /// # Errors
+    ///
+    /// Returns the [`ClickHouseError`](crate::clickhouse::ClickHouseError) that
+    /// stops a client being built from `config` at all.
+    pub async fn ready_once_clickhouse_accepts(
+        &self,
+        config: &crate::clickhouse::ClickHouseConfig,
+        shutdown: &tokio_util::sync::CancellationToken,
+    ) -> Result<bool, crate::clickhouse::ClickHouseError> {
+        let client = crate::clickhouse::ClickHouseQueryClient::new(config)?;
+        let accepted = crate::pipeline::startup::retry_until_shutdown(
+            shutdown,
+            || client.probe_access(),
+            |_| true,
+            |e, attempts, retry_in| {
+                tracing::warn!(
+                    error = %e,
+                    attempts,
+                    retry_in = ?retry_in,
+                    "ClickHouse refused the startup probe, staying not ready"
+                );
+            },
+        )
+        .await?;
+        let Some(((), attempts)) = accepted else {
+            return Ok(false);
+        };
+        tracing::info!(attempts, "ClickHouse accepted the startup probe, ready");
+        self.set_ready(true);
+        Ok(true)
     }
 
     pub fn set_kafka_connected(&self, connected: bool) {
@@ -817,6 +859,67 @@ mod tests {
         assert!(state.is_ready());
         state.set_ready(false);
         assert!(!state.is_ready());
+    }
+
+    #[tokio::test]
+    async fn the_startup_probe_stops_not_ready_at_shutdown() {
+        use std::time::Duration;
+
+        // A port bound then released, so every connect is refused.
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .and_then(|l| l.local_addr())
+            .expect("a free loopback port")
+            .port();
+        let config = crate::clickhouse::ClickHouseConfig {
+            hosts: vec![format!("127.0.0.1:{port}")],
+            transport: crate::clickhouse::Transport::Http,
+            ..Default::default()
+        };
+        let state = ServerState::new(test_metrics(), test_scaling());
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let stop = shutdown.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            stop.cancel();
+        });
+
+        let finished = tokio::time::timeout(
+            Duration::from_secs(10),
+            state.ready_once_clickhouse_accepts(&config, &shutdown),
+        )
+        .await;
+
+        assert!(
+            matches!(finished, Ok(Ok(false))),
+            "the startup probe did not report the shutdown within 10s"
+        );
+        assert!(
+            !state.is_ready(),
+            "a ClickHouse nothing answers on went ready"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_config_no_client_can_be_built_from_is_an_error_not_a_ready() {
+        let config = crate::clickhouse::ClickHouseConfig {
+            hosts: vec![],
+            ..Default::default()
+        };
+        let state = ServerState::new(test_metrics(), test_scaling());
+        let shutdown = tokio_util::sync::CancellationToken::new();
+
+        let probed = state
+            .ready_once_clickhouse_accepts(&config, &shutdown)
+            .await;
+
+        assert!(
+            matches!(
+                probed,
+                Err(crate::clickhouse::ClickHouseError::Connection(_))
+            ),
+            "a config with no hosts did not fail to build a client"
+        );
+        assert!(!state.is_ready(), "a config with no hosts went ready");
     }
 
     #[test]

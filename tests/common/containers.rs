@@ -103,6 +103,23 @@ mod testcontainers_impl {
             Self { clickhouse, kafka }
         }
 
+        /// ClickHouse where the passwordless `default` user may create users
+        /// and grant to them, with Kafka beside it if `need_kafka`.
+        pub async fn clickhouse_managing_users(test: &str, need_kafka: bool) -> Self {
+            crate::common::test_logging::init();
+            crate::common::require_docker_in_ci();
+            let clickhouse = start_clickhouse_with(test, Some(CLICKHOUSE_ACCESS_MANAGEMENT)).await;
+            let kafka = if need_kafka {
+                Some(start_kafka(test).await)
+            } else {
+                None
+            };
+            Self {
+                clickhouse: Some(clickhouse),
+                kafka,
+            }
+        }
+
         /// Spin up exactly the containers the app declares it depends on.
         ///
         /// Reads `Config::deployment_contract().depends_on` (the same list that
@@ -202,17 +219,42 @@ mod testcontainers_impl {
         }
     }
 
+    /// Users config that lets `default` create users and grant to them.
+    const CLICKHOUSE_ACCESS_MANAGEMENT: &str = r"<clickhouse>
+    <users>
+        <default>
+            <access_management>1</access_management>
+        </default>
+    </users>
+</clickhouse>
+";
+
     /// Start ClickHouse container
     async fn start_clickhouse(test: &str) -> ContainerAsync<ClickHouseImage> {
+        start_clickhouse_with(test, None).await
+    }
+
+    /// Start ClickHouse, with `users_config` added under `users.d` if given.
+    async fn start_clickhouse_with(
+        test: &str,
+        users_config: Option<&str>,
+    ) -> ContainerAsync<ClickHouseImage> {
         let name = crate::common::container_name(Some(test), "clickhouse");
         crate::common::reap_stale(&name);
-        ClickHouseImage::default()
+        let mut image = ClickHouseImage::default()
             .with_tag(format!("{CLICKHOUSE_TAG}@{CLICKHOUSE_DIGEST}"))
             // From 25.x the entrypoint refuses to leave `default` passwordless
             // unless told to, and rejects every connection with "Authentication
             // failed" instead. The module's own config predates that. Tests
             // connect as default with no password, so keep that and say so.
-            .with_env_var("CLICKHOUSE_SKIP_USER_SETUP", "1")
+            .with_env_var("CLICKHOUSE_SKIP_USER_SETUP", "1");
+        if let Some(users_config) = users_config {
+            image = image.with_copy_to(
+                "/etc/clickhouse-server/users.d/dfe-test-users.xml",
+                users_config.as_bytes().to_vec(),
+            );
+        }
+        image
             .with_container_name(&name)
             .with_labels(crate::common::test_labels("clickhouse"))
             .with_ready_conditions(vec![clickhouse_ready()])
@@ -289,13 +331,28 @@ mod testcontainers_impl {
 
     /// Start Kafka container
     async fn start_kafka(test: &str) -> ContainerAsync<KafkaImage> {
+        start_kafka_with(test, None).await
+    }
+
+    /// Start Kafka listening on `host_port`, for a loader configured with that
+    /// address before the broker exists.
+    pub async fn start_kafka_on(test: &str, host_port: u16) -> ContainerAsync<KafkaImage> {
+        start_kafka_with(test, Some(host_port)).await
+    }
+
+    /// Start Kafka, on `host_port` if given.
+    async fn start_kafka_with(test: &str, host_port: Option<u16>) -> ContainerAsync<KafkaImage> {
         let name = crate::common::container_name(Some(test), "kafka");
         crate::common::reap_stale(&name);
         // The module's default `apache/kafka-native` segfaults in `getpwuid`
         // during its GraalVM `setup` binary, so use the JVM image.
-        KafkaImage::default()
+        let mut image = KafkaImage::default()
             .with_jvm_image()
-            .with_tag(format!("{KAFKA_TAG}@{KAFKA_DIGEST}"))
+            .with_tag(format!("{KAFKA_TAG}@{KAFKA_DIGEST}"));
+        if let Some(host_port) = host_port {
+            image = image.with_mapped_port(host_port, KAFKA_PORT);
+        }
+        image
             .with_container_name(&name)
             .with_labels(crate::common::test_labels("kafka"))
             // A JVM broker takes tens of seconds to print "Kafka Server
@@ -359,4 +416,4 @@ mod testcontainers_impl {
 pub use testcontainers_impl::TestInfrastructure;
 #[cfg(feature = "testcontainers")]
 #[allow(unused_imports)]
-pub use testcontainers_impl::start_clickhouse_https;
+pub use testcontainers_impl::{start_clickhouse_https, start_kafka_on};

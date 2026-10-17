@@ -231,12 +231,9 @@ impl ServiceApp for App {
                 }
             }
 
-            // Mark as ready
-            server_state.set_ready(true);
-
-            // Run the pipeline
+            // Readiness and intake both wait for ClickHouse to accept the credentials.
             orchestrator
-                .run()
+                .run_once_clickhouse_accepts(&server_state)
                 .await
                 .map_err(|e| CliError::Service(e.to_string()))?;
 

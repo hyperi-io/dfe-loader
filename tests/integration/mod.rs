@@ -3,9 +3,13 @@
 
 //! Integration tests
 
+#[cfg(feature = "testcontainers")]
+mod broker_startup;
 mod clickhouse;
 #[cfg(feature = "testcontainers")]
 mod clickhouse_inserter_e2e;
+#[cfg(feature = "testcontainers")]
+mod clickhouse_readiness;
 #[cfg(feature = "testcontainers")]
 mod clickhouse_tls;
 mod config;

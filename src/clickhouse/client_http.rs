@@ -512,6 +512,29 @@ impl ClickHouseQueryClient {
         Ok(())
     }
 
+    /// Log in as the configured user and read `system.tables` and
+    /// `system.columns` for the configured database, the reads the schema
+    /// lookups make.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClickHouseError::Query`] naming the first read `ClickHouse`
+    /// refused, with the server's error code and message.
+    pub async fn probe_access(&self) -> Result<()> {
+        for table in ["system.tables", "system.columns"] {
+            let sql = format!(
+                "SELECT count() AS _dfe_count FROM {table} WHERE database = {}",
+                escape_string(&self.database)
+            );
+            let _: CountRow = self
+                .read_bound
+                .run(self.ch_client.query(&sql).fetch_one())
+                .await
+                .map_err(|e| ClickHouseError::Query(format!("reading {table}: {e}")))?;
+        }
+        Ok(())
+    }
+
     /// Get the database name.
     #[must_use]
     pub fn database(&self) -> &str {
