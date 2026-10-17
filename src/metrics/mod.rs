@@ -582,23 +582,21 @@ impl ServerState {
     /// Logs each refusal with the server's answer and retries on scalo's sink
     /// backoff until accepted or `shutdown` fires. Kafka is left out, so one
     /// broker outage cannot pull every loader out of service.
+    ///
+    /// Returns `true` once accepted, `false` when `shutdown` fired first.
+    ///
+    /// # Errors
+    ///
+    /// Returns the [`ClickHouseError`](crate::clickhouse::ClickHouseError) that
+    /// stops a client being built from `config` at all.
     pub async fn ready_once_clickhouse_accepts(
         &self,
         config: &crate::clickhouse::ClickHouseConfig,
         shutdown: &tokio_util::sync::CancellationToken,
-    ) {
+    ) -> Result<bool, crate::clickhouse::ClickHouseError> {
         use backon::BackoffBuilder;
 
-        let client = match crate::clickhouse::ClickHouseQueryClient::new(config) {
-            Ok(client) => client,
-            Err(e) => {
-                tracing::error!(
-                    error = %e,
-                    "no ClickHouse client for the startup probe, staying not ready"
-                );
-                return;
-            }
-        };
+        let client = crate::clickhouse::ClickHouseQueryClient::new(config)?;
         let backoff = scalo::sink_stack::SinkStackConfig::default();
         let ceiling = std::time::Duration::from_millis(backoff.max_backoff_ms);
         let mut schedule = backoff.backoff().without_max_times().build();
@@ -607,13 +605,13 @@ impl ServerState {
             attempts = attempts.saturating_add(1);
             let probed = tokio::select! {
                 biased;
-                () = shutdown.cancelled() => return,
+                () = shutdown.cancelled() => return Ok(false),
                 probed = client.probe_access() => probed,
             };
             let Err(e) = probed else {
                 tracing::info!(attempts, "ClickHouse accepted the startup probe, ready");
                 self.set_ready(true);
-                return;
+                return Ok(true);
             };
             let retry_in = schedule.next().unwrap_or(ceiling);
             tracing::warn!(
@@ -624,7 +622,7 @@ impl ServerState {
             );
             tokio::select! {
                 biased;
-                () = shutdown.cancelled() => return,
+                () = shutdown.cancelled() => return Ok(false),
                 () = tokio::time::sleep(retry_in) => {}
             }
         }
@@ -902,11 +900,34 @@ mod tests {
         )
         .await;
 
-        assert!(finished.is_ok(), "the startup probe ignored shutdown");
+        assert!(
+            matches!(finished, Ok(Ok(false))),
+            "the startup probe did not report the shutdown: {finished:?}"
+        );
         assert!(
             !state.is_ready(),
             "a ClickHouse nothing answers on went ready"
         );
+    }
+
+    #[tokio::test]
+    async fn a_config_no_client_can_be_built_from_is_an_error_not_a_ready() {
+        let config = crate::clickhouse::ClickHouseConfig {
+            hosts: vec![],
+            ..Default::default()
+        };
+        let state = ServerState::new(test_metrics(), test_scaling());
+        let shutdown = tokio_util::sync::CancellationToken::new();
+
+        let probed = state
+            .ready_once_clickhouse_accepts(&config, &shutdown)
+            .await;
+
+        assert!(
+            probed.is_err(),
+            "a config with no hosts probed as {probed:?}"
+        );
+        assert!(!state.is_ready(), "a config with no hosts went ready");
     }
 
     #[test]

@@ -39,7 +39,7 @@ use crate::column_meta::{ColumnMetaCache, parse_directives};
 use crate::config::{Config, SharedConfig};
 use crate::kafka::transport::{PartitionRead, ReceivedBatch};
 use crate::kafka::{TransportAdapter, TransportBackend};
-use crate::metrics::Metrics;
+use crate::metrics::{Metrics, ServerState};
 use crate::routing::Router;
 use crate::transform::Transformer;
 use crate::transform::{ComputedColumnCache, FieldMappingCache, HeaderExtractor, MappingBuilder};
@@ -234,6 +234,30 @@ impl Orchestrator {
     /// Get the shutdown token for external shutdown requests
     pub fn shutdown_token(&self) -> CancellationToken {
         self.shutdown.clone()
+    }
+
+    /// Run the pipeline once `ClickHouse` accepts the loader's credentials,
+    /// marking `state` ready at that point.
+    ///
+    /// Nothing joins the consumer group or opens the listener before then, so a
+    /// loader that cannot write takes no partitions from one that can. A
+    /// shutdown first returns without starting the pipeline.
+    ///
+    /// # Errors
+    ///
+    /// Whatever [`run`](Self::run) returns, or [`crate::Error::ClickHouse`]
+    /// when no `ClickHouse` client can be built from the config.
+    pub async fn run_once_clickhouse_accepts(&mut self, state: &ServerState) -> Result<()> {
+        let config: crate::clickhouse::ClickHouseConfig = (&self.config.clickhouse).into();
+        if state
+            .ready_once_clickhouse_accepts(&config, &self.shutdown)
+            .await?
+        {
+            self.run().await
+        } else {
+            info!("Shutdown before ClickHouse accepted the loader, the pipeline never started");
+            Ok(())
+        }
     }
 
     /// Run the pipeline until shutdown

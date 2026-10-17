@@ -1,30 +1,42 @@
 // SPDX-License-Identifier: BUSL-1.1
 // Copyright (c) 2026 HYPERI PTY LIMITED
 
-//! The loader reports ready only once `ClickHouse` accepts its credentials.
+//! The loader reports ready, and takes records, only once `ClickHouse` accepts
+//! its credentials.
 //!
 //! Each test creates a least-privilege user on a real `ClickHouse` and runs the
 //! startup probe as that user: with its password, with a wrong one, and with a
-//! wrong one the server is then changed to accept.
+//! wrong one the server is then changed to accept. The intake tests run the
+//! whole loader on Kafka behind the same probe.
 //!
 //! Gated behind `#[cfg(feature = "testcontainers")]`. Needs process-per-test
 //! (nextest): a test reading the probe's log installs the process's subscriber.
 
 #![cfg(feature = "testcontainers")]
 
+use std::collections::BTreeSet;
 use std::io::Write;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use dfe_loader::clickhouse::{ClickHouseConfig, ClickHouseQueryClient, Transport};
+use dfe_loader::config::Config;
 use dfe_loader::metrics::{Metrics, ServerState};
+use dfe_loader::pipeline::Orchestrator;
+use rdkafka::ClientConfig;
+use rdkafka::consumer::{BaseConsumer, Consumer};
+use rdkafka::producer::FutureRecord;
 use scalo::ScalingPressure;
+use scalo::config::sensitive::SensitiveString;
 use scalo::metrics::{MetricsConfig, MetricsManager};
 use scalo::scaling::ScalingPressureConfig;
 use tokio_util::sync::CancellationToken;
 
-use super::grpc_outage::{clickhouse_address, query_client};
+use super::grpc_outage::{clickhouse_address, free_port, query_client, wait_landed};
+use super::kafka_offset_floor::{kafka_bootstrap, kafka_loader};
+use super::kafka_transport_e2e::{ensure_topic, make_producer};
 use crate::common::containers::TestInfrastructure;
+use crate::common::unique_table_name;
 use crate::test_name;
 
 /// The user the probe logs in as.
@@ -38,6 +50,15 @@ const READY_WITHIN: Duration = Duration::from_secs(30);
 
 /// How long a refused probe is watched for a ready it must never report.
 const REFUSED_FOR: Duration = Duration::from_secs(5);
+
+/// The first line the pipeline logs when it starts.
+const PIPELINE_STARTED: &str = "Starting pipeline orchestrator";
+
+/// Records on the topic before the loader starts.
+const RECORDS: u64 = 20;
+
+/// How long records have to land once the loader is running.
+const LAND_WITHIN: Duration = Duration::from_secs(90);
 
 /// The log lines this test process writes, kept for the test to read.
 #[derive(Clone, Default)]
@@ -115,6 +136,46 @@ fn not_ready_state() -> Arc<ServerState> {
     Arc::new(ServerState::new(Metrics::new(&manager), scaling))
 }
 
+/// A Kafka loader for `topic` and `default.{table}` that logs in to
+/// `ClickHouse` as the probe user with `password`.
+fn probe_user_loader(
+    bootstrap: &str,
+    topic: &str,
+    clickhouse: &str,
+    table: &str,
+    password: &str,
+) -> Config {
+    let mut config = kafka_loader(
+        bootstrap,
+        topic,
+        &format!("dfe-{table}"),
+        clickhouse.to_string(),
+        table,
+    );
+    config.clickhouse.username = USER.to_string();
+    config.clickhouse.password = SensitiveString::from(password.to_string());
+    config
+}
+
+/// Members of the consumer group `group` the broker reports right now.
+async fn group_members(bootstrap: &str, group: &str) -> usize {
+    let (bootstrap, group) = (bootstrap.to_string(), group.to_string());
+    tokio::task::spawn_blocking(move || {
+        // Its own group id: this client only asks, it never joins `group`.
+        let observer: BaseConsumer = ClientConfig::new()
+            .set("bootstrap.servers", &bootstrap)
+            .set("group.id", format!("{group}-observer"))
+            .create()
+            .expect("group observer");
+        let groups = observer
+            .fetch_group_list(Some(&group), Duration::from_secs(10))
+            .expect("describe the consumer group");
+        groups.groups().iter().map(|g| g.members().len()).sum()
+    })
+    .await
+    .expect("group observer task")
+}
+
 /// Whether `done` comes true within `within`, checked every 100 ms.
 async fn comes_true(within: Duration, done: impl Fn() -> bool) -> bool {
     let deadline = tokio::time::Instant::now() + within;
@@ -130,7 +191,7 @@ async fn comes_true(within: Duration, done: impl Fn() -> bool) -> bool {
 /// The control: a user `ClickHouse` accepts goes ready.
 #[tokio::test]
 async fn a_user_clickhouse_accepts_goes_ready() {
-    let infra = TestInfrastructure::clickhouse_managing_users(test_name!()).await;
+    let infra = TestInfrastructure::clickhouse_managing_users(test_name!(), false).await;
     let clickhouse = clickhouse_address(&infra).await;
     let password = fresh_password();
     create_user(&query_client(&clickhouse), &password).await;
@@ -144,8 +205,8 @@ async fn a_user_clickhouse_accepts_goes_ready() {
     .await;
 
     assert!(
-        probed.is_ok(),
-        "the probe was still running after {READY_WITHIN:?}"
+        matches!(probed, Ok(Ok(true))),
+        "the probe did not report acceptance within {READY_WITHIN:?}: {probed:?}"
     );
     assert!(state.is_ready(), "a user ClickHouse accepts is not ready");
 }
@@ -155,7 +216,7 @@ async fn a_user_clickhouse_accepts_goes_ready() {
 #[tokio::test]
 async fn a_wrong_password_never_goes_ready_and_logs_the_516() {
     let logs = Captured::install();
-    let infra = TestInfrastructure::clickhouse_managing_users(test_name!()).await;
+    let infra = TestInfrastructure::clickhouse_managing_users(test_name!(), false).await;
     let clickhouse = clickhouse_address(&infra).await;
     create_user(&query_client(&clickhouse), &fresh_password()).await;
 
@@ -191,7 +252,7 @@ async fn a_wrong_password_never_goes_ready_and_logs_the_516() {
 #[tokio::test]
 async fn a_refused_probe_goes_ready_once_clickhouse_accepts_the_password() {
     let logs = Captured::install();
-    let infra = TestInfrastructure::clickhouse_managing_users(test_name!()).await;
+    let infra = TestInfrastructure::clickhouse_managing_users(test_name!(), false).await;
     let clickhouse = clickhouse_address(&infra).await;
     let admin = query_client(&clickhouse);
     create_user(&admin, &fresh_password()).await;
@@ -206,7 +267,7 @@ async fn a_refused_probe_goes_ready_once_clickhouse_accepts_the_password() {
         tokio::spawn(async move {
             state
                 .ready_once_clickhouse_accepts(&config, &shutdown)
-                .await;
+                .await
         })
     };
 
@@ -226,11 +287,164 @@ async fn a_refused_probe_goes_ready_once_clickhouse_accepts_the_password() {
         "went ready while ClickHouse refused the password"
     );
     assert!(
-        matches!(recovered, Ok(Ok(()))),
-        "the probe did not finish within {READY_WITHIN:?} of the password change: {recovered:?}"
+        matches!(recovered, Ok(Ok(Ok(true)))),
+        "the probe did not report acceptance within {READY_WITHIN:?} of the password change: \
+         {recovered:?}"
     );
     assert!(
         state.is_ready(),
         "not ready after ClickHouse accepted the password"
     );
+}
+
+/// A loader `ClickHouse` refuses never joins the consumer group, so it takes no
+/// partition from a loader that can write. Once the password is accepted it
+/// joins and the records already on the topic land.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_wrong_password_takes_no_partitions_until_clickhouse_accepts_it() {
+    let logs = Captured::install();
+    let infra = TestInfrastructure::clickhouse_managing_users(test_name!(), true).await;
+    let clickhouse = clickhouse_address(&infra).await;
+    let bootstrap = kafka_bootstrap(&infra).await;
+    let admin = query_client(&clickhouse);
+    create_user(&admin, &fresh_password()).await;
+
+    let table = unique_table_name("readiness_intake");
+    admin
+        .execute(&format!(
+            "CREATE TABLE default.{table} (id UInt64) ENGINE = MergeTree() ORDER BY id"
+        ))
+        .await
+        .expect("create table");
+    let topic = format!("readiness-{table}");
+    let group = format!("dfe-{table}");
+    ensure_topic(&bootstrap, &topic).await;
+    let producer = make_producer(&bootstrap);
+    for id in 0..RECORDS {
+        let payload = format!(r#"{{"id":{id}}}"#);
+        producer
+            .send(
+                FutureRecord::<(), str>::to(&topic).payload(&payload),
+                Duration::from_secs(30),
+            )
+            .await
+            .unwrap_or_else(|(e, _)| panic!("deliver record {id}: {e}"));
+    }
+
+    let password = fresh_password();
+    let state = not_ready_state();
+    let mut loader = Orchestrator::new(probe_user_loader(
+        &bootstrap,
+        &topic,
+        &clickhouse,
+        &table,
+        &password,
+    ));
+    let stop = loader.shutdown_token();
+    let running = {
+        let state = Arc::clone(&state);
+        tokio::spawn(async move { loader.run_once_clickhouse_accepts(&state).await })
+    };
+
+    let refused = comes_true(REFUSED_FOR, || logs.text().contains(REFUSED)).await;
+    // Watch the group for a while, as long as a loader that subscribed would
+    // need to join it.
+    let mut most_members_while_refused = 0;
+    let watch_until = tokio::time::Instant::now() + REFUSED_FOR * 2;
+    while tokio::time::Instant::now() < watch_until {
+        most_members_while_refused =
+            most_members_while_refused.max(group_members(&bootstrap, &group).await);
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    let started_while_refused = logs.text().contains(PIPELINE_STARTED);
+    let ready_while_refused = state.is_ready();
+
+    admin
+        .execute(&format!("ALTER USER {USER} IDENTIFIED BY '{password}'"))
+        .await
+        .expect("change the probe user's password");
+    let want: BTreeSet<u64> = (0..RECORDS).collect();
+    let landed = wait_landed(&clickhouse, &table, &want, LAND_WITHIN).await;
+    let members_once_accepted = group_members(&bootstrap, &group).await;
+    let ready_once_accepted = state.is_ready();
+    stop.cancel();
+    let stopped = tokio::time::timeout(Duration::from_secs(60), running).await;
+    let _ = admin
+        .execute(&format!("DROP TABLE IF EXISTS default.{table}"))
+        .await;
+    eprintln!("{}", logs.text());
+
+    assert!(refused, "the wrong password was never refused");
+    assert_eq!(
+        most_members_while_refused, 0,
+        "the loader joined the consumer group while ClickHouse refused its password"
+    );
+    assert!(
+        !started_while_refused,
+        "the pipeline started while ClickHouse refused the password"
+    );
+    assert!(
+        !ready_while_refused,
+        "went ready while ClickHouse refused the password"
+    );
+    assert_eq!(
+        landed, want,
+        "the records on the topic did not land once ClickHouse accepted the password"
+    );
+    assert_eq!(
+        members_once_accepted, 1,
+        "the loader is not in the consumer group once ClickHouse accepted the password"
+    );
+    assert!(
+        ready_once_accepted,
+        "not ready after ClickHouse accepted the password"
+    );
+    assert!(
+        matches!(stopped, Ok(Ok(Ok(())))),
+        "the loader did not stop cleanly: {stopped:?}"
+    );
+}
+
+/// A shutdown while `ClickHouse` refuses the password returns at once and never
+/// starts the pipeline.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_shutdown_while_clickhouse_refuses_never_starts_the_pipeline() {
+    let logs = Captured::install();
+    let infra = TestInfrastructure::clickhouse_managing_users(test_name!(), false).await;
+    let clickhouse = clickhouse_address(&infra).await;
+    create_user(&query_client(&clickhouse), &fresh_password()).await;
+
+    // No broker listens here: the pipeline has nothing to reach before shutdown.
+    let no_broker = format!("127.0.0.1:{}", free_port());
+    let table = unique_table_name("readiness_shutdown");
+    let state = not_ready_state();
+    let mut loader = Orchestrator::new(probe_user_loader(
+        &no_broker,
+        &format!("readiness-{table}"),
+        &clickhouse,
+        &table,
+        &fresh_password(),
+    ));
+    let stop = loader.shutdown_token();
+    let running = {
+        let state = Arc::clone(&state);
+        tokio::spawn(async move { loader.run_once_clickhouse_accepts(&state).await })
+    };
+
+    let refused = comes_true(REFUSED_FOR, || logs.text().contains(REFUSED)).await;
+    stop.cancel();
+    let stopped = tokio::time::timeout(Duration::from_secs(10), running).await;
+    let logged = logs.text();
+    eprintln!("{logged}");
+
+    assert!(refused, "the wrong password was never refused");
+    assert!(
+        matches!(stopped, Ok(Ok(Ok(())))),
+        "the loader did not return cleanly within 10s of the shutdown: {stopped:?}"
+    );
+    assert!(
+        !logged.contains(PIPELINE_STARTED),
+        "the pipeline started although ClickHouse never accepted the password"
+    );
+    assert!(!state.is_ready(), "went ready without ClickHouse accepting");
 }

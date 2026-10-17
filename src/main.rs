@@ -231,19 +231,9 @@ impl ServiceApp for App {
                 }
             }
 
-            let probe_state = Arc::clone(&server_state);
-            let probe_config: dfe_loader::clickhouse::ClickHouseConfig =
-                (&config.clickhouse).into();
-            let probe_shutdown = runtime.shutdown.clone();
-            tokio::spawn(async move {
-                probe_state
-                    .ready_once_clickhouse_accepts(&probe_config, &probe_shutdown)
-                    .await;
-            });
-
-            // Run the pipeline
+            // Readiness and intake both wait for ClickHouse to accept the credentials.
             orchestrator
-                .run()
+                .run_once_clickhouse_accepts(&server_state)
                 .await
                 .map_err(|e| CliError::Service(e.to_string()))?;
 

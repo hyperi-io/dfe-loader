@@ -103,15 +103,20 @@ mod testcontainers_impl {
             Self { clickhouse, kafka }
         }
 
-        /// ClickHouse alone, where the passwordless `default` user may create
-        /// users and grant to them.
-        pub async fn clickhouse_managing_users(test: &str) -> Self {
+        /// ClickHouse where the passwordless `default` user may create users
+        /// and grant to them, with Kafka beside it if `need_kafka`.
+        pub async fn clickhouse_managing_users(test: &str, need_kafka: bool) -> Self {
             crate::common::test_logging::init();
             crate::common::require_docker_in_ci();
             let clickhouse = start_clickhouse_with(test, Some(CLICKHOUSE_ACCESS_MANAGEMENT)).await;
+            let kafka = if need_kafka {
+                Some(start_kafka(test).await)
+            } else {
+                None
+            };
             Self {
                 clickhouse: Some(clickhouse),
-                kafka: None,
+                kafka,
             }
         }
 
