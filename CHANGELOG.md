@@ -3,6 +3,12 @@
 Rendered by CI and committed back at the end of a release -- do not edit by
 hand. Release notes also appear on the GitHub Releases page, one per tag.
 
+## [1.18.54](https://github.com/hyperi-io/dfe-loader/compare/v1.18.53...v1.18.54) (2026-10-17)
+
+### Bug Fixes
+
+* gate readiness on ClickHouse login ([3a0d005](https://github.com/hyperi-io/dfe-loader/commit/3a0d0056370002e8663fbd395273564536a6fdfe))
+
 ## [1.18.53](https://github.com/hyperi-io/dfe-loader/compare/v1.18.52...v1.18.53) (2026-10-17)
 
 ### Bug Fixes
