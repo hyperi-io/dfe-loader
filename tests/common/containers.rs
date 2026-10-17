@@ -103,6 +103,18 @@ mod testcontainers_impl {
             Self { clickhouse, kafka }
         }
 
+        /// ClickHouse alone, where the passwordless `default` user may create
+        /// users and grant to them.
+        pub async fn clickhouse_managing_users(test: &str) -> Self {
+            crate::common::test_logging::init();
+            crate::common::require_docker_in_ci();
+            let clickhouse = start_clickhouse_with(test, Some(CLICKHOUSE_ACCESS_MANAGEMENT)).await;
+            Self {
+                clickhouse: Some(clickhouse),
+                kafka: None,
+            }
+        }
+
         /// Spin up exactly the containers the app declares it depends on.
         ///
         /// Reads `Config::deployment_contract().depends_on` (the same list that
@@ -202,17 +214,42 @@ mod testcontainers_impl {
         }
     }
 
+    /// Users config that lets `default` create users and grant to them.
+    const CLICKHOUSE_ACCESS_MANAGEMENT: &str = r"<clickhouse>
+    <users>
+        <default>
+            <access_management>1</access_management>
+        </default>
+    </users>
+</clickhouse>
+";
+
     /// Start ClickHouse container
     async fn start_clickhouse(test: &str) -> ContainerAsync<ClickHouseImage> {
+        start_clickhouse_with(test, None).await
+    }
+
+    /// Start ClickHouse, with `users_config` added under `users.d` if given.
+    async fn start_clickhouse_with(
+        test: &str,
+        users_config: Option<&str>,
+    ) -> ContainerAsync<ClickHouseImage> {
         let name = crate::common::container_name(Some(test), "clickhouse");
         crate::common::reap_stale(&name);
-        ClickHouseImage::default()
+        let mut image = ClickHouseImage::default()
             .with_tag(format!("{CLICKHOUSE_TAG}@{CLICKHOUSE_DIGEST}"))
             // From 25.x the entrypoint refuses to leave `default` passwordless
             // unless told to, and rejects every connection with "Authentication
             // failed" instead. The module's own config predates that. Tests
             // connect as default with no password, so keep that and say so.
-            .with_env_var("CLICKHOUSE_SKIP_USER_SETUP", "1")
+            .with_env_var("CLICKHOUSE_SKIP_USER_SETUP", "1");
+        if let Some(users_config) = users_config {
+            image = image.with_copy_to(
+                "/etc/clickhouse-server/users.d/dfe-test-users.xml",
+                users_config.as_bytes().to_vec(),
+            );
+        }
+        image
             .with_container_name(&name)
             .with_labels(crate::common::test_labels("clickhouse"))
             .with_ready_conditions(vec![clickhouse_ready()])

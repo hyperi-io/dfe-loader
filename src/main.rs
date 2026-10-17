@@ -231,8 +231,15 @@ impl ServiceApp for App {
                 }
             }
 
-            // Mark as ready
-            server_state.set_ready(true);
+            let probe_state = Arc::clone(&server_state);
+            let probe_config: dfe_loader::clickhouse::ClickHouseConfig =
+                (&config.clickhouse).into();
+            let probe_shutdown = runtime.shutdown.clone();
+            tokio::spawn(async move {
+                probe_state
+                    .ready_once_clickhouse_accepts(&probe_config, &probe_shutdown)
+                    .await;
+            });
 
             // Run the pipeline
             orchestrator

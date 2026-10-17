@@ -573,6 +573,61 @@ impl ServerState {
     pub fn set_ready(&self, ready: bool) {
         self.ready
             .store(ready, std::sync::atomic::Ordering::Release);
+        self.metrics.set_pipeline_ready(ready);
+    }
+
+    /// Mark the loader ready once `ClickHouse` accepts its credentials and
+    /// answers the reads its schema lookups make.
+    ///
+    /// Logs each refusal with the server's answer and retries on scalo's sink
+    /// backoff until accepted or `shutdown` fires. Kafka is left out, so one
+    /// broker outage cannot pull every loader out of service.
+    pub async fn ready_once_clickhouse_accepts(
+        &self,
+        config: &crate::clickhouse::ClickHouseConfig,
+        shutdown: &tokio_util::sync::CancellationToken,
+    ) {
+        use backon::BackoffBuilder;
+
+        let client = match crate::clickhouse::ClickHouseQueryClient::new(config) {
+            Ok(client) => client,
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    "no ClickHouse client for the startup probe, staying not ready"
+                );
+                return;
+            }
+        };
+        let backoff = scalo::sink_stack::SinkStackConfig::default();
+        let ceiling = std::time::Duration::from_millis(backoff.max_backoff_ms);
+        let mut schedule = backoff.backoff().without_max_times().build();
+        let mut attempts: u32 = 0;
+        loop {
+            attempts = attempts.saturating_add(1);
+            let probed = tokio::select! {
+                biased;
+                () = shutdown.cancelled() => return,
+                probed = client.probe_access() => probed,
+            };
+            let Err(e) = probed else {
+                tracing::info!(attempts, "ClickHouse accepted the startup probe, ready");
+                self.set_ready(true);
+                return;
+            };
+            let retry_in = schedule.next().unwrap_or(ceiling);
+            tracing::warn!(
+                error = %e,
+                attempts,
+                retry_in = ?retry_in,
+                "ClickHouse refused the startup probe, staying not ready"
+            );
+            tokio::select! {
+                biased;
+                () = shutdown.cancelled() => return,
+                () = tokio::time::sleep(retry_in) => {}
+            }
+        }
     }
 
     pub fn set_kafka_connected(&self, connected: bool) {
@@ -817,6 +872,41 @@ mod tests {
         assert!(state.is_ready());
         state.set_ready(false);
         assert!(!state.is_ready());
+    }
+
+    #[tokio::test]
+    async fn the_startup_probe_stops_not_ready_at_shutdown() {
+        use std::time::Duration;
+
+        // A port bound then released, so every connect is refused.
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .and_then(|l| l.local_addr())
+            .expect("a free loopback port")
+            .port();
+        let config = crate::clickhouse::ClickHouseConfig {
+            hosts: vec![format!("127.0.0.1:{port}")],
+            transport: crate::clickhouse::Transport::Http,
+            ..Default::default()
+        };
+        let state = ServerState::new(test_metrics(), test_scaling());
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let stop = shutdown.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            stop.cancel();
+        });
+
+        let finished = tokio::time::timeout(
+            Duration::from_secs(10),
+            state.ready_once_clickhouse_accepts(&config, &shutdown),
+        )
+        .await;
+
+        assert!(finished.is_ok(), "the startup probe ignored shutdown");
+        assert!(
+            !state.is_ready(),
+            "a ClickHouse nothing answers on went ready"
+        );
     }
 
     #[test]

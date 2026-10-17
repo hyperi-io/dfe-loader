@@ -64,8 +64,7 @@ See [clickhouse/INSERT-FORMATS.md](clickhouse/INSERT-FORMATS.md).
 - **`top`** -- `dfe-loader top` renders those metrics as a TUI. `--once`,
   `--json`, and `--filter` make it scriptable; the JSON/TSV output pipes into
   shell tooling.
-- **Health** -- the probes (`/livez`, `/readyz`) from the
-  scalo health pillar, for Kubernetes liveness/readiness/startup.
+- **Health** -- the probes (`/livez`, `/readyz`) from the scalo health pillar, for Kubernetes liveness/readiness/startup. `/readyz` stays 503 until ClickHouse accepts the configured user and answers reads of `system.tables` and `system.columns` for the configured database. Each refusal is logged with ClickHouse's error code (516 for a wrong password) and retried on a wait that doubles from 100 ms to 30 s, plus up to as much again in jitter. `pipeline_ready` reads 1 once it passes. Kafka and the gRPC peer play no part in readiness.
 
 ## Hot-reload
 
