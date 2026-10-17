@@ -902,7 +902,7 @@ mod tests {
 
         assert!(
             matches!(finished, Ok(Ok(false))),
-            "the startup probe did not report the shutdown: {finished:?}"
+            "the startup probe did not report the shutdown within 10s"
         );
         assert!(
             !state.is_ready(),
@@ -924,8 +924,11 @@ mod tests {
             .await;
 
         assert!(
-            probed.is_err(),
-            "a config with no hosts probed as {probed:?}"
+            matches!(
+                probed,
+                Err(crate::clickhouse::ClickHouseError::Connection(_))
+            ),
+            "a config with no hosts did not fail to build a client"
         );
         assert!(!state.is_ready(), "a config with no hosts went ready");
     }

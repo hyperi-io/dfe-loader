@@ -206,7 +206,7 @@ async fn a_user_clickhouse_accepts_goes_ready() {
 
     assert!(
         matches!(probed, Ok(Ok(true))),
-        "the probe did not report acceptance within {READY_WITHIN:?}: {probed:?}"
+        "the probe did not report acceptance within {READY_WITHIN:?}"
     );
     assert!(state.is_ready(), "a user ClickHouse accepts is not ready");
 }
@@ -288,8 +288,7 @@ async fn a_refused_probe_goes_ready_once_clickhouse_accepts_the_password() {
     );
     assert!(
         matches!(recovered, Ok(Ok(Ok(true)))),
-        "the probe did not report acceptance within {READY_WITHIN:?} of the password change: \
-         {recovered:?}"
+        "the probe did not report acceptance within {READY_WITHIN:?} of the password change"
     );
     assert!(
         state.is_ready(),
@@ -401,7 +400,7 @@ async fn a_wrong_password_takes_no_partitions_until_clickhouse_accepts_it() {
     );
     assert!(
         matches!(stopped, Ok(Ok(Ok(())))),
-        "the loader did not stop cleanly: {stopped:?}"
+        "the loader did not stop cleanly within 60s of the shutdown"
     );
 }
 
@@ -440,7 +439,7 @@ async fn a_shutdown_while_clickhouse_refuses_never_starts_the_pipeline() {
     assert!(refused, "the wrong password was never refused");
     assert!(
         matches!(stopped, Ok(Ok(Ok(())))),
-        "the loader did not return cleanly within 10s of the shutdown: {stopped:?}"
+        "the loader did not return cleanly within 10s of the shutdown"
     );
     assert!(
         !logged.contains(PIPELINE_STARTED),
