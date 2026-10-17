@@ -3,6 +3,15 @@
 Rendered by CI and committed back at the end of a release -- do not edit by
 hand. Release notes also appear on the GitHub Releases page, one per tag.
 
+## [1.18.53](https://github.com/hyperi-io/dfe-loader/compare/v1.18.52...v1.18.53) (2026-10-17)
+
+### Bug Fixes
+
+* delete the unused Coercer ([#262](https://github.com/hyperi-io/dfe-loader/issues/262)) ([ab4ed58](https://github.com/hyperi-io/dfe-loader/commit/ab4ed580dd1543e9ddcb5657426e04390493f165))
+* **deps:** update Rust crate tokio-util to >=0.7.20, <0.8 ([#260](https://github.com/hyperi-io/dfe-loader/issues/260)) ([5c41ddc](https://github.com/hyperi-io/dfe-loader/commit/5c41ddc18e37b3bf9270bccb5ced93fa62b9eacc))
+* land zoned timestamps at their UTC instant ([#261](https://github.com/hyperi-io/dfe-loader/issues/261)) ([cda2718](https://github.com/hyperi-io/dfe-loader/commit/cda27184e45b468f21c7f573fc6bdb171de6a741)), closes [#259](https://github.com/hyperi-io/dfe-loader/issues/259) [#153](https://github.com/hyperi-io/dfe-loader/issues/153)
+* rebuild on scalo 2.14.17 ([fabbf6d](https://github.com/hyperi-io/dfe-loader/commit/fabbf6d38453bf61c7badc3e6dfc353e2da464d8))
+
 ## [1.18.52](https://github.com/hyperi-io/dfe-loader/compare/v1.18.51...v1.18.52) (2026-10-15)
 
 ### Bug Fixes
