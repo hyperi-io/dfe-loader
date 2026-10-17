@@ -157,6 +157,45 @@ fn probe_user_loader(
     config
 }
 
+/// The real loader binary, killed if the test ends without stopping it.
+struct LoaderProcess(std::process::Child);
+
+impl LoaderProcess {
+    /// Send SIGTERM, the signal Kubernetes stops a pod with, and wait up to
+    /// `within` for the exit.
+    async fn terminate(&mut self, within: Duration) -> Option<std::process::ExitStatus> {
+        let _ = std::process::Command::new("kill")
+            .args(["-TERM", &self.0.id().to_string()])
+            .status();
+        let deadline = tokio::time::Instant::now() + within;
+        while tokio::time::Instant::now() < deadline {
+            if let Ok(Some(status)) = self.0.try_wait() {
+                return Some(status);
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        None
+    }
+}
+
+impl Drop for LoaderProcess {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// The status `/{path}` on the loader's metrics listener answers, if any.
+async fn probe_status(port: u16, path: &str) -> Option<u16> {
+    reqwest::Client::new()
+        .get(format!("http://127.0.0.1:{port}/{path}"))
+        .timeout(Duration::from_secs(5))
+        .send()
+        .await
+        .ok()
+        .map(|r| r.status().as_u16())
+}
+
 /// Members of the consumer group `group` the broker reports right now.
 async fn group_members(bootstrap: &str, group: &str) -> usize {
     let (bootstrap, group) = (bootstrap.to_string(), group.to_string());
@@ -446,4 +485,68 @@ async fn a_shutdown_while_clickhouse_refuses_never_starts_the_pipeline() {
         "the pipeline started although ClickHouse never accepted the password"
     );
     assert!(!state.is_ready(), "went ready without ClickHouse accepting");
+}
+
+/// The shipped binary, against a `ClickHouse` that refuses its login, answers
+/// `/livez`, reports `/readyz` 503, starts no pipeline, and exits cleanly on
+/// SIGTERM.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_binary_serves_its_probes_and_starts_no_pipeline_while_clickhouse_refuses() {
+    let infra = TestInfrastructure::clickhouse_managing_users(test_name!(), false).await;
+    let clickhouse = clickhouse_address(&infra).await;
+    // No user is created, so every login the binary makes is refused.
+    let dir = tempfile::tempdir().expect("working directory");
+    let log_path = dir.path().join("loader.log");
+    let log = std::fs::File::create(&log_path).expect("loader log");
+    let metrics_port = free_port();
+    let mut loader = LoaderProcess(
+        std::process::Command::new(env!("CARGO_BIN_EXE_dfe-loader"))
+            .arg("--metrics-addr")
+            .arg(format!("127.0.0.1:{metrics_port}"))
+            // An empty directory, so no `.env` reaches the binary.
+            .current_dir(dir.path())
+            .env("DFE_LOADER_CLICKHOUSE_HOSTS", &clickhouse)
+            .env("DFE_LOADER_CLICKHOUSE_DATABASE", "default")
+            .env("DFE_LOADER_CLICKHOUSE_USERNAME", USER)
+            .env("DFE_LOADER_CLICKHOUSE_PASSWORD", fresh_password())
+            .env(
+                "DFE_LOADER_KAFKA_BROKERS",
+                format!("127.0.0.1:{}", free_port()),
+            )
+            .env("DFE_LOADER_VERSION_CHECK__ENABLED", "false")
+            .stdout(log.try_clone().expect("loader log handle"))
+            .stderr(log)
+            .spawn()
+            .expect("start the loader binary"),
+    );
+    let logged = || std::fs::read_to_string(&log_path).unwrap_or_default();
+
+    let refused = comes_true(READY_WITHIN, || logged().contains(REFUSED)).await;
+    let livez = probe_status(metrics_port, "livez").await;
+    let readyz = probe_status(metrics_port, "readyz").await;
+    tokio::time::sleep(REFUSED_FOR).await;
+    let started_while_refused = logged().contains(PIPELINE_STARTED);
+    let exit = loader.terminate(Duration::from_secs(30)).await;
+    let log_text = logged();
+    eprintln!("{log_text}");
+
+    assert!(
+        !started_while_refused,
+        "the binary started the pipeline while ClickHouse refused its login"
+    );
+    assert!(refused, "the binary never logged a refused login");
+    assert_eq!(
+        livez,
+        Some(200),
+        "/livez did not answer while ClickHouse refused"
+    );
+    assert_eq!(readyz, Some(503), "/readyz did not report not ready");
+    assert!(
+        exit.is_some_and(|status| status.success()),
+        "the binary did not exit cleanly within 30s of SIGTERM: {exit:?}"
+    );
+    assert!(
+        log_text.contains("Shutdown before ClickHouse accepted the loader"),
+        "the binary did not report stopping before the pipeline started"
+    );
 }

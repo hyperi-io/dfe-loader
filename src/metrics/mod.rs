@@ -579,9 +579,9 @@ impl ServerState {
     /// Mark the loader ready once `ClickHouse` accepts its credentials and
     /// answers the reads its schema lookups make.
     ///
-    /// Logs each refusal with the server's answer and retries on scalo's sink
-    /// backoff until accepted or `shutdown` fires. Kafka is left out, so one
-    /// broker outage cannot pull every loader out of service.
+    /// Logs each refusal with the server's answer and retries on the cascade's
+    /// `sink_stack` backoff until accepted or `shutdown` fires. Kafka is left
+    /// out, so one broker outage cannot pull every loader out of service.
     ///
     /// Returns `true` once accepted, `false` when `shutdown` fired first.
     ///
@@ -594,38 +594,27 @@ impl ServerState {
         config: &crate::clickhouse::ClickHouseConfig,
         shutdown: &tokio_util::sync::CancellationToken,
     ) -> Result<bool, crate::clickhouse::ClickHouseError> {
-        use backon::BackoffBuilder;
-
         let client = crate::clickhouse::ClickHouseQueryClient::new(config)?;
-        let backoff = scalo::sink_stack::SinkStackConfig::default();
-        let ceiling = std::time::Duration::from_millis(backoff.max_backoff_ms);
-        let mut schedule = backoff.backoff().without_max_times().build();
-        let mut attempts: u32 = 0;
-        loop {
-            attempts = attempts.saturating_add(1);
-            let probed = tokio::select! {
-                biased;
-                () = shutdown.cancelled() => return Ok(false),
-                probed = client.probe_access() => probed,
-            };
-            let Err(e) = probed else {
-                tracing::info!(attempts, "ClickHouse accepted the startup probe, ready");
-                self.set_ready(true);
-                return Ok(true);
-            };
-            let retry_in = schedule.next().unwrap_or(ceiling);
-            tracing::warn!(
-                error = %e,
-                attempts,
-                retry_in = ?retry_in,
-                "ClickHouse refused the startup probe, staying not ready"
-            );
-            tokio::select! {
-                biased;
-                () = shutdown.cancelled() => return Ok(false),
-                () = tokio::time::sleep(retry_in) => {}
-            }
-        }
+        let accepted = crate::pipeline::startup::retry_until_shutdown(
+            shutdown,
+            || client.probe_access(),
+            |_| true,
+            |e, attempts, retry_in| {
+                tracing::warn!(
+                    error = %e,
+                    attempts,
+                    retry_in = ?retry_in,
+                    "ClickHouse refused the startup probe, staying not ready"
+                );
+            },
+        )
+        .await?;
+        let Some(((), attempts)) = accepted else {
+            return Ok(false);
+        };
+        tracing::info!(attempts, "ClickHouse accepted the startup probe, ready");
+        self.set_ready(true);
+        Ok(true)
     }
 
     pub fn set_kafka_connected(&self, connected: bool) {

@@ -16,6 +16,7 @@ pub(crate) mod leases;
 pub mod orchestrator;
 pub(crate) mod pending_schema;
 pub mod processor;
+pub(crate) mod startup;
 pub mod types;
 pub(crate) mod unsettled;
 

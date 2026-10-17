@@ -331,13 +331,28 @@ mod testcontainers_impl {
 
     /// Start Kafka container
     async fn start_kafka(test: &str) -> ContainerAsync<KafkaImage> {
+        start_kafka_with(test, None).await
+    }
+
+    /// Start Kafka listening on `host_port`, for a loader configured with that
+    /// address before the broker exists.
+    pub async fn start_kafka_on(test: &str, host_port: u16) -> ContainerAsync<KafkaImage> {
+        start_kafka_with(test, Some(host_port)).await
+    }
+
+    /// Start Kafka, on `host_port` if given.
+    async fn start_kafka_with(test: &str, host_port: Option<u16>) -> ContainerAsync<KafkaImage> {
         let name = crate::common::container_name(Some(test), "kafka");
         crate::common::reap_stale(&name);
         // The module's default `apache/kafka-native` segfaults in `getpwuid`
         // during its GraalVM `setup` binary, so use the JVM image.
-        KafkaImage::default()
+        let mut image = KafkaImage::default()
             .with_jvm_image()
-            .with_tag(format!("{KAFKA_TAG}@{KAFKA_DIGEST}"))
+            .with_tag(format!("{KAFKA_TAG}@{KAFKA_DIGEST}"));
+        if let Some(host_port) = host_port {
+            image = image.with_mapped_port(host_port, KAFKA_PORT);
+        }
+        image
             .with_container_name(&name)
             .with_labels(crate::common::test_labels("kafka"))
             // A JVM broker takes tens of seconds to print "Kafka Server
@@ -401,4 +416,4 @@ mod testcontainers_impl {
 pub use testcontainers_impl::TestInfrastructure;
 #[cfg(feature = "testcontainers")]
 #[allow(unused_imports)]
-pub use testcontainers_impl::start_clickhouse_https;
+pub use testcontainers_impl::{start_clickhouse_https, start_kafka_on};
