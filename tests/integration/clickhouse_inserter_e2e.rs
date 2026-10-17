@@ -199,6 +199,140 @@ async fn test_inserter_rowbinary_insert() {
 }
 
 // ============================================================================
+// Inserter: zoned ISO 8601 timestamps on both formats (#259)
+// ============================================================================
+
+/// One row's stored instants as epoch values, so the server's timezone cannot
+/// change what is compared, plus what its `_json` column holds.
+#[derive(clickhouse::Row, serde::Deserialize)]
+struct StoredInstants {
+    k: String,
+    t: u32,
+    n0: i64,
+    n3: i64,
+    n6: i64,
+    n9: i64,
+    ntz: i64,
+    at_type: String,
+    json: String,
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_zoned_timestamps_land_at_their_utc_instant_on_both_formats() {
+    let (_infra, client, ch) = spin_up(test_name!()).await;
+    let reader = ch.clone();
+
+    // The fix must not lean on the server: it runs with the default reader.
+    let input_format: String = reader
+        .query("SELECT getSetting('date_time_input_format')")
+        .fetch_one()
+        .await
+        .expect("read date_time_input_format");
+    assert_eq!(input_format, "basic");
+
+    let table = unique_table_name("tc_zoned_ts");
+    client
+        .execute(&format!(
+            "CREATE TABLE {table} (
+                k String,
+                t DateTime,
+                t0 DateTime64(0),
+                t3 DateTime64(3),
+                t6 DateTime64(6),
+                t9 DateTime64(9),
+                tz DateTime64(3, 'Asia/Tokyo'),
+                _json JSON
+            ) ENGINE = MergeTree() ORDER BY k"
+        ))
+        .await
+        .expect("create table");
+
+    // 2026-04-07 07:03:00.123456789 UTC in each zone form a source sends.
+    let forms = [
+        "2026-04-07T17:03:00.123456789+10:00",
+        "2026-04-07T01:33:00.123456789-05:30",
+        "2026-04-07T07:03:00.123456789Z",
+    ];
+    for (label, format) in [
+        ("jsoneachrow", InsertFormat::JsonEachRow),
+        ("rowbinary", InsertFormat::RowBinary),
+    ] {
+        let rows: Vec<Map<String, Value>> = forms
+            .iter()
+            .enumerate()
+            .map(|(i, text)| {
+                json!({"k": format!("{label}-{i}"), "t": text, "t0": text, "t3": text,
+                       "t6": text, "t9": text, "tz": text})
+                .as_object()
+                .unwrap()
+                .clone()
+            })
+            .collect();
+        let raw: Vec<Arc<[u8]>> = forms
+            .iter()
+            .map(|text| Arc::from(format!(r#"{{"at":"{text}"}}"#).into_bytes()))
+            .collect();
+
+        let inserter = Inserter::new(client.clone(), ch.clone(), fast_fail_config())
+            .with_insert_format(format);
+        let inserted = inserter
+            .insert_rows(&table, &rows, &raw)
+            .await
+            .unwrap_or_else(|e| panic!("{label}: zoned timestamps must insert: {e}"));
+        assert_eq!(inserted, forms.len(), "{label}");
+    }
+
+    let stored: Vec<StoredInstants> = reader
+        .query(&format!(
+            "SELECT k, toUnixTimestamp(t) AS t, toUnixTimestamp64Nano(t0) AS n0,
+                    toUnixTimestamp64Nano(t3) AS n3, toUnixTimestamp64Nano(t6) AS n6,
+                    toUnixTimestamp64Nano(t9) AS n9, toUnixTimestamp64Nano(tz) AS ntz,
+                    dynamicType(_json.at) AS at_type, toString(_json) AS json
+             FROM {table} ORDER BY k"
+        ))
+        .fetch_all()
+        .await
+        .expect("read stored instants");
+    assert_eq!(stored.len(), 2 * forms.len());
+
+    const SECS: i64 = 1_775_545_380;
+    for row in &stored {
+        let k = &row.k;
+        assert_eq!(i64::from(row.t), SECS, "{k}: DateTime");
+        assert_eq!(row.n0, SECS * 1_000_000_000, "{k}: DateTime64(0)");
+        assert_eq!(
+            row.n3,
+            SECS * 1_000_000_000 + 123_000_000,
+            "{k}: DateTime64(3)"
+        );
+        assert_eq!(
+            row.n6,
+            SECS * 1_000_000_000 + 123_456_000,
+            "{k}: DateTime64(6)"
+        );
+        assert_eq!(
+            row.n9,
+            SECS * 1_000_000_000 + 123_456_789,
+            "{k}: DateTime64(9)"
+        );
+        assert_eq!(
+            row.ntz,
+            SECS * 1_000_000_000 + 123_000_000,
+            "{k}: a column's own timezone must not move the instant"
+        );
+
+        // `_json` keeps the source's text: no inference into a DateTime, on either format.
+        let index: usize = k.rsplit('-').next().unwrap().parse().unwrap();
+        assert_eq!(row.at_type, "String", "{k}: _json.at type");
+        assert_eq!(
+            row.json,
+            format!(r#"{{"at":"{}"}}"#, forms[index]),
+            "{k}: _json text"
+        );
+    }
+}
+
+// ============================================================================
 // Inserter: the typed meta-schema table over RowBinary (#134)
 // ============================================================================
 
