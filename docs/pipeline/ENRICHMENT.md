@@ -43,7 +43,7 @@ documents at the field.
 
 ## Cost and placement
 
-Enrichment runs after coercion and before buffering, on the promoted row. The
+Enrichment runs after extraction and before buffering, on the promoted row. The
 lookups are cached, so a hot IP is resolved once and reused. Because the columns
 are flat and additive, a table opts in simply by declaring the enrichment
 columns in its schema -- an enriched value is written only where the target

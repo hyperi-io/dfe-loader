@@ -16,12 +16,12 @@ table on the way out.
 ```mermaid
 flowchart LR
     M["bytes"] --> P["parse"] --> R["route"] --> X["extract"]
-    X --> C["coerce"] --> E["enrich"] --> B["buffer"] --> I["insert"]
+    X --> E["enrich"] --> B["buffer"] --> I["insert"]
 ```
 
 ## Docs
 
-- [OVERVIEW.md](OVERVIEW.md) -- the seven stages, in order.
+- [OVERVIEW.md](OVERVIEW.md) -- the six stages, in order.
 - [ROUTING.md](ROUTING.md) -- choosing `db.table` from message fields.
 - [CAPTURE-MODES.md](CAPTURE-MODES.md) -- what is stored as `_json` / `_raw`,
   and the three-level precedence.

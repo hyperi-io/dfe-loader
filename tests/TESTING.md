@@ -13,7 +13,7 @@ tests/
 │   ├── mod.rs                    # mod config; mod errors; mod resilience; ...
 │   ├── clickhouse.rs             # ClickHouse HTTP client
 │   ├── config.rs                 # Config loading, validation, hot-reload
-│   ├── datatypes.rs              # Type coercion (DateTime64, UUID, Bool, etc.)
+│   ├── datatypes.rs              # Column types (DateTime64, UUID, Bool, etc.)
 │   ├── deployment.rs             # Helm chart + Dockerfile generation from contract
 │   ├── dlq.rs                    # Dead letter queue
 │   ├── errors.rs                 # Error handling, edge cases, negative paths

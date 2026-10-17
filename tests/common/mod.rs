@@ -306,11 +306,6 @@ pub fn ensure_docker_infra() -> Result<bool, String> {
 /// ClickHouse or Kafka -- a real cluster, or a dfe-docker compose stack cloned
 /// as a sibling -- which CI is not expected to provide. Failing on those would
 /// assert an environment nobody promised.
-///
-/// That does leave a real gap: the `coerce_integration` tests reach for a live
-/// ClickHouse at localhost:9000 and have never run in CI, so their coverage is
-/// developer-machine-only. Closing it means giving the shared rust-ci workflow
-/// a ClickHouse service, not loosening this guard.
 pub fn require_docker_in_ci() {
     assert!(
         std::env::var_os("CI").is_none() || has_docker(),

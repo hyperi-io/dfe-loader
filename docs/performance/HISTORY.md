@@ -172,7 +172,7 @@ null->DEFAULT) is left to ClickHouse:
 | UUID without hyphens -> RFC 4122 | CH UUID rejects bare hex |
 | IPv4 integer -> dotted-decimal | CH IPv4 rejects integers |
 
-See `src/transform/coerce.rs` (`CoercionMode::Delta`).
+The encoder carries these cases, in `src/clickhouse_ext/encode.rs`.
 
 ## Future optimisations
 

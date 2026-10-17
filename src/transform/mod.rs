@@ -3,7 +3,6 @@
 
 //! JSON transformation pipeline
 
-pub mod coerce;
 pub mod computed;
 pub mod extractor;
 pub mod field_mapping;
@@ -14,7 +13,6 @@ pub mod remap_loader;
 pub mod timestamp;
 pub mod transformer;
 
-pub use coerce::{Coercer, CoercionMode};
 pub use computed::{ComputedColumnCache, parse_computed_directive};
 pub use extractor::{HeaderExtraction, HeaderExtractor};
 pub use field_mapping::{

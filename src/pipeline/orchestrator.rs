@@ -2081,7 +2081,6 @@ fn memory_guard_config(config: &Config) -> MemoryGuardConfig {
 //   metadata.*            — transformer + capture overrides rebuilt on reload
 //   field_sanitization.*  — transformer rebuilt on reload
 //   buffer.flush_rows / flush_bytes / flush_age_secs — buffer thresholds updated
-//   coercion.*            — coercer config (referenced per-batch)
 //   enrichment.ip_fields  — which fields to enrich
 //   field_mapping.*       — field mapping overrides
 //

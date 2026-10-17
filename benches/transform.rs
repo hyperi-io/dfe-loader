@@ -6,7 +6,6 @@
 //! Detailed benchmarks for transformation operations:
 //! - JSON flattening (nested to flat)
 //! - Timestamp validation and correction
-//! - Type coercion
 //! - Map batch building (Vec<Map<String, Value>> accumulation)
 //!
 //! Run with: cargo bench --bench transform
