@@ -7,7 +7,8 @@
 //! startup probe as that user: with its password, with a wrong one, and with a
 //! wrong one the server is then changed to accept.
 //!
-//! Gated behind `#[cfg(feature = "testcontainers")]`.
+//! Gated behind `#[cfg(feature = "testcontainers")]`. Needs process-per-test
+//! (nextest): a test reading the probe's log installs the process's subscriber.
 
 #![cfg(feature = "testcontainers")]
 
@@ -21,7 +22,6 @@ use scalo::ScalingPressure;
 use scalo::metrics::{MetricsConfig, MetricsManager};
 use scalo::scaling::ScalingPressureConfig;
 use tokio_util::sync::CancellationToken;
-use tracing::instrument::WithSubscriber;
 
 use super::grpc_outage::{clickhouse_address, query_client};
 use crate::common::containers::TestInfrastructure;
@@ -39,7 +39,7 @@ const READY_WITHIN: Duration = Duration::from_secs(30);
 /// How long a refused probe is watched for a ready it must never report.
 const REFUSED_FOR: Duration = Duration::from_secs(5);
 
-/// The log lines a future writes, kept for the test to read.
+/// The log lines this test process writes, kept for the test to read.
 #[derive(Clone, Default)]
 struct Captured(Arc<Mutex<Vec<u8>>>);
 
@@ -59,16 +59,25 @@ impl Captured {
         String::from_utf8_lossy(&self.0.lock().expect("log buffer")).into_owned()
     }
 
-    /// A subscriber writing here, for one future to run under.
-    fn dispatch(&self) -> tracing::Dispatch {
-        let writer = self.clone();
-        tracing::Dispatch::new(
-            tracing_subscriber::fmt()
-                .with_writer(move || writer.clone())
-                .with_ansi(false)
-                .finish(),
-        )
+    /// Capture every log line in this process from here on.
+    ///
+    /// The one subscriber the process has: a span made under a scoped
+    /// subscriber and dropped under another panics the registry.
+    fn install() -> Self {
+        let logs = Self::default();
+        let writer = logs.clone();
+        tracing_subscriber::fmt()
+            .with_writer(move || writer.clone())
+            .with_ansi(false)
+            .try_init()
+            .expect("no subscriber before this one: nextest gives each test its own process");
+        logs
     }
+}
+
+/// A password made for one test run.
+fn fresh_password() -> String {
+    uuid::Uuid::new_v4().simple().to_string()
 }
 
 /// Create the probe user with `password`, granted only the loader's reads and writes.
@@ -123,13 +132,14 @@ async fn comes_true(within: Duration, done: impl Fn() -> bool) -> bool {
 async fn a_user_clickhouse_accepts_goes_ready() {
     let infra = TestInfrastructure::clickhouse_managing_users(test_name!()).await;
     let clickhouse = clickhouse_address(&infra).await;
-    create_user(&query_client(&clickhouse), "right").await;
+    let password = fresh_password();
+    create_user(&query_client(&clickhouse), &password).await;
 
     let state = not_ready_state();
     let shutdown = CancellationToken::new();
     let probed = tokio::time::timeout(
         READY_WITHIN,
-        state.ready_once_clickhouse_accepts(&as_probe_user(&clickhouse, "right"), &shutdown),
+        state.ready_once_clickhouse_accepts(&as_probe_user(&clickhouse, &password), &shutdown),
     )
     .await;
 
@@ -144,18 +154,17 @@ async fn a_user_clickhouse_accepts_goes_ready() {
 /// `ClickHouse` answered with.
 #[tokio::test]
 async fn a_wrong_password_never_goes_ready_and_logs_the_516() {
+    let logs = Captured::install();
     let infra = TestInfrastructure::clickhouse_managing_users(test_name!()).await;
     let clickhouse = clickhouse_address(&infra).await;
-    create_user(&query_client(&clickhouse), "right").await;
+    create_user(&query_client(&clickhouse), &fresh_password()).await;
 
     let state = not_ready_state();
     let shutdown = CancellationToken::new();
-    let logs = Captured::default();
+    let wrong = as_probe_user(&clickhouse, &fresh_password());
     let probed = tokio::time::timeout(
         REFUSED_FOR,
-        state
-            .ready_once_clickhouse_accepts(&as_probe_user(&clickhouse, "wrong"), &shutdown)
-            .with_subscriber(logs.dispatch()),
+        state.ready_once_clickhouse_accepts(&wrong, &shutdown),
     )
     .await;
     let logged = logs.text();
@@ -181,32 +190,30 @@ async fn a_wrong_password_never_goes_ready_and_logs_the_516() {
 /// changed to accept it, with no restart.
 #[tokio::test]
 async fn a_refused_probe_goes_ready_once_clickhouse_accepts_the_password() {
+    let logs = Captured::install();
     let infra = TestInfrastructure::clickhouse_managing_users(test_name!()).await;
     let clickhouse = clickhouse_address(&infra).await;
     let admin = query_client(&clickhouse);
-    create_user(&admin, "old").await;
+    create_user(&admin, &fresh_password()).await;
 
     let state = not_ready_state();
     let shutdown = CancellationToken::new();
-    let logs = Captured::default();
+    let new_password = fresh_password();
     let probe = {
         let state = Arc::clone(&state);
-        let config = as_probe_user(&clickhouse, "new");
+        let config = as_probe_user(&clickhouse, &new_password);
         let shutdown = shutdown.clone();
-        tokio::spawn(
-            async move {
-                state
-                    .ready_once_clickhouse_accepts(&config, &shutdown)
-                    .await;
-            }
-            .with_subscriber(logs.dispatch()),
-        )
+        tokio::spawn(async move {
+            state
+                .ready_once_clickhouse_accepts(&config, &shutdown)
+                .await;
+        })
     };
 
     let refused = comes_true(REFUSED_FOR, || logs.text().contains(REFUSED)).await;
     let ready_while_refused = state.is_ready();
     admin
-        .execute(&format!("ALTER USER {USER} IDENTIFIED BY 'new'"))
+        .execute(&format!("ALTER USER {USER} IDENTIFIED BY '{new_password}'"))
         .await
         .expect("change the probe user's password");
     let recovered = tokio::time::timeout(READY_WITHIN, probe).await;
