@@ -32,6 +32,8 @@ mod inserter;
 mod json_depth;
 mod kafka;
 #[cfg(feature = "testcontainers")]
+mod kafka_dlq_metrics;
+#[cfg(feature = "testcontainers")]
 mod kafka_offset_floor;
 #[cfg(feature = "testcontainers")]
 mod kafka_rebalance;

@@ -27,7 +27,7 @@
 //! | `_uuid`, `_timestamp_load` | Skipped — ClickHouse DEFAULT generates these |
 //! | `_json` | Skipped — zero-copy splice at serialisation time |
 //! | `_timestamp_received` | The edge's receive stamp, then the directive's fields; else current UTC time |
-//! | `DateTime`/`DateTime64` | RFC3339 normalised to ClickHouse's text form |
+//! | `DateTime`/`DateTime64` | A zoned value moved to UTC text, every fraction digit kept |
 //! | `@skip` directive | Excluded from insert |
 //! | `@source:host.name` | Dotted path descends the parsed payload |
 //! | `@renamed:first(a/b/c)` | First-match source field lookup |
@@ -44,13 +44,13 @@
 
 use std::sync::Arc;
 
-use chrono::Utc;
+use chrono::{SubsecRound, Utc};
 use parking_lot::RwLock;
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde_json::{Map, Value};
 use tracing::debug;
 
-use crate::transform::transformer::fmt_ts;
+use crate::datetime::{self, utc_text};
 
 use crate::clickhouse::TableSchema;
 use crate::column_meta::{ColumnMetaCache, TOPIC_NAME_MARKER};
@@ -319,7 +319,8 @@ impl HeaderExtractor {
         col_meta: &ColumnMetaCache,
         topic_source: Option<&str>,
     ) -> HeaderExtraction {
-        let now = Utc::now();
+        // Ingest time is stamped to the millisecond.
+        let now = Utc::now().trunc_subsecs(3);
         let mut map = Map::with_capacity(schema.columns.len());
         let plan = self.plan_for(table, schema, col_meta);
         let contended = &plan.contended;
@@ -368,7 +369,7 @@ impl HeaderExtractor {
                     if found && !map.get(name.as_str()).is_some_and(Value::is_null) {
                         normalise_datetime(&mut map, name);
                     } else {
-                        map.insert(name.clone(), Value::String(fmt_ts(&now)));
+                        map.insert(name.clone(), Value::String(utc_text(&now)));
                     }
                 }
                 continue;
@@ -384,7 +385,7 @@ impl HeaderExtractor {
                 if found {
                     normalise_datetime(&mut map, name);
                 } else {
-                    map.insert(name.clone(), Value::String(fmt_ts(&now)));
+                    map.insert(name.clone(), Value::String(utc_text(&now)));
                 }
                 continue;
             }
@@ -433,51 +434,17 @@ fn is_datetime(col: &crate::clickhouse::types::ColumnInfo) -> bool {
     matches!(col.parsed_type.tag, TypeTag::DateTime | TypeTag::DateTime64)
 }
 
-/// Rewrite an RFC3339 date-time into the text form `ClickHouse` parses.
+/// Rewrite a zoned date-time as zone-less UTC text, keeping every fraction digit.
 ///
 /// Both transforms and the receiver emit `2026-09-07T05:53:53.385Z`, and
 /// `JSONEachRow`'s `DateTime64` reader stops at the zone suffix and rejects the
-/// whole batch (code 27), so every row in it is lost. Anything that is not
-/// RFC3339 is left alone: the space-separated form and epoch numbers already
-/// parse, and a value this cannot read is the coercer's to judge, not ours.
+/// whole batch (code 27), so every row in it is lost. The zone-less form and
+/// epoch numbers already parse, and are left alone.
 #[inline]
 fn normalise_datetime(map: &mut Map<String, Value>, name: &str) {
-    let Some(value) = map.get_mut(name) else {
-        return;
-    };
-    let Some(text) = value.as_str() else {
-        return;
-    };
-    if !looks_rfc3339(text) {
-        return;
+    if let Some(value) = map.get_mut(name) {
+        datetime::normalise_zoned(value);
     }
-    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(text) {
-        *value = Value::String(fmt_ts(&dt.with_timezone(&Utc)));
-    }
-}
-
-/// Whether a value can be RFC3339, cheaply enough to run on every row.
-///
-/// The common case is already `ClickHouse`'s text form -- a space at byte 10 and
-/// no zone -- so it costs one byte compare and a look at the last six, and never
-/// the parse or the `String` the rewrite allocates. RFC3339 needs a `T`/`t`
-/// separator there, or, for the space-separated form chrono also accepts, a
-/// trailing `Z` or a `+HH:MM` / `-HH:MM` offset.
-#[inline]
-fn looks_rfc3339(text: &str) -> bool {
-    let bytes = text.as_bytes();
-    if bytes.len() < 11 {
-        return false;
-    }
-    if bytes[10] == b'T' || bytes[10] == b't' {
-        return true;
-    }
-    if matches!(bytes[bytes.len() - 1], b'Z' | b'z') {
-        return true;
-    }
-    bytes[bytes.len() - 6..]
-        .iter()
-        .any(|b| matches!(b, b'+' | b'-'))
 }
 
 /// Resolve a parsed `@default` / `@source` fallback against this message's context.
@@ -498,7 +465,7 @@ fn resolve_default(
     topic_source: Option<&str>,
 ) -> Option<Value> {
     match default.as_str() {
-        Some("now()") => Some(Value::String(fmt_ts(now))),
+        Some("now()") => Some(Value::String(utc_text(now))),
         Some("uuid()") => Some(Value::String(uuid::Uuid::now_v7().to_string())),
         Some(TOPIC_NAME_MARKER) => topic_source
             .filter(|source| !source.is_empty())
@@ -1413,6 +1380,37 @@ mod tests {
     }
 
     #[test]
+    fn test_offset_timestamp_keeps_every_fraction_digit() {
+        // The insert stage cuts to the column's precision, so a DateTime64(6)
+        // or (9) column only keeps its digits if this pass does not drop them.
+        let extractor = default_extractor();
+        let mut schema = make_datetime_schema(&["seen_at"]);
+        schema.columns[0].type_name = "DateTime64(9)".to_string();
+        schema.columns[0].parsed_type = ParsedType::parse("DateTime64(9)");
+        let col_meta = empty_col_meta();
+
+        for (raw, expected) in [
+            (
+                br#"{"seen_at": "2026-04-07T17:03:00.123456789+10:00"}"#.as_slice(),
+                "2026-04-07 07:03:00.123456789",
+            ),
+            (
+                br#"{"seen_at": "2026-04-07T01:33:00.123456-05:30"}"#.as_slice(),
+                "2026-04-07 07:03:00.123456",
+            ),
+            (
+                br#"{"seen_at": "2026-04-07T07:03:00Z"}"#.as_slice(),
+                "2026-04-07 07:03:00.000",
+            ),
+        ] {
+            let map = extractor
+                .extract(raw, "dfe.events", &schema, &col_meta, None)
+                .fields;
+            assert_eq!(map.get("seen_at"), Some(&Value::String(expected.into())));
+        }
+    }
+
+    #[test]
     fn test_datetime_column_rfc3339_is_normalised() {
         // Not only the common header: any DateTime column fed by @source hits
         // the same reader.
@@ -1551,17 +1549,6 @@ mod tests {
             before,
             "the guard path must leave the value where it was, not rebuild it"
         );
-    }
-
-    #[test]
-    fn test_rfc3339_guard_admits_only_what_can_parse() {
-        assert!(looks_rfc3339("2026-09-07T05:53:53.385Z"));
-        assert!(looks_rfc3339("2026-09-07t05:53:53Z"));
-        assert!(looks_rfc3339("2026-09-07 05:53:53.385+10:00"));
-        assert!(!looks_rfc3339("2026-09-07 05:53:53.385"));
-        assert!(!looks_rfc3339("2026-09-07 05:53:53"));
-        assert!(!looks_rfc3339("2026-09-07"));
-        assert!(!looks_rfc3339(""));
     }
 
     #[test]

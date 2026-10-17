@@ -794,9 +794,9 @@ impl Inserter {
         let (db, tbl) = parse_db_table(table);
 
         // This path serialises the row map as it stands, so a value bound for a
-        // JSON, `Point` or `Array` column is shaped here — the encoder does it
-        // for RowBinary, and a hoisted `tags` array reaching a JSON column
-        // unshaped is code 117.
+        // JSON, `Point`, `Array` or date-time column is shaped here, as the
+        // encoder does for RowBinary. A hoisted `tags` array reaching a JSON
+        // column unshaped is code 117, and a zoned timestamp is code 27.
         let shaped_columns = self.shaped_columns(table).await;
 
         // Serialise rows as NDJSON — sonic_rs for SIMD-accelerated encoding.

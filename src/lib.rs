@@ -18,6 +18,7 @@ pub mod clickhouse;
 pub mod clickhouse_ext;
 pub mod column_meta;
 pub mod config;
+pub mod datetime;
 pub mod enrich;
 pub mod error;
 pub mod kafka;

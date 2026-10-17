@@ -46,9 +46,9 @@
 //! cannot do server-side: epoch magnitude detection (ms/us/ns) and ISO-8601
 //! 'T'-separator handling for date/time types, hyphen-less UUID hex,
 //! integer-to-dotted IPv4, every Elasticsearch geo_point form for a `Point`,
-//! and a single value written as a one-element `Array`. All timestamps are
-//! treated as UTC; non-zero timezone offsets on datetime strings are rejected
-//! rather than silently dropped.
+//! and a single value written as a one-element `Array`. Date-time text is read
+//! by [`crate::datetime::parse`]: zone-less text is UTC, and an offset is
+//! applied.
 
 use std::borrow::Cow;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -58,6 +58,7 @@ use serde_json::{Map, Value};
 
 use super::error::DynamicError;
 use super::parsed_type::{ParsedType, TypeTag};
+use crate::datetime::{self, civil_days_from_epoch};
 use crate::payload::depth::{MAX_PARSE_DEPTH, json_depth_within};
 
 use clickhouse::_priv::RowKind;
@@ -385,8 +386,7 @@ fn encode_typed(
             buf.extend_from_slice(&secs.to_le_bytes());
         }
         TypeTag::DateTime64 => {
-            let precision = pt.precision.unwrap_or(3);
-            let ticks = datetime64_to_ticks(value, precision, col)?;
+            let ticks = datetime64_to_ticks(value, datetime_precision(pt), col)?;
             buf.extend_from_slice(&ticks.to_le_bytes());
         }
         TypeTag::Decimal32 => {
@@ -558,12 +558,16 @@ fn wrap_value(key: &str, inner: Value) -> Value {
 }
 
 /// Whether a column's values can need [`shape_for_type`] before a JSONEachRow
-/// body carries them: a JSON, a `Point` or an `Array`, alone or as a `Map`
-/// value.
+/// body carries them: a JSON, a `Point`, an `Array` or a date-time, alone or
+/// as a `Map` value.
 #[must_use]
 pub fn needs_shaping(ty: &ParsedType) -> bool {
     match ty.tag {
-        TypeTag::JSON | TypeTag::Point | TypeTag::Array => true,
+        TypeTag::JSON
+        | TypeTag::Point
+        | TypeTag::Array
+        | TypeTag::DateTime
+        | TypeTag::DateTime64 => true,
         TypeTag::Map => ty.map_types.as_ref().is_some_and(|(_, v)| needs_shaping(v)),
         _ => false,
     }
@@ -571,14 +575,21 @@ pub fn needs_shaping(ty: &ParsedType) -> bool {
 
 /// Shape a value into the form its column reads from a JSONEachRow body, by
 /// the rules the RowBinary encoder applies at the same depths: JSON text and
-/// non-objects for a JSON, any geo_point form for a `Point`, and a single
-/// value for an `Array`.
+/// non-objects for a JSON, any geo_point form for a `Point`, a single value
+/// for an `Array`, and zoned or over-precise text for a date-time.
 pub fn shape_for_type(value: &mut Value, ty: &ParsedType) {
     if ty.nullable && value.is_null() {
         return;
     }
     match ty.tag {
         TypeTag::JSON => shape_json_value(value),
+        TypeTag::DateTime | TypeTag::DateTime64 => {
+            if let Value::String(text) = value
+                && let Some(wire) = datetime::wire_text(text, datetime_precision(ty))
+            {
+                *text = wire;
+            }
+        }
         TypeTag::Point => {
             // A value no geo_point form reads is left for the server to refuse.
             if let Ok((lon, lat)) = geo_point_lon_lat(value) {
@@ -620,6 +631,9 @@ pub fn shaping_changes(value: &Value, ty: &ParsedType) -> bool {
     }
     match ty.tag {
         TypeTag::JSON => !value.is_object(),
+        TypeTag::DateTime | TypeTag::DateTime64 => value
+            .as_str()
+            .is_some_and(|text| datetime::wire_text_differs(text, datetime_precision(ty))),
         TypeTag::Point => {
             let already_pair = matches!(value, Value::Array(items)
                 if items.len() == 2 && items.iter().all(Value::is_number));
@@ -639,6 +653,15 @@ pub fn shaping_changes(value: &Value, ty: &ParsedType) -> bool {
             _ => false,
         },
         _ => false,
+    }
+}
+
+/// Fraction digits a date-time column holds: none for a `DateTime`, and 3 for
+/// a `DateTime64` whose precision did not parse, as `ClickHouse` defaults it.
+fn datetime_precision(ty: &ParsedType) -> u8 {
+    match ty.tag {
+        TypeTag::DateTime64 => ty.precision.unwrap_or(3),
+        _ => 0,
     }
 }
 
@@ -916,8 +939,7 @@ fn to_epoch_seconds(value: &Value, col: &str) -> Result<i64, DynamicError> {
             if let Ok(raw) = s.parse::<i64>() {
                 return Ok(epoch_to_seconds(raw));
             }
-            let (secs, _) = parse_datetime_str(s).map_err(|m| enc_err(col, &m))?;
-            Ok(secs)
+            Ok(datetime::parse(s).map_err(|m| enc_err(col, m))?.secs)
         }
         _ => Err(enc_err(col, "expected datetime string or epoch number")),
     }
@@ -964,114 +986,13 @@ fn datetime64_to_ticks(value: &Value, precision: u8, col: &str) -> Result<i64, D
             if let Ok(n) = s.parse::<i64>() {
                 return Ok(n);
             }
-            let (secs, frac_nanos) = parse_datetime_str(s).map_err(|m| enc_err(col, &m))?;
-            let multiplier = 10i64.pow(u32::from(precision));
-            let base = secs
-                .checked_mul(multiplier)
-                .ok_or_else(|| enc_err(col, "DateTime64 epoch overflow"))?;
-            let frac_scaled =
-                i64::from(frac_nanos) / 10i64.pow(9u32.saturating_sub(u32::from(precision)));
-            base.checked_add(frac_scaled)
+            datetime::parse(s)
+                .map_err(|m| enc_err(col, m))?
+                .ticks(precision)
                 .ok_or_else(|| enc_err(col, "DateTime64 epoch overflow"))
         }
         _ => Err(enc_err(col, "expected number or datetime string")),
     }
-}
-
-/// Parse `YYYY-MM-DD[ T]HH:MM:SS[.frac][Z|+00:00]` into `(unix_seconds,
-/// fractional_nanoseconds)`. UTC only; non-zero offsets are rejected.
-fn parse_datetime_str(s: &str) -> Result<(i64, u32), String> {
-    let bytes = s.as_bytes();
-    let len = bytes.len();
-
-    if len < 19 {
-        return Err("invalid DateTime string".into());
-    }
-    let sep = bytes[10];
-    if sep != b' ' && sep != b'T' {
-        return Err("invalid DateTime string".into());
-    }
-
-    let mut pos = 19;
-
-    let frac_nanos = if pos < len && bytes[pos] == b'.' {
-        pos += 1;
-        let frac_start = pos;
-        while pos < len && bytes[pos].is_ascii_digit() {
-            pos += 1;
-        }
-        let frac_digits = pos - frac_start;
-        if frac_digits == 0 {
-            return Err("invalid DateTime string".into());
-        }
-        let clamped = frac_digits.min(9);
-        let frac_slice = &s[frac_start..frac_start + clamped];
-        let mut frac: u32 = frac_slice
-            .parse()
-            .map_err(|_| "invalid fractional seconds".to_string())?;
-        if clamped < 9 {
-            frac *= 10u32.pow(9 - clamped as u32);
-        }
-        frac
-    } else {
-        0u32
-    };
-
-    if pos < len {
-        if bytes[pos] == b'Z' {
-            pos += 1;
-        } else if (bytes[pos] == b'+' || bytes[pos] == b'-') && pos + 6 <= len {
-            let sign = bytes[pos];
-            let tz_slice = &s[pos + 1..pos + 6];
-            if tz_slice.len() == 5
-                && tz_slice.as_bytes()[2] == b':'
-                && tz_slice[..2].bytes().all(|b| b.is_ascii_digit())
-                && tz_slice[3..].bytes().all(|b| b.is_ascii_digit())
-            {
-                if sign == b'-' || &tz_slice[..2] != "00" || &tz_slice[3..] != "00" {
-                    return Err(format!(
-                        "non-UTC timezone offset '{}{}' not supported; convert to UTC first",
-                        sign as char, tz_slice
-                    ));
-                }
-                pos += 6;
-            }
-        }
-    }
-
-    if pos != len {
-        return Err("invalid DateTime string".into());
-    }
-
-    let year: i32 = s[0..4].parse().map_err(|_| "invalid year".to_string())?;
-    let month: u32 = s[5..7].parse().map_err(|_| "invalid month".to_string())?;
-    let day: u32 = s[8..10].parse().map_err(|_| "invalid day".to_string())?;
-    let hour: u32 = s[11..13].parse().map_err(|_| "invalid hour".to_string())?;
-    let min: u32 = s[14..16]
-        .parse()
-        .map_err(|_| "invalid minute".to_string())?;
-    let sec: u32 = s[17..19]
-        .parse()
-        .map_err(|_| "invalid second".to_string())?;
-
-    if !(1..=12).contains(&month) || !(1..=31).contains(&day) || hour > 23 || min > 59 || sec > 59 {
-        return Err("invalid DateTime string".into());
-    }
-
-    let days = civil_days_from_epoch(year, month, day);
-    let secs = days * 86_400 + i64::from(hour) * 3600 + i64::from(min) * 60 + i64::from(sec);
-    Ok((secs, frac_nanos))
-}
-
-/// Days since 1970-01-01 for a civil date (Howard Hinnant's algorithm).
-fn civil_days_from_epoch(year: i32, month: u32, day: u32) -> i64 {
-    let y = i64::from(if month <= 2 { year - 1 } else { year });
-    let m = i64::from(if month <= 2 { month + 9 } else { month - 3 });
-    let era = y.div_euclid(400);
-    let yoe = y.rem_euclid(400);
-    let doy = (153 * m + 2) / 5 + i64::from(day) - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    era * 146_097 + doe - 719_468
 }
 
 // ---------------------------------------------------------------------------
@@ -1678,13 +1599,73 @@ mod tests {
         );
     }
 
+    /// 2026-04-07 07:03:00.123456789 UTC, written with each zone form a source sends.
+    const ZONED_FORMS: [&str; 3] = [
+        "2026-04-07T17:03:00.123456789+10:00",
+        "2026-04-07T01:33:00.123456789-05:30",
+        "2026-04-07T07:03:00.123456789Z",
+    ];
+
     #[test]
-    fn datetime64_rejects_nonzero_offset() {
-        let e = enc_err_of(
-            json!({"ts": "2026-04-07 07:03:00+05:30"}),
-            &[("ts", "DateTime64(3)")],
+    fn datetime64_applies_the_offset_at_every_precision() {
+        for text in ZONED_FORMS {
+            for (ty, ticks) in [
+                ("DateTime64(0)", 1_775_545_380_i64),
+                ("DateTime64(3)", 1_775_545_380_123),
+                ("DateTime64(6)", 1_775_545_380_123_456),
+                ("DateTime64(9)", 1_775_545_380_123_456_789),
+            ] {
+                assert_eq!(
+                    enc(json!({"ts": text}), &[("ts", ty)]),
+                    ticks.to_le_bytes(),
+                    "{text} into {ty}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn datetime_applies_the_offset() {
+        for text in ZONED_FORMS {
+            assert_eq!(
+                enc(json!({"ts": text}), &[("ts", "DateTime")]),
+                1_775_545_380_u32.to_le_bytes(),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn datetime_offset_that_crosses_midnight_moves_the_date() {
+        // 2026-04-06 16:00:00 UTC.
+        assert_eq!(
+            enc(
+                json!({"ts": "2026-04-07 02:00:00+10:00"}),
+                &[("ts", "DateTime")]
+            ),
+            1_775_491_200_u32.to_le_bytes()
         );
-        assert!(format!("{e}").contains("non-UTC"), "got: {e}");
+    }
+
+    #[test]
+    fn datetime64_refuses_an_offset_out_of_range() {
+        for text in [
+            "2026-04-07 07:03:00+24:00",
+            "2026-04-07 07:03:00+10:60",
+            "2026-04-07 07:03:00+1",
+        ] {
+            let e = enc_err_of(json!({"ts": text}), &[("ts", "DateTime64(3)")]);
+            assert!(format!("{e}").contains("ts"), "{text}: {e}");
+        }
+    }
+
+    #[test]
+    fn datetime_text_with_a_multibyte_character_is_refused_not_a_panic() {
+        let e = enc_err_of(
+            json!({"ts": "2026-1\u{e9}-7 07:03:00"}),
+            &[("ts", "DateTime")],
+        );
+        assert!(format!("{e}").contains("ts"), "got: {e}");
     }
 
     // ---- Decimal ----
@@ -2328,6 +2309,65 @@ mod tests {
     #[test]
     fn shaping_leaves_an_object_bound_for_an_array_of_scalars() {
         assert_shaped_for("Array(String)", json!({"a": 1}), json!({"a": 1}));
+    }
+
+    #[test]
+    fn shaping_sends_a_zoned_datetime_as_epoch_text_at_the_column_precision() {
+        for text in ZONED_FORMS {
+            assert_shaped_for("DateTime", json!(text), json!("1775545380"));
+            assert_shaped_for(
+                "DateTime('Australia/Sydney')",
+                json!(text),
+                json!("1775545380"),
+            );
+            assert_shaped_for("DateTime64(0)", json!(text), json!("1775545380"));
+            assert_shaped_for("DateTime64(3)", json!(text), json!("1775545380.123"));
+            assert_shaped_for(
+                "DateTime64(6, 'Asia/Tokyo')",
+                json!(text),
+                json!("1775545380.123456"),
+            );
+            assert_shaped_for("DateTime64(9)", json!(text), json!("1775545380.123456789"));
+            assert_shaped_for(
+                "Nullable(DateTime64(3))",
+                json!(text),
+                json!("1775545380.123"),
+            );
+            assert_shaped_for(
+                "Array(DateTime64(3))",
+                json!([text]),
+                json!(["1775545380.123"]),
+            );
+        }
+    }
+
+    #[test]
+    fn shaping_cuts_zone_less_fraction_digits_the_column_does_not_hold() {
+        assert_shaped_for(
+            "DateTime",
+            json!("2026-04-07 07:03:00.123"),
+            json!("2026-04-07 07:03:00"),
+        );
+        assert_shaped_for(
+            "DateTime64(3)",
+            json!("2026-04-07 07:03:00.123456789"),
+            json!("2026-04-07 07:03:00.123"),
+        );
+    }
+
+    #[test]
+    fn shaping_leaves_datetime_values_the_server_reads_as_they_are() {
+        for (ty, value) in [
+            ("DateTime64(3)", json!("2026-04-07 07:03:00.123")),
+            ("DateTime64(6)", json!("2026-04-07 07:03:00.123")),
+            ("DateTime64(3)", json!("2026-04-07T07:03:00")),
+            ("DateTime64(3)", json!(1_775_545_380_123_i64)),
+            ("DateTime64(3)", json!("not a time")),
+            ("DateTime", json!("1775545380")),
+            ("Nullable(DateTime64(3))", Value::Null),
+        ] {
+            assert_shaped_for(ty, value.clone(), value);
+        }
     }
 
     #[test]

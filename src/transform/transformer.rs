@@ -6,11 +6,12 @@
 //! Pipeline: Parse → Extract tags → Flatten → Timestamp → _raw rename → Metadata → Sanitize → Remove routing fields
 //! Note: _json is injected by the orchestrator, not by the transformer.
 
-use chrono::{DateTime, Utc};
+use chrono::{SubsecRound, Utc};
 use serde_json::{Map, Value};
 
 use crate::Result;
 use crate::config::{FieldSanitizationConfig, MetadataConfig, RoutingConfig, TimestampDqConfig};
+use crate::datetime::{self, utc_text};
 use crate::transform::flatten::flatten_value_owned;
 use crate::transform::timestamp::{TimestampResult, TimestampValidator};
 
@@ -24,14 +25,6 @@ static TIMESTAMP_RECEIVED_INPUT_FIELD: &str = "timestamp_received";
 static TIMESTAMP_OUTPUT_FIELD: &str = "_timestamp";
 static TIMESTAMP_RECEIVED_OUTPUT_FIELD: &str = "_timestamp_received";
 static TIMESTAMP_COLLECTOR_FIELD: &str = "_timestamp_collector";
-
-/// Format a `DateTime` for `ClickHouse` DateTime64(3) insertion via `JSONEachRow`.
-/// Uses space separator and no timezone suffix — `ClickHouse`'s `JSONEachRow` parser
-/// doesn't support RFC3339 'Z' or '+00:00' suffixes in datetime strings.
-#[inline]
-pub(crate) fn fmt_ts(dt: &DateTime<Utc>) -> String {
-    dt.format("%Y-%m-%d %H:%M:%S%.3f").to_string()
-}
 
 /// Transform result with metadata
 pub struct TransformResult {
@@ -192,8 +185,9 @@ impl Transformer {
         org_id: Option<&str>,
         source: Option<&str>,
     ) -> Result<TransformResult> {
-        // Cache current time once per message to avoid multiple syscalls
-        let now = Utc::now();
+        // Cache current time once per message to avoid multiple syscalls.
+        // Ingest time is stamped to the millisecond.
+        let now = Utc::now().trunc_subsecs(3);
         // OPTIMIZATION: Lazy timestamp formatting - only format if we need to insert
         let mut now_str: Option<String> = None;
 
@@ -248,36 +242,38 @@ impl Transformer {
 
                 match ts_result {
                     TimestampResult::Valid(dt) => {
-                        data.insert(TIMESTAMP_OUTPUT_FIELD.into(), Value::String(fmt_ts(&dt)));
+                        data.insert(TIMESTAMP_OUTPUT_FIELD.into(), Value::String(utc_text(&dt)));
                     }
                     TimestampResult::Corrected(dt, reason) => {
                         warnings.get_or_insert_with(Vec::new).push(reason);
-                        data.insert(TIMESTAMP_OUTPUT_FIELD.into(), Value::String(fmt_ts(&dt)));
+                        data.insert(TIMESTAMP_OUTPUT_FIELD.into(), Value::String(utc_text(&dt)));
                     }
                     TimestampResult::Invalid(reason) => {
                         warnings.get_or_insert_with(Vec::new).push(reason);
                         // OPTIMIZATION: Lazy format - only format now() if we actually need it
-                        let ts = now_str.get_or_insert_with(|| fmt_ts(&now)).clone();
+                        let ts = now_str.get_or_insert_with(|| utc_text(&now)).clone();
                         data.insert(TIMESTAMP_OUTPUT_FIELD.into(), Value::String(ts));
                     }
                 }
             } else {
                 // No timestamp field - inject current time (lazy format)
-                let ts = now_str.get_or_insert_with(|| fmt_ts(&now)).clone();
+                let ts = now_str.get_or_insert_with(|| utc_text(&now)).clone();
                 data.insert(TIMESTAMP_OUTPUT_FIELD.into(), Value::String(ts));
             }
 
             // Step 4: Extract collector timestamp if present
             // Use remove() to take ownership instead of get().cloned() to avoid allocation
             if self.extract_collector_timestamp
-                && let Some(ts) = data.remove(&self.collector_timestamp_path)
+                && let Some(mut ts) = data.remove(&self.collector_timestamp_path)
             {
+                datetime::normalise_zoned(&mut ts);
                 data.insert(TIMESTAMP_COLLECTOR_FIELD.into(), ts);
             }
 
             // Step 4b: Extract timestamp_received if present (nullable)
             // This is when the receiver/loader received the event
-            if let Some(ts) = data.remove(TIMESTAMP_RECEIVED_INPUT_FIELD) {
+            if let Some(mut ts) = data.remove(TIMESTAMP_RECEIVED_INPUT_FIELD) {
+                datetime::normalise_zoned(&mut ts);
                 data.insert(TIMESTAMP_RECEIVED_OUTPUT_FIELD.into(), ts);
             }
 
@@ -945,6 +941,62 @@ mod tests {
         assert!(result.data.contains_key("_timestamp_received"));
         // Original field should be removed (ownership transferred)
         assert!(!result.data.contains_key("timestamp_received"));
+    }
+
+    #[test]
+    fn test_transform_received_and_collector_offsets_land_as_utc_text() {
+        // Left verbatim, a zoned value fails the whole JSONEachRow batch with code 27.
+        let transformer = Transformer::default();
+        let raw = br#"{"event": "x",
+            "timestamp_received": "2026-04-07T17:03:00.123+10:00",
+            "tags": {"collector": {"timestamp": "2026-04-07T01:33:00.123456-05:30"}}}"#;
+        let value: Value = serde_json::from_slice(raw).unwrap();
+        let result = transformer.transform_with_raw(value, None, None).unwrap();
+        assert_eq!(
+            result.data.get("_timestamp_received"),
+            Some(&Value::String("2026-04-07 07:03:00.123".into()))
+        );
+        assert_eq!(
+            result.data.get("_timestamp_collector"),
+            Some(&Value::String("2026-04-07 07:03:00.123456".into()))
+        );
+    }
+
+    #[test]
+    fn test_transform_received_without_a_zone_is_untouched() {
+        let transformer = Transformer::default();
+        let raw = br#"{"event": "x", "timestamp_received": 1775545380123}"#;
+        let value: Value = serde_json::from_slice(raw).unwrap();
+        let result = transformer.transform_with_raw(value, None, None).unwrap();
+        assert_eq!(
+            result.data.get("_timestamp_received"),
+            Some(&Value::from(1_775_545_380_123_i64))
+        );
+    }
+
+    #[test]
+    fn test_transform_timestamp_keeps_microseconds_and_nanoseconds() {
+        let transformer = Transformer::default();
+        for (input, expected) in [
+            (
+                "2026-04-07T17:03:00.123456+10:00",
+                "2026-04-07 07:03:00.123456",
+            ),
+            (
+                "2026-04-07T07:03:00.123456789Z",
+                "2026-04-07 07:03:00.123456789",
+            ),
+            ("2026-04-07T07:03:00.120Z", "2026-04-07 07:03:00.120"),
+            ("2026-04-07T07:03:00Z", "2026-04-07 07:03:00.000"),
+        ] {
+            let value = serde_json::json!({"event": "x", "timestamp": input});
+            let result = transformer.transform_with_raw(value, None, None).unwrap();
+            assert_eq!(
+                result.data.get("_timestamp"),
+                Some(&Value::String(expected.into())),
+                "{input}"
+            );
+        }
     }
 
     // ========================================================================
