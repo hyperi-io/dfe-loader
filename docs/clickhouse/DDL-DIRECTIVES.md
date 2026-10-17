@@ -1785,9 +1785,8 @@ def get_filtered_functions(target_type: str, category: Optional[str] = None) -> 
 
 ### Rust type safety reference
 
-The dfe-loader Rust implementation provides robust type safety. The Python API
-should mirror this behaviour. The type parser and coercer live in
-`src/clickhouse_ext/` (ParsedType) and `src/transform/`.
+The dfe-loader Rust implementation parses column types with `ParsedType` in
+`src/clickhouse_ext/`. The Python API should mirror its category mapping.
 
 **Type parsing (ParsedType, in `src/clickhouse_ext/`):**
 
@@ -1829,39 +1828,6 @@ pub fn coercer_category(&self) -> &str {
     }
 }
 ```
-
-**Type coercion (`src/transform/coerce.rs`):**
-
-```rust
-// Dispatch to type-specific coercer
-pub fn coerce_value(&self, value: &Value, target: &ParsedType) -> Result<Value> {
-    if value.is_null() || self.is_null_value(value) {
-        return self.handle_null(target);
-    }
-
-    match target.coercer_category() {
-        "String" => self.coerce_string(value, target),
-        "Int" => self.coerce_int(value),
-        "UInt" => self.coerce_uint(value),
-        "Float" => self.coerce_float(value),
-        "DateTime64" => self.coerce_datetime64(value, target),
-        "UUID" => self.coerce_uuid(value),
-        "IPv4" => self.coerce_ipv4(value),
-        // ... etc
-        _ => self.coerce_string(value, target),  // Safe fallback
-    }
-}
-```
-
-**Key type safety rules:**
-
-1. **Nullable handling:** `Nullable(T)` allows NULL, non-nullable columns get
-   defaults
-2. **Overflow protection:** Integer overflow detected and rejected
-3. **String null detection:** Recognises "null", "NULL", "None", "", etc.
-4. **Date/time normalisation:** Auto-detects epoch seconds/millis/micros/nanos
-5. **UUID normalisation:** Handles hyphenated, non-hyphenated, braced formats
-6. **IP address validation:** Validates format before accepting
 
 **Python API should implement equivalent validation:**
 

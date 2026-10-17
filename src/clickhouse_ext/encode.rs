@@ -910,7 +910,7 @@ fn decimal_backing_i128(value: &Value, scale: u8, col: &str) -> Result<i128, Dyn
 // ---------------------------------------------------------------------------
 
 /// Scale a numeric epoch value down to whole seconds, detecting ms/us/ns by
-/// magnitude. Matches the loader's coercer thresholds.
+/// magnitude.
 fn epoch_to_seconds(ts: i64) -> i64 {
     if ts > 1_000_000_000_000_000_000 {
         ts / 1_000_000_000
@@ -1800,8 +1800,7 @@ mod tests {
 
     #[test]
     fn ipv6_nullable_rejects_an_empty_string() {
-        // Reachable only in Delta mode, where IPv6 is off the coercer's
-        // allow-list; Full mode maps "" to null via the null_strings list.
+        // An empty string is not an address, even on a nullable column.
         let err = enc_err_of(json!({"ip": ""}), &[("ip", "Nullable(IPv6)")]);
         assert!(err.to_string().contains("invalid IP address"), "{err}");
     }

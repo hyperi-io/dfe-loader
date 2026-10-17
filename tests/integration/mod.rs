@@ -8,7 +8,6 @@ mod clickhouse;
 mod clickhouse_inserter_e2e;
 #[cfg(feature = "testcontainers")]
 mod clickhouse_tls;
-mod coerce_integration;
 mod config;
 mod config_reachability;
 // A leak check has to fail the test when the container is still there, and the

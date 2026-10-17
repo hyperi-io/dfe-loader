@@ -23,11 +23,10 @@ flowchart LR
     P["JSON parse"]
     R["route -> db.table"]
     X["extract header + schema columns"]
-    C["coerce (delta only)"]
     E["enrich"]
     B["per-table buffer"]
     I["insert + commit offsets"]
-    M --> S --> P --> R --> X --> C --> E --> B --> I
+    M --> S --> P --> R --> X --> E --> B --> I
 ```
 
 The stages, in order, all in `src/pipeline/` (`MessageProcessor::process` is the
@@ -86,27 +85,22 @@ fields are promoted to typed columns. The header extractor pulls the common
 header fields; the rest of the declared columns are pulled from the payload by
 name. Anything not promoted stays in the payload, available as `_json`.
 
-## 4. Coerce
-
-Coercion is applied only to the delta between the payload value and the column type that needs help: epoch vs ISO timestamps, UUID strings, IPv4/IPv6, numeric strings, every geo_point form for a `Point`, and a single value for an `Array` (see [../clickhouse/TYPES.md](../clickhouse/TYPES.md)). It is deliberately narrow -- the encoder handles native types directly, so coercion only steps in where a wire value needs reshaping to fit the column.
-Coercion warnings are sampled, not logged per row, to avoid flooding.
-
-## 5. Enrich
+## 4. Enrich
 
 Optional enrichment (`geoip`, `reputation`, `risk`) injects flat columns onto
 the promoted row only -- never into `_json`. Each is a toggle; the lookups are
 cached. See [ENRICHMENT.md](ENRICHMENT.md).
 
-## 6. Buffer and capture
+## 5. Buffer and capture
 
 The promoted row, plus whatever `capture_mode` dictates for `_json` and `_raw`,
 lands in the per-table buffer (rows + raw payloads + Kafka offsets). Capture
 mode is resolved per table with a three-level precedence (DDL directive >
 per-table config > global). See [CAPTURE-MODES.md](CAPTURE-MODES.md).
 
-## 7. Insert and commit
+## 6. Insert and commit
 
-Each table's buffer flushes on its own triggers (`flush_rows` / `flush_bytes` / `flush_age_secs`). The batch is encoded and inserted through `clickhouse_ext` (RowBinary by default). Kafka offsets commit once per flush cycle, and on each partition stop below the lowest offset not placed yet -- at-least-once. Batch salvage isolates a row ClickHouse rejects for good and sends it to the DLQ. A batch that fails for any other reason is held and retried with jittered backoff until it lands. See [../ARCHITECTURE.md](../ARCHITECTURE.md#resilience) and [../clickhouse/INSERT-FORMATS.md](../clickhouse/INSERT-FORMATS.md).
+The encoder reshapes only the values ClickHouse cannot take as sent: epoch vs ISO timestamps, hyphen-less UUIDs, integer IPv4, every geo_point form for a `Point`, and a single value for an `Array` (see [../clickhouse/TYPES.md](../clickhouse/TYPES.md)). Each table's buffer flushes on its own triggers (`flush_rows` / `flush_bytes` / `flush_age_secs`). The batch is encoded and inserted through `clickhouse_ext` (RowBinary by default). Kafka offsets commit once per flush cycle, and on each partition stop below the lowest offset not placed yet -- at-least-once. Batch salvage isolates a row ClickHouse rejects for good and sends it to the DLQ. A batch that fails for any other reason is held and retried with jittered backoff until it lands. See [../ARCHITECTURE.md](../ARCHITECTURE.md#resilience) and [../clickhouse/INSERT-FORMATS.md](../clickhouse/INSERT-FORMATS.md).
 
 ## Parallelism
 

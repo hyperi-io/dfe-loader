@@ -18,7 +18,7 @@
 //!
 //! - No flattening — a dotted source path is walked in place, never materialised
 //! - No `_json` injection — that is spliced zero-copy at serialisation time
-//! - No coercion — `DeltaCoercer` runs on the returned map after extraction
+//! - No coercion — the `RowBinary` encoder reshapes values at insert
 //!
 //! ## Column handling
 //!
@@ -703,7 +703,7 @@ mod tests {
 
     #[test]
     fn timestamp_received_takes_the_fetcher_stamp_234() {
-        // dfe-fetcher stamps epoch milliseconds; the coercer converts the number.
+        // dfe-fetcher stamps epoch milliseconds; the encoder converts the number.
         let raw = br#"{"event":"x","_timestamp_received":1759700000123,"_timestamp_receiver":1759700099999}"#;
         assert_eq!(
             received_for(raw, None),

@@ -52,7 +52,6 @@ use crate::clickhouse::error::{
 };
 use crate::clickhouse::{ClickHouseQueryClient, SchemaCache};
 use crate::clickhouse_ext::{ColumnDef, needs_shaping, shape_for_type, shaping_changes};
-use crate::transform::Coercer;
 
 /// Split "db.table" into (db, table). Panics if no dot — callers always
 /// pass fully qualified names from `BufferManager`.
@@ -269,8 +268,6 @@ fn rejected_row_bytes(
 /// - **Fatal errors** (auth, schema): Fail immediately, no retry
 #[derive(Clone)]
 pub struct Inserter {
-    /// HTTP client for DDL and schema queries only (no inserts)
-    http_client: Arc<ClickHouseQueryClient>,
     /// The fork client. Every insert, `RowBinary` and `JSONEachRow`, goes over
     /// HTTP: `clickhouse.protocol: native` is refused at startup.
     ch_client: clickhouse::Client,
@@ -286,10 +283,8 @@ pub struct Inserter {
     max_salvage_depth: u32,
     /// Semaphore for limiting concurrent inserts
     semaphore: Option<Arc<Semaphore>>,
-    /// Schema cache for type-aware coercion (`JSONEachRow` path)
+    /// Schema cache invalidated on a schema-drift insert error
     schema_cache: Option<Arc<SchemaCache>>,
-    /// Type coercer applied before each insert (`JSONEachRow` path)
-    coercer: Option<Arc<Coercer>>,
     /// Whether a schema-drift insert error drops the cached schema
     /// (`schema.refresh_on_error`).
     refresh_on_error: bool,
@@ -303,8 +298,8 @@ impl Inserter {
     /// Create a new inserter.
     ///
     /// The `ch_client` handles ALL inserts — `RowBinary` via `DynamicInsert`,
-    /// `JSONEachRow` via `InsertFormatted`. The `http_client` is used only for
-    /// DDL and schema queries.
+    /// `JSONEachRow` via `InsertFormatted`. The `http_client` supplies the bound
+    /// on schema reads.
     pub fn new(
         http_client: Arc<ClickHouseQueryClient>,
         ch_client: clickhouse::Client,
@@ -318,7 +313,6 @@ impl Inserter {
 
         Self {
             read_bound: http_client.read_bound(),
-            http_client,
             ch_client,
             dynamic_schema_cache: crate::clickhouse_ext::DynamicSchemaCache::new(
                 Duration::from_secs(crate::config::SchemaConfig::default().cache_ttl_secs),
@@ -331,7 +325,6 @@ impl Inserter {
             max_salvage_depth: config.max_salvage_depth,
             semaphore,
             schema_cache: None,
-            coercer: None,
             refresh_on_error: true,
             timeouts: Timeouts::default(),
         }
@@ -409,56 +402,6 @@ impl Inserter {
     fn drop_cached_schema(&self, table: &str) {
         if let Some(cache) = &self.schema_cache {
             cache.invalidate(table);
-        }
-    }
-
-    /// Enable schema-driven type coercion before each insert.
-    ///
-    /// When enabled, the inserter fetches the table schema (from cache or live)
-    /// and applies the coercer to each row before sending to `ClickHouse`. This
-    /// covers cases that `ClickHouse`'s `JSONEachRow` server-side coercion does not
-    /// handle automatically — e.g., epoch ms integers into `DateTime64` columns,
-    /// UUID normalisation, string "true"/"1" into Bool, and null handling for
-    /// non-nullable columns.
-    pub fn with_schema_coercion(
-        mut self,
-        schema_cache: Arc<SchemaCache>,
-        coercer: Arc<Coercer>,
-    ) -> Self {
-        self.schema_cache = Some(schema_cache);
-        self.coercer = Some(coercer);
-        self
-    }
-
-    /// Apply schema-driven coercion to a batch of rows.
-    ///
-    /// Fetches schema from cache (or live from `ClickHouse` on cache miss), then
-    /// applies the coercer to every row. On schema fetch failure, rows are sent
-    /// as-is and `ClickHouse`'s server-side coercion handles them.
-    async fn coerce_batch(&self, table: &str, rows: &mut [Map<String, Value>]) {
-        let (coercer, cache) = match (&self.coercer, &self.schema_cache) {
-            (Some(c), Some(sc)) => (c, sc),
-            _ => return, // Coercion not configured — pass through
-        };
-
-        let schema = match cache.get(table) {
-            Some(s) => s,
-            None => match self.http_client.fetch_table_schema(table).await {
-                Ok(s) => {
-                    cache.insert(table.to_string(), s.clone());
-                    s
-                }
-                Err(e) => {
-                    warn!(table = %table, error = %e, "Schema fetch failed, skipping coercion");
-                    return;
-                }
-            },
-        };
-
-        for row in rows.iter_mut() {
-            if let Err(e) = coercer.coerce_row(row, &schema) {
-                warn!(table = %table, error = %e, "Row coercion failed, row sent as-is");
-            }
         }
     }
 
@@ -910,15 +853,11 @@ impl Inserter {
     /// - **Fatal errors**: Fail entire batch (no salvage, no DLQ)
     pub async fn insert_with_salvage(&self, batch: FlushBatch) -> InsertResult {
         let table = batch.table;
-        let mut rows = batch.rows;
+        let rows = batch.rows;
         let offsets = batch.offsets;
         let raw_payloads = batch.raw_payloads;
         let reserved = batch.reserved;
         let num_rows = rows.len();
-
-        // Apply schema-driven coercion if configured. Done once here --
-        // salvage sub-batches reuse already-coerced rows.
-        self.coerce_batch(&table, &mut rows).await;
 
         // Pass raw_payloads for zero-copy _json splice (json_primary path);
         // salvage sub-batches keep their slice of it.

@@ -51,7 +51,6 @@ flowchart TB
         P["JSON parse<br/>sonic-rs -> Arc[u8]"]
         R["Route (pre-flatten)<br/>db.table"]
         X["Extract<br/>header + schema-promoted cols"]
-        C["Coerce (delta only)<br/>epoch / ISO / UUID / IPv4"]
         E["Enrich<br/>GeoIP / reputation / risk"]
         B["Per-table buffer<br/>rows + raw + offsets"]
     end
@@ -65,7 +64,7 @@ flowchart TB
     CH[("ClickHouse")]
     DLQ["DLQ (Kafka primary, file fallback)"]
 
-    K & G & M --> P --> R --> X --> C --> E --> B
+    K & G & M --> P --> R --> X --> E --> B
     B -->|RowBinary default| CE
     CE --> HTTP --> CH
     B -->|insert_format=json_each_row| JF --> CH
@@ -84,7 +83,7 @@ flowchart TB
 | Operations | [OPERATIONS.md](OPERATIONS.md) | Running, config-check, metrics/top, hot-reload, DLQ |
 | Build features | [FEATURE-FLAGS.md](FEATURE-FLAGS.md) | Cargo features and the fork patch mechanism |
 | Insert layer | [clickhouse/](clickhouse/) | RowBinary vs JSONEachRow, `clickhouse_ext`, schema cache, type handling, TLS, DDL directives |
-| Hot path | [pipeline/](pipeline/) | Routing, extraction, coercion, enrichment, capture modes, buffering |
+| Hot path | [pipeline/](pipeline/) | Routing, extraction, enrichment, capture modes, buffering |
 | Transports | [transport/](transport/) | Kafka / gRPC / Memory, the common header |
 | Deployment | [deployment/](deployment/) | Container + chart publishing, schemas |
 | Performance | [performance/](performance/) | Hot-path optimisations, parser-selection history, PGO/BOLT |

@@ -28,7 +28,6 @@ flowchart TB
     subgraph L3["L3 -- Transform"]
         ROUTE["Router (sonic-rs)"]
         EXTRACT["HeaderExtractor"]
-        COERCE["Coercer (delta)"]
         ENRICH["Enrichment (geoip/rep/risk)"]
     end
     subgraph L2["L2 -- Buffer + insert"]
