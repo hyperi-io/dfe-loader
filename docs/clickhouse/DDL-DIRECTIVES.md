@@ -172,8 +172,8 @@ and nothing does.
 **Examples:**
 
 ```sql
--- @source: org_id
--- @config: routing.org_id_field (default: "org_id")
+-- @source: _org_id
+-- @config: routing.org_id_field (default: "_org_id")
 `_org_id` String,
 
 -- @source: first(tags/_tags/meta)

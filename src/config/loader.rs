@@ -1509,7 +1509,7 @@ kafka:
         let config = Config::default();
         assert_eq!(config.routing.default_db, "dfe");
         assert_eq!(config.routing.default_table, "main");
-        assert_eq!(config.routing.org_id_field, Some("org_id".to_string()));
+        assert_eq!(config.routing.org_id_field, Some("_org_id".to_string()));
         assert_eq!(
             config.routing.topic_suffixes,
             vec!["_land".to_string(), "_load".to_string()]

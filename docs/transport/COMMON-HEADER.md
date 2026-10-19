@@ -772,7 +772,7 @@ let untrusted input grow the label set without bound.
 
 ```toml
 [routing]
-org_id_field = "org_id"           # Field to extract for _org_id
+org_id_field = "_org_id"          # Field to extract for _org_id
 db_fields = []                     # Empty = shared schema
 table_fields = ["event_category"]  # Field for table routing
 default_db = "common"
