@@ -110,7 +110,7 @@ pub struct RoutingConfig {
     pub default_table: String,
 
     /// Field to extract for _`org_id` column (stored in data for RLS)
-    /// Example: "`org_id`" or "tenant.id"
+    /// Default: "_`org_id`", the common-header tenant field
     /// This field is extracted and stored as _`org_id`, regardless of routing behaviour
     pub org_id_field: Option<String>,
 
@@ -149,8 +149,8 @@ impl Default for RoutingConfig {
             table_fields: vec!["_source".to_string()],
             default_db: "dfe".to_string(),
             default_table: "main".to_string(),
-            // Extract org_id for _org_id column (RLS)
-            org_id_field: Some("org_id".to_string()),
+            // The common-header _org_id, never a payload field a sender chose
+            org_id_field: Some("_org_id".to_string()),
             // No per-org routing by default (shared schema)
             org_routes: vec![],
             source_to_table: HashMap::new(),

@@ -191,7 +191,7 @@
         ],
         "default_db": "dfe",
         "default_table": "main",
-        "org_id_field": "org_id",
+        "org_id_field": "_org_id",
         "org_routes": [],
         "source_to_table": {},
         "mapping_file": null,
@@ -1280,12 +1280,12 @@
           "default": "main"
         },
         "org_id_field": {
-          "description": "Field to extract for _`org_id` column (stored in data for RLS)\nExample: \"`org_id`\" or \"tenant.id\"\nThis field is extracted and stored as _`org_id`, regardless of routing behaviour",
+          "description": "Field to extract for _`org_id` column (stored in data for RLS)\nDefault: \"_`org_id`\", the common-header tenant field\nThis field is extracted and stored as _`org_id`, regardless of routing behaviour",
           "type": [
             "string",
             "null"
           ],
-          "default": "org_id"
+          "default": "_org_id"
         },
         "org_routes": {
           "description": "Per-organisation database routing. Only orgs explicitly listed here receive\ntheir own database — all other orgs always go to `default_db`.\nExample: [{`org_id`: \"acme\"}, {`org_id`: \"bigcorp\", database: \"`bigcorp_dfe`\"}]",

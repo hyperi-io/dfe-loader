@@ -182,7 +182,7 @@ impl HeaderExtractor {
             org_id_field: routing
                 .org_id_field
                 .clone()
-                .unwrap_or_else(|| "org_id".to_string()),
+                .unwrap_or_else(|| "_org_id".to_string()),
             source_fields: metadata.source_fields.clone(),
             capture_source: metadata.capture_source,
             metadata_enabled: metadata.enabled,
@@ -789,8 +789,8 @@ mod tests {
 
     #[test]
     fn test_extracts_org_id_from_routing_field() {
-        let extractor = default_extractor(); // org_id_field = "org_id"
-        let raw = br#"{"org_id": "acme", "data": "x"}"#;
+        let extractor = default_extractor(); // org_id_field = "_org_id"
+        let raw = br#"{"_org_id": "acme", "data": "x"}"#;
         let schema = make_schema(&["_org_id"]);
         let col_meta = empty_col_meta();
 
@@ -798,6 +798,19 @@ mod tests {
             .extract(raw, "dfe.events", &schema, &col_meta, None)
             .fields;
         assert_eq!(map.get("_org_id"), Some(&Value::String("acme".into())));
+    }
+
+    #[test]
+    fn test_a_payload_org_id_field_is_not_the_tenant_by_default() {
+        let extractor = default_extractor();
+        let raw = br#"{"org_id": "vendor-field", "data": "x"}"#;
+        let schema = make_schema(&["_org_id"]);
+        let col_meta = empty_col_meta();
+
+        let map = extractor
+            .extract(raw, "dfe.events", &schema, &col_meta, None)
+            .fields;
+        assert_eq!(map.get("_org_id"), None);
     }
 
     #[test]

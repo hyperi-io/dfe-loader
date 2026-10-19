@@ -82,7 +82,7 @@ proptest! {
     ) {
         let router = Router::default();
         let event = json!({
-            "org_id": org_id.clone(),
+            "_org_id": org_id.clone(),
             "event_category": "test"
         });
 

@@ -270,13 +270,13 @@ fn build_payloads(shape: PayloadShape) -> Vec<Vec<u8>> {
 }
 
 fn small_payloads() -> Vec<Vec<u8>> {
-    // ~150-300 byte events, varied org_id and _source for routing exercise
+    // ~150-300 byte events, varied _org_id and _source for routing exercise
     [
-        r#"{"_timestamp":"2026-04-23T12:00:00.123Z","_source":"auth","org_id":"acme","user":"alice","action":"login","ip":"10.0.0.1"}"#,
-        r#"{"_timestamp":"2026-04-23T12:00:01.234Z","_source":"api","org_id":"bigcorp","method":"GET","path":"/v1/users","status":200,"ms":12}"#,
-        r#"{"_timestamp":"2026-04-23T12:00:02.345Z","_source":"admin","org_id":"contoso","actor":"svc-acct","change":"role_grant","target":"u-7"}"#,
-        r#"{"_timestamp":"2026-04-23T12:00:03.456Z","_source":"errors","org_id":"acme","level":"error","msg":"db timeout","retries":3}"#,
-        r#"{"_timestamp":"2026-04-23T12:00:04.567Z","_source":"auth","org_id":"globex","user":"bob","action":"mfa_challenge","factor":"totp"}"#,
+        r#"{"_timestamp":"2026-04-23T12:00:00.123Z","_source":"auth","_org_id":"acme","user":"alice","action":"login","ip":"10.0.0.1"}"#,
+        r#"{"_timestamp":"2026-04-23T12:00:01.234Z","_source":"api","_org_id":"bigcorp","method":"GET","path":"/v1/users","status":200,"ms":12}"#,
+        r#"{"_timestamp":"2026-04-23T12:00:02.345Z","_source":"admin","_org_id":"contoso","actor":"svc-acct","change":"role_grant","target":"u-7"}"#,
+        r#"{"_timestamp":"2026-04-23T12:00:03.456Z","_source":"errors","_org_id":"acme","level":"error","msg":"db timeout","retries":3}"#,
+        r#"{"_timestamp":"2026-04-23T12:00:04.567Z","_source":"auth","_org_id":"globex","user":"bob","action":"mfa_challenge","factor":"totp"}"#,
     ]
     .iter()
     .map(|s| s.as_bytes().to_vec())
@@ -287,8 +287,8 @@ fn medium_payloads() -> Vec<Vec<u8>> {
     // ~1-2 KB events with nested objects (exercises sonic-rs nested paths +
     // dot-notation routing + header extraction over deeper trees).
     [
-        r#"{"_timestamp":"2026-04-23T12:00:00Z","_source":"api","org_id":"acme","request":{"method":"POST","path":"/v1/orders","headers":{"user-agent":"Mozilla/5.0","accept":"application/json","x-request-id":"req-abc-123-xyz"},"body_size":4096},"response":{"status":201,"body_size":256,"duration_ms":47},"client":{"ip":"203.0.113.42","country":"AU","asn":13335},"user":{"id":"u-7","tenant":"acme","roles":["admin","ops"]}}"#,
-        r#"{"_timestamp":"2026-04-23T12:00:01Z","_source":"auth","org_id":"bigcorp","tags":{"event":{"category":"authentication","outcome":"success"}},"actor":{"username":"svc-pipeline","entity_type":"service_account","mfa":{"required":true,"factor":"webauthn","verified":true}},"target":{"resource":"prod-cluster","scope":"read"},"network":{"src_ip":"198.51.100.7","dst_ip":"10.10.5.2","port":443}}"#,
+        r#"{"_timestamp":"2026-04-23T12:00:00Z","_source":"api","_org_id":"acme","request":{"method":"POST","path":"/v1/orders","headers":{"user-agent":"Mozilla/5.0","accept":"application/json","x-request-id":"req-abc-123-xyz"},"body_size":4096},"response":{"status":201,"body_size":256,"duration_ms":47},"client":{"ip":"203.0.113.42","country":"AU","asn":13335},"user":{"id":"u-7","tenant":"acme","roles":["admin","ops"]}}"#,
+        r#"{"_timestamp":"2026-04-23T12:00:01Z","_source":"auth","_org_id":"bigcorp","tags":{"event":{"category":"authentication","outcome":"success"}},"actor":{"username":"svc-pipeline","entity_type":"service_account","mfa":{"required":true,"factor":"webauthn","verified":true}},"target":{"resource":"prod-cluster","scope":"read"},"network":{"src_ip":"198.51.100.7","dst_ip":"10.10.5.2","port":443}}"#,
     ]
     .iter()
     .map(|s| s.as_bytes().to_vec())
@@ -298,7 +298,7 @@ fn medium_payloads() -> Vec<Vec<u8>> {
 fn large_payload() -> Vec<u8> {
     // ~8 KB event with array of 50 sub-records to exercise array iteration
     // through sonic-rs and the buffer accumulator.
-    let mut buf = br#"{"_timestamp":"2026-04-23T12:00:00Z","_source":"api","org_id":"acme","batch_id":"b-2026-04-23-001","events":["#.to_vec();
+    let mut buf = br#"{"_timestamp":"2026-04-23T12:00:00Z","_source":"api","_org_id":"acme","batch_id":"b-2026-04-23-001","events":["#.to_vec();
     for i in 0..50 {
         if i > 0 {
             buf.push(b',');

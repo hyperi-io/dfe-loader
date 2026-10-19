@@ -993,11 +993,15 @@ mod tests {
     fn test_extract_org_id_from_value() {
         let router = Router::default();
 
-        let value1 = serde_json::json!({"org_id": "acme", "event_category": "auth"});
+        let value1 = serde_json::json!({"_org_id": "acme", "event_category": "auth"});
         assert_eq!(router.extract_org_id_from_value(&value1), Some("acme"));
 
         let value2 = serde_json::json!({"event_category": "auth"});
         assert_eq!(router.extract_org_id_from_value(&value2), None);
+
+        // A payload's own org_id field is data, not the tenant.
+        let bare = serde_json::json!({"org_id": "acme"});
+        assert_eq!(router.extract_org_id_from_value(&bare), None);
 
         // Nested org_id
         let config = RoutingConfig {
@@ -1014,11 +1018,14 @@ mod tests {
     fn test_extract_org_id_bytes() {
         let router = Router::default();
 
-        let p1 = br#"{"org_id": "acme", "_source": "auth"}"#;
+        let p1 = br#"{"_org_id": "acme", "_source": "auth"}"#;
         assert_eq!(router.extract_org_id(p1), Some("acme".to_string()));
 
         let p2 = br#"{"_source": "auth"}"#;
         assert_eq!(router.extract_org_id(p2), None);
+
+        let p3 = br#"{"org_id": "acme", "_source": "auth"}"#;
+        assert_eq!(router.extract_org_id(p3), None);
     }
 
     #[test]
