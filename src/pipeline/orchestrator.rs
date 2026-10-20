@@ -4662,19 +4662,20 @@ mod tests {
         assert_eq!(to_commit.iter().map(|o| o.offset).max(), Some(105));
     }
 
+    /// Read as reservations: `current_bytes` also counts whatever else the process allocated.
     #[test]
     fn queued_dead_letters_are_tracked_until_taken() {
         let mut orchestrator = Orchestrator::new(Config::default());
-        let before = orchestrator.memory_guard().current_bytes();
+        let before = orchestrator.memory_guard().reserved_bytes();
         orchestrator.queue_dead_letters(vec![
             DlqEntry::new("loader", "processing", b"12345".to_vec()),
             DlqEntry::new("loader", "processing", b"678".to_vec()),
         ]);
-        assert_eq!(orchestrator.memory_guard().current_bytes(), before + 8);
+        assert_eq!(orchestrator.memory_guard().reserved_bytes(), before + 8);
 
         let taken = orchestrator.take_queued_dead_letters();
         assert_eq!(taken.len(), 2);
-        assert_eq!(orchestrator.memory_guard().current_bytes(), before);
+        assert_eq!(orchestrator.memory_guard().reserved_bytes(), before);
         assert!(orchestrator.take_queued_dead_letters().is_empty());
     }
 
