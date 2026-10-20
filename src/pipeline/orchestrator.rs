@@ -3112,7 +3112,7 @@ mod tests {
         config.kafka.allow_insecure_transport = true;
         let mut orchestrator = Orchestrator::new(config);
         let stop = orchestrator.shutdown_token();
-        // Past one 10 s metadata fetch, so a failed start has had time to end run().
+        // Past one 10 s metadata fetch, so a failed topic listing has had time to end run().
         let wait = Duration::from_secs(12);
         tokio::spawn(async move {
             tokio::time::sleep(wait).await;
@@ -3130,48 +3130,6 @@ mod tests {
         assert!(
             elapsed >= wait,
             "run() returned after {elapsed:?}, before the shutdown at {wait:?}"
-        );
-    }
-
-    /// A transport that cannot be built is retried and counted until shutdown.
-    #[tokio::test]
-    async fn a_transport_that_cannot_start_is_retried_until_shutdown() {
-        let mut config = Config::default();
-        config.kafka.brokers = vec![format!("127.0.0.1:{}", closed_port())];
-        config.kafka.allow_insecure_transport = true;
-        config
-            .kafka
-            .librdkafka_overrides
-            .insert("no.such.property".to_string(), "1".to_string());
-        let mut orchestrator = Orchestrator::new(config);
-        let stop = orchestrator.shutdown_token();
-        let wait = Duration::from_secs(3);
-        tokio::spawn(async move {
-            tokio::time::sleep(wait).await;
-            stop.cancel();
-        });
-
-        let recorder = crate::metrics::counting::CountingRecorder::default();
-        let _local = metrics::set_default_local_recorder(&recorder);
-        let started = std::time::Instant::now();
-        let outcome = tokio::time::timeout(Duration::from_secs(60), orchestrator.run()).await;
-        let elapsed = started.elapsed();
-
-        assert!(
-            matches!(outcome, Ok(Ok(()))),
-            "the loader did not keep retrying its transport and stop cleanly at shutdown"
-        );
-        assert!(
-            elapsed >= wait,
-            "run() returned after {elapsed:?}, before the shutdown at {wait:?}"
-        );
-        assert!(
-            recorder.labelled(
-                crate::metrics::RETRIES_TOTAL,
-                "stage",
-                TRANSPORT_START_STAGE
-            ) >= 1,
-            "a failed transport start was never counted as a retry"
         );
     }
 

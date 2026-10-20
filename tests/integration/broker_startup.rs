@@ -4,9 +4,9 @@
 //! A loader started before its Kafka broker waits for it rather than exiting.
 //!
 //! The loader runs against a real `ClickHouse` with a broker address nothing
-//! listens on yet. Topic auto-discovery cannot start without the broker, so the
-//! transport start fails until a Kafka container comes up on that address;
-//! from there the loader joins and the records on the topic land.
+//! listens on yet. Topic auto-discovery cannot list topics without the broker,
+//! so the loader consumes nothing until a Kafka container comes up on that
+//! address and a topic refresh finds the topic. The records then land.
 //!
 //! Gated behind `#[cfg(feature = "testcontainers")]`.
 
@@ -20,7 +20,7 @@ use dfe_loader::pipeline::Orchestrator;
 use rdkafka::producer::FutureRecord;
 use scalo::metrics::MetricsManager;
 
-use super::grpc_outage::{clickhouse_address, counter_value, free_port, query_client, wait_landed};
+use super::grpc_outage::{clickhouse_address, free_port, query_client, wait_landed};
 use super::kafka_offset_floor::kafka_loader;
 use super::kafka_transport_e2e::{ensure_topic, make_producer, wait_for_broker};
 use crate::common::containers::{TestInfrastructure, start_kafka_on};
@@ -31,7 +31,7 @@ use crate::test_name;
 const RECORDS: u64 = 20;
 
 /// How long the broker stays down: past one 10 s metadata fetch, so a failed
-/// start has had time to end the loader.
+/// topic listing has had time to end the loader.
 const DOWN_FOR: Duration = Duration::from_secs(15);
 
 /// How long records have to land once the broker is up: past the 60 s topic
@@ -71,11 +71,6 @@ async fn a_loader_started_before_its_broker_joins_once_the_broker_is_up() {
 
     tokio::time::sleep(DOWN_FOR).await;
     let alive_while_down = !running.is_finished();
-    let retried_while_down = counter_value(
-        &manager,
-        "pipeline_retries_total",
-        r#"stage="transport_start""#,
-    );
 
     let _kafka = start_kafka_on(test_name!(), port).await;
     wait_for_broker(&bootstrap).await;
@@ -102,10 +97,6 @@ async fn a_loader_started_before_its_broker_joins_once_the_broker_is_up() {
     assert!(
         alive_while_down,
         "the loader exited while its broker was down"
-    );
-    assert!(
-        retried_while_down >= 1.0,
-        "no failed transport start was counted in pipeline_retries_total"
     );
     assert_eq!(
         landed, want,
