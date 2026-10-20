@@ -58,4 +58,4 @@ clickhouse:
 SSL_CERT_FILE=/etc/dfe/ca-bundle.pem   # the private CA plus any public roots still needed
 ```
 
-The CA bundle is non-secret and is distributed with the deployment; the cluster password stays in the git-excluded environment, never in committed config. See [../CONFIGURATION.md](../CONFIGURATION.md) for the cascade and [../deployment/](../deployment/) for how secrets are supplied at runtime.
+The CA bundle is non-secret and is distributed with the deployment. The cluster password stays in the git-excluded environment, never in committed config. See [../CONFIGURATION.md](../CONFIGURATION.md) for the cascade and [../deployment/](../deployment/README.md) for how secrets are supplied at runtime.

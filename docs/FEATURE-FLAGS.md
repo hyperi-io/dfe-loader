@@ -26,7 +26,7 @@ PGO build.
 
 `default = []`. Production builds opt in to `jemalloc` explicitly; CI opts in to
 `testcontainers` for the docker test lane. See
-[deployment/](deployment/) for the release build.
+[deployment/](deployment/README.md) for the release build.
 
 ## The ClickHouse fork is not a feature
 
