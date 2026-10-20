@@ -3119,6 +3119,38 @@ mod tests {
             stop.cancel();
         });
 
+        let started = std::time::Instant::now();
+        let outcome = tokio::time::timeout(Duration::from_secs(60), orchestrator.run()).await;
+        let elapsed = started.elapsed();
+
+        assert!(
+            matches!(outcome, Ok(Ok(()))),
+            "the loader did not wait for its broker and stop cleanly at shutdown"
+        );
+        assert!(
+            elapsed >= wait,
+            "run() returned after {elapsed:?}, before the shutdown at {wait:?}"
+        );
+    }
+
+    /// A transport that cannot be built is retried and counted until shutdown.
+    #[tokio::test]
+    async fn a_transport_that_cannot_start_is_retried_until_shutdown() {
+        let mut config = Config::default();
+        config.kafka.brokers = vec![format!("127.0.0.1:{}", closed_port())];
+        config.kafka.allow_insecure_transport = true;
+        config
+            .kafka
+            .librdkafka_overrides
+            .insert("no.such.property".to_string(), "1".to_string());
+        let mut orchestrator = Orchestrator::new(config);
+        let stop = orchestrator.shutdown_token();
+        let wait = Duration::from_secs(3);
+        tokio::spawn(async move {
+            tokio::time::sleep(wait).await;
+            stop.cancel();
+        });
+
         let recorder = crate::metrics::counting::CountingRecorder::default();
         let _local = metrics::set_default_local_recorder(&recorder);
         let started = std::time::Instant::now();
@@ -3127,7 +3159,7 @@ mod tests {
 
         assert!(
             matches!(outcome, Ok(Ok(()))),
-            "the loader did not wait for its broker and stop cleanly at shutdown"
+            "the loader did not keep retrying its transport and stop cleanly at shutdown"
         );
         assert!(
             elapsed >= wait,
