@@ -29,6 +29,8 @@ mod geoip_provisioning;
 mod grpc_outage;
 #[cfg(feature = "testcontainers")]
 mod grpc_startup;
+#[cfg(feature = "testcontainers")]
+mod header_keys;
 mod helm_contract;
 #[cfg(feature = "testcontainers")]
 mod hot_reload;

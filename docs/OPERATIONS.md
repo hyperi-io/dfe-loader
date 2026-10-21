@@ -107,6 +107,8 @@ so a burst does not flood.
 
 A JSON record nested deeper than 64 levels is dead-lettered as it arrives, before any stage parses it, with the reason `payload nesting exceeds the maximum parse depth of 64`, and counted on `validation_failures_total{reason="out_of_range"}`. A batch too deep to split goes to the DLQ whole. The bound is the one scalo's parse path uses.
 
+A record whose top-level object carries `_org_id` or `_source` more than once, counting a spelling that only decodes to the key, such as one with a unicode escape for the underscore, is dead-lettered the same way on every pipeline mode, with the reason `payload carries the _org_id header key more than once`, and counted on `dfe_loader_duplicate_header_total`. JSON readers disagree on which of the two values wins, so the loader routes neither. A record with no `\` byte and at most one quoted spelling of each key is passed without a scan.
+
 ## Memory pressure
 
 The loader runs under a cgroup-aware memory guard: it checks pressure before

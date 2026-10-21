@@ -505,7 +505,7 @@ pub(super) fn dead_lettered_ids(dir: &Path) -> BTreeSet<u64> {
 
 /// The reason the file DLQ under `dir` recorded for each id it has written,
 /// skipping any torn line.
-fn dead_letter_reasons(dir: &Path) -> std::collections::BTreeMap<u64, String> {
+pub(super) fn dead_letter_reasons(dir: &Path) -> std::collections::BTreeMap<u64, String> {
     fn walk(dir: &Path, reasons: &mut std::collections::BTreeMap<u64, String>) {
         let Ok(entries) = std::fs::read_dir(dir) else {
             return;

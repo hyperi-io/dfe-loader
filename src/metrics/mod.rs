@@ -121,6 +121,9 @@ pub struct Metrics {
     /// Records those messages were split into.
     pub batched_ndjson_records: Counter,
 
+    /// Records dead-lettered at intake for a repeated `_org_id` or `_source` key.
+    pub duplicate_header: Counter,
+
     /// Rows `ClickHouse` took: the landed-rows counter dashboards read.
     pub rows_inserted: Counter,
 
@@ -299,7 +302,17 @@ impl Metrics {
                 "dfe_loader_batched_ndjson_records_total",
                 "Records split out of newline-separated messages",
             ),
+
+            duplicate_header: manager.counter(
+                "dfe_loader_duplicate_header_total",
+                "Records dead-lettered for carrying the _org_id or _source key more than once",
+            ),
         }
+    }
+
+    /// Count a record dead-lettered for carrying a header key more than once.
+    pub fn record_duplicate_header(&self) {
+        self.duplicate_header.increment(1);
     }
 
     /// Record batched arrays split into one record per element.

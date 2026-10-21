@@ -949,7 +949,7 @@ impl Orchestrator {
                             if self.commits_at_receipt {
                                 commit_offsets(&transport, &self.metrics, &received_offsets(&fresh)).await;
                             }
-                            let received = fresh.len() + fan.too_deep.len();
+                            let received = fresh.len() + fan.too_deep.len() + fan.duplicated.len();
                             self.stats.messages_received += received as u64;
                             if let Some(ref m) = self.metrics {
                                 for _ in 0..received {
@@ -957,6 +957,7 @@ impl Orchestrator {
                                 }
                             }
                             self.dead_letter_too_deep(fan.too_deep);
+                            self.dead_letter_duplicate_header(fan.duplicated);
                             let ready = pending_schema_buffer
                                 .take_ready(&schema_cache, &absent_tables);
                             if ready.is_empty() {
@@ -1730,19 +1731,51 @@ impl Orchestrator {
         let dead_letters = too_deep
             .into_iter()
             .map(|msg| {
-                // The ledger ignores a settle for a row it never admitted.
-                if self.holds_answers {
-                    self.acks.admit(seq_of(msg.offset));
-                }
-                super::coordinator::record_dlq_routed("json_depth", &reason, &msg.location());
                 if let Some(ref m) = self.metrics {
                     m.record_json_too_deep();
                 }
-                let source = scalo::dlq::DlqSource::kafka(&*msg.topic, msg.partition, msg.offset);
-                DlqEntry::new("loader", reason.clone(), msg.payload).with_source(source)
+                self.intake_dead_letter(msg, "json_depth", reason.clone())
             })
             .collect();
         self.queue_dead_letters(dead_letters);
+    }
+
+    /// Dead-letter every record that carries `_org_id` or `_source` more than
+    /// once, each counted and naming the key, admitted first the same way.
+    fn dead_letter_duplicate_header(
+        &mut self,
+        duplicated: Vec<(crate::kafka::KafkaMessage, &'static str)>,
+    ) {
+        if duplicated.is_empty() {
+            return;
+        }
+        let dead_letters = duplicated
+            .into_iter()
+            .map(|(msg, key)| {
+                if let Some(ref m) = self.metrics {
+                    m.record_duplicate_header();
+                }
+                let reason = crate::payload::header_keys::duplicate_header_reason(key);
+                self.intake_dead_letter(msg, "duplicate_header", reason)
+            })
+            .collect();
+        self.queue_dead_letters(dead_letters);
+    }
+
+    /// The dead letter for a record the intake refused before any stage read it.
+    fn intake_dead_letter(
+        &mut self,
+        msg: crate::kafka::KafkaMessage,
+        action: &str,
+        reason: String,
+    ) -> DlqEntry {
+        // The ledger ignores a settle for a row it never admitted.
+        if self.holds_answers {
+            self.acks.admit(seq_of(msg.offset));
+        }
+        super::coordinator::record_dlq_routed(action, &reason, &msg.location());
+        let source = scalo::dlq::DlqSource::kafka(&*msg.topic, msg.partition, msg.offset);
+        DlqEntry::new("loader", reason, msg.payload).with_source(source)
     }
 
     /// Take every queued dead letter, releasing the bytes it was tracked under.
@@ -2969,6 +3002,8 @@ struct FanOut {
     messages: Vec<crate::kafka::KafkaMessage>,
     /// Records nested too deeply to parse, taken out before any stage reads them.
     too_deep: Vec<crate::kafka::KafkaMessage>,
+    /// Records carrying a header key more than once, with that key, taken out the same way.
+    duplicated: Vec<(crate::kafka::KafkaMessage, &'static str)>,
     /// Received messages that carried a batch of records as a JSON array.
     arrays: u64,
     /// Records those arrays expanded into.
@@ -2980,11 +3015,12 @@ struct FanOut {
 }
 
 /// Expand every batched message into one message per record, then take out
-/// every record nested too deeply to parse.
+/// every record nested too deeply to parse or carrying a header key twice.
 ///
 /// This is the first thing done to a received batch, and pre-route and the
 /// processor both hand a record to sonic-rs, which recurses once per nesting
-/// level with no limit of its own.
+/// level with no limit of its own. Every pipeline mode reads the batch after
+/// this, so none of them sees a record whose tenant or source is ambiguous.
 fn fan_out_batched_records(batch: Vec<crate::kafka::KafkaMessage>) -> FanOut {
     let mut fan = split_batched_records(batch);
     fan.too_deep = fan
@@ -2993,6 +3029,16 @@ fn fan_out_batched_records(batch: Vec<crate::kafka::KafkaMessage>) -> FanOut {
             crate::payload::depth::nests_too_deep(&msg.payload)
         })
         .collect();
+    let mut keys = Vec::new();
+    let duplicated: Vec<_> = fan
+        .messages
+        .extract_if(.., |msg| {
+            crate::payload::header_keys::duplicated_header_key(&msg.payload)
+                .map(|key| keys.push(key))
+                .is_some()
+        })
+        .collect();
+    fan.duplicated = duplicated.into_iter().zip(keys).collect();
     fan
 }
 
@@ -3458,6 +3504,67 @@ mod tests {
             assert_eq!(offsets(&fan.too_deep), vec![2, 4]);
             pre_route(&fan.messages);
         });
+    }
+
+    // ---- repeated header keys ----
+
+    #[test]
+    fn a_record_carrying_a_header_key_twice_is_taken_out_at_intake() {
+        // The second key is spelled with a unicode escape for its underscore.
+        let escaped = format!(r#"{{"_org_id":"a","{}u005forg_id":"b"}}"#, '\\');
+        let batch = vec![
+            msg_at(1, br#"{"_org_id":"a","n":1}"#),
+            msg_at(2, br#"{"_org_id":"a","_org_id":"b"}"#),
+            msg_at(3, escaped.as_bytes()),
+            msg_at(4, br#"{"_source":"x","_source":"y"}"#),
+            msg_at(5, b"{\"n\":5}\n{\"_org_id\":\"a\",\"_org_id\":\"b\"}"),
+            msg_at(6, br#"[{"n":6},{"_source":"x","_source":"y"}]"#),
+        ];
+        let fan = fan_out_batched_records(batch);
+
+        assert_eq!(offsets(&fan.messages), vec![1, 5, 6]);
+        let duplicated: Vec<(i64, &str)> = fan
+            .duplicated
+            .iter()
+            .map(|(m, key)| (m.offset, *key))
+            .collect();
+        assert_eq!(
+            duplicated,
+            vec![
+                (2, "_org_id"),
+                (3, "_org_id"),
+                (4, "_source"),
+                (5, "_org_id"),
+                (6, "_source"),
+            ],
+            "every record naming its tenant or source twice is taken out, batched or not"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_repeated_header_key_reaches_the_dlq_with_its_reason() {
+        let dir = dlq_dir("duplicateheader");
+        let dlq = file_dlq(&dir);
+        let mut orchestrator = Orchestrator::new(Config::default());
+
+        orchestrator.dead_letter_duplicate_header(vec![
+            (msg_at(5, br#"{"_org_id":"a","_org_id":"b"}"#), "_org_id"),
+            (msg_at(6, br#"{"_source":"x","_source":"y"}"#), "_source"),
+        ]);
+        let queued = orchestrator.take_queued_dead_letters();
+        settle(&mut orchestrator, Some(&dlq), queued, in_30s()).await;
+
+        assert_eq!(orchestrator.stats().messages_dlq, 2);
+        let lines = spooled_lines(&dir);
+        for key in ["_org_id", "_source"] {
+            let reason = crate::payload::header_keys::duplicate_header_reason(key);
+            assert_eq!(
+                lines.iter().filter(|l| l.contains(&reason)).count(),
+                1,
+                "the record repeating {key} is on disk with its reason"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // CaptureOverrides tests moved to capture.rs
