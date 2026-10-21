@@ -325,9 +325,9 @@ schema:
   pending_max_age_secs: 30        # DLQ pending messages older than this
 
 # Hot-reload: watch config file for changes at runtime
-# Safe to reload: buffer, routing, metadata, field_sanitization, timestamp_dq, coercion
-# Requires restart: kafka, clickhouse, payload.pipeline_mode
+# Safe to reload: buffer, routing (but routing.dlq), metadata, field_sanitization, timestamp_dq
+# Requires restart: kafka, clickhouse, payload.pipeline_mode, routing.dlq, field_mapping, enrichment
 hot_reload:
-  enabled: false          # Enable config file watching
+  enabled: true           # Watch the --config file
   poll_interval_secs: 5   # How often to check for file changes
   debounce_ms: 500        # Minimum time between reloads

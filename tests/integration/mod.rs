@@ -30,6 +30,8 @@ mod grpc_outage;
 #[cfg(feature = "testcontainers")]
 mod grpc_startup;
 mod helm_contract;
+#[cfg(feature = "testcontainers")]
+mod hot_reload;
 mod inserter;
 #[cfg(feature = "testcontainers")]
 mod json_depth;

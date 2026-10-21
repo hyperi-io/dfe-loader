@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Config",
-  "description": "Main configuration for dfe-loader.\n\n## Hot-Reload Behaviour\n\n**Hot-reloaded (takes effect on next batch):**\n- `routing.*` — routing rules, table mapping, org routing\n- `timestamp_dq.*` — timestamp validation thresholds\n- `metadata.*` — common header injection, tags, _raw handling\n- `field_sanitization.*` — field name sanitisation rules\n- `buffer.flush_rows` / `buffer.flush_bytes` / `buffer.flush_age_secs`\n- `coercion.*` — type coercion config\n- `enrichment.ip_fields` — which fields to enrich\n- `field_mapping.*` — field mapping overrides\n\n**Requires pod restart (connections/state established at startup):**\n- `transport` — transport type (kafka/grpc) bound at startup\n- `kafka.*` — Kafka consumer created at startup\n- `grpc.*` — gRPC server binds at startup\n- `clickhouse.*` — HTTP client + `clickhouse::Client` created at startup\n- `payload.pipeline_mode` — pipeline path chosen at startup\n- `metrics.*` — HTTP metrics server binds at startup\n- `logging.*` — tracing subscriber installed at startup\n- `scaling.*` — scaling pressure built at startup\n- `hot_reload.*` — watcher config set at startup\n- `schema.*` — schema cache created at startup\n- `geoip.*` — MMDB readers opened at startup\n- `computed_columns.*` — computed column cache built at startup\n- `column_directives.*` — column directive cache built at startup",
+  "description": "Main configuration for dfe-loader.\n\n## Hot-Reload Behaviour\n\n**Hot-reloaded (takes effect on next batch):**\n- `routing.*` -- table fields, defaults, the tenant field and default org, org routing.\n  The deployment contract lists `routing` in `hot_paths`, so an edit there\n  reaches a running pod without rolling it\n- `timestamp_dq.*` -- timestamp validation thresholds\n- `metadata.*` -- common header injection, tags, _raw handling\n- `field_sanitization.*` -- field name sanitisation rules\n- `buffer.flush_rows` / `buffer.flush_bytes` / `buffer.flush_age_secs`\n\n**Requires pod restart (connections/state established at startup):**\n- `transport` -- transport type (kafka/grpc) bound at startup\n- `kafka.*` -- Kafka consumer created at startup\n- `grpc.*` -- gRPC server binds at startup\n- `clickhouse.*` -- HTTP client + `clickhouse::Client` created at startup\n- `payload.pipeline_mode` -- pipeline path chosen at startup\n- `metrics.*` -- HTTP metrics server binds at startup\n- `logging.*` -- tracing subscriber installed at startup\n- `scaling.*` -- scaling pressure built at startup\n- `hot_reload.*` -- watcher config set at startup\n- `schema.*` -- schema cache created at startup\n- `geoip.*` -- MMDB readers opened at startup\n- `computed_columns.*` -- computed column cache built at startup\n- `column_directives.*` -- column directive cache built at startup\n- `routing.dlq` -- DLQ backends opened at startup\n- `field_mapping.*` -- mapping rules built at startup\n- `enrichment.*` -- enrichment pipeline built at startup",
   "type": "object",
   "properties": {
     "transport": {
@@ -140,7 +140,7 @@
       "description": "Hot-reload watcher config. **Restart required.**",
       "$ref": "#/$defs/HotReloadConfig",
       "default": {
-        "enabled": false,
+        "enabled": true,
         "poll_interval_secs": 5,
         "debounce_ms": 500
       }
@@ -181,7 +181,7 @@
       }
     },
     "routing": {
-      "description": "Routing rules and table mapping. **Hot-reloaded.**",
+      "description": "Table and tenant routing. **Hot-reloaded**, `routing.dlq` aside.",
       "$ref": "#/$defs/RoutingConfig",
       "default": {
         "table_fields": [
@@ -313,7 +313,7 @@
       }
     },
     "field_mapping": {
-      "description": "Field mapping overrides. **Hot-reloaded.**",
+      "description": "Field mapping overrides. **Restart required.**",
       "$ref": "#/$defs/FieldMappingConfig",
       "default": {
         "enabled": false,
@@ -324,7 +324,7 @@
       }
     },
     "enrichment": {
-      "description": "IP enrichment field selection. **Hot-reloaded.**",
+      "description": "IP enrichment field selection. **Restart required.**",
       "$ref": "#/$defs/EnrichmentConfig",
       "default": {
         "ip_fields": [
@@ -1036,13 +1036,13 @@
       }
     },
     "HotReloadConfig": {
-      "description": "Hot-reload configuration\n\nControls whether the config file is watched for changes at runtime.\nWhen enabled, the config cascade is re-evaluated on file change and\nsafe-to-reload settings are applied without process restart.\n\n**Safe to hot-reload:** buffer thresholds, routing, metadata, field\nsanitisation, timestamp DQ, coercion settings.\n\n**Requires restart:** Kafka brokers/topics/auth, `ClickHouse` hosts/auth,\npayload pipeline mode, transport type.",
+      "description": "Hot-reload configuration\n\nControls whether the config file is watched for changes at runtime.\nWhen enabled, the config cascade is re-evaluated on file change and\nsafe-to-reload settings are applied without process restart.\n\n**Safe to hot-reload:** buffer thresholds, routing, metadata, field\nsanitisation, timestamp DQ.\n\n**Requires restart:** Kafka brokers/topics/auth, `ClickHouse` hosts/auth,\npayload pipeline mode, transport type, `routing.dlq`, field mapping,\nenrichment.",
       "type": "object",
       "properties": {
         "enabled": {
-          "description": "Enable config file watching (default: false)",
+          "description": "Watch the config file and apply a reloadable change without a restart.\nOn unless set false, because the deployment contract's `hot_paths`\nkeeps a `routing` edit from rolling the pods.",
           "type": "boolean",
-          "default": false
+          "default": true
         },
         "poll_interval_secs": {
           "description": "Polling interval in seconds for checking file changes",

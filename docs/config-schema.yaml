@@ -6,29 +6,31 @@ description: |-
   ## Hot-Reload Behaviour
 
   **Hot-reloaded (takes effect on next batch):**
-  - `routing.*` — routing rules, table mapping, org routing
-  - `timestamp_dq.*` — timestamp validation thresholds
-  - `metadata.*` — common header injection, tags, _raw handling
-  - `field_sanitization.*` — field name sanitisation rules
+  - `routing.*` -- table fields, defaults, the tenant field and default org, org routing.
+    The deployment contract lists `routing` in `hot_paths`, so an edit there
+    reaches a running pod without rolling it
+  - `timestamp_dq.*` -- timestamp validation thresholds
+  - `metadata.*` -- common header injection, tags, _raw handling
+  - `field_sanitization.*` -- field name sanitisation rules
   - `buffer.flush_rows` / `buffer.flush_bytes` / `buffer.flush_age_secs`
-  - `coercion.*` — type coercion config
-  - `enrichment.ip_fields` — which fields to enrich
-  - `field_mapping.*` — field mapping overrides
 
   **Requires pod restart (connections/state established at startup):**
-  - `transport` — transport type (kafka/grpc) bound at startup
-  - `kafka.*` — Kafka consumer created at startup
-  - `grpc.*` — gRPC server binds at startup
-  - `clickhouse.*` — HTTP client + `clickhouse::Client` created at startup
-  - `payload.pipeline_mode` — pipeline path chosen at startup
-  - `metrics.*` — HTTP metrics server binds at startup
-  - `logging.*` — tracing subscriber installed at startup
-  - `scaling.*` — scaling pressure built at startup
-  - `hot_reload.*` — watcher config set at startup
-  - `schema.*` — schema cache created at startup
-  - `geoip.*` — MMDB readers opened at startup
-  - `computed_columns.*` — computed column cache built at startup
-  - `column_directives.*` — column directive cache built at startup
+  - `transport` -- transport type (kafka/grpc) bound at startup
+  - `kafka.*` -- Kafka consumer created at startup
+  - `grpc.*` -- gRPC server binds at startup
+  - `clickhouse.*` -- HTTP client + `clickhouse::Client` created at startup
+  - `payload.pipeline_mode` -- pipeline path chosen at startup
+  - `metrics.*` -- HTTP metrics server binds at startup
+  - `logging.*` -- tracing subscriber installed at startup
+  - `scaling.*` -- scaling pressure built at startup
+  - `hot_reload.*` -- watcher config set at startup
+  - `schema.*` -- schema cache created at startup
+  - `geoip.*` -- MMDB readers opened at startup
+  - `computed_columns.*` -- computed column cache built at startup
+  - `column_directives.*` -- column directive cache built at startup
+  - `routing.dlq` -- DLQ backends opened at startup
+  - `field_mapping.*` -- mapping rules built at startup
+  - `enrichment.*` -- enrichment pipeline built at startup
 type: object
 properties:
   transport:
@@ -140,7 +142,7 @@ properties:
     description: Hot-reload watcher config. **Restart required.**
     $ref: "#/$defs/HotReloadConfig"
     default:
-      enabled: false
+      enabled: true
       poll_interval_secs: 5
       debounce_ms: 500
   scaling:
@@ -176,7 +178,7 @@ properties:
       - source_type
       - event_type
   routing:
-    description: Routing rules and table mapping. **Hot-reloaded.**
+    description: Table and tenant routing. **Hot-reloaded**, `routing.dlq` aside.
     $ref: "#/$defs/RoutingConfig"
     default:
       table_fields:
@@ -286,7 +288,7 @@ properties:
       array_to_json: true
       strict: false
   field_mapping:
-    description: Field mapping overrides. **Hot-reloaded.**
+    description: Field mapping overrides. **Restart required.**
     $ref: "#/$defs/FieldMappingConfig"
     default:
       enabled: false
@@ -295,7 +297,7 @@ properties:
       files: []
       overrides: {}
   enrichment:
-    description: IP enrichment field selection. **Hot-reloaded.**
+    description: IP enrichment field selection. **Restart required.**
     $ref: "#/$defs/EnrichmentConfig"
     default:
       ip_fields:
@@ -935,16 +937,20 @@ $defs:
       safe-to-reload settings are applied without process restart.
 
       **Safe to hot-reload:** buffer thresholds, routing, metadata, field
-      sanitisation, timestamp DQ, coercion settings.
+      sanitisation, timestamp DQ.
 
       **Requires restart:** Kafka brokers/topics/auth, `ClickHouse` hosts/auth,
-      payload pipeline mode, transport type.
+      payload pipeline mode, transport type, `routing.dlq`, field mapping,
+      enrichment.
     type: object
     properties:
       enabled:
-        description: "Enable config file watching (default: false)"
+        description: |-
+          Watch the config file and apply a reloadable change without a restart.
+          On unless set false, because the deployment contract's `hot_paths`
+          keeps a `routing` edit from rolling the pods.
         type: boolean
-        default: false
+        default: true
       poll_interval_secs:
         description: Polling interval in seconds for checking file changes
         type: integer

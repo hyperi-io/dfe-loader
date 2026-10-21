@@ -54,6 +54,10 @@ flowchart TB
 
 The `_org_id` column takes the record's `org_id_field` value and nothing else: no column directive and no sender field such as `org_id` can set it. An absent, null or empty value lands in `default_org_id`, so every row belongs to an org. The database is `default_db` unless `org_routes` lists that tenant.
 
+## A routing edit applies without a restart
+
+The loader watches its config file (`hot_reload.enabled`, on unless set false). On a change it rebuilds the router, the header extractor and the default table from the new `routing` and `metadata`, and pre-warms the schemas of any table the new routing names. Rows already buffered keep the table they were routed to, and no offset is committed for them until they land. `routing.dlq` is the exception: the DLQ is opened at startup, so a change there logs a restart warning. The deployment contract lists `routing` in `hot_paths`, so on Kubernetes an edit there reaches the running pods without rolling them.
+
 ## The topic names the source when the record does not
 
 A transform emits ECS. `_source` is a DFE header field the loader itself adds,

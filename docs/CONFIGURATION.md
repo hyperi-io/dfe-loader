@@ -122,15 +122,15 @@ Insert retry, batch salvage and insert concurrency are not settings. Every build
 
 ## Hot-reload
 
-Config hot-reloads on change. Some fields are safe to apply live; some require a
-restart and are logged as a warning rather than silently applied:
+Config hot-reloads on change: `hot_reload.enabled` is on unless set false, and the loader watches the file `--config` names. Some fields are safe to apply live. The rest require a restart and are logged as a warning rather than silently applied:
 
 - **Restart-required:** `clickhouse.protocol`, ClickHouse URL/hosts,
   `clickhouse.insert_format`, `clickhouse.tls.enabled`, the
   `clickhouse.*_timeout_ms` bounds, Kafka connection -- all of these are baked
-  into the `Client` at build time.
-- **Safe to reload:** buffer thresholds, capture modes, enrichment toggles,
-  routing rules.
+  into the `Client` at build time. Also `routing.dlq`, `field_mapping` and `enrichment`, which are built once at startup.
+- **Safe to reload:** buffer thresholds, `metadata` (capture modes included), `timestamp_dq`, `field_sanitization`, and `routing` other than `routing.dlq`.
+
+On Kubernetes the deployment contract lists `routing` in `hot_paths`, so the chart leaves it out of the pod's config checksum. A `routing` edit reaches the running pods through the refreshed ConfigMap, and an edit anywhere else still rolls them.
 
 ## Verifying config drives behaviour
 

@@ -343,7 +343,12 @@ async fn highest_committed_over_watch(bootstrap: &str, group: &str, topic: &str)
 }
 
 /// Wait until the committed offset reaches `want`, returning the last read.
-async fn wait_committed(bootstrap: &str, group: &str, topic: &str, want: i64) -> Option<i64> {
+pub(super) async fn wait_committed(
+    bootstrap: &str,
+    group: &str,
+    topic: &str,
+    want: i64,
+) -> Option<i64> {
     let deadline = tokio::time::Instant::now() + RECOVERY;
     loop {
         let committed = committed_offset(bootstrap, group, topic).await;

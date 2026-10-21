@@ -1092,14 +1092,17 @@ impl Default for SchemaConfig {
 /// safe-to-reload settings are applied without process restart.
 ///
 /// **Safe to hot-reload:** buffer thresholds, routing, metadata, field
-/// sanitisation, timestamp DQ, coercion settings.
+/// sanitisation, timestamp DQ.
 ///
 /// **Requires restart:** Kafka brokers/topics/auth, `ClickHouse` hosts/auth,
-/// payload pipeline mode, transport type.
+/// payload pipeline mode, transport type, `routing.dlq`, field mapping,
+/// enrichment.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct HotReloadConfig {
-    /// Enable config file watching (default: false)
+    /// Watch the config file and apply a reloadable change without a restart.
+    /// On unless set false, because the deployment contract's `hot_paths`
+    /// keeps a `routing` edit from rolling the pods.
     pub enabled: bool,
 
     /// Polling interval in seconds for checking file changes
@@ -1112,7 +1115,7 @@ pub struct HotReloadConfig {
 impl Default for HotReloadConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: true,
             poll_interval_secs: 5,
             debounce_ms: 500,
         }
