@@ -211,8 +211,19 @@ fn credentials_never_reach_a_config_dump() {
     };
     let dumped = serde_json::to_string(&config).expect("serialise");
     let debugged = format!("{config:?}");
-    for secret in ["account-1234", "licence-abcd", "token-wxyz"] {
-        assert!(!dumped.contains(secret), "{secret} in {dumped}");
-        assert!(!debugged.contains(secret), "{secret} in {debugged}");
+    // The messages name the field, never the value or the dump.
+    for (field, value) in [
+        ("maxmind_account_id", "account-1234"),
+        ("maxmind_license_key", "licence-abcd"),
+        ("ipinfo_token", "token-wxyz"),
+    ] {
+        assert!(
+            !dumped.contains(value),
+            "{field} reached the serialised config"
+        );
+        assert!(
+            !debugged.contains(value),
+            "{field} reached the Debug output"
+        );
     }
 }
