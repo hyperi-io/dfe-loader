@@ -3,6 +3,12 @@
 Rendered by CI and committed back at the end of a release -- do not edit by
 hand. Release notes also appear on the GitHub Releases page, one per tag.
 
+## [1.18.57](https://github.com/hyperi-io/dfe-loader/compare/v1.18.56...v1.18.57) (2026-10-21)
+
+### Bug Fixes
+
+* read the tenant from _org_id alone ([#268](https://github.com/hyperi-io/dfe-loader/issues/268)) ([0656104](https://github.com/hyperi-io/dfe-loader/commit/0656104ac455b35dff743e2053961c994a02b901))
+
 ## [1.18.56](https://github.com/hyperi-io/dfe-loader/compare/v1.18.55...v1.18.56) (2026-10-21)
 
 ### Bug Fixes
