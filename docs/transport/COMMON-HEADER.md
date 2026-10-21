@@ -184,7 +184,7 @@ column the header pass fills, not only this one.
 **Rationale:**
 
 - Useful for latency analysis (time from generation to receipt).
-- Only present if source includes this timestamp.
+- The loader reads the first hop's `_timestamp_received` stamp ahead of the column's directive, then the directive's fields, then the ingest time. No other key such as `received_at` is read unless the directive names it.
 - Nullable because most sources do not provide this.
 - Distinct from `_timestamp_load` which is insert time.
 
