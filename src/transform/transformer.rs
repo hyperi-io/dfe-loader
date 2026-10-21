@@ -3,7 +3,7 @@
 
 //! Main transformer that applies all transformations
 //!
-//! Pipeline: Parse → Extract tags → Flatten → Timestamp → _raw rename → Metadata → Sanitize → Remove routing fields
+//! Pipeline: parse, extract tags, flatten, timestamp, `_raw` rename, remove routing fields, metadata, sanitize
 //! Note: _json is injected by the orchestrator, not by the transformer.
 
 use chrono::{SubsecRound, Utc};
@@ -74,7 +74,6 @@ pub struct Transformer {
 
     // Common Header v2: Routing field removal
     remove_routing_fields: bool,
-    routing_db_fields: Vec<String>,
     routing_table_fields: Vec<String>,
 
     // Common Header v2: _org_id field injection
@@ -118,7 +117,6 @@ impl Transformer {
 
             // Common Header v2: Routing field removal (empty until with_routing called)
             remove_routing_fields: metadata_config.remove_routing_fields,
-            routing_db_fields: Vec::new(),
             routing_table_fields: Vec::new(),
 
             // Common Header v2: _org_id field injection
@@ -134,7 +132,6 @@ impl Transformer {
         routing_config: &RoutingConfig,
     ) -> Self {
         let mut transformer = Self::new(timestamp_config, metadata_config, sanitization_config);
-        transformer.routing_db_fields = routing_config.db_fields.clone();
         transformer.routing_table_fields = routing_config.table_fields.clone();
         transformer
     }
@@ -165,8 +162,8 @@ impl Transformer {
 
     /// Transform a parsed JSON value for Common Header v2 processing.
     ///
-    /// Applies: flatten → timestamp validation → `_raw` rename → `_tags` extraction →
-    /// `_org_id` injection → `_source` injection → routing field removal → field sanitization.
+    /// Applies: flatten, timestamp validation, `_raw` rename, `_tags` extraction,
+    /// routing field removal, `_org_id` injection, `_source` injection, field sanitization.
     ///
     /// When common header is disabled (`metadata.enabled = false`), only flattening and
     /// sanitization are applied — no common header fields are injected.
@@ -297,21 +294,22 @@ impl Transformer {
                 data.insert(self.tags_output.clone(), tags);
             }
 
-            // Step 7: Inject _org_id for row-level security (RLS)
+            // Step 7: Remove routing fields, ahead of the headers below, which
+            // `_source` routing would otherwise strip again.
+            if self.remove_routing_fields {
+                self.remove_routing_fields_from(&mut data);
+            }
+
+            // Step 8: Inject _org_id for row-level security (RLS)
             if let Some(org) = org_id {
                 data.insert(self.org_id_output.clone(), Value::String(org.to_string()));
             }
 
-            // Step 7b: Inject _source (destination table identifier)
+            // Step 8b: Inject _source (destination table identifier)
             if self.capture_source
                 && let Some(src) = source
             {
                 data.insert(self.source_output.clone(), Value::String(src.to_string()));
-            }
-
-            // Step 8: Remove routing fields (they're only used for db.table routing)
-            if self.remove_routing_fields {
-                self.remove_routing_fields_from(&mut data);
             }
         }
 
@@ -368,18 +366,10 @@ impl Transformer {
         Some(current)
     }
 
-    /// Remove routing fields from the data map
+    /// Remove the `table_fields` used for routing from the data map
     ///
-    /// Removes both `db_fields` and `table_fields` used for routing.
     /// Only removes top-level fields (flattened keys like "`tags.event_category`").
     fn remove_routing_fields_from(&self, data: &mut Map<String, Value>) {
-        // Remove db fields
-        for field in &self.routing_db_fields {
-            // For nested fields like "tags.org_id", after flattening it becomes "tags.org_id"
-            data.remove(field);
-        }
-
-        // Remove table fields
         for field in &self.routing_table_fields {
             data.remove(field);
         }
@@ -532,7 +522,6 @@ impl Default for Transformer {
             source_output: "_source".to_string(),
 
             remove_routing_fields: true,
-            routing_db_fields: vec!["org_id".to_string()],
             routing_table_fields: vec!["_source".to_string()],
 
             org_id_output: "_org_id".to_string(),
@@ -656,17 +645,38 @@ mod tests {
 
         let result = transformer.transform_with_raw(value, None, None).unwrap();
 
-        // Routing fields should be removed (org_id always removed)
-        assert!(!result.data.contains_key("org_id"));
-        // _source is removed as routing field then re-injected as common header
-        // (but here source=None so it won't be re-injected)
-        // Other fields should remain
+        // With no header source handed in, the routing field is gone for good.
+        assert!(!result.data.contains_key("_source"));
+        // A sender's org_id is data, not a routing field.
+        assert_eq!(result.data.get("org_id"), Some(&serde_json::json!("acme")));
         assert!(result.data.contains_key("data"));
     }
 
     #[test]
-    fn test_transformer_removes_legacy_routing_fields() {
-        // Test with legacy event_category routing (pre-DFE 2.2 compat)
+    fn the_source_header_survives_routing_on_source() {
+        // The default routing reads `_source`, and stripping it after the
+        // header was written left legacy rows with no `_source` at all.
+        let transformer = Transformer::with_routing(
+            &TimestampDqConfig::default(),
+            &MetadataConfig::default(),
+            &FieldSanitizationConfig::default(),
+            &RoutingConfig::default(),
+        );
+        let value = serde_json::json!({"_source": "", "data": "test"});
+
+        let result = transformer
+            .transform_with_raw(value, Some("default"), Some("main"))
+            .unwrap();
+
+        assert_eq!(result.data.get("_source"), Some(&serde_json::json!("main")));
+        assert_eq!(
+            result.data.get("_org_id"),
+            Some(&serde_json::json!("default"))
+        );
+    }
+
+    #[test]
+    fn test_transformer_removes_category_routing_fields() {
         let transformer = Transformer {
             routing_table_fields: vec![
                 "event_category".to_string(),
@@ -680,10 +690,9 @@ mod tests {
 
         let result = transformer.transform_with_raw(value, None, None).unwrap();
 
-        // Legacy routing fields should be removed
-        assert!(!result.data.contains_key("org_id"));
         assert!(!result.data.contains_key("event_category"));
         // Other fields should remain
+        assert!(result.data.contains_key("org_id"));
         assert!(result.data.contains_key("data"));
     }
 
@@ -1110,7 +1119,6 @@ mod tests {
         let meta_cfg = crate::config::MetadataConfig::default();
         let sanit_cfg = crate::config::FieldSanitizationConfig::default();
         let mut routing_cfg = crate::config::RoutingConfig::default();
-        routing_cfg.db_fields = vec!["org_id_routing".into()];
         routing_cfg.table_fields = vec!["routing_event_type".into()];
 
         let transformer =
@@ -1118,7 +1126,6 @@ mod tests {
 
         let raw = br#"{
             "event": "login",
-            "org_id_routing": "acme",
             "routing_event_type": "auth",
             "keep_me": "value"
         }"#;
@@ -1126,7 +1133,6 @@ mod tests {
         let result = transformer.transform_with_raw(value, None, None).unwrap();
 
         // Routing fields removed
-        assert!(!result.data.contains_key("org_id_routing"));
         assert!(!result.data.contains_key("routing_event_type"));
         // Other fields preserved
         assert!(result.data.contains_key("keep_me"));

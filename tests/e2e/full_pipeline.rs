@@ -66,18 +66,14 @@ async fn test_full_pipeline_e2e() {
     client.execute(&ddl).await.expect("Failed to create table");
 
     let routing_config = RoutingConfig {
-        db_fields: vec!["org_id".to_string()],
         table_fields: vec!["category".to_string()],
         default_db: "default".to_string(),
         default_table: table_name.clone(),
         source_to_table: Default::default(),
-        mapping_file: None,
-        org_id_field: Some("org_id".to_string()),
         org_routes: vec![],
         topic_suffixes: vec!["_land".to_string(), "_load".to_string()],
-        compat_v2_source: false,
         dlq: DlqConfig::default(),
-        rules: vec![],
+        ..RoutingConfig::default()
     };
 
     let router = Router::new(&routing_config);
@@ -202,7 +198,6 @@ async fn test_pipeline_multi_table_routing() {
         .expect("Failed to create table2");
 
     let routing_config = RoutingConfig {
-        db_fields: vec!["org_id".to_string()],
         table_fields: vec!["category".to_string()],
         default_db: "default".to_string(),
         default_table: "common".to_string(),
@@ -212,13 +207,10 @@ async fn test_pipeline_multi_table_routing() {
         ]
         .into_iter()
         .collect(),
-        mapping_file: None,
-        org_id_field: Some("org_id".to_string()),
         org_routes: vec![],
         topic_suffixes: vec!["_land".to_string(), "_load".to_string()],
-        compat_v2_source: false,
         dlq: DlqConfig::default(),
-        rules: vec![],
+        ..RoutingConfig::default()
     };
 
     let router = Router::new(&routing_config);
@@ -330,18 +322,14 @@ async fn test_pipeline_with_flattening() {
     client.execute(&ddl).await.expect("Failed to create table");
 
     let routing_config = RoutingConfig {
-        db_fields: vec![],
         table_fields: vec![],
         default_db: "default".to_string(),
         default_table: table_name.clone(),
         source_to_table: Default::default(),
-        mapping_file: None,
-        org_id_field: Some("org_id".to_string()),
         org_routes: vec![],
         topic_suffixes: vec!["_land".to_string(), "_load".to_string()],
-        compat_v2_source: false,
         dlq: DlqConfig::default(),
-        rules: vec![],
+        ..RoutingConfig::default()
     };
 
     let transformer = Transformer::with_routing(
@@ -455,18 +443,14 @@ async fn test_pipeline_metrics() {
 #[ignore = "requires infrastructure"]
 async fn test_pipeline_dlq_routing() {
     let routing_config = RoutingConfig {
-        db_fields: vec!["org_id".to_string()],
         table_fields: vec!["category".to_string()],
         default_db: String::new(),
         default_table: String::new(),
         source_to_table: Default::default(),
-        mapping_file: None,
-        org_id_field: Some("org_id".to_string()),
         org_routes: vec![],
         topic_suffixes: vec!["_land".to_string(), "_load".to_string()],
-        compat_v2_source: false,
         dlq: DlqConfig::default(),
-        rules: vec![],
+        ..RoutingConfig::default()
     };
 
     let router = Router::new(&routing_config);

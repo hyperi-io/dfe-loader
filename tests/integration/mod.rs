@@ -50,4 +50,6 @@ mod resilience;
 mod rls;
 mod schema;
 mod schema_pending_e2e;
+#[cfg(feature = "testcontainers")]
+mod tenancy;
 mod transport;

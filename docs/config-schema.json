@@ -184,22 +184,19 @@
       "description": "Routing rules and table mapping. **Hot-reloaded.**",
       "$ref": "#/$defs/RoutingConfig",
       "default": {
-        "rules": [],
-        "db_fields": [],
         "table_fields": [
           "_source"
         ],
         "default_db": "dfe",
         "default_table": "main",
         "org_id_field": "_org_id",
+        "default_org_id": "default",
         "org_routes": [],
         "source_to_table": {},
-        "mapping_file": null,
         "topic_suffixes": [
           "_land",
           "_load"
         ],
-        "compat_v2_source": false,
         "dlq": {
           "enabled": true,
           "mode": "cascade",
@@ -1243,24 +1240,8 @@
     "RoutingConfig": {
       "type": "object",
       "properties": {
-        "rules": {
-          "description": "CEL-based routing rules (top-to-bottom, first match wins).\nFalls through to field-extraction routing if no rule matches.",
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/RoutingRule"
-          },
-          "default": []
-        },
-        "db_fields": {
-          "description": "Fields to check for database name (first match wins, dot notation for nested)\nExample: [\"`org_id`\", \"tenant.id\"]\nNOTE: Leave empty to always use `default_db` (recommended for shared schema)",
-          "type": "array",
-          "items": {
-            "type": "string"
-          },
-          "default": []
-        },
         "table_fields": {
-          "description": "Fields to check for table name (first match wins, dot notation for nested)\nDefault: [\"_source\"] — aligned with _source field extraction",
+          "description": "Fields to check for table name (first match wins, dot notation for nested).\nA null or empty value counts as absent. Default: [\"_source\"]",
           "type": "array",
           "items": {
             "type": "string"
@@ -1270,25 +1251,30 @@
           ]
         },
         "default_db": {
-          "description": "Default database if no `db_field` matches (or `db_fields` is empty), or if the\norg is not listed in `org_routes`.\nDefault: \"dfe\" (shared multi-tenant schema)",
+          "description": "Database for every org not listed in `org_routes`.\nDefault: \"dfe\" (shared multi-tenant schema)",
           "type": "string",
           "default": "dfe"
         },
         "default_table": {
-          "description": "Default table if no `table_field` matches\nDefault: \"main\"",
+          "description": "Default table if no `table_field` carries a value\nDefault: \"main\"",
           "type": "string",
           "default": "main"
         },
         "org_id_field": {
-          "description": "Field to extract for _`org_id` column (stored in data for RLS)\nDefault: \"_`org_id`\", the common-header tenant field\nThis field is extracted and stored as _`org_id`, regardless of routing behaviour",
+          "description": "Field the `_org_id` tenant column reads (dot notation for nested),\nthe common-header `_org_id` unless set.",
           "type": [
             "string",
             "null"
           ],
           "default": "_org_id"
         },
+        "default_org_id": {
+          "description": "Tenant for a record whose `org_id_field` is absent, null or empty: the\ndeployment's default org, `default` unless set.",
+          "type": "string",
+          "default": "default"
+        },
         "org_routes": {
-          "description": "Per-organisation database routing. Only orgs explicitly listed here receive\ntheir own database — all other orgs always go to `default_db`.\nExample: [{`org_id`: \"acme\"}, {`org_id`: \"bigcorp\", database: \"`bigcorp_dfe`\"}]",
+          "description": "Per-organisation database routing, keyed on the tenant `_org_id` resolves to.\nOnly orgs listed here receive their own database, all others go to `default_db`.\nExample: [{`org_id`: \"acme\"}, {`org_id`: \"bigcorp\", database: \"`bigcorp_dfe`\"}]",
           "type": "array",
           "items": {
             "$ref": "#/$defs/OrgRoute"
@@ -1303,14 +1289,6 @@
           },
           "default": {}
         },
-        "mapping_file": {
-          "description": "Legacy: mapping file path",
-          "type": [
-            "string",
-            "null"
-          ],
-          "default": null
-        },
         "topic_suffixes": {
           "description": "Topic suffixes to strip when deriving _source from Kafka topic name\nExample: topic \"`auth_land`\" with suffix \"_land\" → _source = \"auth\"",
           "type": "array",
@@ -1321,11 +1299,6 @@
             "_land",
             "_load"
           ]
-        },
-        "compat_v2_source": {
-          "description": "Pre-DFE 2.2 compatibility: prepend `event_category/tags.event_category` to\n`source_fields` and `table_fields` for backwards compatibility with older data formats",
-          "type": "boolean",
-          "default": false
         },
         "dlq": {
           "description": "DLQ configuration",
@@ -1342,38 +1315,12 @@
         }
       }
     },
-    "RoutingRule": {
-      "description": "CEL-based routing rule. When `when` evaluates to true against the message,\nroute to the specified `target` table (and optionally `db` database).\n\nRules are evaluated top-to-bottom, first match wins. If no rule matches,\nfalls through to field-extraction routing (`db_fields/table_fields`).",
-      "type": "object",
-      "properties": {
-        "when": {
-          "description": "CEL expression that must evaluate to true for this rule to match",
-          "type": "string"
-        },
-        "target": {
-          "description": "Target table name",
-          "type": "string"
-        },
-        "db": {
-          "description": "Target database (optional — uses `default_db` if omitted)",
-          "type": [
-            "string",
-            "null"
-          ],
-          "default": null
-        }
-      },
-      "required": [
-        "when",
-        "target"
-      ]
-    },
     "OrgRoute": {
       "description": "Explicit per-organisation database routing.\n\nWhen an org is listed here, messages from that org are routed to the\nspecified database (or `org_id` if `database` is omitted). Orgs NOT\nlisted always go to `default_db`.",
       "type": "object",
       "properties": {
         "org_id": {
-          "description": "Organisation identifier (matched against `org_id_field` value)",
+          "description": "Tenant the record resolves to: its `org_id_field` value, else `default_org_id`.",
           "type": "string"
         },
         "database": {

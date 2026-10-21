@@ -574,6 +574,13 @@ impl Config {
             }
         }
 
+        // An empty default would land every unstamped record in no org at all.
+        if self.routing.default_org_id.is_empty() {
+            return Err(crate::Error::Config(
+                "routing.default_org_id must not be empty".into(),
+            ));
+        }
+
         // Memory validation
         if self.memory.pressure_threshold < 0.0 || self.memory.pressure_threshold > 1.0 {
             return Err(crate::Error::Config(
@@ -1511,15 +1518,19 @@ kafka:
         assert_eq!(config.routing.default_db, "dfe");
         assert_eq!(config.routing.default_table, "main");
         assert_eq!(config.routing.org_id_field, Some("_org_id".to_string()));
+        assert_eq!(config.routing.default_org_id, "default");
         assert_eq!(
             config.routing.topic_suffixes,
             vec!["_land".to_string(), "_load".to_string()]
         );
-        assert_eq!(
-            config.routing.rules,
-            [] as [crate::config::pipeline::RoutingRule; 0]
-        );
-        assert_eq!(config.routing.db_fields, [] as [std::string::String; 0]);
+    }
+
+    #[test]
+    fn an_empty_default_org_fails_validation() {
+        let mut config = Config::default();
+        config.routing.default_org_id = String::new();
+        let err = config.validate().unwrap_err().to_string();
+        assert!(err.contains("routing.default_org_id"), "{err}");
     }
 
     #[test]

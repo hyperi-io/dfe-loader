@@ -104,10 +104,10 @@ Precedence, highest wins: **DDL tag > per-table > global**.
 
 | Setting | Effect |
 |---------|--------|
-| `routing.db_fields` | fields whose value sets the database (empty = shared `default_db`) |
-| `routing.table_fields` | fields whose value sets the table (dot-notation for nested) |
+| `routing.table_fields` | fields whose value sets the table (dot-notation for nested). A null or empty value counts as absent |
 | `routing.default_db` / `default_table` | fallbacks when no field matches |
-| `routing.route_all_by_org` / `routed_orgs` | per-org database routing |
+| `routing.org_id_field` / `default_org_id` | where the `_org_id` tenant is read from, and the tenant a record with none lands in (`default`) |
+| `routing.org_routes` | per-org database routing, keyed on the tenant |
 
 ### Enrichment, resilience
 

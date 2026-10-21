@@ -179,20 +179,17 @@ properties:
     description: Routing rules and table mapping. **Hot-reloaded.**
     $ref: "#/$defs/RoutingConfig"
     default:
-      rules: []
-      db_fields: []
       table_fields:
       - _source
       default_db: dfe
       default_table: main
       org_id_field: _org_id
+      default_org_id: default
       org_routes: []
       source_to_table: {}
-      mapping_file: null
       topic_suffixes:
       - _land
       - _load
-      compat_v2_source: false
       dlq:
         enabled: true
         mode: cascade
@@ -1110,27 +1107,10 @@ $defs:
   RoutingConfig:
     type: object
     properties:
-      rules:
-        description: |-
-          CEL-based routing rules (top-to-bottom, first match wins).
-          Falls through to field-extraction routing if no rule matches.
-        type: array
-        items:
-          $ref: "#/$defs/RoutingRule"
-        default: []
-      db_fields:
-        description: |-
-          Fields to check for database name (first match wins, dot notation for nested)
-          Example: ["`org_id`", "tenant.id"]
-          NOTE: Leave empty to always use `default_db` (recommended for shared schema)
-        type: array
-        items:
-          type: string
-        default: []
       table_fields:
         description: |-
-          Fields to check for table name (first match wins, dot notation for nested)
-          Default: ["_source"] — aligned with _source field extraction
+          Fields to check for table name (first match wins, dot notation for nested).
+          A null or empty value counts as absent. Default: ["_source"]
         type: array
         items:
           type: string
@@ -1138,30 +1118,34 @@ $defs:
         - _source
       default_db:
         description: |-
-          Default database if no `db_field` matches (or `db_fields` is empty), or if the
-          org is not listed in `org_routes`.
+          Database for every org not listed in `org_routes`.
           Default: "dfe" (shared multi-tenant schema)
         type: string
         default: dfe
       default_table:
         description: |-
-          Default table if no `table_field` matches
+          Default table if no `table_field` carries a value
           Default: "main"
         type: string
         default: main
       org_id_field:
         description: |-
-          Field to extract for _`org_id` column (stored in data for RLS)
-          Default: "_`org_id`", the common-header tenant field
-          This field is extracted and stored as _`org_id`, regardless of routing behaviour
+          Field the `_org_id` tenant column reads (dot notation for nested),
+          the common-header `_org_id` unless set.
         type:
         - string
         - "null"
         default: _org_id
+      default_org_id:
+        description: |-
+          Tenant for a record whose `org_id_field` is absent, null or empty: the
+          deployment's default org, `default` unless set.
+        type: string
+        default: default
       org_routes:
         description: |-
-          Per-organisation database routing. Only orgs explicitly listed here receive
-          their own database — all other orgs always go to `default_db`.
+          Per-organisation database routing, keyed on the tenant `_org_id` resolves to.
+          Only orgs listed here receive their own database, all others go to `default_db`.
           Example: [{`org_id`: "acme"}, {`org_id`: "bigcorp", database: "`bigcorp_dfe`"}]
         type: array
         items:
@@ -1175,12 +1159,6 @@ $defs:
         additionalProperties:
           type: string
         default: {}
-      mapping_file:
-        description: "Legacy: mapping file path"
-        type:
-        - string
-        - "null"
-        default: null
       topic_suffixes:
         description: |-
           Topic suffixes to strip when deriving _source from Kafka topic name
@@ -1191,12 +1169,6 @@ $defs:
         default:
         - _land
         - _load
-      compat_v2_source:
-        description: |-
-          Pre-DFE 2.2 compatibility: prepend `event_category/tags.event_category` to
-          `source_fields` and `table_fields` for backwards compatibility with older data formats
-        type: boolean
-        default: false
       dlq:
         description: DLQ configuration
         $ref: "#/$defs/DlqConfig"
@@ -1208,30 +1180,6 @@ $defs:
           file_enabled: true
           file_path: /var/spool/dfe/dlq
           kafka_enabled: true
-  RoutingRule:
-    description: |-
-      CEL-based routing rule. When `when` evaluates to true against the message,
-      route to the specified `target` table (and optionally `db` database).
-
-      Rules are evaluated top-to-bottom, first match wins. If no rule matches,
-      falls through to field-extraction routing (`db_fields/table_fields`).
-    type: object
-    properties:
-      when:
-        description: CEL expression that must evaluate to true for this rule to match
-        type: string
-      target:
-        description: Target table name
-        type: string
-      db:
-        description: Target database (optional — uses `default_db` if omitted)
-        type:
-        - string
-        - "null"
-        default: null
-    required:
-    - when
-    - target
   OrgRoute:
     description: |-
       Explicit per-organisation database routing.
@@ -1242,7 +1190,7 @@ $defs:
     type: object
     properties:
       org_id:
-        description: Organisation identifier (matched against `org_id_field` value)
+        description: "Tenant the record resolves to: its `org_id_field` value, else `default_org_id`."
         type: string
       database:
         description: Target database. If omitted, the `org_id` itself is used as the database name.

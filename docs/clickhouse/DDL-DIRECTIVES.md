@@ -786,15 +786,16 @@ and its value moves to the destination.
   upstream-populated fields.
 - **First-match wins**: With `first()`, fields are tried in order. The first
   present field is renamed; remaining candidates are left untouched.
+- **Not on `_org_id` or `_timestamp`**: both read fixed fields and ignore the directive, so no column comment can point the tenant at a field a sender writes.
 
 **Examples:**
 
 ```sql
 -- @renamed: timestamp
-`_timestamp` DateTime64(3),
+`event_time` DateTime64(3),
 
 -- @renamed: org
-`_org_id` String,
+`org_name` String,
 
 -- @renamed: first(logoriginal/_raw/raw/raw_log/message)
 `_raw` Nullable(String) CODEC(ZSTD(3)),

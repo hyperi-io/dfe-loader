@@ -2210,15 +2210,11 @@ pub(crate) struct PreWarmReport {
     pub rounds: usize,
 }
 
-/// Collect the config-known tables to pre-warm (default table + CEL rule
-/// targets + source_to_table targets), deduplicated.
+/// Collect the config-known tables to pre-warm (default table +
+/// source_to_table targets), deduplicated.
 fn collect_pre_warm_tables(routing: &crate::config::RoutingConfig) -> Vec<String> {
     let default_db = &routing.default_db;
     let mut tables: Vec<String> = vec![format!("{default_db}.{}", routing.default_table)];
-    for rule in &routing.rules {
-        let db = rule.db.as_deref().unwrap_or(default_db);
-        tables.push(format!("{db}.{}", rule.target));
-    }
     for table in routing.source_to_table.values() {
         tables.push(format!("{default_db}.{table}"));
     }

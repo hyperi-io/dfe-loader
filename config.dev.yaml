@@ -26,14 +26,11 @@ clickhouse:
     - api_events
 
 routing:
-  # Fields to extract database name (first match wins, dot notation for nested)
-  db_fields:
-    - org_id
   # Fields to extract table name (first match wins, dot notation for nested)
   table_fields:
     - event_category
     - tags.event_category
-  # Default database if no db_field matches
+  # Database for every org org_routes does not list
   default_db: common
   # Default table if no table_field matches
   default_table: common

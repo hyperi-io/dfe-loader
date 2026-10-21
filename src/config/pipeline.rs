@@ -43,24 +43,6 @@ impl Default for PayloadConfig {
 // Routing Configuration
 // ============================================================================
 
-/// CEL-based routing rule. When `when` evaluates to true against the message,
-/// route to the specified `target` table (and optionally `db` database).
-///
-/// Rules are evaluated top-to-bottom, first match wins. If no rule matches,
-/// falls through to field-extraction routing (`db_fields/table_fields`).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct RoutingRule {
-    /// CEL expression that must evaluate to true for this rule to match
-    pub when: String,
-
-    /// Target table name
-    pub target: String,
-
-    /// Target database (optional — uses `default_db` if omitted)
-    #[serde(default)]
-    pub db: Option<String>,
-}
-
 /// Explicit per-organisation database routing.
 ///
 /// When an org is listed here, messages from that org are routed to the
@@ -68,7 +50,7 @@ pub struct RoutingRule {
 /// listed always go to `default_db`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct OrgRoute {
-    /// Organisation identifier (matched against `org_id_field` value)
+    /// Tenant the record resolves to: its `org_id_field` value, else `default_org_id`.
     pub org_id: String,
 
     /// Target database. If omitted, the `org_id` itself is used as the database name.
@@ -86,36 +68,28 @@ impl OrgRoute {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct RoutingConfig {
-    /// CEL-based routing rules (top-to-bottom, first match wins).
-    /// Falls through to field-extraction routing if no rule matches.
-    #[serde(default)]
-    pub rules: Vec<RoutingRule>,
-
-    /// Fields to check for database name (first match wins, dot notation for nested)
-    /// Example: ["`org_id`", "tenant.id"]
-    /// NOTE: Leave empty to always use `default_db` (recommended for shared schema)
-    pub db_fields: Vec<String>,
-
-    /// Fields to check for table name (first match wins, dot notation for nested)
-    /// Default: ["_source"] — aligned with _source field extraction
+    /// Fields to check for table name (first match wins, dot notation for nested).
+    /// A null or empty value counts as absent. Default: ["_source"]
     pub table_fields: Vec<String>,
 
-    /// Default database if no `db_field` matches (or `db_fields` is empty), or if the
-    /// org is not listed in `org_routes`.
+    /// Database for every org not listed in `org_routes`.
     /// Default: "dfe" (shared multi-tenant schema)
     pub default_db: String,
 
-    /// Default table if no `table_field` matches
+    /// Default table if no `table_field` carries a value
     /// Default: "main"
     pub default_table: String,
 
-    /// Field to extract for _`org_id` column (stored in data for RLS)
-    /// Default: "_`org_id`", the common-header tenant field
-    /// This field is extracted and stored as _`org_id`, regardless of routing behaviour
+    /// Field the `_org_id` tenant column reads (dot notation for nested),
+    /// the common-header `_org_id` unless set.
     pub org_id_field: Option<String>,
 
-    /// Per-organisation database routing. Only orgs explicitly listed here receive
-    /// their own database — all other orgs always go to `default_db`.
+    /// Tenant for a record whose `org_id_field` is absent, null or empty: the
+    /// deployment's default org, `default` unless set.
+    pub default_org_id: String,
+
+    /// Per-organisation database routing, keyed on the tenant `_org_id` resolves to.
+    /// Only orgs listed here receive their own database, all others go to `default_db`.
     /// Example: [{`org_id`: "acme"}, {`org_id`: "bigcorp", database: "`bigcorp_dfe`"}]
     #[serde(default)]
     pub org_routes: Vec<OrgRoute>,
@@ -124,39 +98,30 @@ pub struct RoutingConfig {
     /// Maps extracted source values to destination table names
     pub source_to_table: HashMap<String, String>,
 
-    /// Legacy: mapping file path
-    pub mapping_file: Option<String>,
-
     /// Topic suffixes to strip when deriving _source from Kafka topic name
     /// Example: topic "`auth_land`" with suffix "_land" → _source = "auth"
     pub topic_suffixes: Vec<String>,
-
-    /// Pre-DFE 2.2 compatibility: prepend `event_category/tags.event_category` to
-    /// `source_fields` and `table_fields` for backwards compatibility with older data formats
-    pub compat_v2_source: bool,
 
     /// DLQ configuration
     pub dlq: DlqConfig,
 }
 
+/// The tenant a record with no org of its own lands in, the same in every DFE component.
+pub const DEFAULT_ORG_ID: &str = "default";
+
 impl Default for RoutingConfig {
     fn default() -> Self {
         Self {
-            // No CEL routing rules by default (field extraction only)
-            rules: vec![],
-            // Default: db_fields empty = shared schema (all to dfe.*)
-            db_fields: vec![],
             table_fields: vec!["_source".to_string()],
             default_db: "dfe".to_string(),
             default_table: "main".to_string(),
             // The common-header _org_id, never a payload field a sender chose
             org_id_field: Some("_org_id".to_string()),
+            default_org_id: DEFAULT_ORG_ID.to_string(),
             // No per-org routing by default (shared schema)
             org_routes: vec![],
             source_to_table: HashMap::new(),
-            mapping_file: None,
             topic_suffixes: vec!["_land".to_string(), "_load".to_string()],
-            compat_v2_source: false,
             dlq: DlqConfig::default(),
         }
     }

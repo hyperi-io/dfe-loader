@@ -38,11 +38,11 @@ pub use loader::{
     MemoryConfig, MetricsConfig, ScalingConfig,
 };
 pub use pipeline::{
-    AutoDownloadConfig, CaptureMode, CoercionConfig, ComputedColumnsConfig, DlqConfig,
-    EnrichmentConfig, FieldMappingConfig, FieldMappingOverride, FieldSanitizationConfig,
+    AutoDownloadConfig, CaptureMode, CoercionConfig, ComputedColumnsConfig, DEFAULT_ORG_ID,
+    DlqConfig, EnrichmentConfig, FieldMappingConfig, FieldMappingOverride, FieldSanitizationConfig,
     GeoIpConfig, GeoIpProvider, MetadataConfig, NullHandling, OrgRoute, PayloadConfig,
-    ReputationEnrichmentConfig, RiskScoringConfig, RoutingConfig, RoutingRule, SchemaConfig,
-    TableCaptureConfig, TimestampDqConfig,
+    ReputationEnrichmentConfig, RiskScoringConfig, RoutingConfig, SchemaConfig, TableCaptureConfig,
+    TimestampDqConfig,
 };
 pub use shared::SharedConfig;
 pub use watcher::{ConfigWatcher, WatcherConfig};

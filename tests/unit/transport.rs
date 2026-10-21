@@ -152,9 +152,9 @@ async fn test_routing_from_json() {
 
     // Inject events with different destinations
     let events = vec![
-        json!({ "org_id": "org1", "event_category": "auth", "data": "a" }),
-        json!({ "org_id": "org2", "event_category": "network", "data": "b" }),
-        json!({ "org_id": "org1", "event_category": "file", "data": "c" }),
+        json!({ "_org_id": "org1", "event_category": "auth", "data": "a" }),
+        json!({ "_org_id": "org2", "event_category": "network", "data": "b" }),
+        json!({ "_org_id": "org1", "event_category": "file", "data": "c" }),
     ];
 
     for event in &events {
@@ -166,7 +166,6 @@ async fn test_routing_from_json() {
 
     // Configure router with explicit org_routes for per-org database routing
     let routing_config = RoutingConfig {
-        db_fields: vec!["org_id".to_string()],
         table_fields: vec!["event_category".to_string()],
         default_db: "common".to_string(),
         default_table: "events".to_string(),
@@ -224,7 +223,7 @@ async fn test_routing_with_nested_fields() {
 
     // Configure router with nested field paths and explicit org_route
     let routing_config = RoutingConfig {
-        db_fields: vec!["org_id".to_string(), "tags.event.org_id".to_string()],
+        org_id_field: Some("tags.event.org_id".to_string()),
         table_fields: vec![
             "event_category".to_string(),
             "tags.event.category".to_string(),
@@ -263,7 +262,6 @@ async fn test_routing_fallback_to_defaults() {
         .unwrap();
 
     let routing_config = RoutingConfig {
-        db_fields: vec!["org_id".to_string()],
         table_fields: vec!["event_category".to_string()],
         default_db: "fallback_db".to_string(),
         default_table: "fallback_table".to_string(),
@@ -337,7 +335,7 @@ async fn test_transform_removes_routing_fields() {
     let adapter = MemoryTransportAdapter::new("routing-removal-test");
 
     let event = json!({
-        "org_id": "should_be_removed",
+        "org_id": "a sender field, kept",
         "event_category": "should_be_removed",
         "keep_this": "value",
         "timestamp": "2025-01-01T00:00:00Z"
@@ -349,7 +347,6 @@ async fn test_transform_removes_routing_fields() {
         .unwrap();
 
     let routing_config = RoutingConfig {
-        db_fields: vec!["org_id".to_string()],
         table_fields: vec!["event_category".to_string()],
         ..Default::default()
     };
@@ -367,9 +364,12 @@ async fn test_transform_removes_routing_fields() {
     let result = transformer.transform(value).unwrap();
     let data = result.data;
 
-    // Routing fields should be removed
-    assert!(data.get("org_id").is_none());
+    // The routing field is removed, and a sender's org_id stays as data.
     assert!(data.get("event_category").is_none());
+    assert_eq!(
+        data.get("org_id").and_then(|v| v.as_str()),
+        Some("a sender field, kept")
+    );
 
     // Other fields should remain
     assert_eq!(
@@ -515,7 +515,7 @@ async fn test_full_message_flow_without_clickhouse() {
     // Create realistic events
     let events = vec![
         json!({
-            "org_id": "acme",
+            "_org_id": "acme",
             "event_category": "auth",
             "action": "login",
             "user": { "id": 1, "name": "Alice" },
@@ -523,14 +523,14 @@ async fn test_full_message_flow_without_clickhouse() {
             "timestamp": "2025-01-01T00:00:00Z"
         }),
         json!({
-            "org_id": "acme",
+            "_org_id": "acme",
             "event_category": "network",
             "action": "connection",
             "source": { "ip": "10.0.0.1", "port": 443 },
             "timestamp": "2025-01-01T00:00:01Z"
         }),
         json!({
-            "org_id": "globex",
+            "_org_id": "globex",
             "event_category": "file",
             "action": "create",
             "path": "/tmp/test.txt",
@@ -547,7 +547,6 @@ async fn test_full_message_flow_without_clickhouse() {
 
     // Setup pipeline components with explicit org_routes for per-org database routing
     let routing_config = RoutingConfig {
-        db_fields: vec!["org_id".to_string()],
         table_fields: vec!["event_category".to_string()],
         default_db: "common".to_string(),
         default_table: "events".to_string(),

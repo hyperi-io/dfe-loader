@@ -35,7 +35,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::grpc_outage::{
     SIGXFSZ, clickhouse_address, dead_lettered_ids, file_size_soft_limit, query_client,
-    set_file_size_soft_limit, wait_dead_lettered, wait_landed, with_file_dlq,
+    set_file_size_soft_limit, too_deep_record, wait_dead_lettered, wait_landed, with_file_dlq,
 };
 use super::kafka_transport_e2e::{ensure_topic, make_producer, wait_for_broker};
 use crate::common::containers::TestInfrastructure;
@@ -276,7 +276,7 @@ pub(super) fn kafka_loader(
 }
 
 /// Run the orchestrator until the returned token is cancelled.
-fn start_loader(config: Config) -> (CancellationToken, JoinHandle<()>) {
+pub(super) fn start_loader(config: Config) -> (CancellationToken, JoinHandle<()>) {
     let mut orchestrator = Orchestrator::new(config);
     let shutdown = orchestrator.shutdown_token();
     let loader = tokio::spawn(async move {
@@ -288,7 +288,7 @@ fn start_loader(config: Config) -> (CancellationToken, JoinHandle<()>) {
 }
 
 /// Produce one record to partition 0 of `topic` and return its offset.
-async fn produce(producer: &FutureProducer, topic: &str, payload: &str) -> i64 {
+pub(super) async fn produce(producer: &FutureProducer, topic: &str, payload: &str) -> i64 {
     let record: FutureRecord<'_, str, str> = FutureRecord::to(topic).payload(payload).partition(0);
     let delivery = producer
         .send(record, Duration::from_secs(30))
@@ -459,8 +459,8 @@ async fn a_dead_letter_the_dlq_refuses_holds_the_commit_below_it() {
     let unlimited = file_size_soft_limit();
     set_file_size_soft_limit("0");
 
-    // An empty table name fails routing, so only the DLQ can take this record.
-    let dead_letter = produce(&producer, &topic, r#"{"_source":"","id":1}"#).await;
+    // Nested past the depth bound, so only the DLQ can take this record.
+    let dead_letter = produce(&producer, &topic, &too_deep_record(1)).await;
     produce(&producer, &topic, r#"{"id":2}"#).await;
     let later_landed = wait_landed(&clickhouse, &landing, &BTreeSet::from([2]), BUDGET).await;
     let while_refused = highest_committed_over_watch(&bootstrap, &group, &topic).await;
