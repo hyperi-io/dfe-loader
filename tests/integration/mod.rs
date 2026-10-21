@@ -24,7 +24,7 @@ mod deployment;
 mod dlq;
 mod errors;
 mod field_mapping;
-mod geoip_download_e2e;
+mod geoip_provisioning;
 #[cfg(feature = "testcontainers")]
 mod grpc_outage;
 #[cfg(feature = "testcontainers")]

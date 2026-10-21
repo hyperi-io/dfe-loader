@@ -4,6 +4,7 @@
 //! Pipeline configuration: routing, enrichment, coercion, metadata, field mapping.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 use scalo::config::sensitive::SensitiveString;
 use serde::{Deserialize, Serialize};
@@ -164,61 +165,50 @@ impl Default for ComputedColumnsConfig {
 // GeoIP Configuration
 // ============================================================================
 
-/// `GeoIP` enrichment provider
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum GeoIpProvider {
-    /// DB-IP Lite — free, anonymous download, city-level, CC BY 4.0
-    #[default]
-    DbIpLite,
-    /// `MaxMind` `GeoLite2` — free account required (`account_id` + `license_key`)
-    MaxMindGeoLite2,
-    /// IPLocate.io — free, anonymous, country + ASN only
-    IpLocate,
-    /// `IPinfo` Lite — free token required, country + ASN only
-    IpInfoLite,
-    /// sapics/ip-location-db — free CC0, country + ASN only
-    Sapics,
-    /// User provides MMDB file paths directly
-    Custom,
-}
+pub use scalo::geoip_download::GeoIpProvider;
 
 /// Where the downloaded `GeoIP` databases go by default, and where the deployment
 /// contract mounts a writable volume for them.
 pub(crate) const GEOIP_DATA_DIR: &str = "/var/lib/dfe/geoip";
 
-/// Auto-download settings for `GeoIP` databases
+/// Auto-download settings for `GeoIP` databases: scalo's shape, with the loader's data directory.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct AutoDownloadConfig {
-    /// Enable auto-download on startup if MMDB files missing or stale
+    /// Download a database on startup when the local copy is missing or stale
     pub enabled: bool,
 
-    /// Directory to store downloaded MMDB files
-    pub data_dir: String,
+    /// Directory the downloaded MMDB files are written to
+    pub data_dir: PathBuf,
 
     /// `MaxMind` account ID (required for `max_mind_geo_lite2` provider)
-    pub maxmind_account_id: Option<String>,
+    pub maxmind_account_id: Option<SensitiveString>,
 
     /// `MaxMind` license key (required for `max_mind_geo_lite2` provider)
-    pub maxmind_license_key: Option<String>,
+    pub maxmind_license_key: Option<SensitiveString>,
 
     /// `IPinfo` token (required for `ip_info_lite` provider)
     pub ipinfo_token: Option<SensitiveString>,
 
     /// Max age in days before re-downloading (default: 30)
     pub max_age_days: u32,
+
+    /// Largest download, and largest database decompressed from it, in bytes.
+    /// A transfer past it is abandoned and the local copy kept.
+    pub max_database_bytes: u64,
 }
 
 impl Default for AutoDownloadConfig {
     fn default() -> Self {
+        let upstream = scalo::geoip_download::AutoDownloadConfig::default();
         Self {
-            enabled: true,
-            data_dir: GEOIP_DATA_DIR.into(),
+            enabled: upstream.enabled,
+            data_dir: PathBuf::from(GEOIP_DATA_DIR),
             maxmind_account_id: None,
             maxmind_license_key: None,
             ipinfo_token: None,
-            max_age_days: 30,
+            max_age_days: upstream.max_age_days,
+            max_database_bytes: upstream.max_database_bytes,
         }
     }
 }
@@ -234,16 +224,37 @@ pub struct GeoIpConfig {
     pub provider: GeoIpProvider,
 
     /// Explicit path to city MMDB file (overrides auto-download)
-    pub city_db_path: Option<String>,
+    pub city_db_path: Option<PathBuf>,
 
     /// Explicit path to ASN MMDB file (overrides auto-download)
-    pub asn_db_path: Option<String>,
+    pub asn_db_path: Option<PathBuf>,
 
     /// Auto-download settings
     pub auto_download: AutoDownloadConfig,
 
     /// LRU cache capacity for lookup results
     pub cache_capacity: usize,
+}
+
+impl From<&GeoIpConfig> for scalo::geoip_download::GeoIpConfig {
+    fn from(config: &GeoIpConfig) -> Self {
+        let auto = &config.auto_download;
+        Self {
+            enabled: config.enabled,
+            provider: config.provider,
+            city_db_path: config.city_db_path.clone(),
+            asn_db_path: config.asn_db_path.clone(),
+            auto_download: scalo::geoip_download::AutoDownloadConfig {
+                enabled: auto.enabled,
+                data_dir: auto.data_dir.clone(),
+                maxmind_account_id: auto.maxmind_account_id.clone(),
+                maxmind_license_key: auto.maxmind_license_key.clone(),
+                ipinfo_token: auto.ipinfo_token.clone(),
+                max_age_days: auto.max_age_days,
+                max_database_bytes: auto.max_database_bytes,
+            },
+        }
+    }
 }
 
 impl Default for GeoIpConfig {

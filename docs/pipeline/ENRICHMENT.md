@@ -33,13 +33,28 @@ flowchart LR
 
 | Provider | Config | What it adds |
 |----------|--------|--------------|
-| GeoIP | `enrichment.geoip` | geographic lookup (country, city, ASN) from a local database under `data_dir` |
+| GeoIP | `geoip` | geographic lookup (country, city, ASN) from a local database under `geoip.auto_download.data_dir` |
 | Reputation | `enrichment.reputation` | flags for VPN, Tor, proxy, and botnet membership |
 | Risk scoring | `enrichment.risk_scoring` | weighted composite score from geo + reputation, with a selectable country-risk preset |
 
 Risk scoring is a composite: it needs at least GeoIP or reputation enabled to
 have anything to weigh. Enabling it alone does nothing useful, which the config
 documents at the field.
+
+## Where the GeoIP databases come from
+
+With `geoip.enabled` on, startup provisions the MMDB files through scalo's `geoip_download`, then opens them with `maxminddb`. An explicit `geoip.city_db_path` or `asn_db_path` is used as given. Otherwise a file in `geoip.auto_download.data_dir` (default `/var/lib/dfe/geoip`, the volume the deployment contract mounts) younger than `max_age_days` is kept, a missing or older one is downloaded, and a failed download falls back to the old file. A download larger than `max_database_bytes` (default 512 MiB), or one that does not read as an MMDB, is refused. A missing database leaves enrichment inactive and never stops the loader.
+
+| `geoip.provider` | City | ASN | Credentials |
+|------------------|------|-----|-------------|
+| `db_ip_lite` (default) | yes | yes | none |
+| `max_mind_geo_lite2` | yes | yes | `auto_download.maxmind_account_id`, `maxmind_license_key` |
+| `ip_info_lite` | yes | no | `auto_download.ipinfo_token` |
+| `ip_locate` | no | yes | none |
+| `sapics` | no | yes, DB-IP's ASN data, saved as `sapics-dbip-asn.mmdb` | none |
+| `custom` | the explicit paths | the explicit paths | none |
+
+The credentials are redacted in logs and config dumps. Supply them through the secrets layer, never as literals.
 
 ## Cost and placement
 

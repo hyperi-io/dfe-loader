@@ -34,7 +34,7 @@ tokio-util = { version = ">=0.7.20, <0.8", features = ["rt"] }
 # Shared library with transport abstraction. The floor moves with
 # `release.helm.library` in .hyperi-ci.yaml: the library renders only the
 # contract version its scalo release writes.
-scalo = { version = "2.14.19", features = ["config-schema", "transport-kafka", "transport-grpc", "dlq-kafka", "config", "config-reload", "deployment", "version-check", "scaling", "cli-service", "top", "logger", "metrics", "service-metrics", "expression", "memory", "worker-batch", "governor", "secrets", "sink-stack"] }
+scalo = { version = "2.14.19", features = ["config-schema", "transport-kafka", "transport-grpc", "dlq-kafka", "config", "config-reload", "deployment", "version-check", "scaling", "cli-service", "top", "logger", "metrics", "service-metrics", "expression", "memory", "worker-batch", "governor", "secrets", "sink-stack", "geoip-download"] }
 
 # Steps scalo's jittered retry schedule (sink_stack backoff). Range MUST track
 # scalo's: BackoffBuilder only applies to the ExponentialBuilder scalo returns.
@@ -74,14 +74,8 @@ metrics = ">=0.24.6, <0.25"
 tikv-jemalloc-ctl = { version = ">=0.7.0, <0.8", optional = true, features = ["stats"] }
 tikv-jemallocator = { version = ">=0.7.0, <0.8", optional = true }
 
-# GeoIP enrichment (mmap for long-running apps)
+# GeoIP enrichment (mmap for long-running apps). scalo's geoip-download provisions the files.
 maxminddb = { version = ">=0.32.0, <0.33", features = ["mmap"] }
-
-# GeoIP auto-download (HTTP + gzip decompression + tar extraction)
-# Held on 0.12: 0.13 drops the rustls-tls-native-roots feature this client trusts the system store through.
-reqwest = { version = ">=0.12, <0.13", default-features = false, features = ["rustls-tls-native-roots", "gzip"] }
-flate2 = ">=1.1.10, <2"
-tar = ">=0.4.46, <0.5"
 
 # ClickHouse crate (HyperI fork with native TCP + unified client)
 # rustls-tls + rustls-tls-native-roots: HTTPS for clients built with Client::default()
@@ -124,7 +118,7 @@ proptest = ">=1.12.0, <2"
 test-case = ">=3.4.0, <4"
 
 # Blocking HTTP for sync test reachability probes (skip_if_no_clickhouse macro).
-# Adds the `blocking` feature to the reqwest already-pinned by the lib.
+# Held on 0.12: 0.13 drops the rustls-tls-native-roots feature.
 reqwest = { version = ">=0.12, <0.13", default-features = false, features = ["blocking", "rustls-tls-native-roots"] }
 
 # Integration test containers

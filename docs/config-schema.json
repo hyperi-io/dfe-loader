@@ -115,7 +115,8 @@
           "maxmind_account_id": null,
           "maxmind_license_key": null,
           "ipinfo_token": null,
-          "max_age_days": 30
+          "max_age_days": 30,
+          "max_database_bytes": 536870912
         },
         "cache_capacity": 100000
       }
@@ -854,7 +855,8 @@
             "maxmind_account_id": null,
             "maxmind_license_key": null,
             "ipinfo_token": null,
-            "max_age_days": 30
+            "max_age_days": 30,
+            "max_database_bytes": 536870912
           }
         },
         "cache_capacity": {
@@ -867,51 +869,51 @@
       }
     },
     "GeoIpProvider": {
-      "description": "`GeoIP` enrichment provider",
+      "description": "Source of the MMDB databases.\n\n| Variant | Auth | City | ASN |\n|---|---|---|---|\n| [`DbIpLite`](Self::DbIpLite) | none | yes | yes |\n| [`MaxMindGeoLite2`](Self::MaxMindGeoLite2) | HTTP basic | yes | yes |\n| [`IpLocate`](Self::IpLocate) | none | no | yes |\n| [`IpInfoLite`](Self::IpInfoLite) | token | yes | no |\n| [`Sapics`](Self::Sapics) | none | no | yes |\n| [`Custom`](Self::Custom) | n/a | explicit path | explicit path |",
       "oneOf": [
         {
-          "description": "DB-IP Lite — free, anonymous download, city-level, CC BY 4.0",
+          "description": "DB-IP Lite -- free, anonymous download, city-level, CC BY 4.0.",
           "type": "string",
           "const": "db_ip_lite"
         },
         {
-          "description": "`MaxMind` `GeoLite2` — free account required (`account_id` + `license_key`)",
+          "description": "MaxMind GeoLite2 -- free account required (account id + licence key).",
           "type": "string",
           "const": "max_mind_geo_lite2"
         },
         {
-          "description": "IPLocate.io — free, anonymous, country + ASN only",
+          "description": "IPLocate.io IP to ASN -- free, anonymous, ASN only, CC BY-SA 4.0.",
           "type": "string",
           "const": "ip_locate"
         },
         {
-          "description": "`IPinfo` Lite — free token required, country + ASN only",
+          "description": "IPinfo Lite -- free token required, country + ASN only.",
           "type": "string",
           "const": "ip_info_lite"
         },
         {
-          "description": "sapics/ip-location-db — free CC0, country + ASN only",
+          "description": "DB-IP Lite ASN as sapics/ip-location-db republishes it -- free,\nanonymous, ASN only, CC BY 4.0.",
           "type": "string",
           "const": "sapics"
         },
         {
-          "description": "User provides MMDB file paths directly",
+          "description": "Caller supplies the MMDB paths directly; nothing is downloaded.",
           "type": "string",
           "const": "custom"
         }
       ]
     },
     "AutoDownloadConfig": {
-      "description": "Auto-download settings for `GeoIP` databases",
+      "description": "Auto-download settings for `GeoIP` databases: scalo's shape, with the loader's data directory.",
       "type": "object",
       "properties": {
         "enabled": {
-          "description": "Enable auto-download on startup if MMDB files missing or stale",
+          "description": "Download a database on startup when the local copy is missing or stale",
           "type": "boolean",
           "default": true
         },
         "data_dir": {
-          "description": "Directory to store downloaded MMDB files",
+          "description": "Directory the downloaded MMDB files are written to",
           "type": "string",
           "default": "/var/lib/dfe/geoip"
         },
@@ -921,6 +923,8 @@
             "string",
             "null"
           ],
+          "x-scalo-secret": true,
+          "writeOnly": true,
           "default": null
         },
         "maxmind_license_key": {
@@ -929,6 +933,8 @@
             "string",
             "null"
           ],
+          "x-scalo-secret": true,
+          "writeOnly": true,
           "default": null
         },
         "ipinfo_token": {
@@ -947,6 +953,13 @@
           "format": "uint32",
           "minimum": 0,
           "default": 30
+        },
+        "max_database_bytes": {
+          "description": "Largest download, and largest database decompressed from it, in bytes.\nA transfer past it is abandoned and the local copy kept.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 536870912
         }
       }
     },

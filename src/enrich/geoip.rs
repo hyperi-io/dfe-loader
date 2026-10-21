@@ -434,7 +434,8 @@ impl GeoIpEnricher {
     /// Download failures are non-fatal — the enricher works with
     /// zero, one, or both databases.
     pub async fn from_config(config: &GeoIpConfig) -> Self {
-        let paths = match super::geoip_download::ensure_databases(config).await {
+        let provisioning = scalo::geoip_download::GeoIpConfig::from(config);
+        let paths = match scalo::geoip_download::ensure_databases(&provisioning).await {
             Ok(paths) => paths,
             Err(e) => {
                 warn!(error = %e, "Failed to resolve GeoIP databases, enricher will be inactive");
@@ -1194,7 +1195,7 @@ mod tests {
             provider: crate::config::GeoIpProvider::DbIpLite,
             auto_download: crate::config::AutoDownloadConfig {
                 enabled: false,
-                data_dir: tmp.path().to_string_lossy().into_owned(),
+                data_dir: tmp.path().to_path_buf(),
                 ..Default::default()
             },
             cache_capacity: 500,
@@ -1218,7 +1219,7 @@ mod tests {
         let config = GeoIpConfig {
             enabled: true,
             provider: crate::config::GeoIpProvider::Custom,
-            city_db_path: Some(bogus.to_string_lossy().into_owned()),
+            city_db_path: Some(bogus.clone()),
             asn_db_path: None,
             ..Default::default()
         };
