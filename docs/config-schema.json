@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Config",
-  "description": "Main configuration for dfe-loader.\n\n## Hot-Reload Behaviour\n\n**Hot-reloaded (takes effect on next batch):**\n- `routing.*` — routing rules, table mapping, org routing\n- `timestamp_dq.*` — timestamp validation thresholds\n- `metadata.*` — common header injection, tags, _raw handling\n- `field_sanitization.*` — field name sanitisation rules\n- `buffer.flush_rows` / `buffer.flush_bytes` / `buffer.flush_age_secs`\n- `coercion.*` — type coercion config\n- `enrichment.ip_fields` — which fields to enrich\n- `field_mapping.*` — field mapping overrides\n\n**Requires pod restart (connections/state established at startup):**\n- `transport` — transport type (kafka/grpc) bound at startup\n- `kafka.*` — Kafka consumer created at startup\n- `grpc.*` — gRPC server binds at startup\n- `clickhouse.*` — HTTP client + `clickhouse::Client` created at startup\n- `payload.pipeline_mode` — pipeline path chosen at startup\n- `metrics.*` — HTTP metrics server binds at startup\n- `logging.*` — tracing subscriber installed at startup\n- `scaling.*` — scaling pressure built at startup\n- `hot_reload.*` — watcher config set at startup\n- `schema.*` — schema cache created at startup\n- `geoip.*` — MMDB readers opened at startup\n- `computed_columns.*` — computed column cache built at startup\n- `column_directives.*` — column directive cache built at startup",
+  "description": "Main configuration for dfe-loader.\n\n## Hot-Reload Behaviour\n\n**Hot-reloaded (takes effect on next batch):**\n- `routing.*` -- table fields, defaults, the tenant field and default org, org routing.\n  The deployment contract lists `routing` in `hot_paths`, so an edit there\n  reaches a running pod without rolling it\n- `timestamp_dq.*` -- timestamp validation thresholds\n- `metadata.*` -- common header injection, tags, _raw handling\n- `field_sanitization.*` -- field name sanitisation rules\n- `buffer.flush_rows` / `buffer.flush_bytes` / `buffer.flush_age_secs`\n\n**Requires pod restart (connections/state established at startup):**\n- `transport` -- transport type (kafka/grpc) bound at startup\n- `kafka.*` -- Kafka consumer created at startup\n- `grpc.*` -- gRPC server binds at startup\n- `clickhouse.*` -- HTTP client + `clickhouse::Client` created at startup\n- `payload.pipeline_mode` -- pipeline path chosen at startup\n- `metrics.*` -- HTTP metrics server binds at startup\n- `logging.*` -- tracing subscriber installed at startup\n- `scaling.*` -- scaling pressure built at startup\n- `hot_reload.*` -- watcher config set at startup\n- `schema.*` -- schema cache created at startup\n- `geoip.*` -- MMDB readers opened at startup\n- `computed_columns.*` -- computed column cache built at startup\n- `column_directives.*` -- column directive cache built at startup\n- `routing.dlq` -- DLQ backends opened at startup\n- `field_mapping.*` -- mapping rules built at startup\n- `enrichment.*` -- enrichment pipeline built at startup",
   "type": "object",
   "properties": {
     "transport": {
@@ -115,7 +115,8 @@
           "maxmind_account_id": null,
           "maxmind_license_key": null,
           "ipinfo_token": null,
-          "max_age_days": 30
+          "max_age_days": 30,
+          "max_database_bytes": 536870912
         },
         "cache_capacity": 100000
       }
@@ -140,7 +141,7 @@
       "description": "Hot-reload watcher config. **Restart required.**",
       "$ref": "#/$defs/HotReloadConfig",
       "default": {
-        "enabled": false,
+        "enabled": true,
         "poll_interval_secs": 5,
         "debounce_ms": 500
       }
@@ -181,25 +182,22 @@
       }
     },
     "routing": {
-      "description": "Routing rules and table mapping. **Hot-reloaded.**",
+      "description": "Table and tenant routing. **Hot-reloaded**, `routing.dlq` aside.",
       "$ref": "#/$defs/RoutingConfig",
       "default": {
-        "rules": [],
-        "db_fields": [],
         "table_fields": [
           "_source"
         ],
         "default_db": "dfe",
         "default_table": "main",
         "org_id_field": "_org_id",
+        "default_org_id": "default",
         "org_routes": [],
         "source_to_table": {},
-        "mapping_file": null,
         "topic_suffixes": [
           "_land",
           "_load"
         ],
-        "compat_v2_source": false,
         "dlq": {
           "enabled": true,
           "mode": "cascade",
@@ -316,7 +314,7 @@
       }
     },
     "field_mapping": {
-      "description": "Field mapping overrides. **Hot-reloaded.**",
+      "description": "Field mapping overrides. **Restart required.**",
       "$ref": "#/$defs/FieldMappingConfig",
       "default": {
         "enabled": false,
@@ -327,7 +325,7 @@
       }
     },
     "enrichment": {
-      "description": "IP enrichment field selection. **Hot-reloaded.**",
+      "description": "IP enrichment field selection. **Restart required.**",
       "$ref": "#/$defs/EnrichmentConfig",
       "default": {
         "ip_fields": [
@@ -857,7 +855,8 @@
             "maxmind_account_id": null,
             "maxmind_license_key": null,
             "ipinfo_token": null,
-            "max_age_days": 30
+            "max_age_days": 30,
+            "max_database_bytes": 536870912
           }
         },
         "cache_capacity": {
@@ -870,51 +869,51 @@
       }
     },
     "GeoIpProvider": {
-      "description": "`GeoIP` enrichment provider",
+      "description": "Source of the MMDB databases.\n\n| Variant | Auth | City | ASN |\n|---|---|---|---|\n| [`DbIpLite`](Self::DbIpLite) | none | yes | yes |\n| [`MaxMindGeoLite2`](Self::MaxMindGeoLite2) | HTTP basic | yes | yes |\n| [`IpLocate`](Self::IpLocate) | none | no | yes |\n| [`IpInfoLite`](Self::IpInfoLite) | token | yes | no |\n| [`Sapics`](Self::Sapics) | none | no | yes |\n| [`Custom`](Self::Custom) | n/a | explicit path | explicit path |",
       "oneOf": [
         {
-          "description": "DB-IP Lite — free, anonymous download, city-level, CC BY 4.0",
+          "description": "DB-IP Lite -- free, anonymous download, city-level, CC BY 4.0.",
           "type": "string",
           "const": "db_ip_lite"
         },
         {
-          "description": "`MaxMind` `GeoLite2` — free account required (`account_id` + `license_key`)",
+          "description": "MaxMind GeoLite2 -- free account required (account id + licence key).",
           "type": "string",
           "const": "max_mind_geo_lite2"
         },
         {
-          "description": "IPLocate.io — free, anonymous, country + ASN only",
+          "description": "IPLocate.io IP to ASN -- free, anonymous, ASN only, CC BY-SA 4.0.",
           "type": "string",
           "const": "ip_locate"
         },
         {
-          "description": "`IPinfo` Lite — free token required, country + ASN only",
+          "description": "IPinfo Lite -- free token required, country + ASN only.",
           "type": "string",
           "const": "ip_info_lite"
         },
         {
-          "description": "sapics/ip-location-db — free CC0, country + ASN only",
+          "description": "DB-IP Lite ASN as sapics/ip-location-db republishes it -- free,\nanonymous, ASN only, CC BY 4.0.",
           "type": "string",
           "const": "sapics"
         },
         {
-          "description": "User provides MMDB file paths directly",
+          "description": "Caller supplies the MMDB paths directly; nothing is downloaded.",
           "type": "string",
           "const": "custom"
         }
       ]
     },
     "AutoDownloadConfig": {
-      "description": "Auto-download settings for `GeoIP` databases",
+      "description": "Auto-download settings for `GeoIP` databases: scalo's shape, with the loader's data directory.",
       "type": "object",
       "properties": {
         "enabled": {
-          "description": "Enable auto-download on startup if MMDB files missing or stale",
+          "description": "Download a database on startup when the local copy is missing or stale",
           "type": "boolean",
           "default": true
         },
         "data_dir": {
-          "description": "Directory to store downloaded MMDB files",
+          "description": "Directory the downloaded MMDB files are written to",
           "type": "string",
           "default": "/var/lib/dfe/geoip"
         },
@@ -924,6 +923,8 @@
             "string",
             "null"
           ],
+          "x-scalo-secret": true,
+          "writeOnly": true,
           "default": null
         },
         "maxmind_license_key": {
@@ -932,6 +933,8 @@
             "string",
             "null"
           ],
+          "x-scalo-secret": true,
+          "writeOnly": true,
           "default": null
         },
         "ipinfo_token": {
@@ -950,6 +953,13 @@
           "format": "uint32",
           "minimum": 0,
           "default": 30
+        },
+        "max_database_bytes": {
+          "description": "Largest download, and largest database decompressed from it, in bytes.\nA transfer past it is abandoned and the local copy kept.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 536870912
         }
       }
     },
@@ -1039,13 +1049,13 @@
       }
     },
     "HotReloadConfig": {
-      "description": "Hot-reload configuration\n\nControls whether the config file is watched for changes at runtime.\nWhen enabled, the config cascade is re-evaluated on file change and\nsafe-to-reload settings are applied without process restart.\n\n**Safe to hot-reload:** buffer thresholds, routing, metadata, field\nsanitisation, timestamp DQ, coercion settings.\n\n**Requires restart:** Kafka brokers/topics/auth, `ClickHouse` hosts/auth,\npayload pipeline mode, transport type.",
+      "description": "Hot-reload configuration\n\nControls whether the config file is watched for changes at runtime.\nWhen enabled, the config cascade is re-evaluated on file change and\nsafe-to-reload settings are applied without process restart.\n\n**Safe to hot-reload:** buffer thresholds, routing, metadata, field\nsanitisation, timestamp DQ.\n\n**Requires restart:** Kafka brokers/topics/auth, `ClickHouse` hosts/auth,\npayload pipeline mode, transport type, `routing.dlq`, field mapping,\nenrichment.",
       "type": "object",
       "properties": {
         "enabled": {
-          "description": "Enable config file watching (default: false)",
+          "description": "Watch the config file and apply a reloadable change without a restart.\nOn unless set false, because the deployment contract's `hot_paths`\nkeeps a `routing` edit from rolling the pods.",
           "type": "boolean",
-          "default": false
+          "default": true
         },
         "poll_interval_secs": {
           "description": "Polling interval in seconds for checking file changes",
@@ -1243,24 +1253,8 @@
     "RoutingConfig": {
       "type": "object",
       "properties": {
-        "rules": {
-          "description": "CEL-based routing rules (top-to-bottom, first match wins).\nFalls through to field-extraction routing if no rule matches.",
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/RoutingRule"
-          },
-          "default": []
-        },
-        "db_fields": {
-          "description": "Fields to check for database name (first match wins, dot notation for nested)\nExample: [\"`org_id`\", \"tenant.id\"]\nNOTE: Leave empty to always use `default_db` (recommended for shared schema)",
-          "type": "array",
-          "items": {
-            "type": "string"
-          },
-          "default": []
-        },
         "table_fields": {
-          "description": "Fields to check for table name (first match wins, dot notation for nested)\nDefault: [\"_source\"] — aligned with _source field extraction",
+          "description": "Fields to check for table name (first match wins, dot notation for nested).\nA null or empty value counts as absent. Default: [\"_source\"]",
           "type": "array",
           "items": {
             "type": "string"
@@ -1270,25 +1264,30 @@
           ]
         },
         "default_db": {
-          "description": "Default database if no `db_field` matches (or `db_fields` is empty), or if the\norg is not listed in `org_routes`.\nDefault: \"dfe\" (shared multi-tenant schema)",
+          "description": "Database for every org not listed in `org_routes`.\nDefault: \"dfe\" (shared multi-tenant schema)",
           "type": "string",
           "default": "dfe"
         },
         "default_table": {
-          "description": "Default table if no `table_field` matches\nDefault: \"main\"",
+          "description": "Default table if no `table_field` carries a value\nDefault: \"main\"",
           "type": "string",
           "default": "main"
         },
         "org_id_field": {
-          "description": "Field to extract for _`org_id` column (stored in data for RLS)\nDefault: \"_`org_id`\", the common-header tenant field\nThis field is extracted and stored as _`org_id`, regardless of routing behaviour",
+          "description": "Field the `_org_id` tenant column reads (dot notation for nested),\nthe common-header `_org_id` unless set.",
           "type": [
             "string",
             "null"
           ],
           "default": "_org_id"
         },
+        "default_org_id": {
+          "description": "Tenant for a record whose `org_id_field` is absent, null or empty: the\ndeployment's default org, `default` unless set.",
+          "type": "string",
+          "default": "default"
+        },
         "org_routes": {
-          "description": "Per-organisation database routing. Only orgs explicitly listed here receive\ntheir own database — all other orgs always go to `default_db`.\nExample: [{`org_id`: \"acme\"}, {`org_id`: \"bigcorp\", database: \"`bigcorp_dfe`\"}]",
+          "description": "Per-organisation database routing, keyed on the tenant `_org_id` resolves to.\nOnly orgs listed here receive their own database, all others go to `default_db`.\nExample: [{`org_id`: \"acme\"}, {`org_id`: \"bigcorp\", database: \"`bigcorp_dfe`\"}]",
           "type": "array",
           "items": {
             "$ref": "#/$defs/OrgRoute"
@@ -1303,14 +1302,6 @@
           },
           "default": {}
         },
-        "mapping_file": {
-          "description": "Legacy: mapping file path",
-          "type": [
-            "string",
-            "null"
-          ],
-          "default": null
-        },
         "topic_suffixes": {
           "description": "Topic suffixes to strip when deriving _source from Kafka topic name\nExample: topic \"`auth_land`\" with suffix \"_land\" → _source = \"auth\"",
           "type": "array",
@@ -1321,11 +1312,6 @@
             "_land",
             "_load"
           ]
-        },
-        "compat_v2_source": {
-          "description": "Pre-DFE 2.2 compatibility: prepend `event_category/tags.event_category` to\n`source_fields` and `table_fields` for backwards compatibility with older data formats",
-          "type": "boolean",
-          "default": false
         },
         "dlq": {
           "description": "DLQ configuration",
@@ -1342,38 +1328,12 @@
         }
       }
     },
-    "RoutingRule": {
-      "description": "CEL-based routing rule. When `when` evaluates to true against the message,\nroute to the specified `target` table (and optionally `db` database).\n\nRules are evaluated top-to-bottom, first match wins. If no rule matches,\nfalls through to field-extraction routing (`db_fields/table_fields`).",
-      "type": "object",
-      "properties": {
-        "when": {
-          "description": "CEL expression that must evaluate to true for this rule to match",
-          "type": "string"
-        },
-        "target": {
-          "description": "Target table name",
-          "type": "string"
-        },
-        "db": {
-          "description": "Target database (optional — uses `default_db` if omitted)",
-          "type": [
-            "string",
-            "null"
-          ],
-          "default": null
-        }
-      },
-      "required": [
-        "when",
-        "target"
-      ]
-    },
     "OrgRoute": {
       "description": "Explicit per-organisation database routing.\n\nWhen an org is listed here, messages from that org are routed to the\nspecified database (or `org_id` if `database` is omitted). Orgs NOT\nlisted always go to `default_db`.",
       "type": "object",
       "properties": {
         "org_id": {
-          "description": "Organisation identifier (matched against `org_id_field` value)",
+          "description": "Tenant the record resolves to: its `org_id_field` value, else `default_org_id`.",
           "type": "string"
         },
         "database": {

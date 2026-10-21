@@ -417,21 +417,18 @@ async fn test_kafka_to_clickhouse_bulk_load() {
         },
         clickhouse: ch_config_from_env(),
         routing: RoutingConfig {
-            db_fields: vec![],
             table_fields: vec!["_source".to_string()],
             default_db: "benchmark".to_string(),
             default_table: table_name.clone(),
             org_id_field: Some("org_id".to_string()),
             org_routes: vec![],
             source_to_table: Default::default(),
-            mapping_file: None,
             topic_suffixes: vec!["_land".to_string(), "_load".to_string()],
-            compat_v2_source: false,
             dlq: DlqConfig {
                 enabled: false,
                 ..Default::default()
             },
-            rules: vec![],
+            ..RoutingConfig::default()
         },
         buffer: BufferConfig {
             flush_rows: 200,
@@ -625,24 +622,22 @@ async fn test_kafka_to_clickhouse_org_routing() {
         },
         clickhouse: ch_config_from_env(),
         routing: RoutingConfig {
-            db_fields: vec!["org_id".to_string()],
             table_fields: vec!["_source".to_string()],
             default_db: "benchmark".to_string(),
             default_table: shared_table.clone(),
+            // These messages carry their tenant as `org_id`, so the test points the tenant there.
             org_id_field: Some("org_id".to_string()),
             org_routes: vec![OrgRoute {
                 org_id: org_db.clone(),
                 database: Some(org_db.clone()),
             }],
             source_to_table: Default::default(),
-            mapping_file: None,
             topic_suffixes: vec!["_land".to_string(), "_load".to_string()],
-            compat_v2_source: false,
             dlq: DlqConfig {
                 enabled: false,
                 ..Default::default()
             },
-            rules: vec![],
+            ..RoutingConfig::default()
         },
         buffer: BufferConfig {
             flush_rows: 50,

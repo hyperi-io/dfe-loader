@@ -28,29 +28,31 @@ pub use super::pipeline::*;
 /// ## Hot-Reload Behaviour
 ///
 /// **Hot-reloaded (takes effect on next batch):**
-/// - `routing.*` — routing rules, table mapping, org routing
-/// - `timestamp_dq.*` — timestamp validation thresholds
-/// - `metadata.*` — common header injection, tags, _raw handling
-/// - `field_sanitization.*` — field name sanitisation rules
+/// - `routing.*` -- table fields, defaults, the tenant field and default org, org routing.
+///   The deployment contract lists `routing` in `hot_paths`, so an edit there
+///   reaches a running pod without rolling it
+/// - `timestamp_dq.*` -- timestamp validation thresholds
+/// - `metadata.*` -- common header injection, tags, _raw handling
+/// - `field_sanitization.*` -- field name sanitisation rules
 /// - `buffer.flush_rows` / `buffer.flush_bytes` / `buffer.flush_age_secs`
-/// - `coercion.*` — type coercion config
-/// - `enrichment.ip_fields` — which fields to enrich
-/// - `field_mapping.*` — field mapping overrides
 ///
 /// **Requires pod restart (connections/state established at startup):**
-/// - `transport` — transport type (kafka/grpc) bound at startup
-/// - `kafka.*` — Kafka consumer created at startup
-/// - `grpc.*` — gRPC server binds at startup
-/// - `clickhouse.*` — HTTP client + `clickhouse::Client` created at startup
-/// - `payload.pipeline_mode` — pipeline path chosen at startup
-/// - `metrics.*` — HTTP metrics server binds at startup
-/// - `logging.*` — tracing subscriber installed at startup
-/// - `scaling.*` — scaling pressure built at startup
-/// - `hot_reload.*` — watcher config set at startup
-/// - `schema.*` — schema cache created at startup
-/// - `geoip.*` — MMDB readers opened at startup
-/// - `computed_columns.*` — computed column cache built at startup
-/// - `column_directives.*` — column directive cache built at startup
+/// - `transport` -- transport type (kafka/grpc) bound at startup
+/// - `kafka.*` -- Kafka consumer created at startup
+/// - `grpc.*` -- gRPC server binds at startup
+/// - `clickhouse.*` -- HTTP client + `clickhouse::Client` created at startup
+/// - `payload.pipeline_mode` -- pipeline path chosen at startup
+/// - `metrics.*` -- HTTP metrics server binds at startup
+/// - `logging.*` -- tracing subscriber installed at startup
+/// - `scaling.*` -- scaling pressure built at startup
+/// - `hot_reload.*` -- watcher config set at startup
+/// - `schema.*` -- schema cache created at startup
+/// - `geoip.*` -- MMDB readers opened at startup
+/// - `computed_columns.*` -- computed column cache built at startup
+/// - `column_directives.*` -- column directive cache built at startup
+/// - `routing.dlq` -- DLQ backends opened at startup
+/// - `field_mapping.*` -- mapping rules built at startup
+/// - `enrichment.*` -- enrichment pipeline built at startup
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct Config {
@@ -86,7 +88,7 @@ pub struct Config {
     pub batch_processing: BatchProcessingConfig,
 
     // --- Hot-reloaded (takes effect on next batch) ---
-    /// Routing rules and table mapping. **Hot-reloaded.**
+    /// Table and tenant routing. **Hot-reloaded**, `routing.dlq` aside.
     pub routing: RoutingConfig,
     /// Buffer flush thresholds. **Hot-reloaded.**
     pub buffer: BufferConfig,
@@ -100,9 +102,9 @@ pub struct Config {
     pub metadata: MetadataConfig,
     /// Type coercion config. **Hot-reloaded.**
     pub coercion: CoercionConfig,
-    /// Field mapping overrides. **Hot-reloaded.**
+    /// Field mapping overrides. **Restart required.**
     pub field_mapping: FieldMappingConfig,
-    /// IP enrichment field selection. **Hot-reloaded.**
+    /// IP enrichment field selection. **Restart required.**
     pub enrichment: EnrichmentConfig,
 }
 
@@ -111,6 +113,9 @@ pub const TRANSPORT_KAFKA: &str = "kafka";
 
 /// `transport` value selecting the direct form: the scalo Push listener.
 pub const TRANSPORT_GRPC: &str = "grpc";
+
+/// The config section a running loader reloads, named in the contract's `hot_paths`.
+pub const HOT_PATH_ROUTING: &str = "routing";
 
 fn default_transport() -> String {
     TRANSPORT_KAFKA.to_string()
@@ -574,6 +579,13 @@ impl Config {
             }
         }
 
+        // An empty default would land every unstamped record in no org at all.
+        if self.routing.default_org_id.is_empty() {
+            return Err(crate::Error::Config(
+                "routing.default_org_id must not be empty".into(),
+            ));
+        }
+
         // Memory validation
         if self.memory.pressure_threshold < 0.0 || self.memory.pressure_threshold > 1.0 {
             return Err(crate::Error::Config(
@@ -638,7 +650,8 @@ impl Config {
                     .app_protocol("kubernetes.io/h2c"),
             ],
             unbound_listen_paths: vec![],
-            hot_paths: vec![],
+            // The watcher rebuilds routing on a reload, so an edit there need not roll the pods.
+            hot_paths: vec![HOT_PATH_ROUTING.into()],
             entrypoint_args: vec!["--config".into(), "/etc/dfe/loader.yaml".into()],
             secrets: Self::secrets(),
             // Derived from Config::default(), NOT hand-authored: a json! literal
@@ -791,8 +804,8 @@ impl Config {
                 .description("Per-record enrichment + shaping pipeline applied before insert.")
                 .maturity("stable")
                 .children(vec![
-                    Capability::service("routing").description("Topic -> table routing rules + table mapping."),
-                    Capability::service("geoip").description("MaxMind GeoIP enrichment from mounted MMDB readers."),
+                    Capability::service("routing").description("Table and tenant routing from the common header and the topic."),
+                    Capability::service("geoip").description("GeoIP enrichment from MMDB databases provisioned at startup."),
                     Capability::service("computed_columns").description("Derived columns computed from record fields."),
                     Capability::service("coercion").description("Type coercion of fields to the destination column types."),
                     Capability::service("field_mapping").description("Field-name mapping / overrides."),
@@ -1511,15 +1524,19 @@ kafka:
         assert_eq!(config.routing.default_db, "dfe");
         assert_eq!(config.routing.default_table, "main");
         assert_eq!(config.routing.org_id_field, Some("_org_id".to_string()));
+        assert_eq!(config.routing.default_org_id, "default");
         assert_eq!(
             config.routing.topic_suffixes,
             vec!["_land".to_string(), "_load".to_string()]
         );
-        assert_eq!(
-            config.routing.rules,
-            [] as [crate::config::pipeline::RoutingRule; 0]
-        );
-        assert_eq!(config.routing.db_fields, [] as [std::string::String; 0]);
+    }
+
+    #[test]
+    fn an_empty_default_org_fails_validation() {
+        let mut config = Config::default();
+        config.routing.default_org_id = String::new();
+        let err = config.validate().unwrap_err().to_string();
+        assert!(err.contains("routing.default_org_id"), "{err}");
     }
 
     #[test]
@@ -1994,19 +2011,36 @@ kafka:
     #[test]
     fn test_apply_flat_env_hot_reload_enabled_flag() {
         let var = "TESTPREFIX5_HOT_RELOAD_ENABLED";
-        unsafe { std::env::set_var(var, "true") };
+        unsafe { std::env::set_var(var, "false") };
 
         let mut config = Config::default();
-        // Ensure default is false before apply
-        let was_enabled_before = config.hot_reload.enabled;
+        // On by default, so only the false value shows the flag is read.
+        assert!(config.hot_reload.enabled);
         config.apply_flat_env("TESTPREFIX5");
 
         unsafe { std::env::remove_var(var) };
 
         assert!(
-            config.hot_reload.enabled,
-            "HOT_RELOAD_ENABLED=true should enable. Was before: {was_enabled_before}"
+            !config.hot_reload.enabled,
+            "HOT_RELOAD_ENABLED=false should disable"
         );
+    }
+
+    /// A routing edit applies with no restart only where the watcher runs and
+    /// the chart leaves `routing` out of the pod's config checksum.
+    #[test]
+    fn a_routing_edit_reaches_a_running_pod() {
+        assert!(Config::default().hot_reload.enabled);
+
+        let contract = Config::deployment_contract();
+        assert_eq!(contract.hot_paths, vec!["routing".to_string()]);
+        assert!(
+            !contract.config_mount_path.is_empty(),
+            "a hot path needs a mounted config file to reload"
+        );
+        contract
+            .validate()
+            .expect("the scalo-service chart takes the hot path");
     }
 
     #[test]
@@ -2034,7 +2068,7 @@ kafka:
         assert_eq!(config.kafka.brokers, vec!["localhost:9092"]);
         assert_eq!(config.buffer.flush_rows, 20_000);
         assert_eq!(config.routing.default_db, "dfe");
-        assert!(!config.hot_reload.enabled);
+        assert!(config.hot_reload.enabled);
     }
 
     // ========================================================================

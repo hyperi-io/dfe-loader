@@ -115,28 +115,23 @@ clickhouse:
 # Message routing configuration
 # Routes messages to destination db.table based on event data fields
 routing:
-  # Fields to check for database name (first match wins)
-  # Supports dot notation for nested fields (e.g., "metadata.org_id")
-  db_fields:
-    - org_id
-    # - tenant_id      # Alternative field
-    # - metadata.org   # Nested field example
-
-  # Fields to check for table name (first match wins)
-  # Supports dot notation for nested fields
-  # Default: ["_source"] — aligned with _source field extraction
+  # Fields to check for table name (first one carrying a value wins).
+  # Supports dot notation for nested fields. A null or empty value counts as absent.
   table_fields:
     - _source
 
-  # Default database when db_field value is not found in org_routes (or db_fields is empty)
+  # Database for every org org_routes does not list
   default_db: dfe
 
   # Default table if no table_field matches
   default_table: main
 
-  # Per-organisation database routing.
-  # Only orgs explicitly listed here get their own database — all others go to default_db.
-  # org_id is matched against the value extracted from org_id_field / db_fields.
+  # Field the _org_id tenant column reads, and the tenant for a record with none
+  org_id_field: _org_id
+  default_org_id: default
+
+  # Per-organisation database routing, keyed on the tenant.
+  # Only orgs explicitly listed here get their own database -- all others go to default_db.
   org_routes: []
   # org_routes:
   #   - org_id: acme               # Routes to "acme" database (org_id used as db name)
@@ -151,18 +146,11 @@ routing:
     admin: admin_events
     errors: error_events
 
-  # External mapping file (CSV, YAML, or JSON)
-  # mapping_file: /etc/loader/source-mappings.yaml
-
   # Topic suffixes stripped when deriving _source from Kafka topic name
   # Example: topic "auth_land" with suffix "_land" → _source = "auth"
   topic_suffixes:
     - _land
     - _load
-
-  # Pre-DFE 2.2 compatibility: prepend event_category/tags.event_category
-  # to source_fields and table_fields for backwards compatibility
-  compat_v2_source: false
 
   # Dead Letter Queue settings
   dlq:
@@ -337,9 +325,9 @@ schema:
   pending_max_age_secs: 30        # DLQ pending messages older than this
 
 # Hot-reload: watch config file for changes at runtime
-# Safe to reload: buffer, routing, metadata, field_sanitization, timestamp_dq, coercion
-# Requires restart: kafka, clickhouse, payload.pipeline_mode
+# Safe to reload: buffer, routing (but routing.dlq), metadata, field_sanitization, timestamp_dq
+# Requires restart: kafka, clickhouse, payload.pipeline_mode, routing.dlq, field_mapping, enrichment
 hot_reload:
-  enabled: false          # Enable config file watching
+  enabled: true           # Watch the --config file
   poll_interval_secs: 5   # How often to check for file changes
   debounce_ms: 500        # Minimum time between reloads

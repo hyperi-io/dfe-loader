@@ -50,13 +50,11 @@ async fn test_transform_pipeline_unit() {
 #[ignore = "requires infrastructure"]
 async fn test_routing_and_buffer() {
     // Test routing and buffering without external dependencies
-    // New db.table routing: db from org_id, table from category field
+    // db.table routing: db from the _org_id tenant, table from category field
     let routing_config = RoutingConfig {
-        db_fields: vec!["org_id".to_string()],
         table_fields: vec!["category".to_string(), "event_type".to_string()],
         default_db: "common".to_string(),
         default_table: "events_other".to_string(),
-        org_id_field: Some("org_id".to_string()),
         org_routes: vec![
             dfe_loader::config::OrgRoute {
                 org_id: "acme".to_string(),
@@ -73,11 +71,9 @@ async fn test_routing_and_buffer() {
         ]
         .into_iter()
         .collect(),
-        mapping_file: None,
         topic_suffixes: vec!["_land".to_string(), "_load".to_string()],
-        compat_v2_source: false,
         dlq: DlqConfig::default(),
-        rules: vec![],
+        ..RoutingConfig::default()
     };
 
     let router = Router::new(&routing_config);
@@ -87,19 +83,19 @@ async fn test_routing_and_buffer() {
         flush_age_secs: 60,
     });
 
-    // Simulate processing messages with org_id for db routing
-    // Route result is now "db.table" format
+    // Simulate processing messages with _org_id for db routing
+    // Route result is "db.table" format
     let messages: Vec<(&[u8], &str)> = vec![
         (
-            br#"{"org_id": "acme", "category": "auth", "action": "login"}"#.as_slice(),
+            br#"{"_org_id": "acme", "category": "auth", "action": "login"}"#.as_slice(),
             "acme.events_auth",
         ),
         (
-            br#"{"org_id": "acme", "category": "api", "endpoint": "/users"}"#.as_slice(),
+            br#"{"_org_id": "acme", "category": "api", "endpoint": "/users"}"#.as_slice(),
             "acme.events_api",
         ),
         (
-            br#"{"org_id": "tenant1", "category": "unknown", "data": "test"}"#.as_slice(),
+            br#"{"_org_id": "tenant1", "category": "unknown", "data": "test"}"#.as_slice(),
             "tenant1.unknown",
         ),
     ];

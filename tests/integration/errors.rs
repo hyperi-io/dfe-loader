@@ -49,18 +49,14 @@ fn test_error_invalid_json() {
 #[test]
 fn test_error_missing_routing_fields() {
     let routing_config = RoutingConfig {
-        db_fields: vec!["org_id".to_string()],
         table_fields: vec!["category".to_string()],
         default_db: String::new(),
         default_table: String::new(),
-        org_id_field: Some("org_id".to_string()),
         org_routes: vec![],
         source_to_table: Default::default(),
-        mapping_file: None,
         topic_suffixes: vec!["_land".to_string(), "_load".to_string()],
-        compat_v2_source: false,
         dlq: DlqConfig::default(),
-        rules: vec![],
+        ..RoutingConfig::default()
     };
 
     let router = Router::new(&routing_config);
@@ -85,18 +81,14 @@ fn test_error_missing_routing_fields() {
 #[test]
 fn test_error_null_routing_fields() {
     let routing_config = RoutingConfig {
-        db_fields: vec!["org_id".to_string()],
         table_fields: vec!["category".to_string()],
         default_db: "default".to_string(),
         default_table: "common".to_string(),
-        org_id_field: Some("org_id".to_string()),
         org_routes: vec![],
         source_to_table: Default::default(),
-        mapping_file: None,
         topic_suffixes: vec!["_land".to_string(), "_load".to_string()],
-        compat_v2_source: false,
         dlq: DlqConfig::default(),
-        rules: vec![],
+        ..RoutingConfig::default()
     };
 
     let router = Router::new(&routing_config);
@@ -122,18 +114,14 @@ fn test_error_null_routing_fields() {
 #[test]
 fn test_error_non_string_routing_fields() {
     let routing_config = RoutingConfig {
-        db_fields: vec!["org_id".to_string()],
         table_fields: vec!["category".to_string()],
         default_db: "default".to_string(),
         default_table: "common".to_string(),
-        org_id_field: Some("org_id".to_string()),
         org_routes: vec![],
         source_to_table: Default::default(),
-        mapping_file: None,
         topic_suffixes: vec!["_land".to_string(), "_load".to_string()],
-        compat_v2_source: false,
         dlq: DlqConfig::default(),
-        rules: vec![],
+        ..RoutingConfig::default()
     };
 
     let router = Router::new(&routing_config);

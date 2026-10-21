@@ -894,19 +894,11 @@ mod backend_tests {
         governor: Option<&SelfRegulationGovernor>,
         acknowledgements: bool,
     ) -> (TransportBackend, GrpcTransport) {
-        // The client dials the listener by number, so the port is chosen here,
-        // below the kernel's ephemeral range an outgoing connection could take
-        // it from between the pick and the bind.
-        let span = 10_240 - 9_000;
-        let start = std::process::id() % span;
-        let port = (0..span)
-            .map(|i| u16::try_from(9_000 + (start + i) % span).expect("below 10240"))
-            .find(|&port| std::net::TcpListener::bind(("127.0.0.1", port)).is_ok())
-            .expect("a free loopback port below 10240");
+        // Port 0 binds whatever the kernel hands out, so no other test can hold the port.
         let config = crate::config::Config {
             transport: "grpc".to_string(),
             grpc: crate::config::GrpcConfig {
-                listen: Some(format!("127.0.0.1:{port}")),
+                listen: Some("127.0.0.1:0".to_string()),
                 acknowledgements: scalo::transport::AcknowledgementsConfig::new(acknowledgements),
                 ..Default::default()
             },
@@ -915,11 +907,16 @@ mod backend_tests {
         let backend = TransportBackend::from_config(&config, governor, None)
             .await
             .expect("gRPC backend binds");
-        let client = GrpcTransport::new(&TransportGrpcConfig::client(&format!(
-            "http://127.0.0.1:{port}"
-        )))
-        .await
-        .expect("gRPC client");
+        let TransportBackend::Grpc(adapter) = &backend else {
+            unreachable!("transport grpc builds the gRPC backend");
+        };
+        let addr = adapter
+            .transport
+            .local_addr()
+            .expect("the server reports where it listens");
+        let client = GrpcTransport::new(&TransportGrpcConfig::client(&format!("http://{addr}")))
+            .await
+            .expect("gRPC client");
         (backend, client)
     }
 

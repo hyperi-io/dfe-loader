@@ -45,23 +45,19 @@ proptest! {
         nested_category in "[a-zA-Z0-9_-]{1,30}"
     ) {
         let config = RoutingConfig {
-            db_fields: vec![],
             table_fields: vec!["tags.event.category".to_string(), "event_category".to_string()],
             default_db: "common".to_string(),
             default_table: "events".to_string(),
-            org_id_field: Some("org_id".to_string()),
             org_routes: vec![],
             source_to_table: HashMap::new(),
-            mapping_file: None,
             topic_suffixes: vec!["_land".to_string(), "_load".to_string()],
-            compat_v2_source: false,
             dlq: DlqConfig::default(),
-            rules: vec![],
+            ..RoutingConfig::default()
         };
 
         let router = Router::new(&config);
         let event = json!({
-            "org_id": org_id,
+            "_org_id": org_id,
             "tags": {
                 "event": {
                     "category": nested_category

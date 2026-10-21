@@ -630,9 +630,8 @@ mod tests {
             limit_bytes: 1_073_741_824,
             ..Default::default()
         });
-        // Pre-acquire memory matching the payload sizes
+        // The lease ledger, not current_bytes, which also moves with the host's own usage.
         guard.add_bytes(100);
-        let before = guard.current_bytes();
 
         let mut buffer_manager = BufferManager::new(&BufferConfig::default());
         let mut capture_overrides = CaptureOverrides::new(&MetadataConfig::default());
@@ -656,10 +655,10 @@ mod tests {
             vec![Err(crate::Error::Json("fail".to_string()))];
 
         coord.apply_results(results, &messages);
-        let after = guard.current_bytes();
-        assert!(
-            after < before,
-            "Memory should be released on error: before={before}, after={after}"
+        assert_eq!(
+            guard.reserved_bytes(),
+            50,
+            "the failed message's 50 bytes must be released"
         );
     }
 

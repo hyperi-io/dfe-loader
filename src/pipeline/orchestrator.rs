@@ -122,6 +122,34 @@ fn unsettled_for(config: &Config) -> Unsettled {
     Unsettled::new(Duration::from_secs(config.buffer.flush_age_secs.max(1)))
 }
 
+/// The per-record stages a config builds, rebuilt whole when it reloads.
+struct Stages {
+    router: Router,
+    transformer: Transformer,
+    extractor: HeaderExtractor,
+    /// `db.table` a record that names no table, or an absent one, lands in.
+    default_table: String,
+}
+
+impl Stages {
+    fn new(config: &Config) -> Self {
+        Self {
+            router: Router::with_metadata(&config.routing, &config.metadata),
+            transformer: Transformer::with_routing(
+                &config.timestamp_dq,
+                &config.metadata,
+                &config.field_sanitization,
+                &config.routing,
+            ),
+            extractor: HeaderExtractor::new(&config.metadata, &config.routing),
+            default_table: format!(
+                "{}.{}",
+                config.routing.default_db, config.routing.default_table
+            ),
+        }
+    }
+}
+
 impl Orchestrator {
     /// Create a new orchestrator with config.
     ///
@@ -423,20 +451,12 @@ impl Orchestrator {
         // expired schema drops the extractor path and its @renamed mappings (#25).
         let _schema_refresh_handle = schema_cache.start_background_refresh(resolve_tx.clone());
 
-        let mut router = Router::new(&self.config.routing);
-        let mut transformer = Transformer::with_routing(
-            &self.config.timestamp_dq,
-            &self.config.metadata,
-            &self.config.field_sanitization,
-            &self.config.routing,
-        );
+        let mut stages = Stages::new(&self.config);
 
         // Pipeline mode gate: json_primary (default) or legacy_flatten.
         // json_primary uses HeaderExtractor + zero-copy _json splice; legacy_flatten
         // uses the existing full-flatten Transformer path (unchanged).
         let json_primary_mode = self.config.payload.pipeline_mode != "legacy_flatten";
-
-        let extractor = HeaderExtractor::new(&self.config.metadata, &self.config.routing);
 
         let mut buffer_manager = BufferManager::new(&self.config.buffer);
 
@@ -459,10 +479,6 @@ impl Orchestrator {
         // begins receiving its own data without a pod restart.
         let mut absent_tables =
             super::types::AbsentTables::new(ABSENT_TABLE_TTL, ABSENT_TABLE_CAPACITY);
-        let default_table = format!(
-            "{}.{}",
-            self.config.routing.default_db, self.config.routing.default_table
-        );
 
         // Per-table capture overrides (_json/_raw disable via config + DDL tags)
         let mut capture_overrides = CaptureOverrides::new(&self.config.metadata);
@@ -532,11 +548,11 @@ impl Orchestrator {
         // Intake never waits on a schema: a record whose table is not resolved
         // yet waits in the pending-schema buffer (#36), so pre-warm runs beside
         // the event loop and hands each answer to it like any resolution.
-        let pre_warm = tokio::spawn(pre_warm_schemas(
+        let mut pre_warm = tokio::spawn(pre_warm_schemas(
             Arc::clone(&http_client),
             collect_pre_warm_tables(&self.config.routing),
             Duration::from_secs(self.config.schema.pre_warm_retry_secs),
-            schema_result_tx,
+            schema_result_tx.clone(),
             self.shutdown.clone(),
             self.metrics.clone(),
         ));
@@ -602,13 +618,30 @@ impl Orchestrator {
                         info!(version = version, "Config reloaded, applying safe changes");
 
                         // --- Hot-reloaded: takes effect on next batch ---
-                        router = Router::new(&new_config.routing);
-                        transformer = Transformer::with_routing(
-                            &new_config.timestamp_dq,
-                            &new_config.metadata,
-                            &new_config.field_sanitization,
-                            &new_config.routing,
-                        );
+                        // Rows already buffered keep the table they were routed to.
+                        let new_stages = Stages::new(&new_config);
+                        if new_stages.default_table != stages.default_table {
+                            // The default is never held absent: its rows wait for it instead.
+                            absent_tables.remove(&new_stages.default_table);
+                        }
+                        stages = new_stages;
+                        let to_warm: Vec<String> = collect_pre_warm_tables(&new_config.routing)
+                            .into_iter()
+                            .filter(|table| {
+                                schema_cache.needs_refresh(table) && !absent_tables.contains(table)
+                            })
+                            .collect();
+                        if !to_warm.is_empty() {
+                            pre_warm.abort();
+                            pre_warm = tokio::spawn(pre_warm_schemas(
+                                Arc::clone(&http_client),
+                                to_warm,
+                                Duration::from_secs(new_config.schema.pre_warm_retry_secs),
+                                schema_result_tx.clone(),
+                                self.shutdown.clone(),
+                                self.metrics.clone(),
+                            ));
+                        }
                         buffer_manager.update_config(&new_config.buffer);
                         capture_overrides = CaptureOverrides::new(&new_config.metadata);
 
@@ -673,7 +706,7 @@ impl Orchestrator {
 
                 // Held work goes back to ClickHouse or the DLQ on the backoff schedule.
                 () = self.unsettled.due(), if !self.unsettled.is_empty() => {
-                    let held = self.take_unsettled_for(&absent_tables, &default_table);
+                    let held = self.take_unsettled_for(&absent_tables, &stages.default_table);
                     self.queue_dead_letters(held.dead_letters);
                     let still_held = unplaced_offsets(&buffer_manager, &pending_schema_buffer);
                     self.flush_or_settle(&inserter, &transport, dlq.as_ref(), held.batches, still_held, &mut buffer_manager, &mut pending_schema_buffer).await;
@@ -714,7 +747,7 @@ impl Orchestrator {
                             // Populate SchemaCache for HeaderExtractor (Change A)
                             schema_cache.insert(table.clone(), schema);
                         }
-                        SchemaResolution::TableNotFound if *table == default_table => {
+                        SchemaResolution::TableNotFound if *table == stages.default_table => {
                             // Nothing falls back from the default table, so it is never recorded
                             // absent and its rows wait for it in the pending-schema buffer.
                             schema_cache.invalidate(table);
@@ -744,7 +777,7 @@ impl Orchestrator {
                             match marked {
                                 super::types::AbsentOutcome::Recorded => warn!(
                                     table = %table,
-                                    default_table = %default_table,
+                                    default_table = %stages.default_table,
                                     "Destination table does not exist, falling back to the default table"
                                 ),
                                 super::types::AbsentOutcome::Refreshed => {}
@@ -916,7 +949,7 @@ impl Orchestrator {
                             if self.commits_at_receipt {
                                 commit_offsets(&transport, &self.metrics, &received_offsets(&fresh)).await;
                             }
-                            let received = fresh.len() + fan.too_deep.len();
+                            let received = fresh.len() + fan.too_deep.len() + fan.duplicated.len();
                             self.stats.messages_received += received as u64;
                             if let Some(ref m) = self.metrics {
                                 for _ in 0..received {
@@ -924,6 +957,7 @@ impl Orchestrator {
                                 }
                             }
                             self.dead_letter_too_deep(fan.too_deep);
+                            self.dead_letter_duplicate_header(fan.duplicated);
                             let ready = pending_schema_buffer
                                 .take_ready(&schema_cache, &absent_tables);
                             if ready.is_empty() {
@@ -1010,9 +1044,9 @@ impl Orchestrator {
                             // Create immutable processor (borrows caches as &)
                             let processor = super::processor::MessageProcessor {
                                 config: &self.config,
-                                router: &router,
-                                transformer: &transformer,
-                                extractor: &extractor,
+                                router: &stages.router,
+                                transformer: &stages.transformer,
+                                extractor: &stages.extractor,
                                 json_primary_mode,
                                 enrichment: &enrichment,
                                 schema_cache: &schema_cache,
@@ -1021,7 +1055,7 @@ impl Orchestrator {
                                 computed_column_cache: &computed_column_cache,
                                 capture_overrides: &capture_overrides,
                                 absent_tables: &absent_tables,
-                                default_table: &default_table,
+                                default_table: &stages.default_table,
                             };
 
                             // Process batch — engine pool preferred, then worker pool,
@@ -1212,7 +1246,7 @@ impl Orchestrator {
 
         // Final flush: every buffer is empty after this, so only a row
         // ClickHouse or the DLQ still refuses holds the watermark down.
-        let held = self.take_unsettled_for(&absent_tables, &default_table);
+        let held = self.take_unsettled_for(&absent_tables, &stages.default_table);
         self.queue_dead_letters(held.dead_letters);
         let mut final_batches = buffer_manager.flush_all();
         final_batches.extend(held.batches);
@@ -1697,19 +1731,51 @@ impl Orchestrator {
         let dead_letters = too_deep
             .into_iter()
             .map(|msg| {
-                // The ledger ignores a settle for a row it never admitted.
-                if self.holds_answers {
-                    self.acks.admit(seq_of(msg.offset));
-                }
-                super::coordinator::record_dlq_routed("json_depth", &reason, &msg.location());
                 if let Some(ref m) = self.metrics {
                     m.record_json_too_deep();
                 }
-                let source = scalo::dlq::DlqSource::kafka(&*msg.topic, msg.partition, msg.offset);
-                DlqEntry::new("loader", reason.clone(), msg.payload).with_source(source)
+                self.intake_dead_letter(msg, "json_depth", reason.clone())
             })
             .collect();
         self.queue_dead_letters(dead_letters);
+    }
+
+    /// Dead-letter every record that carries `_org_id` or `_source` more than
+    /// once, each counted and naming the key, admitted first the same way.
+    fn dead_letter_duplicate_header(
+        &mut self,
+        duplicated: Vec<(crate::kafka::KafkaMessage, &'static str)>,
+    ) {
+        if duplicated.is_empty() {
+            return;
+        }
+        let dead_letters = duplicated
+            .into_iter()
+            .map(|(msg, key)| {
+                if let Some(ref m) = self.metrics {
+                    m.record_duplicate_header();
+                }
+                let reason = crate::payload::header_keys::duplicate_header_reason(key);
+                self.intake_dead_letter(msg, "duplicate_header", reason)
+            })
+            .collect();
+        self.queue_dead_letters(dead_letters);
+    }
+
+    /// The dead letter for a record the intake refused before any stage read it.
+    fn intake_dead_letter(
+        &mut self,
+        msg: crate::kafka::KafkaMessage,
+        action: &str,
+        reason: String,
+    ) -> DlqEntry {
+        // The ledger ignores a settle for a row it never admitted.
+        if self.holds_answers {
+            self.acks.admit(seq_of(msg.offset));
+        }
+        super::coordinator::record_dlq_routed(action, &reason, &msg.location());
+        let source = scalo::dlq::DlqSource::kafka(&*msg.topic, msg.partition, msg.offset);
+        DlqEntry::new("loader", reason, msg.payload).with_source(source)
     }
 
     /// Take every queued dead letter, releasing the bytes it was tracked under.
@@ -2132,13 +2198,11 @@ fn memory_guard_config(config: &Config) -> MemoryGuardConfig {
 // =============================================================================
 //
 // Hot-reloaded (takes effect on next batch):
-//   routing.*             — router rebuilt on reload
-//   timestamp_dq.*        — transformer rebuilt on reload
-//   metadata.*            — transformer + capture overrides rebuilt on reload
-//   field_sanitization.*  — transformer rebuilt on reload
-//   buffer.flush_rows / flush_bytes / flush_age_secs — buffer thresholds updated
-//   enrichment.ip_fields  — which fields to enrich
-//   field_mapping.*       — field mapping overrides
+//   routing.*             -- router, extractor, default table and pre-warm rebuilt
+//   timestamp_dq.*        -- transformer rebuilt on reload
+//   metadata.*            -- router, extractor, transformer + capture overrides rebuilt
+//   field_sanitization.*  -- transformer rebuilt on reload
+//   buffer.flush_rows / flush_bytes / flush_age_secs -- buffer thresholds updated
 //
 // Requires pod restart (connections/state established at startup):
 //   kafka.*               — Kafka consumer created at startup
@@ -2154,6 +2218,9 @@ fn memory_guard_config(config: &Config) -> MemoryGuardConfig {
 //   geoip.*               — MMDB readers opened at startup
 //   computed_columns.*    — computed column cache built at startup
 //   column_directives.*   — column directive cache built at startup
+//   routing.dlq           -- DLQ backends opened at startup
+//   field_mapping.*       -- mapping rules built at startup
+//   enrichment.*          -- enrichment pipeline built at startup
 
 /// Log warnings for config fields that changed but require a pod restart.
 ///
@@ -2200,6 +2267,16 @@ fn warn_restart_required(old: &Config, new: &Config) {
     if old.column_directives != new.column_directives {
         warn!("column_directives config changed — requires restart to take effect");
     }
+    // Under the routing hot path, so an edit here no longer rolls the pods.
+    if old.routing.dlq != new.routing.dlq {
+        warn!("routing.dlq config changed -- requires restart to take effect");
+    }
+    if old.field_mapping != new.field_mapping {
+        warn!("field_mapping config changed -- requires restart to take effect");
+    }
+    if old.enrichment != new.enrichment {
+        warn!("enrichment config changed -- requires restart to take effect");
+    }
 }
 
 /// Report from `pre_warm_with_retry`.
@@ -2210,15 +2287,11 @@ pub(crate) struct PreWarmReport {
     pub rounds: usize,
 }
 
-/// Collect the config-known tables to pre-warm (default table + CEL rule
-/// targets + source_to_table targets), deduplicated.
+/// Collect the config-known tables to pre-warm (default table +
+/// source_to_table targets), deduplicated.
 fn collect_pre_warm_tables(routing: &crate::config::RoutingConfig) -> Vec<String> {
     let default_db = &routing.default_db;
     let mut tables: Vec<String> = vec![format!("{default_db}.{}", routing.default_table)];
-    for rule in &routing.rules {
-        let db = rule.db.as_deref().unwrap_or(default_db);
-        tables.push(format!("{db}.{}", rule.target));
-    }
     for table in routing.source_to_table.values() {
         tables.push(format!("{default_db}.{table}"));
     }
@@ -2929,6 +3002,8 @@ struct FanOut {
     messages: Vec<crate::kafka::KafkaMessage>,
     /// Records nested too deeply to parse, taken out before any stage reads them.
     too_deep: Vec<crate::kafka::KafkaMessage>,
+    /// Records carrying a header key more than once, with that key, taken out the same way.
+    duplicated: Vec<(crate::kafka::KafkaMessage, &'static str)>,
     /// Received messages that carried a batch of records as a JSON array.
     arrays: u64,
     /// Records those arrays expanded into.
@@ -2940,11 +3015,12 @@ struct FanOut {
 }
 
 /// Expand every batched message into one message per record, then take out
-/// every record nested too deeply to parse.
+/// every record nested too deeply to parse or carrying a header key twice.
 ///
 /// This is the first thing done to a received batch, and pre-route and the
 /// processor both hand a record to sonic-rs, which recurses once per nesting
-/// level with no limit of its own.
+/// level with no limit of its own. Every pipeline mode reads the batch after
+/// this, so none of them sees a record whose tenant or source is ambiguous.
 fn fan_out_batched_records(batch: Vec<crate::kafka::KafkaMessage>) -> FanOut {
     let mut fan = split_batched_records(batch);
     fan.too_deep = fan
@@ -2953,6 +3029,16 @@ fn fan_out_batched_records(batch: Vec<crate::kafka::KafkaMessage>) -> FanOut {
             crate::payload::depth::nests_too_deep(&msg.payload)
         })
         .collect();
+    let mut keys = Vec::new();
+    let duplicated: Vec<_> = fan
+        .messages
+        .extract_if(.., |msg| {
+            crate::payload::header_keys::duplicated_header_key(&msg.payload)
+                .map(|key| keys.push(key))
+                .is_some()
+        })
+        .collect();
+    fan.duplicated = duplicated.into_iter().zip(keys).collect();
     fan
 }
 
@@ -3062,6 +3148,61 @@ mod tests {
         let config = Config::default();
         let orchestrator = Orchestrator::new(config);
         assert_eq!(orchestrator.stats().messages_received, 0);
+    }
+
+    /// Start-up and every reload build the stages here, so each one reads the
+    /// whole config: the router once read the default metadata instead.
+    #[test]
+    fn the_stages_read_the_configured_routing_and_metadata() {
+        use crate::clickhouse::types::{ColumnInfo, ParsedType, TableSchema};
+        use crate::column_meta::{ColumnDirectivesConfig, ColumnMetaCache};
+
+        let mut config = Config::default();
+        config.routing.default_db = "tenantdb".to_string();
+        config.routing.default_table = "landing".to_string();
+        config.routing.default_org_id = "tenant-zero".to_string();
+        config.metadata.source_fields = vec!["source_name".to_string()];
+        let stages = Stages::new(&config);
+
+        assert_eq!(stages.default_table, "tenantdb.landing");
+        assert_eq!(stages.router.default_org_id(), "tenant-zero");
+        assert_eq!(
+            stages
+                .router
+                .extract_source_from_value(&serde_json::json!({"source_name": "auth"})),
+            Some("auth")
+        );
+
+        let schema = TableSchema {
+            database: "tenantdb".to_string(),
+            table: "landing".to_string(),
+            columns: vec![ColumnInfo {
+                name: "_org_id".to_string(),
+                type_name: "String".to_string(),
+                parsed_type: ParsedType::parse("String"),
+                position: 1,
+                default_kind: String::new(),
+                default_expression: String::new(),
+                comment: String::new(),
+                is_in_primary_key: false,
+                is_in_sorting_key: false,
+            }],
+            comment: String::new(),
+        };
+        let fields = stages
+            .extractor
+            .extract(
+                b"{}",
+                "tenantdb.landing",
+                &schema,
+                &ColumnMetaCache::new(ColumnDirectivesConfig::default()),
+                None,
+            )
+            .fields;
+        assert_eq!(
+            fields.get("_org_id"),
+            Some(&serde_json::json!("tenant-zero"))
+        );
     }
 
     /// Loader state before anything has marked it ready.
@@ -3363,6 +3504,67 @@ mod tests {
             assert_eq!(offsets(&fan.too_deep), vec![2, 4]);
             pre_route(&fan.messages);
         });
+    }
+
+    // ---- repeated header keys ----
+
+    #[test]
+    fn a_record_carrying_a_header_key_twice_is_taken_out_at_intake() {
+        // The second key is spelled with a unicode escape for its underscore.
+        let escaped = format!(r#"{{"_org_id":"a","{}u005forg_id":"b"}}"#, '\\');
+        let batch = vec![
+            msg_at(1, br#"{"_org_id":"a","n":1}"#),
+            msg_at(2, br#"{"_org_id":"a","_org_id":"b"}"#),
+            msg_at(3, escaped.as_bytes()),
+            msg_at(4, br#"{"_source":"x","_source":"y"}"#),
+            msg_at(5, b"{\"n\":5}\n{\"_org_id\":\"a\",\"_org_id\":\"b\"}"),
+            msg_at(6, br#"[{"n":6},{"_source":"x","_source":"y"}]"#),
+        ];
+        let fan = fan_out_batched_records(batch);
+
+        assert_eq!(offsets(&fan.messages), vec![1, 5, 6]);
+        let duplicated: Vec<(i64, &str)> = fan
+            .duplicated
+            .iter()
+            .map(|(m, key)| (m.offset, *key))
+            .collect();
+        assert_eq!(
+            duplicated,
+            vec![
+                (2, "_org_id"),
+                (3, "_org_id"),
+                (4, "_source"),
+                (5, "_org_id"),
+                (6, "_source"),
+            ],
+            "every record naming its tenant or source twice is taken out, batched or not"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_repeated_header_key_reaches_the_dlq_with_its_reason() {
+        let dir = dlq_dir("duplicateheader");
+        let dlq = file_dlq(&dir);
+        let mut orchestrator = Orchestrator::new(Config::default());
+
+        orchestrator.dead_letter_duplicate_header(vec![
+            (msg_at(5, br#"{"_org_id":"a","_org_id":"b"}"#), "_org_id"),
+            (msg_at(6, br#"{"_source":"x","_source":"y"}"#), "_source"),
+        ]);
+        let queued = orchestrator.take_queued_dead_letters();
+        settle(&mut orchestrator, Some(&dlq), queued, in_30s()).await;
+
+        assert_eq!(orchestrator.stats().messages_dlq, 2);
+        let lines = spooled_lines(&dir);
+        for key in ["_org_id", "_source"] {
+            let reason = crate::payload::header_keys::duplicate_header_reason(key);
+            assert_eq!(
+                lines.iter().filter(|l| l.contains(&reason)).count(),
+                1,
+                "the record repeating {key} is on disk with its reason"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // CaptureOverrides tests moved to capture.rs

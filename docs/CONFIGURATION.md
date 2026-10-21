@@ -104,16 +104,16 @@ Precedence, highest wins: **DDL tag > per-table > global**.
 
 | Setting | Effect |
 |---------|--------|
-| `routing.db_fields` | fields whose value sets the database (empty = shared `default_db`) |
-| `routing.table_fields` | fields whose value sets the table (dot-notation for nested) |
+| `routing.table_fields` | fields whose value sets the table (dot-notation for nested). A null or empty value counts as absent |
 | `routing.default_db` / `default_table` | fallbacks when no field matches |
-| `routing.route_all_by_org` / `routed_orgs` | per-org database routing |
+| `routing.org_id_field` / `default_org_id` | where the `_org_id` tenant is read from, and the tenant a record with none lands in (`default`) |
+| `routing.org_routes` | per-org database routing, keyed on the tenant |
 
 ### Enrichment, resilience
 
 | Setting | Effect |
 |---------|--------|
-| `enrichment.geoip` / `reputation` / `risk` | inject enriched columns on the promoted row |
+| `geoip`, `enrichment.reputation` / `risk_scoring` | inject enriched columns on the promoted row -- see [pipeline/ENRICHMENT.md](pipeline/ENRICHMENT.md) |
 | `buffer.flush_rows` / `flush_bytes` / `flush_age_secs` | per-table flush triggers |
 
 Insert retry, batch salvage and insert concurrency are not settings. Every build retries a transient insert failure up to 5 times with jittered backoff, binary-splits a batch with a data error down to the bad rows, and runs at most 8 inserts at once. A batch that still fails is held and retried as described in [OPERATIONS.md](OPERATIONS.md).
@@ -122,15 +122,15 @@ Insert retry, batch salvage and insert concurrency are not settings. Every build
 
 ## Hot-reload
 
-Config hot-reloads on change. Some fields are safe to apply live; some require a
-restart and are logged as a warning rather than silently applied:
+Config hot-reloads on change: `hot_reload.enabled` is on unless set false, and the loader watches the file `--config` names. Some fields are safe to apply live. The rest require a restart and are logged as a warning rather than silently applied:
 
 - **Restart-required:** `clickhouse.protocol`, ClickHouse URL/hosts,
   `clickhouse.insert_format`, `clickhouse.tls.enabled`, the
   `clickhouse.*_timeout_ms` bounds, Kafka connection -- all of these are baked
-  into the `Client` at build time.
-- **Safe to reload:** buffer thresholds, capture modes, enrichment toggles,
-  routing rules.
+  into the `Client` at build time. Also `routing.dlq`, `field_mapping` and `enrichment`, which are built once at startup.
+- **Safe to reload:** buffer thresholds, `metadata` (capture modes included), `timestamp_dq`, `field_sanitization`, and `routing` other than `routing.dlq`.
+
+On Kubernetes the deployment contract lists `routing` in `hot_paths`, so the chart leaves it out of the pod's config checksum. A `routing` edit reaches the running pods through the refreshed ConfigMap, and an edit anywhere else still rolls them.
 
 ## Verifying config drives behaviour
 

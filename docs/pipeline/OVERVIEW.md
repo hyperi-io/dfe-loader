@@ -71,11 +71,7 @@ JSON is the only payload format. MessagePack, supported in DFE/XDR 2.0 and 2.1, 
 
 ## 2. Route
 
-Routing picks `db.table` from the message before any flattening, using the
-configured `routing.db_fields` / `routing.table_fields` (dot-notation for nested
-access). No field match falls back to `routing.default_db` /
-`routing.default_table`; a per-org mode can route by organisation. A routing
-miss is a DLQ event, not a crash. See [ROUTING.md](ROUTING.md).
+Routing picks `db.table` from the message before any flattening, using the configured `routing.table_fields` (dot-notation for nested access). No field carrying a value falls back to the topic's source, then `routing.default_table`. The database is `routing.default_db` unless `routing.org_routes` lists the record's `_org_id` tenant. See [ROUTING.md](ROUTING.md).
 
 ## 3. Extract
 

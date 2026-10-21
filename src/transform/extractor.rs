@@ -26,7 +26,9 @@
 //! |---|---|
 //! | `_uuid`, `_timestamp_load` | Skipped — ClickHouse DEFAULT generates these |
 //! | `_json` | Skipped — zero-copy splice at serialisation time |
-//! | `_timestamp_received` | The edge's receive stamp, then the directive's fields; else current UTC time |
+//! | `_org_id` | `routing.org_id_field` alone, never a directive. Absent, null or empty is `routing.default_org_id` |
+//! | `_source` | A null or empty value reads as absent, so the column's fallback applies |
+//! | `_timestamp_received` | The first hop's `_timestamp_received` stamp, then the directive's fields, then current UTC time |
 //! | `DateTime`/`DateTime64` | A zoned value moved to UTC text, every fraction digit kept |
 //! | `@skip` directive | Excluded from insert |
 //! | `@source:host.name` | Dotted path descends the parsed payload |
@@ -113,20 +115,9 @@ impl<'a> Sources<'a> {
 /// leaves a source already sending that key unaffected.
 static TIMESTAMP_SOURCES: &[&str] = &["timestamp", "@timestamp", "_timestamp"];
 
-/// The receive stamps DFE's own edges write: dfe-fetcher's, then dfe-receiver's.
-///
-/// They are read ahead of any directive, so a column whose header predates
-/// them still records when DFE received the event rather than when it loaded.
-static RECEIVED_STAMPS: &[&str] = &["_timestamp_received", "_timestamp_receiver"];
-
-/// The keys `_timestamp_received` reads when its column carries no directive:
-/// the edge stamps, then the source's own spellings.
-static RECEIVED_SOURCES: &[&str] = &[
-    "_timestamp_received",
-    "_timestamp_receiver",
-    "timestamp_received",
-    "received_at",
-];
+/// The receive stamp DFE's first hop writes, read ahead of any directive so a
+/// column whose header predates it still records when DFE received the event.
+static RECEIVED_STAMPS: &[&str] = &["_timestamp_received"];
 
 /// Per-table extraction state derived from the schema and its directives.
 ///
@@ -165,6 +156,8 @@ impl TablePlan {
 pub struct HeaderExtractor {
     /// Field name in source data to extract for `_org_id` (RLS column).
     org_id_field: String,
+    /// Tenant written when `org_id_field` is absent, null or empty.
+    default_org_id: String,
     /// Field names to check for `_source` value (first match wins).
     source_fields: Vec<String>,
     /// Whether to extract `_source`.
@@ -183,6 +176,7 @@ impl HeaderExtractor {
                 .org_id_field
                 .clone()
                 .unwrap_or_else(|| "_org_id".to_string()),
+            default_org_id: routing.default_org_id.clone(),
             source_fields: metadata.source_fields.clone(),
             capture_source: metadata.capture_source,
             metadata_enabled: metadata.enabled,
@@ -193,23 +187,23 @@ impl HeaderExtractor {
     /// Resolve the source paths a column reads.
     ///
     /// Mirrors the branch order of `extract()`: the columns `ClickHouse`
-    /// generates, then `_timestamp` and `_timestamp_received`, then `@skip`,
-    /// then `@source`/`@renamed`, then the column-name rules.
+    /// generates, then `_org_id`, `_timestamp` and `_timestamp_received`, then
+    /// `@skip`, then `@source`/`@renamed`, then the column-name rules.
     fn sources_for<'a>(&'a self, name: &'a str, renamed: &'a [String], skip: bool) -> Sources<'a> {
         if matches!(name, "_uuid" | "_timestamp_load" | "_json") {
             return Sources::None;
+        }
+        // The tenant comes from `org_id_field` alone, so no directive can point it at a sender field.
+        if name == "_org_id" {
+            return Sources::Pair(&self.org_id_field, None);
         }
         // _timestamp reads the payload ahead of any directive.
         if name == "_timestamp" {
             return Sources::Fixed(TIMESTAMP_SOURCES);
         }
-        // _timestamp_received reads the edge stamps ahead of its directive.
+        // _timestamp_received reads the edge stamp ahead of its directive.
         if name == "_timestamp_received" {
-            return if renamed.is_empty() {
-                Sources::Fixed(RECEIVED_SOURCES)
-            } else {
-                Sources::FixedThen(RECEIVED_STAMPS, renamed)
-            };
+            return Sources::FixedThen(RECEIVED_STAMPS, renamed);
         }
         if skip {
             return Sources::None;
@@ -218,7 +212,6 @@ impl HeaderExtractor {
             return Sources::List(renamed);
         }
         match name {
-            "_org_id" => Sources::Pair(&self.org_id_field, None),
             "_source" if self.capture_source && self.metadata_enabled => {
                 Sources::List(&self.source_fields)
             }
@@ -359,6 +352,17 @@ impl HeaderExtractor {
                 continue;
             }
 
+            // _org_id: every row lands in a tenant, the deployment default when it carries none.
+            if name == "_org_id" {
+                let found = self
+                    .sources_for(name, &[], false)
+                    .try_each(|path| take_present(&mut parsed, path, name, &mut map, contended));
+                if !found {
+                    map.insert(name.clone(), Value::String(self.default_org_id.clone()));
+                }
+                continue;
+            }
+
             // _timestamp_received: the edge's receive stamp, else the ingest time.
             if name == "_timestamp_received" {
                 if self.metadata_enabled {
@@ -396,9 +400,15 @@ impl HeaderExtractor {
             }
 
             // Priority: @renamed directive > per-column defaults > column name.
+            // A null or empty _source names no source, so its fallback applies.
+            let take = if name == "_source" {
+                take_present
+            } else {
+                take_path
+            };
             let found = self
                 .sources_for(name, &directives.renamed, directives.skip)
-                .try_each(|path| take_path(&mut parsed, path, name, &mut map, contended));
+                .try_each(|path| take(&mut parsed, path, name, &mut map, contended));
 
             // Apply column default when all source fields were absent.
             if !found
@@ -555,6 +565,43 @@ fn take_path(
     }
 }
 
+/// Whether a header value is absent in all but name: null or empty text.
+#[inline]
+fn is_blank(value: &Value) -> bool {
+    match value {
+        Value::Null => true,
+        Value::String(s) => s.is_empty(),
+        Value::Bool(_) | Value::Number(_) | Value::Array(_) | Value::Object(_) => false,
+    }
+}
+
+/// `take_path` for a header field where null and empty text read as absent.
+///
+/// An uncontended blank is dropped as it is removed: no later column reads it.
+#[inline]
+fn take_present(
+    parsed: &mut Map<String, Value>,
+    source: &str,
+    dest: &str,
+    map: &mut Map<String, Value>,
+    contended: &FxHashSet<Box<str>>,
+) -> bool {
+    if !contended.is_empty() && contended.contains(source) {
+        let Some(value) = get_path(parsed, source).filter(|v| !is_blank(v)) else {
+            return false;
+        };
+        map.insert(dest.to_string(), value.clone());
+        return true;
+    }
+    match remove_path(parsed, source) {
+        Some(value) if !is_blank(&value) => {
+            map.insert(dest.to_string(), value);
+            true
+        }
+        Some(_) | None => false,
+    }
+}
+
 // ============================================================================
 // Tests
 // ============================================================================
@@ -670,9 +717,9 @@ mod tests {
         }
     }
 
-    /// `_timestamp_received` for one payload, through a table whose column
-    /// carries `directive` as its `@renamed` list, or none.
-    fn received_for(raw: &[u8], directive: Option<&str>) -> Option<Value> {
+    /// The header row for one payload, through a table of `columns` whose
+    /// `_timestamp_received` column carries `directive` as its `@renamed` list, or none.
+    fn received_row(raw: &[u8], directive: Option<&str>, columns: &[&str]) -> Map<String, Value> {
         use crate::column_meta::ColumnDirectivesEntry;
         use rustc_hash::FxHashMap;
 
@@ -688,23 +735,38 @@ mod tests {
             );
             config.tables.insert("dfe.events".to_string(), table_cols);
         }
-        let schema = make_schema(&["_timestamp_received", "event"]);
         default_extractor()
             .extract(
                 raw,
                 "dfe.events",
-                &schema,
+                &make_schema(columns),
                 &ColumnMetaCache::new(config),
                 None,
             )
             .fields
+    }
+
+    /// `_timestamp_received` for one payload, through a table whose column
+    /// carries `directive` as its `@renamed` list, or none.
+    fn received_for(raw: &[u8], directive: Option<&str>) -> Option<Value> {
+        received_row(raw, directive, &["_timestamp_received", "event"])
             .remove("_timestamp_received")
     }
 
+    /// Whether `value` is the ingest-time fallback rather than a stamp the payload carried.
+    fn is_ingest_time(value: Option<&Value>) -> bool {
+        let before = Utc::now() - chrono::Duration::seconds(5);
+        let Some(Value::String(ts)) = value else {
+            return false;
+        };
+        chrono::NaiveDateTime::parse_from_str(ts, "%Y-%m-%d %H:%M:%S%.3f")
+            .is_ok_and(|parsed| parsed.and_utc() >= before)
+    }
+
     #[test]
-    fn timestamp_received_takes_the_fetcher_stamp_234() {
-        // dfe-fetcher stamps epoch milliseconds; the encoder converts the number.
-        let raw = br#"{"event":"x","_timestamp_received":1759700000123,"_timestamp_receiver":1759700099999}"#;
+    fn timestamp_received_takes_the_first_hop_stamp_234() {
+        // The first hop stamps epoch milliseconds, and the encoder converts the number.
+        let raw = br#"{"event":"x","_timestamp_received":1759700000123}"#;
         assert_eq!(
             received_for(raw, None),
             Some(Value::from(1_759_700_000_123_u64))
@@ -712,17 +774,25 @@ mod tests {
     }
 
     #[test]
-    fn timestamp_received_takes_the_receiver_stamp_when_no_fetcher_stamp_234() {
-        let raw = br#"{"event":"x","_timestamp_receiver":1759700099999}"#;
-        assert_eq!(
-            received_for(raw, None),
-            Some(Value::from(1_759_700_099_999_u64))
-        );
+    fn timestamp_received_reads_no_other_spelling_without_a_directive() {
+        // Only `_timestamp_received` is a receive stamp, so these fall back to the ingest time.
+        let payloads: [&[u8]; 3] = [
+            br#"{"event":"x","_timestamp_receiver":1759700099999}"#,
+            br#"{"event":"x","timestamp_received":"2024-01-01T00:00:00Z"}"#,
+            br#"{"event":"x","received_at":"2024-01-01T00:00:00Z"}"#,
+        ];
+        for raw in payloads {
+            assert!(
+                is_ingest_time(received_for(raw, None).as_ref()),
+                "{} set the receive time",
+                String::from_utf8_lossy(raw)
+            );
+        }
     }
 
     #[test]
-    fn timestamp_received_normalises_a_source_rfc3339_stamp_234() {
-        let raw = br#"{"event":"x","received_at":"2024-01-01T00:00:00.250Z"}"#;
+    fn timestamp_received_normalises_an_rfc3339_stamp_234() {
+        let raw = br#"{"event":"x","_timestamp_received":"2024-01-01T00:00:00.250Z"}"#;
         assert_eq!(
             received_for(raw, None),
             Some(Value::String("2024-01-01 00:00:00.250".into()))
@@ -749,34 +819,28 @@ mod tests {
 
     #[test]
     fn timestamp_received_falls_back_to_now_without_a_stamp_234() {
-        let before = Utc::now() - chrono::Duration::seconds(5);
         let payloads: [&[u8]; 2] = [
             br#"{"event":"x"}"#,
             br#"{"event":"x","_timestamp_received":null}"#,
         ];
         for raw in payloads {
-            let Some(Value::String(ts)) = received_for(raw, None) else {
-                panic!(
-                    "no ingest-time fallback for {}",
-                    String::from_utf8_lossy(raw)
-                );
-            };
-            let parsed = chrono::NaiveDateTime::parse_from_str(&ts, "%Y-%m-%d %H:%M:%S%.3f")
-                .expect("ClickHouse text form")
-                .and_utc();
-            assert!(parsed >= before, "{ts} is not the ingest time");
+            assert!(
+                is_ingest_time(received_for(raw, None).as_ref()),
+                "no ingest-time fallback for {}",
+                String::from_utf8_lossy(raw)
+            );
         }
     }
 
     #[test]
     fn timestamp_received_stamp_is_not_taken_from_another_column_234() {
         // A meta column reading the same key gets its own copy of it.
-        let extractor = default_extractor();
         let raw = br#"{"received_at":"2024-01-01T00:00:00Z"}"#;
-        let schema = make_schema(&["_timestamp_received", "received_at"]);
-        let map = extractor
-            .extract(raw, "dfe.events", &schema, &empty_col_meta(), None)
-            .fields;
+        let map = received_row(
+            raw,
+            Some("received_at"),
+            &["_timestamp_received", "received_at"],
+        );
         assert_eq!(
             map.get("_timestamp_received"),
             Some(&Value::String("2024-01-01 00:00:00.000".into()))
@@ -810,7 +874,149 @@ mod tests {
         let map = extractor
             .extract(raw, "dfe.events", &schema, &col_meta, None)
             .fields;
-        assert_eq!(map.get("_org_id"), None);
+        assert_eq!(map.get("_org_id"), Some(&Value::String("default".into())));
+    }
+
+    #[test]
+    fn an_absent_null_or_empty_org_lands_in_the_default_org() {
+        let extractor = default_extractor();
+        let schema = make_schema(&["_org_id", "message"]);
+        let col_meta = empty_col_meta();
+
+        for raw in [
+            br#"{"message": "no tenant"}"#.as_slice(),
+            br#"{"_org_id": null, "message": "null tenant"}"#.as_slice(),
+            br#"{"_org_id": "", "message": "empty tenant"}"#.as_slice(),
+        ] {
+            let map = extractor
+                .extract(raw, "dfe.events", &schema, &col_meta, None)
+                .fields;
+            assert_eq!(
+                map.get("_org_id"),
+                Some(&Value::String("default".into())),
+                "{}",
+                String::from_utf8_lossy(raw)
+            );
+        }
+    }
+
+    #[test]
+    fn the_default_org_is_the_configured_one() {
+        let routing = RoutingConfig {
+            default_org_id: "tenant-zero".to_string(),
+            ..RoutingConfig::default()
+        };
+        let extractor = HeaderExtractor::new(&MetadataConfig::default(), &routing);
+        let map = extractor
+            .extract(
+                br#"{"_org_id": ""}"#,
+                "dfe.events",
+                &make_schema(&["_org_id"]),
+                &empty_col_meta(),
+                None,
+            )
+            .fields;
+        assert_eq!(
+            map.get("_org_id"),
+            Some(&Value::String("tenant-zero".into()))
+        );
+    }
+
+    /// The header profiles once pointed `_org_id` at the sender's `org_id` by
+    /// directive, which let a sender pick its own tenant.
+    #[test]
+    fn a_directive_cannot_point_the_tenant_at_a_sender_field() {
+        use crate::column_meta::parse_directives;
+        use rustc_hash::FxHashMap;
+
+        let extractor = default_extractor();
+        let schema = make_schema(&["_org_id", "message"]);
+        let col_meta = ColumnMetaCache::new(ColumnDirectivesConfig::default());
+        let mut ddl = FxHashMap::default();
+        ddl.insert(
+            "_org_id".to_string(),
+            parse_directives("@source: org_id - Organisation id for row-level security"),
+        );
+        col_meta.apply_ddl("dfe.events", ddl);
+
+        let sender_only = br#"{"org_id": "someone-else", "message": "x"}"#;
+        let map = extractor
+            .extract(sender_only, "dfe.events", &schema, &col_meta, None)
+            .fields;
+        assert_eq!(map.get("_org_id"), Some(&Value::String("default".into())));
+
+        let stamped = br#"{"org_id": "someone-else", "_org_id": "acme", "message": "x"}"#;
+        let map = extractor
+            .extract(stamped, "dfe.events", &schema, &col_meta, None)
+            .fields;
+        assert_eq!(map.get("_org_id"), Some(&Value::String("acme".into())));
+    }
+
+    #[test]
+    fn a_meta_column_reading_the_tenant_keeps_its_copy() {
+        use crate::column_meta::parse_directives;
+        use rustc_hash::FxHashMap;
+
+        let extractor = default_extractor();
+        let schema = make_schema(&["_org_id", "tenant"]);
+        let col_meta = ColumnMetaCache::new(ColumnDirectivesConfig::default());
+        let mut ddl = FxHashMap::default();
+        ddl.insert("tenant".to_string(), parse_directives("@source: _org_id"));
+        col_meta.apply_ddl("dfe.events", ddl);
+
+        let map = extractor
+            .extract(
+                br#"{"_org_id": "acme"}"#,
+                "dfe.events",
+                &schema,
+                &col_meta,
+                None,
+            )
+            .fields;
+        assert_eq!(map.get("_org_id"), Some(&Value::String("acme".into())));
+        assert_eq!(map.get("tenant"), Some(&Value::String("acme".into())));
+    }
+
+    #[test]
+    fn a_blank_source_takes_the_topic_fallback() {
+        let extractor = default_extractor();
+        let schema = make_schema(&["_source"]);
+        let col_meta = timeseries_source_col_meta("dfe.main");
+
+        for raw in [
+            br#"{"_source": "", "message": "x"}"#.as_slice(),
+            br#"{"_source": null, "message": "x"}"#.as_slice(),
+        ] {
+            let map = extractor
+                .extract(raw, "dfe.main", &schema, &col_meta, Some("cisco-ios"))
+                .fields;
+            assert_eq!(
+                map.get("_source"),
+                Some(&Value::String("cisco-ios".into())),
+                "{}",
+                String::from_utf8_lossy(raw)
+            );
+        }
+    }
+
+    #[test]
+    fn a_blank_source_with_no_fallback_leaves_the_column_absent() {
+        let extractor = default_extractor();
+        let schema = make_schema(&["_source", "message"]);
+
+        for raw in [
+            br#"{"_source": "", "message": "x"}"#.as_slice(),
+            br#"{"_source": null, "message": "x"}"#.as_slice(),
+        ] {
+            let map = extractor
+                .extract(raw, "dfe.events", &schema, &empty_col_meta(), None)
+                .fields;
+            assert!(
+                !map.contains_key("_source"),
+                "a blank source must not land as a value: {:?}",
+                map.get("_source")
+            );
+        }
     }
 
     #[test]

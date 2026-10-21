@@ -4,6 +4,5 @@
 //! Event enrichment (`GeoIP`, reputation, risk scoring)
 
 pub mod geoip;
-pub mod geoip_download;
 pub mod reputation;
 pub mod risk;

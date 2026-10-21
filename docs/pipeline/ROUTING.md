@@ -10,58 +10,53 @@
 
 # Routing
 
-Routing decides the `db.table` a message lands in, before any flattening, from
-fields in the message itself. It runs early in the hot path so a routing miss is
-a cheap DLQ event rather than wasted downstream work.
+Routing picks the `db.table` a message lands in, before any flattening, from fields in the message itself. The first hop (dfe-receiver or dfe-fetcher) sets `_source` and `_org_id` with its rules, so the loader reads those two header fields and evaluates no rules of its own.
 
 ```mermaid
 flowchart TB
     MSG["parsed message"]
-    DBF{"db_fields match?"}
-    TBF{"table_fields match?"}
+    ORG{"org_routes lists the tenant?"}
+    TBF{"a table_fields value?"}
     TOPIC{"topic is {source}_land / {source}_load?"}
-    ORG{"route_all_by_org?"}
     DEFDB["default_db"]
+    ORGDB["the org's database"]
     DEFTBL["default_table"]
     SRC["the topic's source"]
     OUT["db.table"]
-    DLQ["DLQ (miss)"]
 
-    MSG --> DBF
-    DBF -->|yes| OUT
-    DBF -->|no| ORG
-    ORG -->|org in routed_orgs| OUT
+    MSG --> ORG
+    ORG -->|yes| ORGDB --> OUT
     ORG -->|no| DEFDB --> OUT
     MSG --> TBF
     TBF -->|yes| OUT
     TBF -->|no| TOPIC
     TOPIC -->|yes| SRC --> OUT
     TOPIC -->|no| DEFTBL --> OUT
-    OUT -.unresolvable.-> DLQ
 ```
 
 ## Settings
 
 | Setting | Effect |
 |---------|--------|
-| `routing.db_fields` | fields whose value selects the database; empty means everything shares `default_db` |
-| `routing.table_fields` | fields whose value selects the table; dot-notation reaches nested fields (`event.category`) |
-| `routing.default_db` | database used when no `db_fields` value matches -- default `dfe` |
+| `routing.table_fields` | fields whose value selects the table, first one carrying a value wins. Dot-notation reaches nested fields (`event.category`). Default `["_source"]` |
+| `routing.default_db` | database for every org `org_routes` does not list -- default `dfe` |
 | `routing.default_table` | table used when neither a `table_fields` value nor the topic names one -- default `main`, so an unrouted message lands in `dfe.main` |
 | `routing.topic_suffixes` | suffixes that mark a topic as one source's own -- default `_land` / `_load`, so `cisco-ios_load` names the source `cisco-ios` |
-| `routing.route_all_by_org` / `routed_orgs` | route by organisation into a per-org database |
+| `routing.org_id_field` | field the tenant is read from -- default `_org_id`, the common-header field the first hop stamps |
+| `routing.default_org_id` | tenant for a record that carries none -- default `default`, the deployment's default org |
+| `routing.org_routes` | orgs that get a database of their own, keyed on the tenant: `[{org_id: acme, database: acme_dfe}]` |
 
 ## How a field is resolved
 
-`db_fields` and `table_fields` are ordered lists; the first field present in the
-message wins, and its value (lower-cased, sanitised to a valid identifier) is the
-database or table name. Dot-notation walks nested objects, so
-`table_fields = ["event.category"]` reads `category` inside the `event` object.
+`table_fields` is an ordered list. The first field carrying a value wins, and the value is the table name. A null or empty value counts as absent, so `{"_source": ""}` falls through to the next field, then the topic, then `default_table`. It never reaches the DLQ. Dot-notation walks nested objects, so `table_fields = ["event.category"]` reads `category` inside the `event` object.
 
-When no listed field is present, the topic is asked next, and only then do the
-configured defaults apply. A message that cannot be resolved to a real
-`db.table` -- or that resolves to a table the loader cannot reflect -- goes to
-the DLQ; it never wedges the consumer.
+## The tenant
+
+The `_org_id` column takes the record's `org_id_field` value and nothing else: no column directive and no sender field such as `org_id` can set it. An absent, null or empty value lands in `default_org_id`, so every row belongs to an org. The database is `default_db` unless `org_routes` lists that tenant.
+
+## A routing edit applies without a restart
+
+The loader watches its config file (`hot_reload.enabled`, on unless set false). On a change it rebuilds the router, the header extractor and the default table from the new `routing` and `metadata`, and pre-warms the schemas of any table the new routing names. Rows already buffered keep the table they were routed to, and no offset is committed for them until they land. `routing.dlq` is the exception: the DLQ is opened at startup, so a change there logs a restart warning. The deployment contract lists `routing` in `hot_paths`, so on Kubernetes an edit there reaches the running pods without rolling them.
 
 ## The topic names the source when the record does not
 

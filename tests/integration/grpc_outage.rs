@@ -505,7 +505,7 @@ pub(super) fn dead_lettered_ids(dir: &Path) -> BTreeSet<u64> {
 
 /// The reason the file DLQ under `dir` recorded for each id it has written,
 /// skipping any torn line.
-fn dead_letter_reasons(dir: &Path) -> std::collections::BTreeMap<u64, String> {
+pub(super) fn dead_letter_reasons(dir: &Path) -> std::collections::BTreeMap<u64, String> {
     fn walk(dir: &Path, reasons: &mut std::collections::BTreeMap<u64, String>) {
         let Ok(entries) = std::fs::read_dir(dir) else {
             return;
@@ -1218,8 +1218,19 @@ async fn no_record_waiting_on_its_schema_is_lost_while_clickhouse_is_down() {
     );
 }
 
-/// A record naming an empty table fails processing, so only the DLQ can take
-/// it -- the same hand-over as a parse error or a pre-route reject.
+/// A record nested past the loader's 64-level bound, which only the DLQ can
+/// take. The test's own parser reads it back, since `serde_json` allows 128.
+pub(super) fn too_deep_record(id: u64) -> String {
+    const LEVELS: usize = 70;
+    format!(
+        r#"{{"id":{id},"deep":{}{}}}"#,
+        "[".repeat(LEVELS),
+        "]".repeat(LEVELS)
+    )
+}
+
+/// A record too deeply nested to process, so only the DLQ can take it -- the
+/// same hand-over as a parse error or a pre-route reject.
 ///
 /// Needs process-per-test (nextest): the file size limit is process-wide.
 #[tokio::test]
@@ -1238,10 +1249,7 @@ async fn no_unroutable_record_is_lost_while_the_dlq_refuses_writes() {
     let (shutdown, loader, client) = start_loader(config, listen_port).await;
     wait_for_loader(&client, &clickhouse, &table).await;
 
-    let unroutable = push_while_the_dlq_refuses(client, 1..UNROUTABLE + 1, |id| {
-        format!(r#"{{"_source":"","id":{id}}}"#)
-    })
-    .await;
+    let unroutable = push_while_the_dlq_refuses(client, 1..UNROUTABLE + 1, too_deep_record).await;
 
     let dead_lettered = wait_dead_lettered(dlq_dir.path(), &unroutable, LANDING_BUDGET).await;
 

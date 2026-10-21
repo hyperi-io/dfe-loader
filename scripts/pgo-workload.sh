@@ -303,7 +303,6 @@ clickhouse:
   tables: []
 
 routing:
-  db_fields: []
   table_fields:
     - "_source"
   default_db: "dfe"

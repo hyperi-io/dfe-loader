@@ -24,12 +24,16 @@ mod deployment;
 mod dlq;
 mod errors;
 mod field_mapping;
-mod geoip_download_e2e;
+mod geoip_provisioning;
 #[cfg(feature = "testcontainers")]
 mod grpc_outage;
 #[cfg(feature = "testcontainers")]
 mod grpc_startup;
+#[cfg(feature = "testcontainers")]
+mod header_keys;
 mod helm_contract;
+#[cfg(feature = "testcontainers")]
+mod hot_reload;
 mod inserter;
 #[cfg(feature = "testcontainers")]
 mod json_depth;
@@ -50,4 +54,6 @@ mod resilience;
 mod rls;
 mod schema;
 mod schema_pending_e2e;
+#[cfg(feature = "testcontainers")]
+mod tenancy;
 mod transport;

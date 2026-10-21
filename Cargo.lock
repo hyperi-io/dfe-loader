@@ -250,18 +250,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "async-compression"
-version = "0.4.50"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ee19bd99b43e3691acbad4e840420a4881cea6c0b66a208125a824f8fd53f5a1"
-dependencies = [
- "compression-codecs",
- "compression-core",
- "pin-project-lite",
- "tokio",
-]
-
-[[package]]
 name = "async-stream"
 version = "0.3.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -933,23 +921,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "compression-codecs"
-version = "0.4.45"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "98fc98460ba0ad5317075d3632b8dfc45d0be8c4a49347c2a38272019717614a"
-dependencies = [
- "compression-core",
- "flate2",
- "memchr",
-]
-
-[[package]]
-name = "compression-core"
-version = "0.4.33"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6e8ccc4ea9f6acc32d102c0f6d471d11d913ad15f20c04de743374861fa1d414"
-
-[[package]]
 name = "const-oid"
 version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1371,7 +1342,6 @@ dependencies = [
  "csv",
  "dotenvy",
  "figment",
- "flate2",
  "futures",
  "hyper-rustls",
  "hyper-util",
@@ -1393,7 +1363,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sonic-rs",
- "tar",
  "tempfile",
  "test-case",
  "testcontainers",
@@ -4408,6 +4377,7 @@ dependencies = [
  "rustls-platform-verifier",
  "serde",
  "serde_json",
+ "serde_urlencoded",
  "sync_wrapper",
  "tokio",
  "tokio-rustls",
@@ -4639,9 +4609,9 @@ dependencies = [
 
 [[package]]
 name = "scalo"
-version = "2.14.18"
+version = "2.14.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8d3c6b53a20c42f7c0b062a05eb458e3ad6f74b94b3431466a1ca5a38e7fa0f1"
+checksum = "f2511918aac064c7d1f867e10cc67c613aaa1841a086ae86437ae01d84d51f29"
 dependencies = [
  "aes-gcm",
  "backon",
@@ -4655,6 +4625,7 @@ dependencies = [
  "dotenvy",
  "figment",
  "file-rotate",
+ "flate2",
  "governor",
  "hkdf",
  "hyper-util",
@@ -4685,6 +4656,7 @@ dependencies = [
  "sha2 0.11.1",
  "sonic-rs",
  "sysinfo",
+ "tar",
  "thiserror 2.0.21",
  "tokio",
  "tokio-stream",
@@ -5314,7 +5286,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
@@ -5850,17 +5822,12 @@ version = "0.6.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4cfcf7e2740e6fc6d4d688b4ef00650406bb94adf4731e43c096c3a19fe40840"
 dependencies = [
- "async-compression",
  "bitflags 2.13.2",
  "bytes",
- "futures-core",
  "futures-util",
  "http",
  "http-body",
- "http-body-util",
  "pin-project-lite",
- "tokio",
- "tokio-util",
  "tower",
  "tower-layer",
  "tower-service",

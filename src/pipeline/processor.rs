@@ -308,10 +308,9 @@ impl MessageProcessor<'_> {
             // Legacy flatten path
             let common_header = self.config.metadata.enabled;
 
+            // Every row lands in a tenant, the deployment default when it carries none.
             let org_id_owned = if common_header {
-                self.router
-                    .extract_org_id_from_value(&value)
-                    .map(std::string::ToString::to_string)
+                Some(self.router.org_id_or_default(&value).to_string())
             } else {
                 None
             };
@@ -850,7 +849,6 @@ mod tests {
     #[test]
     fn routing_config_drives_actual_table() {
         let mut config = Config::default();
-        config.routing.db_fields = vec![]; // shared schema -> default_db
         config.routing.table_fields = vec!["event_category".to_string()];
         config.routing.default_db = "dfe".to_string();
         config.routing.default_table = "fallback".to_string();
@@ -1342,11 +1340,7 @@ mod tests {
     // ========================================================================
 
     #[test]
-    fn process_routes_to_dlq_with_routing_rule_failure() {
-        // Set up a CEL routing rule that produces a DLQ routing outcome.
-        // Simplest DLQ trigger: compat_v2_source with no source/table resolvable.
-        // Since Router's DLQ path is complex, we test the error mapping instead.
-        // Simpler: test that parse failures (pre-routing) become errors.
+    fn a_payload_that_is_not_json_is_refused_for_the_dlq() {
         let harness = TestHarness::new();
         let proc = harness.processor();
 
@@ -1913,6 +1907,118 @@ mod tests {
             Some(&serde_json::Value::String("cisco-ios".to_string())),
             "the _load suffix is stripped and the topic's source labels the row"
         );
+    }
+
+    // ========================================================================
+    // The tenant is `_org_id` alone, else the default org, on both paths.
+    // ========================================================================
+
+    /// Header columns as the DFE profiles shipped them, `_org_id` pointed at the
+    /// sender's own `org_id` by directive.
+    const HEADER_COLUMNS: &[(&str, &str)] = &[
+        (
+            "_org_id",
+            "@source: org_id - Organisation id for row-level security",
+        ),
+        (
+            "_source",
+            "@source: first(_source) | topic_name - Data source label",
+        ),
+        ("message", ""),
+    ];
+
+    fn process_on_path(
+        harness: &TestHarness,
+        json_primary: bool,
+        topic: &str,
+        payload: &[u8],
+    ) -> crate::pipeline::types::ProcessedMessage {
+        let processor = if json_primary {
+            harness.processor_json_primary()
+        } else {
+            harness.processor()
+        };
+        processor
+            .process(&harness.make_msg_on(topic, payload))
+            .expect("processed")
+    }
+
+    #[test]
+    fn a_sender_org_id_never_sets_the_tenant() {
+        let harness = TestHarness::new();
+        apply_resolution(&harness, "dfe.main", HEADER_COLUMNS);
+
+        for json_primary in [true, false] {
+            let processed = process_on_path(
+                &harness,
+                json_primary,
+                "main_land",
+                br#"{"org_id":"someone-else","message":"x"}"#,
+            );
+            assert_eq!(
+                processed.data.get("_org_id"),
+                Some(&json!("default")),
+                "json_primary={json_primary}"
+            );
+            let stamped = process_on_path(
+                &harness,
+                json_primary,
+                "main_land",
+                br#"{"org_id":"someone-else","_org_id":"acme","message":"x"}"#,
+            );
+            assert_eq!(
+                stamped.data.get("_org_id"),
+                Some(&json!("acme")),
+                "json_primary={json_primary}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_null_or_empty_org_lands_in_the_default_org() {
+        let harness = TestHarness::new();
+        apply_resolution(&harness, "dfe.main", HEADER_COLUMNS);
+
+        for json_primary in [true, false] {
+            for payload in [
+                br#"{"message":"x"}"#.as_slice(),
+                br#"{"_org_id":null,"message":"x"}"#.as_slice(),
+                br#"{"_org_id":"","message":"x"}"#.as_slice(),
+            ] {
+                let processed = process_on_path(&harness, json_primary, "main_land", payload);
+                assert_eq!(
+                    processed.data.get("_org_id"),
+                    Some(&json!("default")),
+                    "json_primary={json_primary} {}",
+                    String::from_utf8_lossy(payload)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_empty_source_lands_in_the_default_table_not_the_dlq() {
+        let harness = TestHarness::new();
+        assert!(
+            harness.config.routing.dlq.enabled,
+            "the DLQ is on by default, which an empty table name used to reach"
+        );
+        apply_resolution(&harness, "dfe.main", HEADER_COLUMNS);
+
+        for json_primary in [true, false] {
+            for payload in [
+                br#"{"_source":"","message":"x"}"#.as_slice(),
+                br#"{"_source":null,"message":"x"}"#.as_slice(),
+            ] {
+                let processed = process_on_path(&harness, json_primary, "main_land", payload);
+                assert_eq!(processed.table, "dfe.main", "json_primary={json_primary}");
+                assert_eq!(
+                    processed.data.get("_source"),
+                    Some(&json!("main")),
+                    "json_primary={json_primary}: the topic labels a record with no source"
+                );
+            }
+        }
     }
 
     // ========================================================================

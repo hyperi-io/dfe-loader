@@ -16,30 +16,27 @@ use dfe_loader::transform::Transformer;
 
 use crate::common::{create_http_test_client, drop_http_test_table};
 
-/// Test that _`org_id` field is populated from source data
+/// Test that _`org_id` field is populated from the common-header tenant
 #[tokio::test]
 async fn test_org_id_field_population() {
     let routing_config = RoutingConfig {
-        db_fields: vec![], // Shared schema - no per-org routing
         table_fields: vec!["category".to_string()],
         default_db: "common".to_string(),
         default_table: "events".to_string(),
-        org_id_field: Some("org_id".to_string()),
         org_routes: vec![],
         source_to_table: HashMap::new(),
-        mapping_file: None,
         topic_suffixes: vec!["_land".to_string(), "_load".to_string()],
-        compat_v2_source: false,
         dlq: DlqConfig::default(),
-        rules: vec![],
+        ..RoutingConfig::default()
     };
 
     let router = Router::new(&routing_config);
     let transformer = Transformer::default();
 
-    // Test message with org_id
+    // The tenant stamp beside a sender's own org_id field
     let msg = json!({
-        "org_id": "acme",
+        "_org_id": "acme",
+        "org_id": "a sender field",
         "category": "auth",
         "action": "login",
         "user_id": 12345
@@ -53,43 +50,62 @@ async fn test_org_id_field_population() {
 
     // Extract org_id before transform
     let value: serde_json::Value = serde_json::from_slice(&payload).unwrap();
-    let org_id_owned = router
-        .extract_org_id_from_value(&value)
-        .map(std::string::ToString::to_string);
-    assert_eq!(org_id_owned.as_deref(), Some("acme"));
+    let org_id_owned = router.org_id_or_default(&value).to_string();
+    assert_eq!(org_id_owned, "acme");
 
     // Transform with org_id
     let result = transformer
-        .transform_with_raw(value, org_id_owned.as_deref(), None)
+        .transform_with_raw(value, Some(&org_id_owned), None)
         .unwrap();
 
     // Verify _org_id field is present
-    assert!(result.data.contains_key("_org_id"));
     assert_eq!(
         result.data.get("_org_id").unwrap().as_str().unwrap(),
         "acme"
     );
 
-    // Verify original org_id is removed (routing field removal)
-    assert!(!result.data.contains_key("org_id"));
+    // The sender's field is data and lands as itself
+    assert_eq!(
+        result.data.get("org_id").and_then(|v| v.as_str()),
+        Some("a sender field")
+    );
+}
+
+/// A record with no tenant of its own lands in the default org
+#[tokio::test]
+async fn test_org_id_defaults_when_absent() {
+    let router = Router::new(&RoutingConfig::default());
+    let transformer = Transformer::default();
+
+    for msg in [
+        json!({"org_id": "a sender field", "action": "login"}),
+        json!({"_org_id": null, "action": "login"}),
+        json!({"_org_id": "", "action": "login"}),
+    ] {
+        let org_id_owned = router.org_id_or_default(&msg).to_string();
+        let result = transformer
+            .transform_with_raw(msg, Some(&org_id_owned), None)
+            .unwrap();
+        assert_eq!(
+            result.data.get("_org_id").and_then(|v| v.as_str()),
+            Some("default")
+        );
+    }
 }
 
 /// Test that _`org_id` field works with different field names
 #[tokio::test]
 async fn test_org_id_custom_field_name() {
     let routing_config = RoutingConfig {
-        db_fields: vec![],
         table_fields: vec!["event_type".to_string()],
         default_db: "common".to_string(),
         default_table: "events".to_string(),
         org_id_field: Some("tenant_id".to_string()), // Custom field name
         org_routes: vec![],
         source_to_table: HashMap::new(),
-        mapping_file: None,
         topic_suffixes: vec!["_land".to_string(), "_load".to_string()],
-        compat_v2_source: false,
         dlq: DlqConfig::default(),
-        rules: vec![],
+        ..RoutingConfig::default()
     };
 
     let router = Router::new(&routing_config);
@@ -124,20 +140,16 @@ async fn test_org_id_custom_field_name() {
 #[tokio::test]
 async fn test_shared_schema_multiple_orgs() {
     let routing_config = RoutingConfig {
-        db_fields: vec![], // Empty = shared schema
         table_fields: vec!["category".to_string()],
         default_db: "common".to_string(),
         default_table: "events".to_string(),
-        org_id_field: Some("org_id".to_string()),
-        org_routes: vec![],
+        org_routes: vec![], // Empty = shared schema
         source_to_table: [("auth".to_string(), "events_auth".to_string())]
             .into_iter()
             .collect(),
-        mapping_file: None,
         topic_suffixes: vec!["_land".to_string(), "_load".to_string()],
-        compat_v2_source: false,
         dlq: DlqConfig::default(),
-        rules: vec![],
+        ..RoutingConfig::default()
     };
 
     let router = Router::new(&routing_config);
@@ -150,9 +162,9 @@ async fn test_shared_schema_multiple_orgs() {
 
     // Messages from different orgs, same category
     let messages = vec![
-        json!({"org_id": "acme", "category": "auth", "action": "login"}),
-        json!({"org_id": "bigcorp", "category": "auth", "action": "logout"}),
-        json!({"org_id": "startup", "category": "auth", "action": "register"}),
+        json!({"_org_id": "acme", "category": "auth", "action": "login"}),
+        json!({"_org_id": "bigcorp", "category": "auth", "action": "logout"}),
+        json!({"_org_id": "startup", "category": "auth", "action": "register"}),
     ];
 
     for msg in messages {

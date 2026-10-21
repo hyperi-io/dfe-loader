@@ -4,6 +4,7 @@
 //! Pipeline configuration: routing, enrichment, coercion, metadata, field mapping.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 use scalo::config::sensitive::SensitiveString;
 use serde::{Deserialize, Serialize};
@@ -43,24 +44,6 @@ impl Default for PayloadConfig {
 // Routing Configuration
 // ============================================================================
 
-/// CEL-based routing rule. When `when` evaluates to true against the message,
-/// route to the specified `target` table (and optionally `db` database).
-///
-/// Rules are evaluated top-to-bottom, first match wins. If no rule matches,
-/// falls through to field-extraction routing (`db_fields/table_fields`).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct RoutingRule {
-    /// CEL expression that must evaluate to true for this rule to match
-    pub when: String,
-
-    /// Target table name
-    pub target: String,
-
-    /// Target database (optional — uses `default_db` if omitted)
-    #[serde(default)]
-    pub db: Option<String>,
-}
-
 /// Explicit per-organisation database routing.
 ///
 /// When an org is listed here, messages from that org are routed to the
@@ -68,7 +51,7 @@ pub struct RoutingRule {
 /// listed always go to `default_db`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct OrgRoute {
-    /// Organisation identifier (matched against `org_id_field` value)
+    /// Tenant the record resolves to: its `org_id_field` value, else `default_org_id`.
     pub org_id: String,
 
     /// Target database. If omitted, the `org_id` itself is used as the database name.
@@ -86,36 +69,28 @@ impl OrgRoute {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct RoutingConfig {
-    /// CEL-based routing rules (top-to-bottom, first match wins).
-    /// Falls through to field-extraction routing if no rule matches.
-    #[serde(default)]
-    pub rules: Vec<RoutingRule>,
-
-    /// Fields to check for database name (first match wins, dot notation for nested)
-    /// Example: ["`org_id`", "tenant.id"]
-    /// NOTE: Leave empty to always use `default_db` (recommended for shared schema)
-    pub db_fields: Vec<String>,
-
-    /// Fields to check for table name (first match wins, dot notation for nested)
-    /// Default: ["_source"] — aligned with _source field extraction
+    /// Fields to check for table name (first match wins, dot notation for nested).
+    /// A null or empty value counts as absent. Default: ["_source"]
     pub table_fields: Vec<String>,
 
-    /// Default database if no `db_field` matches (or `db_fields` is empty), or if the
-    /// org is not listed in `org_routes`.
+    /// Database for every org not listed in `org_routes`.
     /// Default: "dfe" (shared multi-tenant schema)
     pub default_db: String,
 
-    /// Default table if no `table_field` matches
+    /// Default table if no `table_field` carries a value
     /// Default: "main"
     pub default_table: String,
 
-    /// Field to extract for _`org_id` column (stored in data for RLS)
-    /// Default: "_`org_id`", the common-header tenant field
-    /// This field is extracted and stored as _`org_id`, regardless of routing behaviour
+    /// Field the `_org_id` tenant column reads (dot notation for nested),
+    /// the common-header `_org_id` unless set.
     pub org_id_field: Option<String>,
 
-    /// Per-organisation database routing. Only orgs explicitly listed here receive
-    /// their own database — all other orgs always go to `default_db`.
+    /// Tenant for a record whose `org_id_field` is absent, null or empty: the
+    /// deployment's default org, `default` unless set.
+    pub default_org_id: String,
+
+    /// Per-organisation database routing, keyed on the tenant `_org_id` resolves to.
+    /// Only orgs listed here receive their own database, all others go to `default_db`.
     /// Example: [{`org_id`: "acme"}, {`org_id`: "bigcorp", database: "`bigcorp_dfe`"}]
     #[serde(default)]
     pub org_routes: Vec<OrgRoute>,
@@ -124,39 +99,30 @@ pub struct RoutingConfig {
     /// Maps extracted source values to destination table names
     pub source_to_table: HashMap<String, String>,
 
-    /// Legacy: mapping file path
-    pub mapping_file: Option<String>,
-
     /// Topic suffixes to strip when deriving _source from Kafka topic name
     /// Example: topic "`auth_land`" with suffix "_land" → _source = "auth"
     pub topic_suffixes: Vec<String>,
-
-    /// Pre-DFE 2.2 compatibility: prepend `event_category/tags.event_category` to
-    /// `source_fields` and `table_fields` for backwards compatibility with older data formats
-    pub compat_v2_source: bool,
 
     /// DLQ configuration
     pub dlq: DlqConfig,
 }
 
+/// The tenant a record with no org of its own lands in, the same in every DFE component.
+pub const DEFAULT_ORG_ID: &str = "default";
+
 impl Default for RoutingConfig {
     fn default() -> Self {
         Self {
-            // No CEL routing rules by default (field extraction only)
-            rules: vec![],
-            // Default: db_fields empty = shared schema (all to dfe.*)
-            db_fields: vec![],
             table_fields: vec!["_source".to_string()],
             default_db: "dfe".to_string(),
             default_table: "main".to_string(),
             // The common-header _org_id, never a payload field a sender chose
             org_id_field: Some("_org_id".to_string()),
+            default_org_id: DEFAULT_ORG_ID.to_string(),
             // No per-org routing by default (shared schema)
             org_routes: vec![],
             source_to_table: HashMap::new(),
-            mapping_file: None,
             topic_suffixes: vec!["_land".to_string(), "_load".to_string()],
-            compat_v2_source: false,
             dlq: DlqConfig::default(),
         }
     }
@@ -199,61 +165,50 @@ impl Default for ComputedColumnsConfig {
 // GeoIP Configuration
 // ============================================================================
 
-/// `GeoIP` enrichment provider
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum GeoIpProvider {
-    /// DB-IP Lite — free, anonymous download, city-level, CC BY 4.0
-    #[default]
-    DbIpLite,
-    /// `MaxMind` `GeoLite2` — free account required (`account_id` + `license_key`)
-    MaxMindGeoLite2,
-    /// IPLocate.io — free, anonymous, country + ASN only
-    IpLocate,
-    /// `IPinfo` Lite — free token required, country + ASN only
-    IpInfoLite,
-    /// sapics/ip-location-db — free CC0, country + ASN only
-    Sapics,
-    /// User provides MMDB file paths directly
-    Custom,
-}
+pub use scalo::geoip_download::GeoIpProvider;
 
 /// Where the downloaded `GeoIP` databases go by default, and where the deployment
 /// contract mounts a writable volume for them.
 pub(crate) const GEOIP_DATA_DIR: &str = "/var/lib/dfe/geoip";
 
-/// Auto-download settings for `GeoIP` databases
+/// Auto-download settings for `GeoIP` databases: scalo's shape, with the loader's data directory.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct AutoDownloadConfig {
-    /// Enable auto-download on startup if MMDB files missing or stale
+    /// Download a database on startup when the local copy is missing or stale
     pub enabled: bool,
 
-    /// Directory to store downloaded MMDB files
-    pub data_dir: String,
+    /// Directory the downloaded MMDB files are written to
+    pub data_dir: PathBuf,
 
     /// `MaxMind` account ID (required for `max_mind_geo_lite2` provider)
-    pub maxmind_account_id: Option<String>,
+    pub maxmind_account_id: Option<SensitiveString>,
 
     /// `MaxMind` license key (required for `max_mind_geo_lite2` provider)
-    pub maxmind_license_key: Option<String>,
+    pub maxmind_license_key: Option<SensitiveString>,
 
     /// `IPinfo` token (required for `ip_info_lite` provider)
     pub ipinfo_token: Option<SensitiveString>,
 
     /// Max age in days before re-downloading (default: 30)
     pub max_age_days: u32,
+
+    /// Largest download, and largest database decompressed from it, in bytes.
+    /// A transfer past it is abandoned and the local copy kept.
+    pub max_database_bytes: u64,
 }
 
 impl Default for AutoDownloadConfig {
     fn default() -> Self {
+        let upstream = scalo::geoip_download::AutoDownloadConfig::default();
         Self {
-            enabled: true,
-            data_dir: GEOIP_DATA_DIR.into(),
+            enabled: upstream.enabled,
+            data_dir: PathBuf::from(GEOIP_DATA_DIR),
             maxmind_account_id: None,
             maxmind_license_key: None,
             ipinfo_token: None,
-            max_age_days: 30,
+            max_age_days: upstream.max_age_days,
+            max_database_bytes: upstream.max_database_bytes,
         }
     }
 }
@@ -269,16 +224,37 @@ pub struct GeoIpConfig {
     pub provider: GeoIpProvider,
 
     /// Explicit path to city MMDB file (overrides auto-download)
-    pub city_db_path: Option<String>,
+    pub city_db_path: Option<PathBuf>,
 
     /// Explicit path to ASN MMDB file (overrides auto-download)
-    pub asn_db_path: Option<String>,
+    pub asn_db_path: Option<PathBuf>,
 
     /// Auto-download settings
     pub auto_download: AutoDownloadConfig,
 
     /// LRU cache capacity for lookup results
     pub cache_capacity: usize,
+}
+
+impl From<&GeoIpConfig> for scalo::geoip_download::GeoIpConfig {
+    fn from(config: &GeoIpConfig) -> Self {
+        let auto = &config.auto_download;
+        Self {
+            enabled: config.enabled,
+            provider: config.provider,
+            city_db_path: config.city_db_path.clone(),
+            asn_db_path: config.asn_db_path.clone(),
+            auto_download: scalo::geoip_download::AutoDownloadConfig {
+                enabled: auto.enabled,
+                data_dir: auto.data_dir.clone(),
+                maxmind_account_id: auto.maxmind_account_id.clone(),
+                maxmind_license_key: auto.maxmind_license_key.clone(),
+                ipinfo_token: auto.ipinfo_token.clone(),
+                max_age_days: auto.max_age_days,
+                max_database_bytes: auto.max_database_bytes,
+            },
+        }
+    }
 }
 
 impl Default for GeoIpConfig {
@@ -1127,14 +1103,17 @@ impl Default for SchemaConfig {
 /// safe-to-reload settings are applied without process restart.
 ///
 /// **Safe to hot-reload:** buffer thresholds, routing, metadata, field
-/// sanitisation, timestamp DQ, coercion settings.
+/// sanitisation, timestamp DQ.
 ///
 /// **Requires restart:** Kafka brokers/topics/auth, `ClickHouse` hosts/auth,
-/// payload pipeline mode, transport type.
+/// payload pipeline mode, transport type, `routing.dlq`, field mapping,
+/// enrichment.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct HotReloadConfig {
-    /// Enable config file watching (default: false)
+    /// Watch the config file and apply a reloadable change without a restart.
+    /// On unless set false, because the deployment contract's `hot_paths`
+    /// keeps a `routing` edit from rolling the pods.
     pub enabled: bool,
 
     /// Polling interval in seconds for checking file changes
@@ -1147,7 +1126,7 @@ pub struct HotReloadConfig {
 impl Default for HotReloadConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: true,
             poll_interval_secs: 5,
             debounce_ms: 500,
         }
