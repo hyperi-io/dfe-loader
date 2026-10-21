@@ -37,10 +37,10 @@
   children:
   - kind: service
     name: routing
-    description: Topic -> table routing rules + table mapping.
+    description: Table and tenant routing from the common header and the topic.
   - kind: service
     name: geoip
-    description: MaxMind GeoIP enrichment from mounted MMDB readers.
+    description: GeoIP enrichment from MMDB databases provisioned at startup.
   - kind: service
     name: computed_columns
     description: Derived columns computed from record fields.

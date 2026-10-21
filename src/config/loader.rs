@@ -804,8 +804,8 @@ impl Config {
                 .description("Per-record enrichment + shaping pipeline applied before insert.")
                 .maturity("stable")
                 .children(vec![
-                    Capability::service("routing").description("Topic -> table routing rules + table mapping."),
-                    Capability::service("geoip").description("MaxMind GeoIP enrichment from mounted MMDB readers."),
+                    Capability::service("routing").description("Table and tenant routing from the common header and the topic."),
+                    Capability::service("geoip").description("GeoIP enrichment from MMDB databases provisioned at startup."),
                     Capability::service("computed_columns").description("Derived columns computed from record fields."),
                     Capability::service("coercion").description("Type coercion of fields to the destination column types."),
                     Capability::service("field_mapping").description("Field-name mapping / overrides."),
