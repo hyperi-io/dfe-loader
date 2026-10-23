@@ -87,6 +87,10 @@ Full cascade and per-setting behaviour: [docs/CONFIGURATION.md](docs/CONFIGURATI
 
 [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md), [COMMERCIAL.md](COMMERCIAL.md).
 
+## Issues
+
+Open bugs: [this repo](https://github.com/hyperi-io/dfe-loader/issues?q=is%3Aopen+is%3Aissue+type%3ABug+-label%3Abacklog+-label%3Anext-minor) | [whole DFE suite](https://github.com/search?type=issues&q=is%3Aopen+is%3Aissue+type%3ABug+-label%3Abacklog+-label%3Anext-minor+repo%3Ahyperi-io%2Fdfe-infra+repo%3Ahyperi-io%2Fdfe-docker+repo%3Ahyperi-io%2Fdfe-deploy+repo%3Ahyperi-io%2Fdfe-engine+repo%3Ahyperi-io%2Fdfe-loader+repo%3Ahyperi-io%2Fdfe-receiver+repo%3Ahyperi-io%2Fdfe-fetcher+repo%3Ahyperi-io%2Fdfe-archiver+repo%3Ahyperi-io%2Fdfe-transform-vrl+repo%3Ahyperi-io%2Fdfe-transform-vector+repo%3Ahyperi-io%2Fdfe-transform-elastic+repo%3Ahyperi-io%2Fdfe-ui+repo%3Ahyperi-io%2Fdfe-hyperdx+repo%3Ahyperi-io%2Fscalo-rs+repo%3Ahyperi-io%2Fscalo-py+repo%3Ahyperi-io%2Flogreducer+repo%3Ahyperi-io%2Fdfe-schemas+repo%3Ahyperi-io%2Fvector-vrl+repo%3Ahyperi-io%2Fculvert+repo%3Ahyperi-io%2Fclickhouse-dfe+repo%3Ahyperi-io%2Ffactbook-rs)
+
 ## License
 
 BUSL-1.1, licensor HYPERI PTY LIMITED. Each version converts to Apache 2.0 on the third anniversary of its first public distribution. See [LICENSE](LICENSE) and [COMMERCIAL.md](COMMERCIAL.md).
