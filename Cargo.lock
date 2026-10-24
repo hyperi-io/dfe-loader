@@ -1161,9 +1161,9 @@ dependencies = [
 
 [[package]]
 name = "ctutils"
-version = "0.4.3"
+version = "0.4.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "03bb0e1cc970d482d121d9a1744999169b69a07470b3d644a7894e53fcaf4574"
+checksum = "38d28fb6aa7dd680b3ffd1a3e64e115c177bdba63c0ae7f9cd48129ff05c4fa0"
 dependencies = [
  "cmov",
 ]
@@ -4609,9 +4609,9 @@ dependencies = [
 
 [[package]]
 name = "scalo"
-version = "2.14.19"
+version = "2.14.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f2511918aac064c7d1f867e10cc67c613aaa1841a086ae86437ae01d84d51f29"
+checksum = "1142b6ab1b3e4fa1847b2f92eb63ff78d3177d0e380a32c42d18ebcb9256f207"
 dependencies = [
  "aes-gcm",
  "backon",
