@@ -14,7 +14,6 @@ yanked = "warn"
 maximum-db-staleness = "P90D"
 ignore = [
     { id = "RUSTSEC-2024-0436", reason = "paste is a compile-time proc-macro reached only through tikv-jemalloc-ctl, so it has no runtime exposure; drop when that chain moves to pastey, which cel already uses" },
-    { id = "RUSTSEC-2026-0381", reason = "webpki-roots 0.26.11 holds no roots of its own, it re-exports webpki-roots 1.x, which Cargo.lock resolves to 1.0.10 without the emSign root. The 0.26 shim comes from the clickhouse fork (hyperi-io/clickhouse-rs rev 6f9acd96), a normal dependency. Drop when the clickhouse dependency moves to webpki-roots 1.x (dfe-loader #133)" },
 ]
 
 [licenses]
