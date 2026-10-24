@@ -3,6 +3,12 @@
 Rendered by CI and committed back at the end of a release -- do not edit by
 hand. Release notes also appear on the GitHub Releases page, one per tag.
 
+## [1.18.58](https://github.com/hyperi-io/dfe-loader/compare/v1.18.57...v1.18.58) (2026-10-24)
+
+### Bug Fixes
+
+* take scalo 2.14.20 and ctutils 0.4.5 ([#270](https://github.com/hyperi-io/dfe-loader/issues/270)) ([479dbea](https://github.com/hyperi-io/dfe-loader/commit/479dbea6ade66464f2440b2889c2cba924026416))
+
 ## [1.18.57](https://github.com/hyperi-io/dfe-loader/compare/v1.18.56...v1.18.57) (2026-10-21)
 
 ### Bug Fixes
