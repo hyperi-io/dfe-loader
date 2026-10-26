@@ -72,8 +72,8 @@ DURATION="${PGO_WORKLOAD_DURATION_SECS:-300}"
 # services.clickhouse-version), pinned by digest so a rebuilt tag cannot change
 # the server. Digests sit on their own lines: the Renovate regex stops at a colon.
 # renovate: datasource=docker depName=redpandadata/redpanda
-KAFKA_TAG="v26.2.3"
-KAFKA_DIGEST="sha256:9e83cfa99278f30d0133271c26bf670cd69c94ffa6ba0b42830dd0c3bd9dcfd9"
+KAFKA_TAG="v26.2.5"
+KAFKA_DIGEST="sha256:badca2d958f81da675c3055a9ecb6ebb590325582bcf16936148ffd65e96e920"
 # renovate: datasource=docker depName=clickhouse/clickhouse-server
 CH_TAG="26.3.42.3"
 CH_DIGEST="sha256:21d572843e59539c7d100286b6f5a6053c341fe4b33c2d7b74b1ff7cb24c5399"

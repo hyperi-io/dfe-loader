@@ -41,7 +41,7 @@ services:
     # Matches KAFKA_TAG in scripts/pgo-workload.sh and dfe-infra's
     # services.redpanda-version. Two pins of the same broker on different
     # patches makes Renovate track two lines and open a PR per line.
-    image: redpandadata/redpanda:v26.2.3@sha256:9e83cfa99278f30d0133271c26bf670cd69c94ffa6ba0b42830dd0c3bd9dcfd9
+    image: redpandadata/redpanda:v26.2.5@sha256:badca2d958f81da675c3055a9ecb6ebb590325582bcf16936148ffd65e96e920
     container_name: redpanda-dev
     command:
       - redpanda
