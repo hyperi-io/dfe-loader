@@ -190,6 +190,11 @@ impl Unsettled {
             .retain(|off| !off.is_from(topic, partition));
     }
 
+    /// The table of each held batch, once per batch.
+    pub(crate) fn batch_tables(&self) -> impl Iterator<Item = &str> {
+        self.batches.iter().map(|batch| batch.table.as_str())
+    }
+
     /// Rows across every held batch and dead letter.
     pub(crate) fn rows(&self) -> usize {
         self.batches.iter().map(|b| b.rows.len()).sum::<usize>() + self.dead_letters.len()

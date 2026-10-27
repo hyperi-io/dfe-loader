@@ -21,7 +21,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use dfe_loader::clickhouse::InsertFormat;
-use dfe_loader::config::Config;
+use dfe_loader::config::{Config, SharedConfig};
 use dfe_loader::pipeline::Orchestrator;
 use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::producer::{FutureProducer, FutureRecord};
@@ -839,6 +839,107 @@ async fn a_batch_held_for_a_dropped_table_follows_new_records_to_the_default_tab
         followed.contains(&1),
         "the batch held for the dropped table never reached the default table, so its \
          partition's commit stays frozen until a restart"
+    );
+    assert!(
+        after >= Some(last + 1),
+        "the watermark never moved past the held batch once it landed: {after:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_batch_held_for_a_removed_source_follows_it_to_the_default_table() {
+    let infra = TestInfrastructure::new(test_name!(), true, true).await;
+    let clickhouse = clickhouse_address(&infra).await;
+    let bootstrap = kafka_bootstrap(&infra).await;
+    let direct = query_client(&clickhouse);
+
+    let landing = unique_table_name("kafka_removed_landing");
+    let removed = unique_table_name("kafka_removed_source");
+    for table in [&landing, &removed] {
+        direct
+            .execute(&format!(
+                "CREATE TABLE default.{table} (id UInt64) ENGINE = MergeTree() ORDER BY id"
+            ))
+            .await
+            .expect("create table");
+    }
+    let topic = format!("removed-{landing}");
+    let group = format!("dfe-{landing}");
+    ensure_topic(&bootstrap, &topic).await;
+
+    // The source is routed by name, as dfe-engine routes every source it
+    // defines, and its schema stays cached for the whole test.
+    let mut config = kafka_loader(&bootstrap, &topic, &group, clickhouse.clone(), &landing);
+    config
+        .routing
+        .source_to_table
+        .insert(removed.clone(), removed.clone());
+    let shared = SharedConfig::new(config.clone());
+    let mut orchestrator = Orchestrator::new(config.clone()).with_shared_config(shared.clone());
+    let shutdown = orchestrator.shutdown_token();
+    let loader = tokio::spawn(async move {
+        if let Err(error) = orchestrator.run().await {
+            tracing::error!(%error, "the loader stopped with an error");
+        }
+    });
+    let producer = make_producer(&bootstrap);
+    wait_for_loader(&producer, &topic, &clickhouse, &landing).await;
+
+    produce(
+        &producer,
+        &topic,
+        &format!(r#"{{"_source":"{removed}","id":100}}"#),
+    )
+    .await;
+    let warmed = wait_landed(&clickhouse, &removed, &BTreeSet::from([100]), BUDGET).await;
+
+    // The source is removed with a record in flight: its table goes first, so
+    // the record's insert fails and is held, then the routing drops it.
+    direct
+        .execute(&format!("DROP TABLE default.{removed} SYNC"))
+        .await
+        .expect("drop table");
+    let held = produce(
+        &producer,
+        &topic,
+        &format!(r#"{{"_source":"{removed}","id":1}}"#),
+    )
+    .await;
+    produce(&producer, &topic, r#"{"id":2}"#).await;
+    let later = wait_landed(&clickhouse, &landing, &BTreeSet::from([2]), BUDGET).await;
+    let while_held = highest_committed_over_watch(&bootstrap, &group, &topic).await;
+
+    config.routing.source_to_table.clear();
+    shared.update(config);
+    let followed = wait_landed(&clickhouse, &landing, &BTreeSet::from([1]), RECOVERY).await;
+    let last = produce(&producer, &topic, r#"{"id":3}"#).await;
+    let after = wait_committed(&bootstrap, &group, &topic, last + 1).await;
+
+    shutdown.cancel();
+    let _ = tokio::time::timeout(Duration::from_secs(30), loader).await;
+    for table in [&landing, &removed] {
+        let _ = direct
+            .execute(&format!("DROP TABLE IF EXISTS default.{table}"))
+            .await;
+    }
+
+    assert!(
+        warmed.contains(&100),
+        "the record that caches the source's schema never landed"
+    );
+    assert!(
+        later.contains(&2),
+        "the record after the held batch never landed"
+    );
+    assert!(
+        while_held.is_some_and(|next| next <= held),
+        "the group committed {while_held:?} while the batch holding offset {held} had not \
+         landed: a crash then would have lost it"
+    );
+    assert!(
+        followed.contains(&1),
+        "the batch held for the removed source never reached the default table, so its \
+         partition's commit stays frozen"
     );
     assert!(
         after >= Some(last + 1),

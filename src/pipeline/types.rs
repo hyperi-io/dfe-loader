@@ -53,6 +53,9 @@ pub(crate) struct AbsentTables {
     rechecking: FxHashMap<String, Duration>,
     /// Tables the live routing names.
     live: FxHashSet<String>,
+    /// Tables the live routing named until a reload removed them: their source
+    /// is gone, so a batch held for one is not waiting on a table to appear.
+    retired: FxHashSet<String>,
     ttl: Duration,
     live_first: Duration,
     live_cap: Duration,
@@ -89,6 +92,7 @@ impl AbsentTables {
             entries: FxHashMap::default(),
             rechecking: FxHashMap::default(),
             live: FxHashSet::default(),
+            retired: FxHashSet::default(),
             ttl,
             live_first: ttl,
             live_cap: ttl,
@@ -125,8 +129,18 @@ impl AbsentTables {
     /// A cleared table is remembered as being re-resolved, so a table that is
     /// still absent is not announced a second time, and its next mark starts
     /// at the short wait.
+    ///
+    /// A table the previous routing named and this one does not is remembered
+    /// as retired until a later reload names it again.
     pub fn set_live(&mut self, tables: impl IntoIterator<Item = String>) {
-        self.live = tables.into_iter().collect();
+        let live: FxHashSet<String> = tables.into_iter().collect();
+        let dropped: Vec<String> = self.live.difference(&live).cloned().collect();
+        self.retired.retain(|t| !live.contains(t));
+        if self.retired.len() + dropped.len() > self.capacity {
+            self.retired.clear();
+        }
+        self.retired.extend(dropped);
+        self.live = live;
         let cleared: Vec<String> = self
             .entries
             .keys()
@@ -140,6 +154,11 @@ impl AbsentTables {
             self.entries.remove(&t);
             self.rechecking.insert(t, Duration::ZERO);
         }
+    }
+
+    /// Whether a routing reload removed `table`, and none since has named it.
+    pub fn is_retired(&self, table: &str) -> bool {
+        self.retired.contains(table)
     }
 
     /// How long to trust a fresh "does not exist" for `table`.
@@ -520,5 +539,53 @@ mod tests {
             vec!["dfe.acme".to_string()],
             "short wait after the reload, not the 60 s it held before"
         );
+    }
+
+    #[test]
+    fn a_table_a_reload_stops_naming_is_retired_until_one_names_it_again() {
+        // (routing reloads in order, table, retired after the last?)
+        let cases: [(&[&[&str]], &str, bool); 6] = [
+            (&[&["dfe.a", "dfe.b"], &["dfe.a"]], "dfe.b", true),
+            (&[&["dfe.a", "dfe.b"], &["dfe.a"]], "dfe.a", false),
+            (
+                &[&["dfe.a", "dfe.b"], &["dfe.a"], &["dfe.a", "dfe.b"]],
+                "dfe.b",
+                false,
+            ),
+            (
+                &[&["dfe.a", "dfe.b"], &["dfe.a"], &["dfe.a", "dfe.c"]],
+                "dfe.b",
+                true,
+            ),
+            // Never named: a payload-routed table is not retired.
+            (&[&["dfe.a"], &[]], "dfe.x", false),
+            (&[&["dfe.a"]], "dfe.a", false),
+        ];
+        for (reloads, table, retired) in cases {
+            let mut absent = live_absent(60, 1, 30);
+            for routing in reloads {
+                absent.set_live(routing.iter().map(|t| (*t).to_string()));
+            }
+            assert_eq!(
+                absent.is_retired(table),
+                retired,
+                "{table} after {reloads:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_retired_set_is_bounded_like_the_entries() {
+        let mut absent = AbsentTables::new(Duration::from_secs(60), 4);
+        for n in 0..10 {
+            absent.set_live([format!("dfe.t{n}")]);
+            absent.set_live(std::iter::empty());
+        }
+        assert!(
+            absent.retired.len() <= 4,
+            "{} retired",
+            absent.retired.len()
+        );
+        assert!(absent.is_retired("dfe.t9"), "the latest removal is kept");
     }
 }

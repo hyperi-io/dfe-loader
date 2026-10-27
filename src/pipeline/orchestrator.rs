@@ -629,6 +629,7 @@ impl Orchestrator {
                         stages = new_stages;
                         let to_warm =
                             tables_to_warm(&new_config.routing, &mut absent_tables, &schema_cache);
+                        self.recheck_retired_held(&absent_tables, &stages.default_table, &resolve_tx);
                         if !to_warm.is_empty() {
                             pre_warm.abort();
                             pre_warm = tokio::spawn(pre_warm_schemas(
@@ -700,6 +701,7 @@ impl Orchestrator {
                     // Read after the take, so it names only what stayed behind.
                     let still_held = unplaced_offsets(&buffer_manager, &pending_schema_buffer);
                     self.flush_or_settle(&inserter, &transport, dlq.as_ref(), batches, still_held, &mut buffer_manager, &mut pending_schema_buffer).await;
+                    self.recheck_retired_held(&absent_tables, &stages.default_table, &resolve_tx);
                 }
 
                 // Held work goes back to ClickHouse or the DLQ on the backoff schedule.
@@ -1951,6 +1953,44 @@ impl Orchestrator {
             batch.table = default_table.into();
         }
         held
+    }
+
+    /// Tables of held batches whose source a routing reload removed and which
+    /// `ClickHouse` has not yet reported absent.
+    ///
+    /// Such a table is not expected to appear, so it is asked about at once.
+    /// A "does not exist" answer marks it absent, and the next attempt takes
+    /// the batch to the default table (#280). A table the live routing still
+    /// names, or one routed from the payload, keeps waiting for its table.
+    fn retired_held_tables(
+        &self,
+        absent: &super::types::AbsentTables,
+        default_table: &str,
+    ) -> Vec<String> {
+        let mut tables: Vec<String> = self
+            .unsettled
+            .batch_tables()
+            .filter(|table| {
+                *table != default_table && absent.is_retired(table) && !absent.contains(table)
+            })
+            .map(str::to_string)
+            .collect();
+        tables.sort_unstable();
+        tables.dedup();
+        tables
+    }
+
+    /// Hand each table [`Self::retired_held_tables`] names to the resolver.
+    fn recheck_retired_held(
+        &self,
+        absent: &super::types::AbsentTables,
+        default_table: &str,
+        resolve_tx: &mpsc::Sender<String>,
+    ) {
+        for table in self.retired_held_tables(absent, default_table) {
+            debug!(table = %table, "Source of a held batch was removed, checking its table still exists");
+            let _ = resolve_tx.try_send(table);
+        }
     }
 
     /// Keep the commit below each rejected row with no bytes for the DLQ where
@@ -4544,6 +4584,107 @@ mod tests {
             ],
             "only the batch for the absent table moves, with its rows and offsets"
         );
+    }
+
+    #[test]
+    fn a_batch_held_for_a_removed_source_leaves_the_hold_on_the_next_attempt() {
+        // A batch for dfe.gone is held after its insert failed. A routing reload
+        // lands, ClickHouse answers for each table the loader asks about, and
+        // the hold is taken for the next attempt (#280).
+        // (named before, named after, ClickHouse has the table,
+        //  asked?, table the batch is taken for)
+        let cases = [
+            // Source removed and its table dropped: the batch follows new
+            // records to the default table and its offsets with it.
+            (&["gone"][..], &[][..], false, true, "dfe.main"),
+            (
+                &["gone", "kept"][..],
+                &["kept"][..],
+                false,
+                true,
+                "dfe.main",
+            ),
+            // Still routed, so its table is expected back: hold and retry.
+            (&["gone"][..], &["gone"][..], false, false, "dfe.gone"),
+            // Source removed but the table is there: it lands where it was routed.
+            (&["gone"][..], &[][..], true, true, "dfe.gone"),
+            // Routed from the payload, never by name: hold and retry.
+            (&[][..], &[][..], false, false, "dfe.gone"),
+        ];
+        for (before, after, exists, want_asked, want_table) in cases {
+            let label = format!("named {before:?} then {after:?}, table exists: {exists}");
+            let mut orchestrator = Orchestrator::new(Config::default());
+            let cache = SchemaCache::new(300);
+            let mut absent =
+                super::super::types::AbsentTables::new(ABSENT_TABLE_TTL, ABSENT_TABLE_CAPACITY)
+                    .with_live_recheck(LIVE_ABSENT_RECHECK_FIRST, LIVE_ABSENT_RECHECK_CAP);
+            absent.set_live(collect_pre_warm_tables(&routing_naming(before)));
+            let mut buffers = staged_buffers();
+            for off in 100..105 {
+                buffered_row(&mut buffers, "dfe.gone", 0, off);
+            }
+            for batch in buffers.get_ready_for_flush() {
+                orchestrator.unsettled.hold(batch);
+            }
+
+            let _ = tables_to_warm(&routing_naming(after), &mut absent, &cache);
+            let asked = orchestrator.retired_held_tables(&absent, "dfe.main");
+            for table in &asked {
+                if exists {
+                    absent.remove(table);
+                } else {
+                    record_table_absent(&mut absent, &cache, table, std::time::Instant::now());
+                }
+            }
+            let held = orchestrator.take_unsettled_for(&absent, "dfe.main");
+
+            assert_eq!(!asked.is_empty(), want_asked, "{label}: asked {asked:?}");
+            let taken: Vec<(String, Vec<i64>)> = held
+                .batches
+                .iter()
+                .map(|b| {
+                    let offsets = b.offsets.iter().map(|o| o.offset).collect();
+                    (b.table.to_string(), offsets)
+                })
+                .collect();
+            assert_eq!(
+                taken,
+                vec![(want_table.to_string(), (100..105).collect())],
+                "{label}: the batch keeps every row and offset, so landing it commits past them"
+            );
+        }
+    }
+
+    #[test]
+    fn a_table_already_known_absent_or_the_default_is_not_asked_again() {
+        // (held table, marked absent, asked?)
+        let cases = [
+            ("dfe.gone", false, true),
+            ("dfe.gone", true, false),
+            ("dfe.main", false, false),
+        ];
+        for (table, marked, want_asked) in cases {
+            let mut orchestrator = Orchestrator::new(Config::default());
+            let cache = SchemaCache::new(300);
+            let mut absent =
+                super::super::types::AbsentTables::new(ABSENT_TABLE_TTL, ABSENT_TABLE_CAPACITY);
+            absent.set_live(collect_pre_warm_tables(&routing_naming(&["gone"])));
+            absent.set_live(collect_pre_warm_tables(&routing_naming(&[])));
+            if marked {
+                record_table_absent(&mut absent, &cache, table, std::time::Instant::now());
+            }
+            let mut buffers = staged_buffers();
+            for off in 100..105 {
+                buffered_row(&mut buffers, table, 0, off);
+            }
+            for batch in buffers.get_ready_for_flush() {
+                orchestrator.unsettled.hold(batch);
+            }
+
+            let asked = orchestrator.retired_held_tables(&absent, "dfe.main");
+
+            assert_eq!(!asked.is_empty(), want_asked, "{table}, marked {marked}");
+        }
     }
 
     fn inserter_for(config: &Config) -> Inserter {
