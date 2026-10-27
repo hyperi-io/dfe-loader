@@ -58,8 +58,7 @@ data to guide compiler optimisations. See
 [cargo-pgo](https://github.com/Kobzol/cargo-pgo).
 
 > **CI:** hyperi-ci runs this automatically on the `release` channel when
-> configured. See `TODO.md` -> *Rust Release-Track Optimisation* for the
-> opt-in steps. The commands below are for **local profiling only**.
+> configured. The commands below are for **local profiling only**.
 
 #### Local setup (manual)
 
@@ -264,8 +263,7 @@ cargo flamegraph --bin dfe-loader -- --config config.yaml
 ## Recommended production build
 
 **For production releases: let hyperi-ci do this.** Push to a `release`-channel
-project and CI applies the full optimisation pipeline automatically. See
-`TODO.md` -> *Rust Release-Track Optimisation* for opt-in steps.
+project and CI applies the full optimisation pipeline automatically.
 
 **For local development / one-off profiling:**
 
