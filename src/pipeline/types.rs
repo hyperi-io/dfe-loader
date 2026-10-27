@@ -37,18 +37,36 @@ pub struct ProcessedMessage {
 /// so a loader identity missing a GRANT also reads as "table absent". Each
 /// entry expires and is re-resolved, which is what lets a table that appears
 /// start receiving its own data without a pod restart.
+///
+/// A table the live routing names is expected to appear: the engine pushes
+/// routing when a source is created and deploys its table seconds later. Such
+/// a table is re-resolved on a short, doubling wait up to `live_cap`, so it
+/// starts receiving its data within seconds. Any other table keeps the full
+/// `ttl`.
 pub(crate) struct AbsentTables {
-    entries: FxHashMap<String, Instant>,
-    /// Tables whose entry aged out and are being re-resolved. The same "does
-    /// not exist" coming back is the answer already held, not news, so without
-    /// this memory a dead source re-announces itself once a TTL forever (#129).
-    rechecking: FxHashSet<String>,
+    entries: FxHashMap<String, Held>,
+    /// Tables whose entry aged out and are being re-resolved, with the wait
+    /// their last entry carried. The same "does not exist" coming back is the
+    /// answer already held, not news, so without this memory a dead source
+    /// re-announces itself once a TTL forever (#129). The wait seeds the
+    /// next entry's backoff.
+    rechecking: FxHashMap<String, Duration>,
+    /// Tables the live routing names.
+    live: FxHashSet<String>,
     ttl: Duration,
+    live_first: Duration,
+    live_cap: Duration,
     /// Upper bound on distinct entries. The routed table name comes from a
     /// payload field with no allowlist, so untrusted input would otherwise
     /// grow this map -- and the per-table metric label set with it -- without
     /// limit.
     capacity: usize,
+}
+
+/// One absent table: when it was marked and how long that answer is trusted.
+struct Held {
+    marked: Instant,
+    wait: Duration,
 }
 
 /// What [`AbsentTables::insert`] did with a table.
@@ -65,13 +83,26 @@ pub(crate) enum AbsentOutcome {
 }
 
 impl AbsentTables {
+    /// Every table waits `ttl` until [`Self::with_live_recheck`] says otherwise.
     pub fn new(ttl: Duration, capacity: usize) -> Self {
         Self {
             entries: FxHashMap::default(),
-            rechecking: FxHashSet::default(),
+            rechecking: FxHashMap::default(),
+            live: FxHashSet::default(),
             ttl,
+            live_first: ttl,
+            live_cap: ttl,
             capacity,
         }
+    }
+
+    /// Re-resolve a table the live routing names after `first`, doubling the
+    /// wait each time it is still absent, up to `cap` (and never past `ttl`).
+    #[must_use]
+    pub fn with_live_recheck(mut self, first: Duration, cap: Duration) -> Self {
+        self.live_cap = cap.min(self.ttl);
+        self.live_first = first.min(self.live_cap);
+        self
     }
 
     pub fn is_empty(&self) -> bool {
@@ -86,17 +117,55 @@ impl AbsentTables {
         self.entries.contains_key(table)
     }
 
+    /// Replace the set of tables the live routing names, and drop the absent
+    /// mark of each one. A routing reload naming a table says it is meant to
+    /// exist, and the mark may predate the table being created. The caller
+    /// resolves the cleared tables again.
+    ///
+    /// A cleared table is remembered as being re-resolved, so a table that is
+    /// still absent is not announced a second time, and its next mark starts
+    /// at the short wait.
+    pub fn set_live(&mut self, tables: impl IntoIterator<Item = String>) {
+        self.live = tables.into_iter().collect();
+        let cleared: Vec<String> = self
+            .entries
+            .keys()
+            .filter(|t| self.live.contains(*t))
+            .cloned()
+            .collect();
+        if !cleared.is_empty() && self.rechecking.len() >= self.capacity {
+            self.rechecking.clear();
+        }
+        for t in cleared {
+            self.entries.remove(&t);
+            self.rechecking.insert(t, Duration::ZERO);
+        }
+    }
+
+    /// How long to trust a fresh "does not exist" for `table`.
+    fn wait_for(&self, table: &str) -> Duration {
+        if !self.live.contains(table) {
+            return self.ttl;
+        }
+        match self.rechecking.get(table) {
+            Some(prev) => prev.saturating_mul(2).clamp(self.live_first, self.live_cap),
+            None => self.live_first,
+        }
+    }
+
     /// Mark a table absent, or refresh an answer already held.
     pub fn insert(&mut self, table: &str, now: Instant) -> AbsentOutcome {
-        if let Some(slot) = self.entries.get_mut(table) {
-            *slot = now;
+        if let Some(held) = self.entries.get_mut(table) {
+            held.marked = now;
             return AbsentOutcome::Refreshed;
         }
         if self.entries.len() >= self.capacity {
             return AbsentOutcome::Rejected;
         }
-        self.entries.insert(table.to_string(), now);
-        if self.rechecking.remove(table) {
+        let wait = self.wait_for(table);
+        self.entries
+            .insert(table.to_string(), Held { marked: now, wait });
+        if self.rechecking.remove(table).is_some() {
             AbsentOutcome::Refreshed
         } else {
             AbsentOutcome::Recorded
@@ -109,15 +178,14 @@ impl AbsentTables {
         self.rechecking.remove(table);
     }
 
-    /// Remove and return the entries whose TTL has passed, remembering each as
+    /// Remove and return the entries whose wait has passed, remembering each as
     /// being re-resolved. The caller re-requests resolution for each.
     pub fn expired(&mut self, now: Instant) -> Vec<String> {
-        let ttl = self.ttl;
-        let due: Vec<String> = self
+        let due: Vec<(String, Duration)> = self
             .entries
             .iter()
-            .filter(|&(_, &marked)| now.saturating_duration_since(marked) >= ttl)
-            .map(|(t, _)| t.clone())
+            .filter(|&(_, held)| now.saturating_duration_since(held.marked) >= held.wait)
+            .map(|(t, held)| (t.clone(), held.wait))
             .collect();
         // A table whose re-resolution never answers stays here, so the recheck
         // memory is dropped wholesale at the cap the entries are bounded by.
@@ -126,11 +194,13 @@ impl AbsentTables {
         if !due.is_empty() && self.rechecking.len() >= self.capacity {
             self.rechecking.clear();
         }
-        for t in &due {
-            self.entries.remove(t);
-            self.rechecking.insert(t.clone());
+        let mut tables = Vec::with_capacity(due.len());
+        for (t, wait) in due {
+            self.entries.remove(&t);
+            self.rechecking.insert(t.clone(), wait);
+            tables.push(t);
         }
-        due
+        tables
     }
 }
 
@@ -308,5 +378,147 @@ mod tests {
         assert!(!absent.contains("dfe.c"));
         // A table already tracked is still refreshable at the cap.
         assert_eq!(absent.insert("dfe.a", now), AbsentOutcome::Refreshed);
+    }
+
+    fn live_absent(ttl_secs: u64, first_secs: u64, cap_secs: u64) -> AbsentTables {
+        AbsentTables::new(Duration::from_secs(ttl_secs), 8).with_live_recheck(
+            Duration::from_secs(first_secs),
+            Duration::from_secs(cap_secs),
+        )
+    }
+
+    #[test]
+    fn a_table_the_routing_names_is_rechecked_on_a_short_doubling_wait() {
+        // The engine pushes routing at source create and deploys the table a
+        // couple of seconds later. Trusting the first "absent" for the full
+        // TTL sent that minute of rows to the default table (#275).
+        // (live?, still-absent re-marks, expected waits in seconds)
+        let cases: [(bool, usize, &[u64]); 3] = [
+            (true, 6, &[1, 2, 4, 8, 8, 8]),
+            (false, 3, &[60, 60, 60]),
+            (true, 1, &[1]),
+        ];
+        for (live, marks, waits) in cases {
+            let mut absent = live_absent(60, 1, 8);
+            if live {
+                absent.set_live(["dfe.acme".to_string()]);
+            }
+            let mut now = Instant::now();
+            for (n, want) in waits.iter().take(marks).enumerate() {
+                absent.insert("dfe.acme", now);
+                let wait = Duration::from_secs(*want);
+                assert_eq!(
+                    absent.expired(now + wait.saturating_sub(Duration::from_millis(1))),
+                    Vec::<String>::new(),
+                    "live={live} mark {n}: still trusted just before {want}s"
+                );
+                assert_eq!(
+                    absent.expired(now + wait),
+                    vec!["dfe.acme".to_string()],
+                    "live={live} mark {n}: re-resolved at {want}s"
+                );
+                now += wait;
+            }
+        }
+    }
+
+    #[test]
+    fn a_table_that_appears_after_the_mark_is_picked_up_within_the_short_wait() {
+        // Marked absent at t0, created 2 s later. The recheck at 1 s finds
+        // nothing, the one at 3 s finds it. The first-ever mark was 60 s.
+        let mut absent = live_absent(60, 1, 30);
+        absent.set_live(["dfe.acme".to_string()]);
+        let t0 = Instant::now();
+
+        absent.insert("dfe.acme", t0);
+        assert_eq!(
+            absent.expired(t0 + Duration::from_secs(1)),
+            vec!["dfe.acme".to_string()]
+        );
+        assert_eq!(
+            absent.insert("dfe.acme", t0 + Duration::from_secs(1)),
+            AbsentOutcome::Refreshed,
+            "the same answer is not announced again"
+        );
+        assert_eq!(
+            absent.expired(t0 + Duration::from_secs(3)),
+            vec!["dfe.acme".to_string()]
+        );
+        // ClickHouse now answers with a schema: the orchestrator removes the
+        // table, and nothing is left to divert or re-check.
+        absent.remove("dfe.acme");
+        assert!(absent.is_empty());
+        assert_eq!(
+            absent.expired(t0 + Duration::from_secs(600)),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn a_table_still_absent_is_looked_up_once_per_wait_not_per_message() {
+        // Fresh answers are held: between rechecks `expired` hands out
+        // nothing, however many ticks (batches) pass, so the lookup count
+        // is bounded by the schedule.
+        let mut absent = live_absent(60, 1, 30);
+        absent.set_live(["dfe.gone".to_string()]);
+        let t0 = Instant::now();
+        let mut now = t0;
+        absent.insert("dfe.gone", now);
+        let mut lookups = 0;
+        while now < t0 + Duration::from_secs(120) {
+            now += Duration::from_millis(10);
+            if !absent.expired(now).is_empty() {
+                lookups += 1;
+                absent.insert("dfe.gone", now);
+            }
+        }
+        // 1, 2, 4, 8, 16, 30, 30, 30 ... over 120 s.
+        assert!(
+            (6..=10).contains(&lookups),
+            "12000 ticks made {lookups} lookups"
+        );
+    }
+
+    #[test]
+    fn a_reload_naming_a_marked_table_clears_the_mark() {
+        // (marked, named by the reload, mark survives?)
+        let cases = [
+            ("dfe.acme", "dfe.acme", false),
+            ("dfe.acme", "dfe.other", true),
+        ];
+        for (marked, named, survives) in cases {
+            let mut absent = live_absent(60, 1, 30);
+            absent.insert(marked, Instant::now());
+            absent.set_live([named.to_string()]);
+            assert_eq!(
+                absent.contains(marked),
+                survives,
+                "marked {marked}, reload names {named}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_cleared_table_that_is_still_absent_restarts_on_the_short_wait_without_a_second_warning() {
+        let mut absent = live_absent(60, 1, 30);
+        let t0 = Instant::now();
+        // Marked as an unrouted name: the full TTL.
+        absent.insert("dfe.acme", t0);
+        assert_eq!(
+            absent.expired(t0 + Duration::from_secs(1)),
+            Vec::<String>::new()
+        );
+
+        absent.set_live(["dfe.acme".to_string()]);
+        assert!(!absent.contains("dfe.acme"));
+        assert_eq!(
+            absent.insert("dfe.acme", t0 + Duration::from_secs(2)),
+            AbsentOutcome::Refreshed
+        );
+        assert_eq!(
+            absent.expired(t0 + Duration::from_secs(3)),
+            vec!["dfe.acme".to_string()],
+            "short wait after the reload, not the 60 s it held before"
+        );
     }
 }
