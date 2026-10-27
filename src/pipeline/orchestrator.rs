@@ -478,7 +478,9 @@ impl Orchestrator {
         // Entries expire so a table created after its source started producing
         // begins receiving its own data without a pod restart.
         let mut absent_tables =
-            super::types::AbsentTables::new(ABSENT_TABLE_TTL, ABSENT_TABLE_CAPACITY);
+            super::types::AbsentTables::new(ABSENT_TABLE_TTL, ABSENT_TABLE_CAPACITY)
+                .with_live_recheck(LIVE_ABSENT_RECHECK_FIRST, LIVE_ABSENT_RECHECK_CAP);
+        absent_tables.set_live(collect_pre_warm_tables(&self.config.routing));
 
         // Per-table capture overrides (_json/_raw disable via config + DDL tags)
         let mut capture_overrides = CaptureOverrides::new(&self.config.metadata);
@@ -625,12 +627,8 @@ impl Orchestrator {
                             absent_tables.remove(&new_stages.default_table);
                         }
                         stages = new_stages;
-                        let to_warm: Vec<String> = collect_pre_warm_tables(&new_config.routing)
-                            .into_iter()
-                            .filter(|table| {
-                                schema_cache.needs_refresh(table) && !absent_tables.contains(table)
-                            })
-                            .collect();
+                        let to_warm =
+                            tables_to_warm(&new_config.routing, &mut absent_tables, &schema_cache);
                         if !to_warm.is_empty() {
                             pre_warm.abort();
                             pre_warm = tokio::spawn(pre_warm_schemas(
@@ -2287,6 +2285,24 @@ pub(crate) struct PreWarmReport {
     pub rounds: usize,
 }
 
+/// The tables a routing reload resolves again.
+///
+/// The reload names the tables the routing now expects to exist, so a mark
+/// recording one as absent is dropped: the table may have been created since.
+/// What is left absent after that is re-resolved on the short live schedule.
+fn tables_to_warm(
+    routing: &crate::config::RoutingConfig,
+    absent_tables: &mut super::types::AbsentTables,
+    schema_cache: &SchemaCache,
+) -> Vec<String> {
+    let named = collect_pre_warm_tables(routing);
+    absent_tables.set_live(named.iter().cloned());
+    named
+        .into_iter()
+        .filter(|table| schema_cache.needs_refresh(table) && !absent_tables.contains(table))
+        .collect()
+}
+
 /// Collect the config-known tables to pre-warm (default table +
 /// source_to_table targets), deduplicated.
 fn collect_pre_warm_tables(routing: &crate::config::RoutingConfig) -> Vec<String> {
@@ -2508,6 +2524,15 @@ const PENDING_REREQUEST_INTERVAL: Duration = Duration::from_secs(2);
 /// is resolved again. Bounds how long a source keeps landing in the default
 /// table after its own table is created.
 const ABSENT_TABLE_TTL: Duration = Duration::from_secs(60);
+
+/// First wait before a table the live routing names is resolved again after
+/// `ClickHouse` said it does not exist. The engine pushes routing when a source
+/// is created and deploys the table a couple of seconds later.
+const LIVE_ABSENT_RECHECK_FIRST: Duration = Duration::from_secs(1);
+
+/// The wait doubles from [`LIVE_ABSENT_RECHECK_FIRST`] up to this, so a routed
+/// table that never appears costs one lookup per interval, not one per batch.
+const LIVE_ABSENT_RECHECK_CAP: Duration = Duration::from_secs(30);
 
 /// Upper bound on tables tracked as absent. The routed table name comes from a
 /// payload field with no allowlist, so this is what stops untrusted input
@@ -4601,6 +4626,95 @@ mod tests {
             vec!["dfe.kept".to_string()],
             "the dropped table stays on the 60 s refresh for the life of the process"
         );
+    }
+
+    fn routing_naming(tables: &[&str]) -> crate::config::RoutingConfig {
+        let mut routing = crate::config::RoutingConfig::default();
+        for (n, table) in tables.iter().enumerate() {
+            routing
+                .source_to_table
+                .insert(format!("source{n}"), (*table).to_string());
+        }
+        routing
+    }
+
+    #[test]
+    fn a_routing_reload_clears_the_absent_mark_of_a_table_it_names() {
+        // The reload that adds a source arrives before its table exists, and a
+        // later reload finds it. Either way the named table is resolved again
+        // rather than trusted absent for the rest of the TTL (#275).
+        // (marked absent, routing names, resolved again?)
+        let cases = [
+            ("acme", &["acme"][..], true),
+            ("acme", &["other"][..], false),
+            ("acme", &[][..], false),
+        ];
+        for (marked, named, resolved_again) in cases {
+            let cache = SchemaCache::new(300);
+            let mut absent =
+                super::super::types::AbsentTables::new(ABSENT_TABLE_TTL, ABSENT_TABLE_CAPACITY)
+                    .with_live_recheck(LIVE_ABSENT_RECHECK_FIRST, LIVE_ABSENT_RECHECK_CAP);
+            let marked = format!("dfe.{marked}");
+            record_table_absent(&mut absent, &cache, &marked, std::time::Instant::now());
+            let routing = routing_naming(named);
+            let named: Vec<String> = named.iter().map(|t| format!("dfe.{t}")).collect();
+
+            let warm = tables_to_warm(&routing, &mut absent, &cache);
+
+            assert_eq!(
+                warm.contains(&marked),
+                resolved_again,
+                "marked {marked}, routing names {named:?}"
+            );
+            assert_eq!(
+                absent.contains(&marked),
+                !resolved_again,
+                "marked {marked}, routing names {named:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_table_created_after_the_absent_mark_is_diverted_for_seconds_not_a_minute() {
+        // Routing names the table at t0 and ClickHouse has no such table yet.
+        let cache = SchemaCache::new(300);
+        let mut absent =
+            super::super::types::AbsentTables::new(ABSENT_TABLE_TTL, ABSENT_TABLE_CAPACITY)
+                .with_live_recheck(LIVE_ABSENT_RECHECK_FIRST, LIVE_ABSENT_RECHECK_CAP);
+        let routing = routing_naming(&["acme"]);
+        let t0 = std::time::Instant::now();
+        absent.set_live(collect_pre_warm_tables(&routing));
+        record_table_absent(&mut absent, &cache, "dfe.acme", t0);
+        assert!(
+            absent.contains("dfe.acme"),
+            "rows divert while it is absent"
+        );
+
+        let due = absent.expired(t0 + LIVE_ABSENT_RECHECK_FIRST);
+        assert_eq!(due, vec!["dfe.acme".to_string()]);
+        assert!(
+            LIVE_ABSENT_RECHECK_FIRST * 4 < ABSENT_TABLE_TTL,
+            "the first recheck is nowhere near the full TTL"
+        );
+    }
+
+    #[test]
+    fn a_genuinely_absent_table_still_falls_back_and_is_not_looked_up_per_row() {
+        let cache = SchemaCache::new(300);
+        let mut absent =
+            super::super::types::AbsentTables::new(ABSENT_TABLE_TTL, ABSENT_TABLE_CAPACITY)
+                .with_live_recheck(LIVE_ABSENT_RECHECK_FIRST, LIVE_ABSENT_RECHECK_CAP);
+        absent.set_live(collect_pre_warm_tables(&routing_naming(&["gone"])));
+        let t0 = std::time::Instant::now();
+        record_table_absent(&mut absent, &cache, "dfe.gone", t0);
+
+        // A thousand batches inside the first wait: every one still diverts and
+        // none asks ClickHouse.
+        for tick in 1..=1000u32 {
+            let now = t0 + LIVE_ABSENT_RECHECK_FIRST * tick / 1001;
+            assert!(absent.contains("dfe.gone"), "batch {tick} falls back");
+            assert!(absent.expired(now).is_empty(), "batch {tick} made a lookup");
+        }
     }
 
     #[test]
