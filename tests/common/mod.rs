@@ -11,8 +11,6 @@
 pub mod containers;
 pub mod metrics;
 pub mod test_logging;
-#[cfg(feature = "testcontainers")]
-pub mod tls_broker;
 
 use std::env;
 use std::net::ToSocketAddrs;

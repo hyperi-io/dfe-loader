@@ -24,20 +24,6 @@ mod testcontainers_impl {
     // are multi-arch, so neither pays that cost.
     use testcontainers_modules::kafka::apache::{KAFKA_PORT, Kafka as KafkaImage};
 
-    /// Kafka to test against. Pinned rather than left to the module default,
-    /// which is 3.8.0 -- behind the 4.x line that dropped ZooKeeper for KRaft.
-    ///
-    /// Pinned in our own source because a tag chosen by a library default is
-    /// invisible to dependency review: Renovate reads Cargo.toml, reports the
-    /// crate current, and never sees the image. The annotation is what puts it
-    /// back under review.
-    // renovate: datasource=docker depName=apache/kafka
-    const KAFKA_TAG: &str = "4.3.1";
-
-    /// Digest of `KAFKA_TAG`, apart from it because the Renovate regex stops at a colon.
-    const KAFKA_DIGEST: &str =
-        "sha256:77e3df9054047a88b520d0cc46e16696d3b22022e1d580aeccd2632df6532837";
-
     /// ClickHouse to test against -- the server dfe-infra `versions.yaml`
     /// deploys and `docker-compose.dev.yaml` runs, pinned to the patch and its
     /// digest rather than the 26.3 minor, so a rebuild of that tag cannot
@@ -348,7 +334,7 @@ mod testcontainers_impl {
         // during its GraalVM `setup` binary, so use the JVM image.
         let mut image = KafkaImage::default()
             .with_jvm_image()
-            .with_tag(format!("{KAFKA_TAG}@{KAFKA_DIGEST}"));
+            .with_tag(scalo::transport::kafka::test_support::kafka_tag());
         if let Some(host_port) = host_port {
             image = image.with_mapped_port(host_port, KAFKA_PORT);
         }
