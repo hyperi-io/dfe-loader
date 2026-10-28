@@ -4706,6 +4706,7 @@ dependencies = [
  "sonic-rs",
  "sysinfo",
  "tar",
+ "tempfile",
  "thiserror 2.0.21",
  "tokio",
  "tokio-stream",

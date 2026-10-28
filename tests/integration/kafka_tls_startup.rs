@@ -28,10 +28,10 @@ use std::time::Duration;
 use rdkafka::ClientConfig;
 use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
 use rdkafka::producer::{FutureProducer, FutureRecord};
+use scalo::transport::kafka::test_support::{SCRAM_PASSWORD, SCRAM_USER, TlsBroker};
 
 use super::grpc_outage::{clickhouse_address, free_port, query_client, wait_landed};
 use crate::common::containers::TestInfrastructure;
-use crate::common::tls_broker::{SCRAM_PASSWORD, SCRAM_USER, TlsBroker};
 use crate::common::{has_docker, require_docker_in_ci, unique_table_name};
 use crate::test_name;
 
@@ -364,9 +364,8 @@ async fn the_binary_consumes_from_a_broker_with_tls_on() {
         return;
     }
     let test = test_name!();
-    let ports = [free_port(), free_port(), free_port(), free_port()];
     let (broker, infra) = tokio::join!(
-        TlsBroker::start(test, ports),
+        TlsBroker::start("dfe-loader", test),
         TestInfrastructure::new(test, true, false)
     );
     let broker = broker.unwrap_or_else(|e| panic!("the TLS broker would not start: {e}"));
