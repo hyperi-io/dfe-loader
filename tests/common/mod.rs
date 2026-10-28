@@ -488,7 +488,7 @@ pub fn require_docker_in_ci() {
 // can tell what left it behind. testcontainers' default is a random hex name,
 // which is untraceable the moment one survives.
 //
-// Naming: `dfe-loader-test-integration-<test>-<service>`, because every
+// Naming: `dfe-loader-test-integration-<test>-<service>-p<pid>`, because every
 // container here is owned by exactly ONE test. nextest runs each test in its own
 // process, so nothing is shared even when it looks like it should be -- the 15
 // tests calling `spin_up()` start 15 ClickHouse containers. That was already
@@ -504,11 +504,10 @@ pub fn require_docker_in_ci() {
 //     runs and the container survives.
 //
 // testcontainers-rs 0.27 has no resource reaper (no Ryuk), so the second case
-// is the one that leaves crap behind. A deterministic name would then make it
-// WORSE than a random one -- the leaked container holds the name and every
-// later run fails with "name already in use". `reap_stale` closes that: remove
-// any container already holding the name before starting, so a leak costs the
-// next run nothing and self-heals.
+// is the one that leaves crap behind. The process id in the name means a leaked
+// container cannot hold a name a later run asks for, and `reap_stale` removes the
+// containers whose owning process (the `owner-pid` label) has gone, so a leak
+// costs the next run nothing and self-heals.
 //
 // The label goes on as well, so a sweep can find these regardless of name:
 //   docker rm -f $(docker ps -aq --filter label=io.hyperi.test.suite=dfe-loader-integration)
@@ -545,6 +544,11 @@ pub fn test_labels(service: &str) -> Vec<(String, String)> {
 /// test binary; nothing does that today, and using it from several tests would
 /// make them collide on the name rather than share the container.
 ///
+/// The name ends in the owning process id, so two runs of one test on one
+/// daemon never ask for the same name. Without it the second start fails with
+/// "name is already in use" and burns the whole startup timeout before the
+/// error surfaces.
+///
 /// Names are lowercased and non-alphanumerics collapse to `-`, because Docker
 /// only accepts `[a-zA-Z0-9][a-zA-Z0-9_.-]*`, and the test paths `test_name!`
 /// produces have colons in them.
@@ -561,9 +565,16 @@ pub fn container_name(test: Option<&str>, service: &str) -> String {
             })
             .collect::<String>()
     };
+    let pid = std::process::id();
     test.map_or_else(
-        || format!("dfe-loader-test-integration-{}", slug(service)),
-        |t| format!("dfe-loader-test-integration-{}-{}", slug(t), slug(service)),
+        || format!("dfe-loader-test-integration-{}-p{pid}", slug(service)),
+        |t| {
+            format!(
+                "dfe-loader-test-integration-{}-{}-p{pid}",
+                slug(t),
+                slug(service)
+            )
+        },
     )
 }
 
@@ -604,6 +615,7 @@ macro_rules! test_name {
 /// container are all fine. A failure here must not fail the test -- the start
 /// that follows reports the real problem.
 pub fn reap_stale(name: &str) {
+    reap_dead_owners();
     let running = std::process::Command::new("docker")
         .args(["ps", "--quiet", "--filter", &format!("name=^{name}$")])
         .output();
@@ -618,6 +630,55 @@ pub fn reap_stale(name: &str) {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status();
+}
+
+/// Names from a `docker ps` listing of `"<name> <owner-pid>"` lines whose owner
+/// is no longer alive.
+pub fn dead_owner_names(listing: &str, alive: impl Fn(u32) -> bool) -> Vec<String> {
+    listing
+        .lines()
+        .filter_map(|line| {
+            let (name, pid) = line.split_once(' ')?;
+            let pid: u32 = pid.trim().parse().ok()?;
+            (!alive(pid)).then(|| name.to_string())
+        })
+        .collect()
+}
+
+/// Whether a process with this id exists (any owner), via `ps -p`.
+fn process_alive(pid: u32) -> bool {
+    std::process::Command::new("ps")
+        .args(["-p", &pid.to_string()])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
+/// Remove the containers a killed run left behind: those carrying this suite's
+/// label whose owning process is gone. Run-unique names mean a stray no longer
+/// blocks a later run, so this only stops them piling up.
+fn reap_dead_owners() {
+    let Ok(out) = std::process::Command::new("docker")
+        .args([
+            "ps",
+            "--all",
+            "--filter",
+            &format!("label={}={}", TEST_SUITE_LABEL.0, TEST_SUITE_LABEL.1),
+            "--format",
+            "{{.Names}} {{.Label \"io.hyperi.test.owner-pid\"}}",
+        ])
+        .output()
+    else {
+        return;
+    };
+    for name in dead_owner_names(&String::from_utf8_lossy(&out.stdout), process_alive) {
+        let _ = std::process::Command::new("docker")
+            .args(["rm", "--force", "--volumes", &name])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
 }
 
 /// Skip test if no test environment is available (either mode)
