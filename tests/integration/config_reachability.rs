@@ -32,6 +32,18 @@ fn config_key_for(env_var: &str, env_prefix: &str) -> String {
         .replace("__", ".")
 }
 
+/// Held by every test here that loads the config or starts a child process, because the env cascade reads
+/// process-global variables that `every_declared_secret_env_var_reaches_the_config`
+/// and `env_cascade_forms_reach_the_config` set. Under plain `cargo test` the tests
+/// share a process, and an unlocked reader sees another test's variable.
+static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+    ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 fn write_config(dir: &tempfile::TempDir, body: &str) -> String {
     let path = dir.path().join("loader.yaml");
     std::fs::write(&path, body).expect("write config");
@@ -56,6 +68,7 @@ fn write_config(dir: &tempfile::TempDir, body: &str) -> String {
 #[test]
 #[allow(unsafe_code)]
 fn every_declared_secret_env_var_reaches_the_config() {
+    let _env = env_lock();
     let contract = Config::deployment_contract();
     let prefix = contract.env_prefix.clone();
 
@@ -143,6 +156,7 @@ fn keda_scales_on_cpu_and_never_on_kafka_lag() {
 /// with a `sasl:` block at all came out enabled.
 #[test]
 fn sasl_enabled_false_stays_false() {
+    let _env = env_lock();
     let dir = tempfile::TempDir::new().expect("tempdir");
     let path = write_config(
         &dir,
@@ -160,6 +174,7 @@ fn sasl_enabled_false_stays_false() {
 /// is what makes the chart's two secret env vars sufficient on their own.
 #[test]
 fn sasl_credentials_alone_enable_it() {
+    let _env = env_lock();
     let dir = tempfile::TempDir::new().expect("tempdir");
     let path = write_config(
         &dir,
@@ -289,6 +304,7 @@ fn clickhouse_tls_fields_with_no_reader_are_rejected() {
 #[test]
 #[allow(unsafe_code)]
 fn env_cascade_forms_reach_the_config() {
+    let _env = env_lock();
     // Chart / deployment-contract form: DFE_LOADER__SECTION__FIELD.
     {
         // SAFETY: test-only; removed at the end of the block.
@@ -359,6 +375,7 @@ fn config_check_in(dir: &std::path::Path) -> String {
 /// search up the tree loads another project's settings and credentials.
 #[test]
 fn a_dotenv_in_a_parent_directory_is_not_loaded() {
+    let _env = env_lock();
     let root = tempfile::TempDir::new().expect("tempdir");
     let project = root.path().join("project");
     std::fs::create_dir(&project).expect("project dir");
