@@ -25,6 +25,7 @@ use dfe_loader::metrics::{Metrics, ServerState};
 use dfe_loader::pipeline::Orchestrator;
 use rdkafka::ClientConfig;
 use rdkafka::consumer::{BaseConsumer, Consumer};
+use rdkafka::error::{KafkaError, RDKafkaErrorCode};
 use rdkafka::producer::FutureRecord;
 use scalo::ScalingPressure;
 use scalo::config::sensitive::SensitiveString;
@@ -206,9 +207,20 @@ async fn group_members(bootstrap: &str, group: &str) -> usize {
             .set("group.id", format!("{group}-observer"))
             .create()
             .expect("group observer");
-        let groups = observer
-            .fetch_group_list(Some(&group), Duration::from_secs(10))
-            .expect("describe the consumer group");
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        let groups = loop {
+            match observer.fetch_group_list(Some(&group), Duration::from_secs(10)) {
+                Ok(groups) => break groups,
+                // A broker answers these until its group coordinator has loaded, just after it starts.
+                Err(KafkaError::GroupListFetch(
+                    RDKafkaErrorCode::CoordinatorLoadInProgress
+                    | RDKafkaErrorCode::CoordinatorNotAvailable,
+                )) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(200));
+                }
+                Err(e) => panic!("describe the consumer group: {e}"),
+            }
+        };
         groups.groups().iter().map(|g| g.members().len()).sum()
     })
     .await
