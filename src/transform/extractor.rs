@@ -487,25 +487,26 @@ fn resolve_default(
 /// Remove a source field from the parsed object, descending a dotted path.
 ///
 /// A flat key (and a payload already flattened to literal dotted keys) takes a
-/// single hash lookup; only a genuine miss on a dotted path walks the tree, so
-/// nested ECS payloads map without a flatten pass. Nothing is allocated either way.
+/// single hash lookup. On a miss each `.` is tried as the split between an
+/// object key and the rest, left to right, so a literal dotted key nested inside
+/// an object (`ResourceAttributes.service.name`) resolves as well as a nested
+/// ECS payload. Nothing is allocated either way.
 #[inline]
 fn remove_path(parsed: &mut Map<String, Value>, path: &str) -> Option<Value> {
     if let Some(v) = parsed.remove(path) {
         return Some(v);
     }
-    if !path.contains('.') {
-        return None;
-    }
+    remove_split(parsed, path)
+}
 
-    let mut parts = path.split('.');
-    let mut current = parsed.get_mut(parts.next()?)?;
-    let mut parts = parts.peekable();
-    while let Some(part) = parts.next() {
-        if parts.peek().is_none() {
-            return current.as_object_mut()?.remove(part);
+/// The miss path of `remove_path`: descend into each object a prefix of `path` names.
+fn remove_split(parsed: &mut Map<String, Value>, path: &str) -> Option<Value> {
+    for (dot, _) in path.match_indices('.') {
+        if let Some(Value::Object(child)) = parsed.get_mut(&path[..dot])
+            && let Some(v) = remove_path(child, &path[dot + 1..])
+        {
+            return Some(v);
         }
-        current = current.as_object_mut()?.get_mut(part)?;
     }
     None
 }
@@ -518,18 +519,17 @@ fn get_path<'a>(parsed: &'a Map<String, Value>, path: &str) -> Option<&'a Value>
     if let Some(v) = parsed.get(path) {
         return Some(v);
     }
-    if !path.contains('.') {
-        return None;
-    }
+    get_split(parsed, path)
+}
 
-    let mut parts = path.split('.');
-    let mut current = parsed.get(parts.next()?)?;
-    let mut parts = parts.peekable();
-    while let Some(part) = parts.next() {
-        if parts.peek().is_none() {
-            return current.as_object()?.get(part);
+/// The miss path of `get_path`: descend into each object a prefix of `path` names.
+fn get_split<'a>(parsed: &'a Map<String, Value>, path: &str) -> Option<&'a Value> {
+    for (dot, _) in path.match_indices('.') {
+        if let Some(Value::Object(child)) = parsed.get(&path[..dot])
+            && let Some(v) = get_path(child, &path[dot + 1..])
+        {
+            return Some(v);
         }
-        current = current.as_object()?.get(part)?;
     }
     None
 }
@@ -1318,6 +1318,143 @@ mod tests {
             .extract(raw, "dfe.filebeat", &schema, &col_meta, None)
             .fields;
         assert_eq!(map.get("host_name"), Some(&Value::String("web-02".into())));
+    }
+
+    /// `(payload, path, found, payload left after removing it)`.
+    const PATH_CASES: &[(&str, &str, Option<&str>, &str)] = &[
+        // Top-level literal dotted key and plain nesting keep working.
+        (r#"{"a.b":1}"#, "a.b", Some("1"), r"{}"),
+        (
+            r#"{"a":{"b":{"c":2}}}"#,
+            "a.b.c",
+            Some("2"),
+            r#"{"a":{"b":{}}}"#,
+        ),
+        (
+            r#"{"a":{"b":{"c":2}}}"#,
+            "a",
+            Some(r#"{"b":{"c":2}}"#),
+            r"{}",
+        ),
+        // A literal dotted key nested in an object.
+        (r#"{"a":{"b.c":3}}"#, "a.b.c", Some("3"), r#"{"a":{}}"#),
+        (r#"{"a":{"b.c.d":4}}"#, "a.b.c.d", Some("4"), r#"{"a":{}}"#),
+        // A literal dotted key holding an object, then plain nesting.
+        (r#"{"a.b":{"c":5}}"#, "a.b.c", Some("5"), r#"{"a.b":{}}"#),
+        // Literal, then literal again, then a plain segment.
+        (
+            r#"{"a.b":{"c.d":{"e":6}}}"#,
+            "a.b.c.d.e",
+            Some("6"),
+            r#"{"a.b":{"c.d":{}}}"#,
+        ),
+        // The exact key wins over a nested path to the same dotted name.
+        (
+            r#"{"a.b":1,"a":{"b":2}}"#,
+            "a.b",
+            Some("1"),
+            r#"{"a":{"b":2}}"#,
+        ),
+        // A split that names an object without the rest falls through to the next one.
+        (
+            r#"{"a":{"x":1},"a.b":{"c":7}}"#,
+            "a.b.c",
+            Some("7"),
+            r#"{"a":{"x":1},"a.b":{}}"#,
+        ),
+        // Misses leave the payload alone.
+        (r#"{"a":{"b":1}}"#, "z", None, r#"{"a":{"b":1}}"#),
+        (r#"{"a":{"b":1}}"#, "a.z", None, r#"{"a":{"b":1}}"#),
+        (r#"{"a":{"b":1}}"#, "a.b.c", None, r#"{"a":{"b":1}}"#),
+        (
+            r#"{"a":"s","a.b":null}"#,
+            "a.b.c",
+            None,
+            r#"{"a":"s","a.b":null}"#,
+        ),
+        (r#"{"a":[{"b":1}]}"#, "a.b", None, r#"{"a":[{"b":1}]}"#),
+        (r#"{"a":{"b.c":3}}"#, "a.b", None, r#"{"a":{"b.c":3}}"#),
+    ];
+
+    #[test]
+    fn test_remove_and_get_path_resolve_literal_dotted_keys_at_any_depth() {
+        for (payload, path, found, left) in PATH_CASES {
+            let parsed: Map<String, Value> = serde_json::from_str(payload).unwrap();
+            let expected: Option<Value> = found.map(|f| serde_json::from_str(f).unwrap());
+            let left: Map<String, Value> = serde_json::from_str(left).unwrap();
+
+            assert_eq!(
+                get_path(&parsed, path),
+                expected.as_ref(),
+                "get_path({path}) on {payload}"
+            );
+
+            let mut owned = parsed.clone();
+            assert_eq!(
+                remove_path(&mut owned, path),
+                expected,
+                "remove_path({path}) on {payload}"
+            );
+            assert_eq!(
+                owned, left,
+                "payload left after remove_path({path}) on {payload}"
+            );
+        }
+    }
+
+    /// The first record dfe-receiver emits in hyperdx mode, copied from the
+    /// dfe-schemas `otlp_logs_receiver_hyperdx.ndjson` fixture.
+    const OTLP_HYPERDX_RECORD: &[u8] = br#"{"Timestamp":"2026-10-28 02:11:05.000000000","ObservedTimestamp":"2026-10-28 02:11:05.000000000","TraceId":"cef7083db6ea01b762ad95bfbef5cae8","SpanId":"458e193cc6b0b179","SeverityText":"WARN","SeverityNumber":13,"Body":"request complete method=GET path=/api/v1/health status=200","ServiceName":"checkout-api","LogAttributes":{"http.status":"200"},"ResourceAttributes":{"service.name":"checkout-api","service.instance.id":"instance-1","host.name":"app-01","telemetry.sdk.language":"python"},"ScopeName":"probe","ScopeVersion":"","_timestamp_received":1793153633254,"_source":"main","_org_id":"default"}"#;
+
+    /// The matching generic-mode record, where the same attributes sit under `resource`.
+    const OTLP_GENERIC_RECORD: &[u8] = br#"{"_signal":"log","_timestamp":"2026-10-28T02:11:05.000000000Z","_observed_timestamp":"2026-10-28T02:11:05.000000000Z","trace_id":"cef7083db6ea01b762ad95bfbef5cae8","span_id":"458e193cc6b0b179","severity_text":"WARN","severity_number":13,"body":"request complete method=GET path=/api/v1/health status=200","attributes":{"http.status":"200"},"resource":{"service.name":"checkout-api","service.instance.id":"instance-1","host.name":"app-01","telemetry.sdk.language":"python"},"scope_name":"probe","scope_version":"","_timestamp_received":1793153674658,"_source":"main","_org_id":"default"}"#;
+
+    #[test]
+    fn test_otlp_resource_attributes_with_dotted_names_map_to_columns() {
+        use crate::column_meta::parse_directives;
+        use rustc_hash::FxHashMap;
+
+        let cases: [(&[u8], &str, &str); 2] = [
+            (
+                OTLP_HYPERDX_RECORD,
+                "ResourceAttributes",
+                "dfe.otel_logs_hyperdx",
+            ),
+            (OTLP_GENERIC_RECORD, "resource", "dfe.otel_logs_generic"),
+        ];
+        for (payload, resource_key, table) in cases {
+            let mut ddl = FxHashMap::default();
+            for (col, key) in [("service_name", "service.name"), ("host_name", "host.name")] {
+                ddl.insert(
+                    col.to_string(),
+                    parse_directives(&format!(
+                        "@source: {resource_key}.{key} - resource attribute"
+                    )),
+                );
+            }
+            let col_meta = ColumnMetaCache::new(ColumnDirectivesConfig::default());
+            col_meta.apply_ddl(table, ddl);
+
+            let map = default_extractor()
+                .extract(
+                    payload,
+                    table,
+                    &make_schema(&["service_name", "host_name"]),
+                    &col_meta,
+                    None,
+                )
+                .fields;
+            assert_eq!(
+                map.get("service_name"),
+                Some(&Value::String("checkout-api".into())),
+                "{resource_key}.service.name"
+            );
+            assert_eq!(
+                map.get("host_name"),
+                Some(&Value::String("app-01".into())),
+                "{resource_key}.host.name"
+            );
+        }
     }
 
     #[test]
