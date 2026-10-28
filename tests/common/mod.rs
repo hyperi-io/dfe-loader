@@ -5,7 +5,7 @@
 //!
 //! Supports dual-mode testing via `TEST_MODE` env var:
 //! - `"remote"` (default): remote cluster endpoints from `.env`
-//! - `"docker"`: dfe-docker infra profile (localhost, no auth, no TLS)
+//! - `"docker"`: dfe-docker `clickhouse` and `kafka-redpanda` profiles (localhost, no auth, no TLS)
 #![allow(dead_code)]
 
 pub mod containers;
@@ -30,7 +30,7 @@ use dfe_loader::config::{ClickHouseConfig, KafkaConfig, SaslConfig};
 ///
 /// Set via `TEST_MODE` env var:
 /// - `"remote"` (default): use Kafka/ClickHouse from `.env`
-/// - `"docker"`: use dfe-docker infra profile (localhost, no auth, no TLS)
+/// - `"docker"`: use dfe-docker `clickhouse` and `kafka-redpanda` profiles (localhost, no auth, no TLS)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TestMode {
     Remote,
@@ -234,7 +234,19 @@ impl KafkaTestConfig {
 // Docker Lifecycle (convenience)
 // ============================================================================
 
-/// Start dfe-docker infra profile if `TEST_MODE=docker` and containers aren't running.
+/// The dfe-docker profiles that give the Docker mode its ClickHouse
+/// (`localhost:8123`) and Kafka (`localhost:19092`).
+const DFE_DOCKER_COMPOSE_UP: [&str; 7] = [
+    "compose",
+    "--profile",
+    "clickhouse",
+    "--profile",
+    "kafka-redpanda",
+    "up",
+    "-d",
+];
+
+/// Start the dfe-docker ClickHouse and Redpanda profiles if `TEST_MODE=docker` and containers aren't running.
 ///
 /// Looks for dfe-docker at:
 ///   1. `DFE_DOCKER_PATH` env var
@@ -273,13 +285,15 @@ pub fn ensure_docker_infra() -> Result<bool, String> {
     }
 
     let status = std::process::Command::new("docker")
-        .args(["compose", "--profile", "infra", "up", "-d"])
+        .args(DFE_DOCKER_COMPOSE_UP)
         .current_dir(&docker_path)
         .status()
         .map_err(|e| format!("docker compose failed: {e}"))?;
 
     if !status.success() {
-        return Err("docker compose --profile infra up -d failed".into());
+        return Err(
+            "docker compose up for the clickhouse and kafka-redpanda profiles failed".into(),
+        );
     }
 
     for _ in 0..30 {
