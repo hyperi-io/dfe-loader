@@ -84,17 +84,17 @@ TEST_MODE=remote cargo nextest run
 
 ### Docker-local
 
-Uses `dfe-docker` infra profile (single-node, no auth, no TLS).
+Uses the `dfe-docker` `clickhouse` and `kafka-redpanda` profiles (single-node, no auth, no TLS).
 
 ```bash
 # Start infrastructure
-cd ../dfe-docker && docker compose --profile infra up -d
+cd ../dfe-docker && docker compose --profile clickhouse --profile kafka-redpanda up -d
 
 # Run tests
 TEST_MODE=docker cargo nextest run
 
 # Tear down
-docker compose --profile infra down
+docker compose --profile clickhouse --profile kafka-redpanda down
 ```
 
 - ClickHouse: `localhost:8123` / `localhost:9000`
