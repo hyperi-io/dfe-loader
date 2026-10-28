@@ -3,35 +3,17 @@
 
 //! `ClickHouse` integration tests
 //!
-//! Tests run against the ClickHouse cluster named in `.env`
+//! Tests run against the ClickHouse `CLICKHOUSE_HOST` names, else a container
+//! the test starts (`--features testcontainers`).
 //! Uses HTTP client with `JSONEachRow` for all `ClickHouse` operations
 
 use serde_json::json;
 
-use crate::common::{
-    check_clickhouse_reachable, create_http_test_client, drop_http_test_table, load_dotenv,
-    unique_table_name,
-};
-
-fn skip_if_no_clickhouse() -> bool {
-    load_dotenv();
-    if !crate::common::has_clickhouse() {
-        eprintln!("CLICKHOUSE_HOST not set");
-        return true;
-    }
-    if !check_clickhouse_reachable() {
-        eprintln!("ClickHouse not reachable");
-        return true;
-    }
-    false
-}
+use crate::common::{create_http_test_client, drop_http_test_table, unique_table_name};
 
 #[tokio::test]
 async fn test_clickhouse_connect() {
-    if skip_if_no_clickhouse() {
-        eprintln!("Skipping test: no ClickHouse available");
-        return;
-    }
+    crate::require_clickhouse!();
 
     let client = if let Some(c) = create_http_test_client() {
         c
@@ -51,10 +33,7 @@ async fn test_clickhouse_connect() {
 
 #[tokio::test]
 async fn test_clickhouse_insert_json() {
-    if skip_if_no_clickhouse() {
-        eprintln!("Skipping test: no ClickHouse available");
-        return;
-    }
+    crate::require_clickhouse!();
 
     let client = match create_http_test_client() {
         Some(c) => c,
@@ -166,10 +145,7 @@ async fn test_clickhouse_insert_json() {
 
 #[tokio::test]
 async fn test_clickhouse_table_exists() {
-    if skip_if_no_clickhouse() {
-        eprintln!("Skipping test: no ClickHouse available");
-        return;
-    }
+    crate::require_clickhouse!();
 
     let client = match create_http_test_client() {
         Some(c) => c,
@@ -183,10 +159,7 @@ async fn test_clickhouse_table_exists() {
 
 #[tokio::test]
 async fn test_clickhouse_variant_type_support() {
-    if skip_if_no_clickhouse() {
-        eprintln!("Skipping test: no ClickHouse available");
-        return;
-    }
+    crate::require_clickhouse!();
 
     let client = match create_http_test_client() {
         Some(c) => c,

@@ -11,7 +11,7 @@ use dfe_loader::clickhouse::schema::{SchemaCache, SchemaCacheConfig};
 use dfe_loader::clickhouse::{ColumnInfo, ParsedType, TableSchema};
 
 use crate::common::{create_http_test_client, drop_http_test_table, unique_table_name};
-use crate::skip_if_no_clickhouse;
+use crate::require_clickhouse;
 
 // ============================================================================
 // Helper to create test ColumnInfo
@@ -207,7 +207,7 @@ fn test_schema_cache_needs_refresh() {
 
 #[tokio::test]
 async fn test_schema_introspection_from_clickhouse() {
-    skip_if_no_clickhouse!();
+    require_clickhouse!();
 
     let client = match create_http_test_client() {
         Some(c) => c,
@@ -255,7 +255,7 @@ async fn test_schema_introspection_from_clickhouse() {
 
 #[tokio::test]
 async fn test_schema_cache_with_clickhouse() {
-    skip_if_no_clickhouse!();
+    require_clickhouse!();
 
     let client = match create_http_test_client() {
         Some(c) => c,
@@ -311,7 +311,7 @@ async fn test_schema_cache_with_clickhouse() {
 /// restart.
 #[tokio::test]
 async fn test_schema_cache_background_refresh_keeps_warm() {
-    skip_if_no_clickhouse!();
+    require_clickhouse!();
 
     use std::sync::Arc;
 

@@ -10,6 +10,7 @@ mod clickhouse;
 mod clickhouse_inserter_e2e;
 #[cfg(feature = "testcontainers")]
 mod clickhouse_readiness;
+mod clickhouse_test_config;
 #[cfg(feature = "testcontainers")]
 mod clickhouse_tls;
 mod config;

@@ -72,7 +72,7 @@ Controlled by `TEST_MODE` in `.env` (or env var):
 
 ### Remote (default)
 
-Uses the remote Kafka and ClickHouse named in `.env`. Tests skip if endpoints unreachable.
+Uses the remote Kafka and ClickHouse named in `.env`. A test that needs ClickHouse uses `CLICKHOUSE_HOST` when it is set, else starts a container (`--features testcontainers`, run under nextest), and never probes `localhost`. A named ClickHouse that does not answer skips locally and fails in CI.
 
 ```bash
 TEST_MODE=remote cargo nextest run
@@ -110,7 +110,7 @@ let ch = ClickHouseTestConfig::from_env();
 let kf = KafkaTestConfig::from_env();
 
 // Skip if infrastructure unavailable
-skip_if_no_clickhouse!();
+require_clickhouse!();
 skip_if_no_kafka!();
 ```
 
