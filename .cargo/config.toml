@@ -15,8 +15,3 @@ rustflags = ["-C", "target-cpu=x86-64-v3", "-C", "link-arg=-fuse-ld=mold"]  # AV
 [target.aarch64-unknown-linux-gnu]
 linker = "aarch64-linux-gnu-gcc"
 rustflags = ["-C", "target-cpu=generic"]    # NEON is baseline for ARM64
-
-# Native CPU features, only on a host with no matching [target] table above
-# (e.g. macOS): cargo applies a matching [target] table even without --target.
-[build]
-rustflags = ["-C", "target-cpu=native"]
