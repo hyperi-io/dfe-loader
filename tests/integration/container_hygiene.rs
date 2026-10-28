@@ -18,7 +18,10 @@ fn per_test_container_name_includes_the_test() {
     let name = container_name(Some("inserter_basic"), "clickhouse");
     assert_eq!(
         name,
-        "dfe-loader-test-integration-inserter-basic-clickhouse"
+        format!(
+            "dfe-loader-test-integration-inserter-basic-clickhouse-p{}",
+            std::process::id()
+        )
     );
 }
 
@@ -26,7 +29,13 @@ fn per_test_container_name_includes_the_test() {
 #[test]
 fn binary_scoped_container_name_omits_the_test() {
     let name = container_name(None, "clickhouse");
-    assert_eq!(name, "dfe-loader-test-integration-clickhouse");
+    assert_eq!(
+        name,
+        format!(
+            "dfe-loader-test-integration-clickhouse-p{}",
+            std::process::id()
+        )
+    );
 }
 
 /// Two tests asking for the same service must get DIFFERENT names.
@@ -75,7 +84,10 @@ fn container_name_is_a_legal_docker_name() {
     let name = container_name(Some("clickhouse_inserter_e2e::test_basic"), "ClickHouse");
     assert_eq!(
         name,
-        "dfe-loader-test-integration-clickhouse-inserter-e2e--test-basic-clickhouse"
+        format!(
+            "dfe-loader-test-integration-clickhouse-inserter-e2e--test-basic-clickhouse-p{}",
+            std::process::id()
+        )
     );
 
     let legal = |s: &str| {
@@ -85,6 +97,28 @@ fn container_name_is_a_legal_docker_name() {
     };
     assert!(legal(&name), "{name} is not a legal Docker container name");
     assert!(legal(&container_name(None, "kafka")));
+}
+
+/// Containers a killed run left behind are the ones whose owning process is
+/// gone, and only those. A line that does not parse is left alone.
+#[test]
+fn only_containers_whose_owner_is_gone_are_reaped() {
+    let listing = "\
+dfe-loader-test-integration-a-clickhouse-p100 100
+dfe-loader-test-integration-b-clickhouse-p200 200
+dfe-loader-test-integration-c-kafka-p300 300
+dfe-loader-test-integration-d-kafka-p
+dfe-loader-test-integration-e-kafka-p400 not-a-pid
+unlabelled
+";
+    let alive = |pid: u32| pid == 200;
+    assert_eq!(
+        crate::common::dead_owner_names(listing, alive),
+        vec![
+            "dfe-loader-test-integration-a-clickhouse-p100",
+            "dfe-loader-test-integration-c-kafka-p300"
+        ]
+    );
 }
 
 /// Every name is prefixed so one `docker ps` filter finds everything this repo's
