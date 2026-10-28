@@ -74,8 +74,24 @@ pub struct ClickHouseTestConfig {
 
 impl ClickHouseTestConfig {
     /// Build from current test mode.
+    ///
+    /// Remote mode names no default host: with `CLICKHOUSE_HOST` unset the host
+    /// is empty and `is_configured()` is false, so a test never reaches for a
+    /// ClickHouse it did not start, such as a dfe-docker stack on `localhost`.
     pub fn from_env() -> Self {
         load_dotenv();
+        if let Some(endpoint) = container_endpoint() {
+            return Self {
+                host: endpoint.host,
+                http_port: endpoint.http_port,
+                native_port: endpoint.native_port,
+                tls: false,
+                user: "default".into(),
+                password: String::new(),
+                database: "default".into(),
+                cluster: None,
+            };
+        }
         match TestMode::detect() {
             TestMode::Docker => Self {
                 host: "localhost".into(),
@@ -87,27 +103,33 @@ impl ClickHouseTestConfig {
                 database: "default".into(),
                 cluster: None, // single node
             },
-            TestMode::Remote => Self {
-                host: env::var("CLICKHOUSE_HOST").unwrap_or_else(|_| "localhost".into()),
-                http_port: env::var("CLICKHOUSE_HTTP_PORT")
-                    .unwrap_or_else(|_| "8123".into())
-                    .parse()
-                    .unwrap_or(8123),
-                native_port: env::var("CLICKHOUSE_NATIVE_PORT")
-                    .unwrap_or_else(|_| "9000".into())
-                    .parse()
-                    .unwrap_or(9000),
-                tls: env::var("CLICKHOUSE_TLS")
-                    .unwrap_or_default()
-                    .eq_ignore_ascii_case("true"),
-                user: env::var("CLICKHOUSE_USER").unwrap_or_else(|_| "default".into()),
-                password: env::var("CLICKHOUSE_PASSWORD").unwrap_or_default(),
-                database: env::var("CLICKHOUSE_DATABASE").unwrap_or_else(|_| "default".into()),
-                cluster: env::var("CLICKHOUSE_CLUSTER")
-                    .ok()
-                    .filter(|s| !s.is_empty()),
-            },
+            TestMode::Remote => Self::remote_from(|name| env::var(name).ok()),
         }
+    }
+
+    /// The Remote-mode config read through `lookup` (the process environment in
+    /// tests, a table in the unit test).
+    pub fn remote_from(lookup: impl Fn(&str) -> Option<String>) -> Self {
+        let port =
+            |name: &str, default: u16| lookup(name).and_then(|v| v.parse().ok()).unwrap_or(default);
+        Self {
+            host: lookup("CLICKHOUSE_HOST").unwrap_or_default(),
+            http_port: port("CLICKHOUSE_HTTP_PORT", 8123),
+            native_port: port("CLICKHOUSE_NATIVE_PORT", 9000),
+            tls: lookup("CLICKHOUSE_TLS")
+                .unwrap_or_default()
+                .eq_ignore_ascii_case("true"),
+            user: lookup("CLICKHOUSE_USER").unwrap_or_else(|| "default".into()),
+            password: lookup("CLICKHOUSE_PASSWORD").unwrap_or_default(),
+            database: lookup("CLICKHOUSE_DATABASE").unwrap_or_else(|| "default".into()),
+            cluster: lookup("CLICKHOUSE_CLUSTER").filter(|s| !s.is_empty()),
+        }
+    }
+
+    /// Whether a ClickHouse is named at all: `CLICKHOUSE_HOST`, `TEST_MODE=docker`
+    /// or a container this test started.
+    pub fn is_configured(&self) -> bool {
+        !self.host.is_empty()
     }
 
     pub fn http_url(&self) -> String {
@@ -129,7 +151,7 @@ impl ClickHouseTestConfig {
     /// inside a `std::thread::spawn` — necessary because tests run inside
     /// tokio runtimes that reject reqwest::blocking's internal runtime drop.
     pub fn is_reachable(&self) -> bool {
-        clickhouse_http_ping_ok(&self.http_url())
+        self.is_configured() && clickhouse_http_ping_ok(&self.http_url())
     }
 
     /// Probe whether the connected `ClickHouse`'s `default` database uses the
@@ -140,8 +162,7 @@ impl ClickHouseTestConfig {
     /// `{uuid}` macro and auto-fill that path. Against a single-node Atomic
     /// `default` database the server rejects the DDL (error 36), so such tests
     /// must skip. This is capability-based (queries `system.databases`) rather
-    /// than mode-based, so it also catches `remote` mode falling back to a
-    /// single-node localhost `ClickHouse` when no `.env` is configured.
+    /// than mode-based, so it also catches a single-node `ClickHouse` in `remote` mode.
     pub fn has_replicated_default_db(&self) -> bool {
         clickhouse_default_db_is_replicated(&self.http_url(), &self.user, &self.password)
     }
@@ -182,6 +203,134 @@ pub fn on_cluster_clause() -> &'static str {
     } else {
         ""
     }
+}
+
+/// Where the `ClickHouse` container a test started is listening.
+#[derive(Clone)]
+struct ContainerEndpoint {
+    host: String,
+    http_port: u16,
+    native_port: u16,
+}
+
+/// Published by `acquire_clickhouse` so every `ClickHouseTestConfig::from_env()`
+/// call in the test reads the container. One slot per process, which is one test
+/// under nextest.
+static CONTAINER_ENDPOINT: std::sync::Mutex<Option<ContainerEndpoint>> =
+    std::sync::Mutex::new(None);
+
+fn container_endpoint() -> Option<ContainerEndpoint> {
+    CONTAINER_ENDPOINT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+}
+
+/// Publish `endpoint`, or return false when a container is already published.
+fn publish_container_endpoint(endpoint: ContainerEndpoint) -> bool {
+    let mut slot = CONTAINER_ENDPOINT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if slot.is_some() {
+        return false;
+    }
+    *slot = Some(endpoint);
+    true
+}
+
+/// A `ClickHouse` held for one test. Dropping it unpublishes the endpoint and
+/// then stops the container, if the test started one.
+pub struct ClickHouseLease {
+    #[cfg(feature = "testcontainers")]
+    _infra: Option<containers::TestInfrastructure>,
+    published: bool,
+}
+
+impl Drop for ClickHouseLease {
+    fn drop(&mut self) {
+        if self.published {
+            *CONTAINER_ENDPOINT
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        }
+    }
+}
+
+/// The `ClickHouse` a test runs against: the one `CLICKHOUSE_HOST` (or
+/// `TEST_MODE=docker`) names, else a container the test starts itself.
+///
+/// `None` means skip, and the reason is printed. A named but unreachable
+/// ClickHouse fails in CI. Without the `testcontainers` feature there is no
+/// container to start, so an unnamed ClickHouse skips: the `testcontainers`
+/// feature set runs these tests.
+pub async fn acquire_clickhouse(test: &str) -> Option<ClickHouseLease> {
+    let ch = ClickHouseTestConfig::from_env();
+    if ch.is_configured() {
+        if ch.is_reachable() {
+            return Some(ClickHouseLease {
+                #[cfg(feature = "testcontainers")]
+                _infra: None,
+                published: false,
+            });
+        }
+        assert!(
+            env::var_os("CI").is_none(),
+            "ClickHouse at {} is named but unreachable in CI",
+            ch.http_addr()
+        );
+        eprintln!(
+            "Skipping: ClickHouse not reachable at {} (TEST_MODE={})",
+            ch.http_addr(),
+            TestMode::detect()
+        );
+        return None;
+    }
+    start_clickhouse_container(test).await
+}
+
+#[cfg(feature = "testcontainers")]
+async fn start_clickhouse_container(test: &str) -> Option<ClickHouseLease> {
+    let infra = containers::TestInfrastructure::new(test, true, false).await;
+    let container = infra.clickhouse.as_ref().expect("ClickHouse container");
+    let host = container
+        .get_host()
+        .await
+        .expect("container host")
+        .to_string();
+    let http_port = container
+        .get_host_port_ipv4(8123)
+        .await
+        .expect("HTTP port mapping");
+    let native_port = container
+        .get_host_port_ipv4(9000)
+        .await
+        .expect("native port mapping");
+    assert!(
+        publish_container_endpoint(ContainerEndpoint {
+            host,
+            http_port,
+            native_port,
+        }),
+        "a second ClickHouse container in one process: run the suite under cargo nextest"
+    );
+    let lease = ClickHouseLease {
+        _infra: Some(infra),
+        published: true,
+    };
+    let ch = ClickHouseTestConfig::from_env();
+    for _ in 0..50 {
+        if ch.is_reachable() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    Some(lease)
+}
+
+#[cfg(not(feature = "testcontainers"))]
+async fn start_clickhouse_container(_test: &str) -> Option<ClickHouseLease> {
+    eprintln!("Skipping: CLICKHOUSE_HOST is unset and containers need --features testcontainers");
+    None
 }
 
 // ============================================================================
@@ -473,19 +622,17 @@ macro_rules! skip_if_no_env {
     };
 }
 
-/// Skip test if `ClickHouse` is not reachable in current mode
+/// Hold a `ClickHouse` for the rest of the test, or return when there is none.
+///
+/// Use as the first line of an `async` test. The binding it leaves keeps the
+/// container alive until the test ends.
 #[macro_export]
-macro_rules! skip_if_no_clickhouse {
+macro_rules! require_clickhouse {
     () => {
-        let ch = $crate::common::ClickHouseTestConfig::from_env();
-        if !ch.is_reachable() {
-            eprintln!(
-                "Skipping: ClickHouse not reachable at {} (TEST_MODE={})",
-                ch.native_addr(),
-                $crate::common::TestMode::detect()
-            );
+        let Some(_clickhouse) = $crate::common::acquire_clickhouse($crate::test_name!()).await
+        else {
             return;
-        }
+        };
     };
 }
 
@@ -524,10 +671,10 @@ macro_rules! skip_if_docker {
 /// Capability-based replacement for `skip_if_docker!` on tests that create
 /// `ReplicatedMergeTree()` tables with no ZooKeeper path: those need the
 /// `Replicated` database engine so the `{uuid}` macro expands. Unlike the
-/// mode-based `skip_if_docker!`, this also skips when `remote` mode falls back
-/// to a single-node localhost `ClickHouse` (no `.env`), where the DDL would
-/// otherwise fail with server error 36. Call after `skip_if_no_clickhouse!`,
-/// which guarantees the probe target is reachable.
+/// mode-based `skip_if_docker!`, this also skips against a single-node
+/// `ClickHouse` such as the test container, where the DDL would otherwise fail
+/// with server error 36. Call after `require_clickhouse!`, which guarantees the
+/// probe target is reachable.
 #[macro_export]
 macro_rules! skip_if_not_replicated {
     () => {

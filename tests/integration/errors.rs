@@ -13,18 +13,7 @@ use dfe_loader::payload::parse_payload;
 use dfe_loader::routing::{RouteResult, Router};
 use dfe_loader::transform::Transformer;
 
-use crate::common::{
-    check_clickhouse_reachable, create_http_test_client, drop_http_test_table, load_dotenv,
-    unique_table_name,
-};
-
-fn skip_if_no_clickhouse() -> bool {
-    load_dotenv();
-    if !crate::common::has_clickhouse() {
-        return true;
-    }
-    !check_clickhouse_reachable()
-}
+use crate::common::{create_http_test_client, drop_http_test_table, unique_table_name};
 
 #[test]
 fn test_error_invalid_json() {
@@ -247,10 +236,7 @@ fn test_error_inconsistent_schema_in_batch() {
 
 #[tokio::test]
 async fn test_error_insert_nonexistent_table() {
-    if skip_if_no_clickhouse() {
-        eprintln!("Skipping test: no ClickHouse available");
-        return;
-    }
+    crate::require_clickhouse!();
 
     let client = match create_http_test_client() {
         Some(c) => c,
@@ -272,10 +258,7 @@ async fn test_error_insert_nonexistent_table() {
 
 #[tokio::test]
 async fn test_error_insert_schema_mismatch() {
-    if skip_if_no_clickhouse() {
-        eprintln!("Skipping test: no ClickHouse available");
-        return;
-    }
+    crate::require_clickhouse!();
 
     let client = match create_http_test_client() {
         Some(c) => c,
@@ -308,10 +291,7 @@ async fn test_error_insert_schema_mismatch() {
 
 #[tokio::test]
 async fn test_error_insert_missing_column() {
-    if skip_if_no_clickhouse() {
-        eprintln!("Skipping test: no ClickHouse available");
-        return;
-    }
+    crate::require_clickhouse!();
 
     let client = match create_http_test_client() {
         Some(c) => c,
@@ -343,10 +323,7 @@ async fn test_error_insert_missing_column() {
 
 #[tokio::test]
 async fn test_error_insert_extra_column() {
-    if skip_if_no_clickhouse() {
-        eprintln!("Skipping test: no ClickHouse available");
-        return;
-    }
+    crate::require_clickhouse!();
 
     let client = match create_http_test_client() {
         Some(c) => c,
@@ -381,10 +358,7 @@ async fn test_error_insert_extra_column() {
 
 #[tokio::test]
 async fn test_error_empty_batch_insert() {
-    if skip_if_no_clickhouse() {
-        eprintln!("Skipping test: no ClickHouse available");
-        return;
-    }
+    crate::require_clickhouse!();
 
     let client = match create_http_test_client() {
         Some(c) => c,

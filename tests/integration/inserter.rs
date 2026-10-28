@@ -17,7 +17,7 @@ use crate::common::{
     create_ch_test_client, create_http_test_client, drop_http_test_table,
     unique_qualified_table_name, unique_table_name,
 };
-use crate::{skip_if_no_clickhouse, skip_if_not_replicated};
+use crate::{require_clickhouse, skip_if_not_replicated};
 
 /// Helper: create JSON rows for testing
 fn make_test_rows(count: usize) -> Vec<Map<String, Value>> {
@@ -41,7 +41,7 @@ fn make_test_rows(count: usize) -> Vec<Map<String, Value>> {
 
 #[tokio::test]
 async fn test_inserter_basic_insert() {
-    skip_if_no_clickhouse!();
+    require_clickhouse!();
 
     let client = if let Some(c) = create_http_test_client() {
         Arc::new(c)
@@ -95,7 +95,7 @@ async fn test_inserter_basic_insert() {
 /// exercised here.
 #[tokio::test]
 async fn rowbinary_multirow_lands_over_http() {
-    skip_if_no_clickhouse!();
+    require_clickhouse!();
 
     let client = match create_http_test_client() {
         Some(c) => Arc::new(c),
@@ -131,7 +131,7 @@ async fn rowbinary_multirow_lands_over_http() {
 
 #[tokio::test]
 async fn test_inserter_large_batch() {
-    skip_if_no_clickhouse!();
+    require_clickhouse!();
 
     let client = match create_http_test_client() {
         Some(c) => Arc::new(c),
@@ -190,7 +190,7 @@ async fn test_inserter_large_batch() {
 
 #[tokio::test]
 async fn test_concurrent_inserts() {
-    skip_if_no_clickhouse!();
+    require_clickhouse!();
 
     let client = match create_http_test_client() {
         Some(c) => Arc::new(c),
@@ -269,7 +269,7 @@ async fn test_concurrent_inserts() {
 
 #[tokio::test]
 async fn test_inserter_batch_salvage() {
-    skip_if_no_clickhouse!();
+    require_clickhouse!();
 
     use compact_str::CompactString;
     use dfe_loader::buffer::FlushBatch;
@@ -354,7 +354,7 @@ fn test_inserter_config_defaults() {
 
 #[tokio::test]
 async fn test_rowbinary_json_from_raw_payload() {
-    skip_if_no_clickhouse!();
+    require_clickhouse!();
     skip_if_not_replicated!();
 
     let client = if let Some(c) = create_http_test_client() {
@@ -449,7 +449,7 @@ async fn test_rowbinary_json_from_raw_payload() {
 /// raw_only mode: _raw populated with full payload, _json stays NULL.
 #[tokio::test]
 async fn test_raw_only_mode_raw_populated_json_null() {
-    skip_if_no_clickhouse!();
+    require_clickhouse!();
     skip_if_not_replicated!();
 
     let client = if let Some(c) = create_http_test_client() {
@@ -533,7 +533,7 @@ async fn test_raw_only_mode_raw_populated_json_null() {
 /// extracted_only mode: neither _json nor _raw populated, only promoted fields.
 #[tokio::test]
 async fn test_extracted_only_mode_both_null() {
-    skip_if_no_clickhouse!();
+    require_clickhouse!();
     skip_if_not_replicated!();
 
     let client = if let Some(c) = create_http_test_client() {

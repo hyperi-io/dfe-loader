@@ -15,13 +15,13 @@ use dfe_loader::transform::HeaderExtractor;
 use rustc_hash::FxHashMap;
 
 use crate::common::{create_http_test_client, drop_http_test_table, unique_table_name};
-use crate::skip_if_no_clickhouse;
+use crate::require_clickhouse;
 
 /// Real DDL `@renamed` comment → real schema/comment fetch → directive parse →
 /// extractor applies the rename. This is the data that #36 was NULLing.
 #[tokio::test]
 async fn renamed_directive_applied_end_to_end_36() {
-    skip_if_no_clickhouse!();
+    require_clickhouse!();
 
     let client = match create_http_test_client() {
         Some(c) => c,
