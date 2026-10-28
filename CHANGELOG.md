@@ -3,6 +3,27 @@
 Rendered by CI and committed back at the end of a release -- do not edit by
 hand. Release notes also appear on the GitHub Releases page, one per tag.
 
+## [1.18.59](https://github.com/hyperi-io/dfe-loader/compare/v1.18.58...v1.18.59) (2026-10-28)
+
+### Bug Fixes
+
+* accept the block-buffer advisory, unreachable here ([#283](https://github.com/hyperi-io/dfe-loader/issues/283)) ([fbe65ca](https://github.com/hyperi-io/dfe-loader/commit/fbe65ca180c5ef374c244a13485f2563e265e5c3))
+* declare the repo classification as product ([#281](https://github.com/hyperi-io/dfe-loader/issues/281)) ([1b6dbf4](https://github.com/hyperi-io/dfe-loader/commit/1b6dbf40e2e285db46f6b0aaa7347edf48452c83))
+* **deps:** update redpandadata/redpanda Docker tag to v26.2.6 ([#273](https://github.com/hyperi-io/dfe-loader/issues/273)) ([d13202b](https://github.com/hyperi-io/dfe-loader/commit/d13202be20e38ce2583987ffb0e9a29f1c14d622))
+* **deps:** update rust-dependencies ([#274](https://github.com/hyperi-io/dfe-loader/issues/274)) ([d145691](https://github.com/hyperi-io/dfe-loader/commit/d145691e1090687da2ae25ca5db0aa516a529b2e))
+* **deps:** update rust-dependencies ([#276](https://github.com/hyperi-io/dfe-loader/issues/276)) ([ee394c6](https://github.com/hyperi-io/dfe-loader/commit/ee394c6ff6b04fd104ea456d966712e2bcb5db7a))
+* drop the target-cpu=native build fallback ([#289](https://github.com/hyperi-io/dfe-loader/issues/289)) ([1e4abad](https://github.com/hyperi-io/dfe-loader/commit/1e4abad955dac190b5c526b8ed939cb2fff64157))
+* let the group observer wait out a loading coordinator ([#293](https://github.com/hyperi-io/dfe-loader/issues/293)) ([531d942](https://github.com/hyperi-io/dfe-loader/commit/531d942684161a028a21b68d1fcab064d2abf47c))
+* make test container names unique per run ([#291](https://github.com/hyperi-io/dfe-loader/issues/291)) ([1d2fe89](https://github.com/hyperi-io/dfe-loader/commit/1d2fe8958672a3b7daf6811056b0930d3c3e1a2f))
+* move a batch held for a removed source past its dropped table ([#282](https://github.com/hyperi-io/dfe-loader/issues/282)) ([1128024](https://github.com/hyperi-io/dfe-loader/commit/11280247e35b77ed3c7688e54a19b8b80ca59490)), closes [#280](https://github.com/hyperi-io/dfe-loader/issues/280)
+* rebuild on scalo 2.14.21 ([1842318](https://github.com/hyperi-io/dfe-loader/commit/1842318f4fad27ccff20704f7845ad9400450906))
+* recheck a routed table's absent mark within seconds, not 60 s ([#278](https://github.com/hyperi-io/dfe-loader/issues/278)) ([5651827](https://github.com/hyperi-io/dfe-loader/commit/5651827a1e4882c2066df9fa30481a4639c30af3)), closes [#275](https://github.com/hyperi-io/dfe-loader/issues/275)
+* resolve literal dotted keys nested in objects ([#284](https://github.com/hyperi-io/dfe-loader/issues/284)) ([fcaddf2](https://github.com/hyperi-io/dfe-loader/commit/fcaddf2708f39b8d75a5a0f69e352e48b6b6fc82))
+* serialise the config tests that read process env ([#292](https://github.com/hyperi-io/dfe-loader/issues/292)) ([bd0606b](https://github.com/hyperi-io/dfe-loader/commit/bd0606bde822d3325f4ec0963a0c2f974a29c663))
+* start the dfe-docker profiles that exist for the Docker test mode ([#290](https://github.com/hyperi-io/dfe-loader/issues/290)) ([5f5b948](https://github.com/hyperi-io/dfe-loader/commit/5f5b9487f46416b8f9af8653c886a46fc8f123dc))
+* start the loader against a real TLS Kafka broker ([#285](https://github.com/hyperi-io/dfe-loader/issues/285)) ([42db94a](https://github.com/hyperi-io/dfe-loader/commit/42db94ab3d4397ababae387c036e711fd16c81ea))
+* stop the ClickHouse tests probing localhost:8123 ([#287](https://github.com/hyperi-io/dfe-loader/issues/287)) ([ae48bdb](https://github.com/hyperi-io/dfe-loader/commit/ae48bdbbe12eebab1c883917fd1af3a1cf07c839))
+
 ## [1.18.58](https://github.com/hyperi-io/dfe-loader/compare/v1.18.57...v1.18.58) (2026-10-24)
 
 ### Bug Fixes
