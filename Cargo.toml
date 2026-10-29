@@ -251,29 +251,29 @@ doc_markdown = "allow"
 # 41 public Result fns have no # Errors section, and 4 no # Panics section.
 missing_errors_doc = "allow"
 missing_panics_doc = "allow"
-# 16 helper fns and consts sit beside their one use.
+# 16 sites.
 items_after_statements = "allow"
 # 13 methods would become associated functions, which rewrites every caller.
 unused_self = "allow"
-# 10 signatures take ownership at the call site, and changing them rewrites its callers.
+# 10 sites, and changing a signature rewrites its callers.
 needless_pass_by_value = "allow"
-# 9 timestamp and epoch literals are written as the spec prints them.
+# 9 sites.
 unreadable_literal = "allow"
-# 8 doc comments quote column names in single quotes.
+# 8 sites.
 doc_link_with_quotes = "allow"
-# 7 match arms are kept apart to read as the cases the spec lists.
+# 7 sites.
 match_same_arms = "allow"
-# 5 config structs mirror YAML flags.
+# 5 sites.
 struct_excessive_bools = "allow"
 # 4 functions run long, the largest at 665 lines, and splitting them needs its own change.
 too_many_lines = "allow"
-# 4 futures are large, and boxing them changes the hot path, which needs a measurement first.
+# 4 sites, and boxing a future changes the hot path, which needs a measurement first.
 large_futures = "allow"
-# 3 name pairs read as a deliberate pair (for example a request and its response).
+# 3 sites.
 similar_names = "allow"
-# 3 small address arguments are passed by reference to match the lookup API.
+# 3 sites.
 trivially_copy_pass_by_ref = "allow"
-# 2 async fns match a trait or an interface that awaits.
+# 2 sites.
 unused_async = "allow"
 # Dynamic Map<String, Value> patterns need flexible casting
 cast_possible_truncation = "allow"
