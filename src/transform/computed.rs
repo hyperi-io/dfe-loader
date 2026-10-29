@@ -60,9 +60,8 @@ impl TableComputedColumns {
         // Build CEL context from current data
         let hash_data: HashMap<String, serde_json::Value> =
             data.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-        let context = match scalo::expression::build_context(&hash_data) {
-            Ok(ctx) => ctx,
-            Err(_) => return,
+        let Ok(context) = scalo::expression::build_context(&hash_data) else {
+            return;
         };
 
         for col in &self.columns {

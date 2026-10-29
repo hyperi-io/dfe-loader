@@ -1322,9 +1322,8 @@ fn encode_map(
     col: &str,
     buf: &mut Vec<u8>,
 ) -> Result<(), DynamicError> {
-    let obj = match value {
-        Value::Object(m) => m,
-        _ => return Err(enc_err(col, "expected object for Map")),
+    let Value::Object(obj) = value else {
+        return Err(enc_err(col, "expected object for Map"));
     };
     write_varint(obj.len() as u64, buf);
     // ClickHouse Map keys are String on this path; write the key text directly.

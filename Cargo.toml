@@ -246,6 +246,35 @@ dbg_macro = "deny"
 module_name_repetitions = "allow"
 # #[must_use] goes where dropping the value is a bug, not on every pure function.
 must_use_candidate = "allow"
+# 117 doc comments name ClickHouse types and columns without backticks.
+doc_markdown = "allow"
+# 41 public Result fns have no # Errors section, and 4 no # Panics section.
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+# 16 helper fns and consts sit beside their one use.
+items_after_statements = "allow"
+# 13 methods would become associated functions, which rewrites every caller.
+unused_self = "allow"
+# 10 signatures take ownership at the call site, and changing them rewrites its callers.
+needless_pass_by_value = "allow"
+# 9 timestamp and epoch literals are written as the spec prints them.
+unreadable_literal = "allow"
+# 8 doc comments quote column names in single quotes.
+doc_link_with_quotes = "allow"
+# 7 match arms are kept apart to read as the cases the spec lists.
+match_same_arms = "allow"
+# 5 config structs mirror YAML flags.
+struct_excessive_bools = "allow"
+# 4 functions run long, the largest at 665 lines, and splitting them needs its own change.
+too_many_lines = "allow"
+# 4 futures are large, and boxing them changes the hot path, which needs a measurement first.
+large_futures = "allow"
+# 3 name pairs read as a deliberate pair (for example a request and its response).
+similar_names = "allow"
+# 3 small address arguments are passed by reference to match the lookup API.
+trivially_copy_pass_by_ref = "allow"
+# 2 async fns match a trait or an interface that awaits.
+unused_async = "allow"
 # Dynamic Map<String, Value> patterns need flexible casting
 cast_possible_truncation = "allow"
 cast_sign_loss = "allow"
