@@ -619,9 +619,8 @@ impl Config {
     )]
     pub fn deployment_contract() -> scalo::deployment::DeploymentContract {
         use scalo::deployment::{
-            CONTRACT_SCHEMA_VERSION, DeploymentContract, HealthContract, ImageProfile,
-            NativeDepsContract, OciLabels, PortCondition, PortContract, ResourceList,
-            ResourcesContract, SecurityContract, ServiceAccount, WritablePath,
+            DeploymentContract, HealthContract, ImageProfile, NativeDepsContract, OciLabels,
+            PortCondition, PortContract, ResourceList, ResourcesContract, WritablePath,
             base_image_from_cascade, image_registry_from_cascade,
         };
 
@@ -632,7 +631,6 @@ impl Config {
             image_registry_from_cascade().unwrap_or_else(|| "ghcr.io/hyperi-io".into());
 
         DeploymentContract {
-            schema_version: CONTRACT_SCHEMA_VERSION,
             app_name: "dfe-loader".into(),
             base_image: base_image.clone(),
             binary_name: "dfe-loader".into(),
@@ -653,7 +651,6 @@ impl Config {
                     .bound_from("grpc.listen")
                     .app_protocol("kubernetes.io/h2c"),
             ],
-            unbound_listen_paths: vec![],
             // The watcher rebuilds routing on a reload, so an edit there need not roll the pods.
             hot_paths: vec![HOT_PATH_ROUTING.into()],
             entrypoint_args: vec!["--config".into(), "/etc/dfe/loader.yaml".into()],
@@ -724,9 +721,7 @@ impl Config {
                     memory: "512Mi".into(),
                 },
             },
-            security: SecurityContract::default(),
-            singleton: false,
-            service_account: ServiceAccount::Own,
+            ..DeploymentContract::default()
         }
     }
 

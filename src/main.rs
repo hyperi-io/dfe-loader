@@ -67,17 +67,14 @@ impl ServiceApp for App {
         self.command.as_ref()
     }
 
-    fn load_config(&self, path: Option<&str>) -> Result<Self::Config, CliError> {
-        // Seed scalo's cascade first: while it is unset every `from_cascade()`
-        // reader -- scaling.*, worker_pool.*, batch_processing.*,
-        // self_regulation.*, version_check.* -- resolves to its hard-coded
-        // default and no env var moves it (#160). The seed is also what reads
-        // ./.env into the environment Config::load reads.
-        if let Err(e) = scalo::config::setup(self.common.to_config_options(self.env_prefix())) {
-            // The cascade is a OnceLock; a second load keeps the first seed.
-            debug!(error = %e, "scalo config cascade already seeded");
-        }
+    /// Not ready until `run_service` installs the pipeline's check.
+    fn readiness_check(&self, _config: &Self::Config) -> Option<scalo::metrics::ReadinessFn> {
+        Some(Arc::new(|| false))
+    }
 
+    fn load_config(&self, path: Option<&str>) -> Result<Self::Config, CliError> {
+        // run_app has set the cascade up from --config, which also reads
+        // ./.env into the environment Config::load reads.
         let config = Config::load(path).map_err(|e| CliError::Config(e.to_string()))?;
         config
             .validate()
@@ -310,7 +307,13 @@ async fn main() {
 
     if let Some(output) = &app.emit_dockerfile {
         let contract = Config::deployment_contract();
-        let content = scalo::deployment::generate_dockerfile(&contract, None);
+        let content = match scalo::deployment::generate_dockerfile(&contract, None) {
+            Ok(content) => content,
+            Err(e) => {
+                eprintln!("fatal: the deployment contract is invalid: {e}");
+                std::process::exit(1);
+            }
+        };
         if let Err(e) = std::fs::write(output, &content) {
             eprintln!("fatal: could not write Dockerfile: {e}");
             std::process::exit(1);
@@ -341,6 +344,9 @@ mod tests {
         }
 
         let app = App::parse_from(["dfe-loader"]);
+        // run_app sets the cascade up before load_config.
+        scalo::config::setup(app.common.to_config_options(app.env_prefix()))
+            .expect("cascade sets up");
         app.load_config(None).expect("default config loads");
 
         // Both values differ from the library defaults the reader falls back to.

@@ -18,7 +18,7 @@ fn contract() -> scalo::deployment::DeploymentContract {
 #[test]
 fn test_generated_dockerfile_matches_existing() {
     let contract = contract();
-    let generated = generate_dockerfile(&contract, None);
+    let generated = generate_dockerfile(&contract, None).expect("the contract is valid");
 
     // Verify key contract points are present. base_image is cascade-resolved
     // (deployment.base_image config/env wins, else scalo's DEFAULT_BASE_IMAGE),
@@ -38,7 +38,7 @@ fn test_generated_dockerfile_matches_existing() {
         "Should expose metrics port"
     );
     assert!(
-        generated.contains("localhost:9090/livez"),
+        generated.contains("/dev/tcp/localhost/9090") && generated.contains("GET /livez"),
         "Should healthcheck against liveness endpoint"
     );
     assert!(
@@ -76,7 +76,7 @@ fn test_contract_declares_secret_env_vars() {
 #[test]
 fn test_generated_compose_fragment() {
     let contract = contract();
-    let compose = generate_compose_fragment(&contract);
+    let compose = generate_compose_fragment(&contract).expect("the contract is valid");
 
     assert!(compose.contains("dfe-loader:"));
     assert!(compose.contains("ghcr.io/hyperi-io/dfe-loader"));
@@ -89,7 +89,7 @@ fn test_generated_compose_fragment() {
 #[test]
 fn test_validate_generated_dockerfile() {
     let contract = contract();
-    let dockerfile = generate_dockerfile(&contract, None);
+    let dockerfile = generate_dockerfile(&contract, None).expect("the contract is valid");
 
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("Dockerfile");
@@ -113,11 +113,11 @@ fn write_artifacts_to_tmp() {
     std::fs::create_dir_all(&base).unwrap();
 
     // Dockerfile
-    let dockerfile = generate_dockerfile(&contract, None);
+    let dockerfile = generate_dockerfile(&contract, None).expect("the contract is valid");
     std::fs::write(base.join("Dockerfile"), &dockerfile).unwrap();
 
     // Compose fragment
-    let compose = generate_compose_fragment(&contract);
+    let compose = generate_compose_fragment(&contract).expect("the contract is valid");
     std::fs::write(base.join("compose.service.yaml"), &compose).unwrap();
 
     eprintln!("Generated artifacts written to: {}", base.display());
