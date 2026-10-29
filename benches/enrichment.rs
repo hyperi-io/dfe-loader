@@ -258,9 +258,9 @@ fn bench_full_enrichment_pipeline(c: &mut Criterion) {
 
                 // Risk scoring
                 let input = RiskInput::from_enrichment(geo.as_ref(), rep.as_ref());
-                let _risk = risk.score(&input);
+                let scored = risk.score(&input);
 
-                black_box((&geo, &rep, &_risk));
+                black_box((&geo, &rep, &scored));
             }
         });
     });

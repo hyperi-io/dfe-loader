@@ -275,6 +275,12 @@ similar_names = "allow"
 trivially_copy_pass_by_ref = "allow"
 # 2 sites.
 unused_async = "allow"
+# 20 sites, all in tests/.
+manual_let_else = "allow"
+# 8 sites, all in tests/.
+default_trait_access = "allow"
+# 7 sites, all in tests/.
+format_push_string = "allow"
 # Dynamic Map<String, Value> patterns need flexible casting
 cast_possible_truncation = "allow"
 cast_sign_loss = "allow"
