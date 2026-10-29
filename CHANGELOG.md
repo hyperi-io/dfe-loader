@@ -3,6 +3,14 @@
 Rendered by CI and committed back at the end of a release -- do not edit by
 hand. Release notes also appear on the GitHub Releases page, one per tag.
 
+## [1.18.60](https://github.com/hyperi-io/dfe-loader/compare/v1.18.59...v1.18.60) (2026-10-29)
+
+### Bug Fixes
+
+* 2.2.2 round on scalo 2.14.22 ([#296](https://github.com/hyperi-io/dfe-loader/issues/296)) ([c42e7f2](https://github.com/hyperi-io/dfe-loader/commit/c42e7f23cb5a685d5aab930cde468e45d50282c6))
+* bring the clippy config to the baseline ([#295](https://github.com/hyperi-io/dfe-loader/issues/295)) ([ff326a6](https://github.com/hyperi-io/dfe-loader/commit/ff326a6835f93a528808a1c3f61ac7833aff93c1))
+* use scalo's Kafka test fixtures instead of a copy ([#286](https://github.com/hyperi-io/dfe-loader/issues/286)) ([f6bfcca](https://github.com/hyperi-io/dfe-loader/commit/f6bfccac4fab7d40e765dd1cf2f080cd63b9690e))
+
 ## [1.18.59](https://github.com/hyperi-io/dfe-loader/compare/v1.18.58...v1.18.59) (2026-10-28)
 
 ### Bug Fixes
