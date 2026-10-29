@@ -132,7 +132,9 @@ impl Transformer {
         routing_config: &RoutingConfig,
     ) -> Self {
         let mut transformer = Self::new(timestamp_config, metadata_config, sanitization_config);
-        transformer.routing_table_fields = routing_config.table_fields.clone();
+        transformer
+            .routing_table_fields
+            .clone_from(&routing_config.table_fields);
         transformer
     }
 
@@ -192,9 +194,8 @@ impl Transformer {
         let mut warnings: Option<Vec<String>> = None;
 
         // Ensure we have an object to work with
-        let obj = match value {
-            Value::Object(map) => map,
-            _ => return Err(crate::Error::Transform("Expected JSON object".into())),
+        let Value::Object(obj) = value else {
+            return Err(crate::Error::Transform("Expected JSON object".into()));
         };
 
         // Step 1: Extract _tags BEFORE flattening (preserves nested structure)

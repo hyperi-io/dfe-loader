@@ -255,7 +255,7 @@ impl PendingSchemaBuffer {
                 if age < max_age {
                     break;
                 }
-                let p = queue.pop_front().expect("front checked above");
+                let Some(p) = queue.pop_front() else { break };
                 self.total_count -= 1;
                 out.push((
                     p.msg,

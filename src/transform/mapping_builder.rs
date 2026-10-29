@@ -269,7 +269,9 @@ mod tests {
 
         // Schema only has source.ip, not destination.ip
         let schema = make_schema(&["source.ip", "other_field"]);
-        let col_meta = crate::column_meta::ColumnMetaCache::new(Default::default());
+        let col_meta = crate::column_meta::ColumnMetaCache::new(
+            crate::column_meta::ColumnDirectivesConfig::default(),
+        );
 
         let mapping = builder.build_for_table(&schema, &col_meta);
         assert_eq!(mapping.len(), 1);
@@ -334,7 +336,9 @@ mod tests {
         };
 
         let schema = make_schema(&["source.ip"]);
-        let col_meta = crate::column_meta::ColumnMetaCache::new(Default::default());
+        let col_meta = crate::column_meta::ColumnMetaCache::new(
+            crate::column_meta::ColumnDirectivesConfig::default(),
+        );
 
         let mapping = builder.build_for_table(&schema, &col_meta);
         assert_eq!(mapping.rules()[0].action, MappingAction::Copy);
@@ -354,7 +358,9 @@ mod tests {
         };
 
         let schema = make_schema(&[]);
-        let col_meta = crate::column_meta::ColumnMetaCache::new(Default::default());
+        let col_meta = crate::column_meta::ColumnMetaCache::new(
+            crate::column_meta::ColumnDirectivesConfig::default(),
+        );
 
         let mapping = builder.build_for_table(&schema, &col_meta);
         assert!(mapping.is_empty());
@@ -397,7 +403,9 @@ mod tests {
 
         let mut cache = FieldMappingCache::new(builder);
         let schema = make_schema(&["source.ip"]);
-        let col_meta = crate::column_meta::ColumnMetaCache::new(Default::default());
+        let col_meta = crate::column_meta::ColumnMetaCache::new(
+            crate::column_meta::ColumnDirectivesConfig::default(),
+        );
 
         assert!(cache.get("common.events").is_none());
         cache.build_and_cache("common.events", &schema, &col_meta);
@@ -415,7 +423,9 @@ mod tests {
 
         let mut cache = FieldMappingCache::new(builder);
         let schema = make_schema(&[]);
-        let col_meta = crate::column_meta::ColumnMetaCache::new(Default::default());
+        let col_meta = crate::column_meta::ColumnMetaCache::new(
+            crate::column_meta::ColumnDirectivesConfig::default(),
+        );
         cache.build_and_cache("common.events", &schema, &col_meta);
         assert!(cache.get("common.events").is_some());
 
@@ -473,7 +483,9 @@ mod tests {
         assert_eq!(builder.base_rule_count(), 0);
         // override stored — we can verify via a build_for_table call
         let schema = make_schema(&["source.ip"]);
-        let col_meta = crate::column_meta::ColumnMetaCache::new(Default::default());
+        let col_meta = crate::column_meta::ColumnMetaCache::new(
+            crate::column_meta::ColumnDirectivesConfig::default(),
+        );
         let _mapping = builder.build_for_table(&schema, &col_meta);
         // no panic — override map populated
     }
@@ -535,7 +547,9 @@ mod tests {
         };
         let mut cache = FieldMappingCache::new(builder);
         let schema = make_schema(&[]);
-        let col_meta = crate::column_meta::ColumnMetaCache::new(Default::default());
+        let col_meta = crate::column_meta::ColumnMetaCache::new(
+            crate::column_meta::ColumnDirectivesConfig::default(),
+        );
         cache.build_and_cache("common.cached", &schema, &col_meta);
 
         // Already cached; mark_pending should not add to pending list

@@ -382,6 +382,7 @@ impl ReputationEnricher {
     }
 
     /// Create enricher with specified cache capacity
+    #[must_use]
     pub fn with_cache_capacity(mut self, capacity: usize) -> Self {
         self.cache_capacity = capacity;
         self

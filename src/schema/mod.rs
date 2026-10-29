@@ -44,6 +44,7 @@ impl TableTags {
     }
 
     /// Add a tag (builder pattern)
+    #[must_use]
     pub fn with(mut self, key: &str, value: &str) -> Self {
         self.tags.insert(key.to_string(), value.to_string());
         self
