@@ -185,9 +185,13 @@ impl TransportAdapter {
             if transport_config.security_protocol == "plaintext" {
                 transport_config.security_protocol = "ssl".to_string();
             }
-            transport_config.ssl_ca_location = tls.ca_cert_file.clone();
-            transport_config.ssl_certificate_location = tls.cert_file.clone();
-            transport_config.ssl_key_location = tls.key_file.clone();
+            transport_config
+                .ssl_ca_location
+                .clone_from(&tls.ca_cert_file);
+            transport_config
+                .ssl_certificate_location
+                .clone_from(&tls.cert_file);
+            transport_config.ssl_key_location.clone_from(&tls.key_file);
             transport_config.ssl_skip_verify = tls.skip_verify;
         }
 
@@ -538,6 +542,10 @@ impl GrpcTransportAdapter {
 pub use memory_adapter::MemoryTransportAdapter;
 
 #[cfg(feature = "transport-memory")]
+#[allow(
+    clippy::expect_used,
+    reason = "test-support adapter, built only under transport-memory"
+)]
 mod memory_adapter {
     use scalo::transport::{MemoryConfig, MemoryTransport, TransportBase, TransportReceiver};
     use std::sync::Arc;

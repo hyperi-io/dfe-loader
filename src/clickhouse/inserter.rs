@@ -333,6 +333,7 @@ impl Inserter {
     /// Set the bounds on inserts (`clickhouse.request_timeout_ms` and
     /// `clickhouse.insert_timeout_ms`). Schema reads run under the query
     /// client's widening bound.
+    #[must_use]
     pub fn with_timeouts(mut self, timeouts: Timeouts) -> Self {
         self.timeouts = timeouts;
         self
@@ -349,6 +350,7 @@ impl Inserter {
     /// - `RowBinary` (default): schema-reflected binary via `DynamicInsert`.
     ///   `ClickHouse` skips JSON parsing — lower cluster CPU at scale.
     /// - `JsonEachRow`: NDJSON via `InsertFormatted`. Self-describing fallback.
+    #[must_use]
     pub fn with_insert_format(mut self, format: InsertFormat) -> Self {
         self.insert_format = format;
         self
@@ -360,6 +362,7 @@ impl Inserter {
     /// suggest the RowBinary encoding used a stale schema (e.g., "Cannot
     /// parse JSON", "type mismatch", "INCORRECT_DATA"). This forces a
     /// fresh schema fetch on the next insert attempt.
+    #[must_use]
     pub fn with_schema_cache(mut self, schema_cache: Arc<SchemaCache>) -> Self {
         self.schema_cache = Some(schema_cache);
         self
@@ -371,6 +374,7 @@ impl Inserter {
     /// With `false` both the `RowBinary` encoder's cache and the loader's
     /// [`SchemaCache`] keep the stale schema until its TTL expires, so the
     /// retries run against it. A schema fetch that failed is still discarded.
+    #[must_use]
     pub fn with_refresh_on_error(mut self, enabled: bool) -> Self {
         self.refresh_on_error = enabled;
         self
@@ -381,6 +385,7 @@ impl Inserter {
     ///
     /// Replaces the encoder's cache, so it belongs with construction, before the
     /// first insert or clone.
+    #[must_use]
     pub fn with_schema_ttl(mut self, ttl: Duration) -> Self {
         self.dynamic_schema_cache = crate::clickhouse_ext::DynamicSchemaCache::new(ttl);
         self
@@ -1121,7 +1126,7 @@ impl Inserter {
 
             handles.push(tokio::spawn(async move {
                 let _permit = match &semaphore {
-                    Some(sem) => Some(sem.acquire().await.expect("Semaphore closed")),
+                    Some(sem) => sem.acquire().await.ok(),
                     None => None,
                 };
                 let result = inserter.insert_with_salvage(batch).await;

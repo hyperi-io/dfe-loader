@@ -239,44 +239,54 @@ unknown_lints = "allow"
 
 [lints.clippy]
 pedantic = { level = "warn", priority = -1 }
-# unwrap/expect: allow globally because unit tests (#[cfg(test)] in lib) use them
-# extensively and CI runs -D warnings. New prod code should use ? instead.
-unwrap_used = "allow"
-expect_used = "allow"
+unwrap_used = "deny"
+expect_used = "deny"
+dbg_macro = "deny"
+# Types keep descriptive names even where the module path repeats them, so call sites read without it.
 module_name_repetitions = "allow"
+# #[must_use] goes where dropping the value is a bug, not on every pure function.
 must_use_candidate = "allow"
+# 117 doc comments name ClickHouse types and columns without backticks.
+doc_markdown = "allow"
+# 41 public Result fns have no # Errors section, and 4 no # Panics section.
 missing_errors_doc = "allow"
 missing_panics_doc = "allow"
+# 16 sites.
+items_after_statements = "allow"
+# 13 methods would become associated functions, which rewrites every caller.
+unused_self = "allow"
+# 10 sites, and changing a signature rewrites its callers.
+needless_pass_by_value = "allow"
+# 9 sites.
+unreadable_literal = "allow"
+# 8 sites.
+doc_link_with_quotes = "allow"
+# 7 sites.
+match_same_arms = "allow"
+# 5 sites.
+struct_excessive_bools = "allow"
+# 4 functions run long, the largest at 665 lines, and splitting them needs its own change.
+too_many_lines = "allow"
+# 4 sites, and boxing a future changes the hot path, which needs a measurement first.
+large_futures = "allow"
+# 3 sites.
+similar_names = "allow"
+# 3 sites.
+trivially_copy_pass_by_ref = "allow"
+# 2 sites.
+unused_async = "allow"
+# 20 sites, all in tests/.
+manual_let_else = "allow"
+# 8 sites, all in tests/.
+default_trait_access = "allow"
+# 7 sites, all in tests/.
+format_push_string = "allow"
 # Dynamic Map<String, Value> patterns need flexible casting
 cast_possible_truncation = "allow"
 cast_sign_loss = "allow"
 cast_precision_loss = "allow"
 cast_lossless = "allow"
 cast_possible_wrap = "allow"
-# Pre-existing patterns that are not bugs
-similar_names = "allow"
-unreadable_literal = "allow"
-items_after_statements = "allow"
-too_many_lines = "allow"
-struct_excessive_bools = "allow"
-doc_markdown = "allow"
-doc_link_with_quotes = "allow"
-unnecessary_wraps = "allow"
-unused_async = "allow"
-unused_self = "allow"
-needless_pass_by_value = "allow"
-trivially_copy_pass_by_ref = "allow"
-match_same_arms = "allow"
-redundant_else = "allow"
-default_trait_access = "allow"
-assigning_clones = "allow"
-manual_let_else = "allow"
-option_if_let_else = "allow"
-return_self_not_must_use = "allow"
-used_underscore_binding = "allow"
-large_futures = "allow"
-format_push_string = "allow"
-float_cmp = "allow"
 # Tests use `let mut cfg = X::default(); cfg.field = ...` for readability over
 # struct-init. Production code is unaffected.
 field_reassign_with_default = "allow"

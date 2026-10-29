@@ -117,9 +117,8 @@ impl EnrichmentPipeline {
             return;
         }
 
-        let ip = match extract_enrich_ip(data, &self.ip_fields) {
-            Some(ip) => ip,
-            None => return,
+        let Some(ip) = extract_enrich_ip(data, &self.ip_fields) else {
+            return;
         };
 
         let geo_result = self.geoip.as_ref().and_then(|g| g.lookup(ip));

@@ -210,24 +210,28 @@ impl Orchestrator {
     }
 
     /// Set shared config for hot-reload support
+    #[must_use]
     pub fn with_shared_config(mut self, shared: SharedConfig) -> Self {
         self.shared_config = Some(shared);
         self
     }
 
     /// Set scaling pressure for KEDA autoscaling
+    #[must_use]
     pub fn with_scaling(mut self, scaling: Arc<ScalingPressure>) -> Self {
         self.scaling = Some(scaling);
         self
     }
 
     /// Set the adaptive worker pool for parallel message processing.
+    #[must_use]
     pub fn with_worker_pool(mut self, pool: Arc<scalo::worker::AdaptiveWorkerPool>) -> Self {
         self.worker_pool = Some(pool);
         self
     }
 
     /// Set the batch processing engine (SIMD parse, pre-route, parallel transform).
+    #[must_use]
     pub fn with_batch_engine(mut self, engine: Arc<scalo::worker::BatchEngine>) -> Self {
         self.batch_engine = Some(engine);
         self
@@ -239,6 +243,7 @@ impl Orchestrator {
     /// in-flight bytes on the SAME guard that feeds the self-regulation governor
     /// and the worker pool — without it the inbound brake would read a guard the
     /// pipeline never touches.
+    #[must_use]
     pub fn with_memory_guard(mut self, guard: Arc<MemoryGuard>) -> Self {
         self.memory_guard = guard;
         self
@@ -249,6 +254,7 @@ impl Orchestrator {
     /// When `Some`, its Kafka pause-partitions inbound gate is attached to the
     /// receive transport in [`run`](Self::run). `None` disables self-regulation
     /// (byte-identical to the pre-governor data path).
+    #[must_use]
     pub fn with_governor(mut self, governor: Option<SelfRegulationGovernor>) -> Self {
         self.governor = governor;
         self

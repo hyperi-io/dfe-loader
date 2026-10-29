@@ -179,9 +179,8 @@ pub fn project(json: &[u8], schema: &TableSchema) -> Vec<u8> {
         Err(_) => return Vec::new(),
     };
 
-    let obj = match value {
-        Value::Object(map) => map,
-        _ => return Vec::new(),
+    let Value::Object(obj) = value else {
+        return Vec::new();
     };
 
     let projector = Projector::new(schema);

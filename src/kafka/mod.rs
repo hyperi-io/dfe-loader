@@ -36,6 +36,7 @@ impl KafkaMessage {
     /// whose schema is missing must be owned by the buffer until its schema
     /// resolves. Cheap `Arc` topic clone + payload `Vec` clone — only on the
     /// cold cache-miss path, never on the hot path.
+    #[must_use]
     pub fn clone_for_pending(&self) -> KafkaMessage {
         KafkaMessage {
             payload: self.payload.clone(),

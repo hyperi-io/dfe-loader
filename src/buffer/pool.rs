@@ -59,12 +59,14 @@ impl<T: Poolable> Pooled<T> {
 impl<T: Poolable> Deref for Pooled<T> {
     type Target = T;
 
+    #[allow(clippy::expect_used, reason = "inner is Some until Drop takes it")]
     fn deref(&self) -> &Self::Target {
         self.inner.as_ref().expect("Pooled object already taken")
     }
 }
 
 impl<T: Poolable> DerefMut for Pooled<T> {
+    #[allow(clippy::expect_used, reason = "inner is Some until Drop takes it")]
     fn deref_mut(&mut self) -> &mut Self::Target {
         self.inner.as_mut().expect("Pooled object already taken")
     }
