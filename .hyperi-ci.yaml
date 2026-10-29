@@ -60,6 +60,7 @@ build:
   strategies:
     - native
   rust:
+    glibc_max: "2.41"
     targets:
       - x86_64-unknown-linux-gnu
       - aarch64-unknown-linux-gnu

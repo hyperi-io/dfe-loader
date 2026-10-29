@@ -164,7 +164,8 @@ fn smoke_deployment_contract() {
 #[test]
 fn smoke_dockerfile_generation() {
     let contract = Config::deployment_contract();
-    let content = scalo::deployment::generate_dockerfile(&contract, None);
+    let content =
+        scalo::deployment::generate_dockerfile(&contract, None).expect("the contract is valid");
     assert!(
         content.contains("FROM"),
         "Dockerfile should contain FROM directive"

@@ -2086,6 +2086,7 @@ impl Orchestrator {
         let mut kept = Vec::with_capacity(dead_letters.len());
         let mut refused: Vec<(DlqEntry, DeadLetterReason)> = Vec::new();
         for entry in dead_letters {
+            let entry = dlq.cap(entry);
             match dlq.refusal(&entry) {
                 Some(reason) => refused.push((entry, reason)),
                 None => kept.push(entry),

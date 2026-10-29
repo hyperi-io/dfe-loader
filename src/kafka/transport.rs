@@ -104,7 +104,7 @@ impl TransportAdapter {
     ) -> Result<Self> {
         let transport_config = Self::convert_config(config, dlq);
 
-        let transport = KafkaTransport::new(&transport_config)
+        let transport = KafkaTransport::receiver(&transport_config)
             .await
             .map_err(|e| start_error("Transport error", e))?
             .with_acknowledgements(config.acknowledgements);
@@ -127,11 +127,9 @@ impl TransportAdapter {
     /// scalo's default excludes (`^__`, `_dlq$`), never replacing them.
     pub fn convert_config(config: &KafkaConfig, dlq: &DlqConfig) -> TransportKafkaConfig {
         let mut transport_config = TransportKafkaConfig {
-            // loader is consume-only (Kafka -> ClickHouse). scalo 2.10 dropped the
-            // explicit role enum for a profile-based config: a NON-EMPTY consumer
-            // group is what makes scalo build a consumer (and no idle producer).
-            // The loader is a consumer, so the group MUST stay set (do not clear
-            // it). The DLQ uses scalo's standalone KafkaProducer, not this
+            // loader is consume-only (Kafka -> ClickHouse), so it builds through
+            // `KafkaTransport::receiver`, which builds no producer and refuses an
+            // empty group. The DLQ uses scalo's standalone KafkaProducer, not this
             // transport. profile defaults to Production (lean librdkafka baseline).
             brokers: config.brokers.clone(),
             group: config.group.clone(),
