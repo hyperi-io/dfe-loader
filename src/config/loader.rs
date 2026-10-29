@@ -613,6 +613,10 @@ impl Config {
     /// Apps provide ~20% customisation; scalo generates ~80% boilerplate
     /// (Dockerfile, Compose fragment), and the release assembles the thin
     /// chart from this contract.
+    #[allow(
+        clippy::expect_used,
+        reason = "Config::default() is plain serialisable data, and the round-trip test covers it"
+    )]
     pub fn deployment_contract() -> scalo::deployment::DeploymentContract {
         use scalo::deployment::{
             CONTRACT_SCHEMA_VERSION, DeploymentContract, HealthContract, ImageProfile,

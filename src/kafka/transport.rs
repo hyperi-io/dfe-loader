@@ -538,6 +538,10 @@ impl GrpcTransportAdapter {
 pub use memory_adapter::MemoryTransportAdapter;
 
 #[cfg(feature = "transport-memory")]
+#[allow(
+    clippy::expect_used,
+    reason = "test-support adapter, built only under transport-memory"
+)]
 mod memory_adapter {
     use scalo::transport::{MemoryConfig, MemoryTransport, TransportBase, TransportReceiver};
     use std::sync::Arc;
