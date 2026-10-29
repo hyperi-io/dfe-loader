@@ -239,44 +239,19 @@ unknown_lints = "allow"
 
 [lints.clippy]
 pedantic = { level = "warn", priority = -1 }
-# unwrap/expect: allow globally because unit tests (#[cfg(test)] in lib) use them
-# extensively and CI runs -D warnings. New prod code should use ? instead.
-unwrap_used = "allow"
-expect_used = "allow"
+unwrap_used = "deny"
+expect_used = "deny"
+dbg_macro = "deny"
+# Types keep descriptive names even where the module path repeats them, so call sites read without it.
 module_name_repetitions = "allow"
+# #[must_use] goes where dropping the value is a bug, not on every pure function.
 must_use_candidate = "allow"
-missing_errors_doc = "allow"
-missing_panics_doc = "allow"
 # Dynamic Map<String, Value> patterns need flexible casting
 cast_possible_truncation = "allow"
 cast_sign_loss = "allow"
 cast_precision_loss = "allow"
 cast_lossless = "allow"
 cast_possible_wrap = "allow"
-# Pre-existing patterns that are not bugs
-similar_names = "allow"
-unreadable_literal = "allow"
-items_after_statements = "allow"
-too_many_lines = "allow"
-struct_excessive_bools = "allow"
-doc_markdown = "allow"
-doc_link_with_quotes = "allow"
-unnecessary_wraps = "allow"
-unused_async = "allow"
-unused_self = "allow"
-needless_pass_by_value = "allow"
-trivially_copy_pass_by_ref = "allow"
-match_same_arms = "allow"
-redundant_else = "allow"
-default_trait_access = "allow"
-assigning_clones = "allow"
-manual_let_else = "allow"
-option_if_let_else = "allow"
-return_self_not_must_use = "allow"
-used_underscore_binding = "allow"
-large_futures = "allow"
-format_push_string = "allow"
-float_cmp = "allow"
 # Tests use `let mut cfg = X::default(); cfg.field = ...` for readability over
 # struct-init. Production code is unaffected.
 field_reassign_with_default = "allow"
