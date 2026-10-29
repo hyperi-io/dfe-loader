@@ -135,7 +135,7 @@ impl Default for Config {
             schema: SchemaConfig::default(),
             geoip: GeoIpConfig::default(),
             computed_columns: ComputedColumnsConfig::default(),
-            column_directives: ColumnDirectivesConfig::default(),
+            column_directives: crate::column_meta::ColumnDirectivesConfig::default(),
             hot_reload: HotReloadConfig::default(),
             scaling: ScalingConfig::default(),
             batch_processing: BatchProcessingConfig::default(),
