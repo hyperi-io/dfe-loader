@@ -3,7 +3,7 @@
 
 //! Config reachability: a setting a deployment can write must reach something.
 //!
-//! Every test here guards a knob that once parsed cleanly and then did nothing —
+//! Every test here guards a knob that once parsed cleanly and then did nothing --
 //! no error, no warning. The class is worth its own file because the failures
 //! look identical from outside: the process starts, logs a healthy line, and
 //! runs on a value the operator did not set.
@@ -72,39 +72,70 @@ fn every_declared_secret_env_var_reaches_the_config() {
     let contract = Config::deployment_contract();
     let prefix = contract.env_prefix.clone();
 
+    // A MaxMind account ID is always numeric and reaches the config the same way.
+    let maxmind = (
+        format!("{prefix}__GEOIP__AUTO_DOWNLOAD__MAXMIND_ACCOUNT_ID"),
+        "geoip".to_string(),
+    );
+    let declared = contract.secrets.iter().flat_map(|g| {
+        g.env_vars
+            .iter()
+            .map(|s| (s.env_var.clone(), g.group_name.clone()))
+    });
+
     let mut checked = 0;
-    for group in &contract.secrets {
-        for secret in &group.env_vars {
-            let key = config_key_for(&secret.env_var, &prefix);
-            let sentinel = format!("reachability-{}", key.replace('.', "-"));
+    for (env_var, group_name) in declared.chain(std::iter::once(maxmind)) {
+        let key = config_key_for(&env_var, &prefix);
+        // An env value figment would parse: a number, a quoted string and an
+        // array must each arrive as the exact bytes the Secret holds.
+        for sentinel in [
+            format!("reachability-{}", key.replace('.', "-")),
+            "0012345678".to_string(),
+            "\"quoted\"".to_string(),
+            "[a, b]".to_string(),
+        ] {
+            // SAFETY: test-only, set and removed inside this one sequential test.
+            unsafe { std::env::set_var(&env_var, &sentinel) };
+            let loaded = Config::load(None);
+            unsafe { std::env::remove_var(&env_var) };
 
-            // SAFETY: test-only; set and removed inside this one sequential test.
-            unsafe { std::env::set_var(&secret.env_var, &sentinel) };
-            let loaded = Config::load(None).expect("config loads");
-            unsafe { std::env::remove_var(&secret.env_var) };
-
+            // The messages carry the env var and group names only, never a value.
+            let loaded = loaded.unwrap_or_else(|_| {
+                panic!("{env_var} ({group_name}) holding a secret-shaped value refused the config")
+            });
             let json = expose_during(|| serde_json::to_value(&loaded)).expect("config serialises");
             let reached = at(&json, &key).and_then(Value::as_str) == Some(sentinel.as_str());
-
-            // The message carries the env var and group names only, never a value.
             assert!(
                 reached,
-                "{} ({}) was set and the config key its name spells did not read it",
-                secret.env_var, group.group_name
+                "{env_var} ({group_name}) was set and the config key its name spells did not read it verbatim"
             );
             checked += 1;
         }
     }
 
     assert!(
-        checked >= 3,
-        "expected the contract to declare the kafka + clickhouse secrets, checked {checked}"
+        checked >= 16,
+        "expected the kafka + clickhouse secrets and the MaxMind ID, 4 values each, checked {checked}"
+    );
+
+    // A whole section set as one env var is parsed, so a numeric secret in it is
+    // refused, and the refusal names the key without the value.
+    unsafe { std::env::set_var(format!("{prefix}_CLICKHOUSE"), "{password=48151623}") };
+    let refused = Config::load(None);
+    unsafe { std::env::remove_var(format!("{prefix}_CLICKHOUSE")) };
+    let message = match refused {
+        Ok(_) => panic!("a numeric password in a section env var loaded as a string"),
+        Err(e) => e.to_string(),
+    };
+    assert!(
+        message.contains("clickhouse.password") && !message.contains("48151623"),
+        "the refusal must name the key and leave the value out: {message}"
     );
 }
 
 /// The KEDA half of the contract must come from this crate's own `KedaConfig`.
 ///
-/// It was `KedaContract::default()` — scalo's own numbers — while `KedaConfig`
+/// It was `KedaContract::default()` -- scalo's own numbers -- while `KedaConfig`
 /// documented itself as the source. The two agreed, which is exactly why
 /// nothing caught it.
 #[test]
@@ -170,7 +201,7 @@ fn sasl_enabled_false_stays_false() {
     );
 }
 
-/// Credentials with no explicit `enabled` still turn SASL on — that side-effect
+/// Credentials with no explicit `enabled` still turn SASL on -- that side-effect
 /// is what makes the chart's two secret env vars sufficient on their own.
 #[test]
 fn sasl_credentials_alone_enable_it() {
@@ -307,7 +338,7 @@ fn env_cascade_forms_reach_the_config() {
     let _env = env_lock();
     // Chart / deployment-contract form: DFE_LOADER__SECTION__FIELD.
     {
-        // SAFETY: test-only; removed at the end of the block.
+        // SAFETY: test-only, removed at the end of the block.
         unsafe { std::env::set_var("DFE_LOADER__ROUTING__DEFAULT_TABLE", "double_sep") };
         let config = Config::load(None).expect("config loads");
         unsafe { std::env::remove_var("DFE_LOADER__ROUTING__DEFAULT_TABLE") };
@@ -339,6 +370,16 @@ fn env_cascade_forms_reach_the_config() {
         let config = Config::load(None).expect("config loads");
         unsafe { std::env::remove_var("DFE_LOADER_CONFIG") };
         assert_eq!(config.routing.default_table, "from_env_named_file");
+
+        // A file it names that is not there is refused, never swapped for defaults.
+        let missing = dir.path().join("absent.yaml");
+        unsafe { std::env::set_var("DFE_LOADER_CONFIG", &missing) };
+        let refused = Config::load(None);
+        unsafe { std::env::remove_var("DFE_LOADER_CONFIG") };
+        assert!(
+            refused.is_err(),
+            "DFE_LOADER_CONFIG named a missing file and the loader ran on defaults"
+        );
     }
 
     // --config still wins over DFE_LOADER_CONFIG.

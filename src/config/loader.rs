@@ -261,7 +261,7 @@ use scalo::config::flat_env::{self, ApplyFlatEnv, Normalize};
 impl ApplyFlatEnv for Config {
     /// Apply flat `DFE_LOADER`_* env var overrides.
     ///
-    /// These are K8s-friendly single-underscore vars. Same names as before — contract
+    /// These are K8s-friendly single-underscore vars. Same names as before -- contract
     /// with dfe-engine. For nested config use `__` nesting via figment.
     fn apply_flat_env(&mut self, prefix: &str) {
         // Kafka
@@ -346,7 +346,7 @@ impl ApplyFlatEnv for Config {
             self.metadata.enabled = v;
         }
 
-        // Logging (generic names — no prefix)
+        // Logging. Only the /config dump reads these: scalo's logger takes LOG_LEVEL and LOG_FORMAT.
         if let Some(v) = flat_env::flat_env_string(prefix, "LOG_LEVEL") {
             self.logging.level = v;
         }
@@ -379,8 +379,8 @@ impl ApplyFlatEnv for Config {
 }
 
 impl Normalize for Config {
-    /// Side-effect: Kafka SASL credentials present → enable auth. (The
-    /// security-protocol → TLS side-effect lives in `apply_flat_env`.)
+    /// Side-effect: Kafka SASL credentials present -> enable auth. (The
+    /// security-protocol -> TLS side-effect lives in `apply_flat_env`.)
     fn normalize(&mut self) {
         // CREDENTIALS only. `mechanism` carries a non-empty serde default, so
         // testing it here makes the condition constant-true and overrides an
@@ -401,23 +401,146 @@ impl Normalize for Config {
 /// `_kafka.sasl.…`, which serde drops in silence. No section starts with `_`.
 ///
 /// Lists require bracket syntax: `DFE_LOADER_KAFKA__BROKERS`=[a, b, c]
+///
+/// A secret is merged as the exact string the env holds. figment would parse
+/// it as a value first, so a numeric `MaxMind` account ID or password refused
+/// startup with the secret printed in the error, and a `"..."`-wrapped one lost
+/// its quotes.
 fn apply_figment_env(config: &mut Config) -> Result<()> {
     use figment::Figment;
     use figment::providers::{Env, Serialized};
     use scalo::expose_during;
 
-    let extracted = expose_during(|| {
-        let env = Env::prefixed(&format!("{ENV_PREFIX}_"))
+    fn loader_env() -> Env {
+        Env::prefixed(&format!("{ENV_PREFIX}_"))
             .map(|key| key.as_str().trim_start_matches('_').into())
-            .split("__");
-        Figment::from(Serialized::defaults(&*config))
-            .merge(env)
+            .split("__")
+    }
+
+    let secrets: &'static [String] = &SECRET_KEYS;
+    let verbatim: Vec<(String, String)> = loader_env()
+        .iter()
+        .filter(|(key, _)| secrets.iter().any(|s| key == s.as_str()))
+        .map(|(key, value)| (key.as_str().to_string(), value))
+        .collect();
+    let parsed = loader_env().filter(|key| !secrets.iter().any(|s| key == s.as_str()));
+
+    let extracted = expose_during(|| {
+        verbatim
+            .iter()
+            .fold(
+                Figment::from(Serialized::defaults(&*config)).merge(parsed),
+                |figment, (key, value)| figment.merge(Serialized::default(key, value)),
+            )
             .extract::<Config>()
-            .map_err(|e| crate::Error::Config(e.to_string()))
+            .map_err(|e| crate::Error::Config(without_values(e)))
     });
 
     *config = extracted?;
     Ok(())
+}
+
+/// An env extraction error naming each key and the type it found, never the
+/// value: a section set as one `{key=value}` env var can carry a secret.
+fn without_values(error: figment::Error) -> String {
+    use figment::error::{Actual, Kind};
+
+    let shape = |actual: &Actual| match actual {
+        Actual::Str(_) => "a string",
+        Actual::Unsigned(_) | Actual::Signed(_) => "an integer",
+        Actual::Float(_) => "a float",
+        Actual::Bool(_) => "a bool",
+        Actual::Seq => "a sequence",
+        Actual::Map => "a map",
+        _ => "another type",
+    };
+    let causes: Vec<String> = error
+        .into_iter()
+        .map(|e| {
+            let found = match &e.kind {
+                Kind::InvalidType(actual, expected) | Kind::InvalidValue(actual, expected) => {
+                    format!("found {}, expected {expected}", shape(actual))
+                }
+                other => other.to_string(),
+            };
+            format!("{}: {found}", e.path.join("."))
+        })
+        .collect();
+    format!("{ENV_PREFIX}_ environment: {}", causes.join("; "))
+}
+
+/// Dotted keys of every config field the schema marks `x-scalo-secret`, and of
+/// every env var the deployment contract fills from a Secret.
+static SECRET_KEYS: std::sync::LazyLock<Vec<String>> = std::sync::LazyLock::new(|| {
+    let schema = scalo::deployment::config_schema_json::<Config>();
+    let mut keys = Vec::new();
+    collect_secret_keys(&schema, &schema, &mut String::new(), &mut keys);
+    for group in Config::secrets() {
+        for secret in group.env_vars {
+            keys.push(
+                secret
+                    .env_var
+                    .strip_prefix(ENV_PREFIX)
+                    .unwrap_or(&secret.env_var)
+                    .trim_start_matches('_')
+                    .to_lowercase()
+                    .replace("__", "."),
+            );
+        }
+    }
+    keys.sort_unstable();
+    keys.dedup();
+    keys
+});
+
+/// Walk a JSON Schema node, following `$ref`, `anyOf`, `oneOf` and `allOf`,
+/// and push the dotted path of each property carrying `x-scalo-secret`.
+fn collect_secret_keys(
+    root: &serde_json::Value,
+    node: &serde_json::Value,
+    path: &mut String,
+    keys: &mut Vec<String>,
+) {
+    if node
+        .get("x-scalo-secret")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+    {
+        keys.push(path.clone());
+        return;
+    }
+    if let Some(target) = node
+        .get("$ref")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|r| r.strip_prefix('#'))
+        .and_then(|pointer| root.pointer(pointer))
+    {
+        collect_secret_keys(root, target, path, keys);
+    }
+    for combinator in ["anyOf", "oneOf", "allOf"] {
+        for branch in node
+            .get(combinator)
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            collect_secret_keys(root, branch, path, keys);
+        }
+    }
+    for (name, child) in node
+        .get("properties")
+        .and_then(serde_json::Value::as_object)
+        .into_iter()
+        .flatten()
+    {
+        let len = path.len();
+        if !path.is_empty() {
+            path.push('.');
+        }
+        path.push_str(name);
+        collect_secret_keys(root, child, path, keys);
+        path.truncate(len);
+    }
 }
 
 /// Read and parse the YAML config file at `path` with scalo's config rules.
@@ -431,7 +554,7 @@ impl Config {
     ///
     /// 1. CLI args (applied separately by caller)
     /// 2. Explicit flat env overrides (`DFE_LOADER_KAFKA_BROKERS`, etc.)
-    /// 3. Figment env vars with `__` nesting — `DFE_LOADER__KAFKA__SASL__USERNAME`
+    /// 3. Figment env vars with `__` nesting -- `DFE_LOADER__KAFKA__SASL__USERNAME`
     ///    (chart / deployment-contract form) or `DFE_LOADER_KAFKA__SASL__USERNAME`
     /// 4. `.env` file: the binary's `load_config` seeds scalo's cascade first,
     ///    which reads `./.env` and no parent directory's
@@ -445,9 +568,9 @@ impl Config {
         let resolved = Self::resolve_config_path(config_path);
         let config_path = resolved.as_deref();
         if let Some(path) = config_path {
-            if Path::new(path).exists() {
-                config = parse_config_file(path)?;
-            }
+            // A named file must be read: running on defaults instead hides a
+            // missing mount, and a SIGHUP reload would swap them in live.
+            config = parse_config_file(path)?;
         } else {
             // Try default config paths
             for path in &["config.yaml", "config.yml"] {
@@ -464,7 +587,7 @@ impl Config {
         // 4. Apply explicit flat env overrides (DFE_LOADER_KAFKA_BROKERS etc.)
         config.apply_flat_env(ENV_PREFIX);
 
-        // 5. Side-effects: credentials → enable auth, etc.
+        // 5. Side-effects: credentials -> enable auth, etc.
         config.normalize();
 
         // 6. Register all config sections in the global registry (enables /config endpoint
@@ -476,7 +599,7 @@ impl Config {
 
     /// Resolve the config file: `--config`, else `DFE_LOADER_CONFIG`.
     ///
-    /// The env var is step 5 of this module's cascade and nothing read it —
+    /// The env var is step 5 of this module's cascade and nothing read it --
     /// scalo's `--config` arg carries no `env =`. The watcher resolves here too.
     #[must_use]
     pub fn resolve_config_path(cli_path: Option<&str>) -> Option<String> {
@@ -554,7 +677,7 @@ impl Config {
             .collect();
             if !ignored.is_empty() {
                 return Err(crate::Error::Config(format!(
-                    "clickhouse.tls.{} reaches no ClickHouse client — only \
+                    "clickhouse.tls.{} reaches no ClickHouse client -- only \
                      clickhouse.tls.enabled is honoured (it selects the https scheme, \
                      verified against the system trust store). Mount a private CA into \
                      the container's trust store instead.",
@@ -593,16 +716,22 @@ impl Config {
             ));
         }
 
-        // Buffer validation
-        if self.buffer.flush_bytes == 0 {
-            return Err(crate::Error::Config(
-                "buffer.flush_bytes must be greater than 0".into(),
-            ));
-        }
-        if self.buffer.flush_rows == 0 {
-            return Err(crate::Error::Config(
-                "buffer.flush_rows must be greater than 0".into(),
-            ));
+        // Buffer validation. A zero period panics tokio's interval, at startup
+        // and on a hot reload alike.
+        for (name, zero) in [
+            ("buffer.flush_bytes", self.buffer.flush_bytes == 0),
+            ("buffer.flush_rows", self.buffer.flush_rows == 0),
+            ("buffer.flush_age_secs", self.buffer.flush_age_secs == 0),
+            (
+                "hot_reload.poll_interval_secs",
+                self.hot_reload.enabled && self.hot_reload.poll_interval_secs == 0,
+            ),
+        ] {
+            if zero {
+                return Err(crate::Error::Config(format!(
+                    "{name} must be greater than 0"
+                )));
+            }
         }
 
         Ok(())
@@ -852,7 +981,7 @@ mod tests {
 
     #[test]
     fn test_config_validation_no_topics() {
-        // Empty topics list is valid — triggers auto-discovery mode.
+        // Empty topics list is valid -- triggers auto-discovery mode.
         let mut config = Config::default();
         config.kafka.topics = vec![];
         config.kafka.topic_regex = None;
@@ -1411,7 +1540,7 @@ kafka:
     #[test]
     fn test_kafka_yaml_other_override_loses_stats_default() {
         // When user provides librdkafka_overrides in YAML, serde replaces
-        // the entire map — the default stats.interval.ms=0 is NOT merged.
+        // the entire map -- the default stats.interval.ms=0 is NOT merged.
         // Acceptable: users who set overrides are advanced and can add
         // statistics.interval.ms themselves if needed.
         let yaml = r#"
@@ -1434,7 +1563,7 @@ kafka:
     }
 
     // ========================================================================
-    // Validation — empty ClickHouse hosts
+    // Validation -- empty ClickHouse hosts
     // ========================================================================
 
     #[test]
@@ -1586,7 +1715,7 @@ kafka:
     }
 
     // ========================================================================
-    // ClickHouseConfig → crate::clickhouse::ClickHouseConfig conversion
+    // ClickHouseConfig -> crate::clickhouse::ClickHouseConfig conversion
     // ========================================================================
 
     #[test]
@@ -1854,18 +1983,18 @@ kafka:
     }
 
     #[test]
-    fn test_load_unreadable_path_returns_default() {
-        // Non-existent path is NOT an error — falls through to defaults + env
-        let result = Config::load(Some("/this/path/does/not/exist.yaml"));
+    fn a_named_config_file_that_is_missing_refuses_to_load() {
+        let err = Config::load(Some("/this/path/does/not/exist.yaml"))
+            .expect_err("a missing --config file loaded the defaults instead");
         assert!(
-            result.is_ok(),
-            "Non-existent config path should fall through to defaults"
+            err.to_string().contains("/this/path/does/not/exist.yaml"),
+            "the error must name the file: {err}"
         );
     }
 
     #[test]
     fn test_serde_parse_empty_yaml_uses_defaults() {
-        // Empty YAML with #[serde(default)] on all fields → all defaults.
+        // Empty YAML with #[serde(default)] on all fields -> all defaults.
         // Bypass Config::load() to avoid parallel env var contamination.
         let config: Config =
             scalo::yaml::from_str("", "config.yaml", scalo::yaml::Profile::Config).unwrap();
@@ -1878,7 +2007,7 @@ kafka:
 
     #[test]
     fn test_serde_parse_partial_yaml_merges_defaults() {
-        // Direct serde parsing (no env var interference) — verifies the
+        // Direct serde parsing (no env var interference) -- verifies the
         // #[serde(default)] cascade works end-to-end for partial configs.
         let yaml = "buffer:\n  flush_rows: 12345\n";
         let config: Config =
@@ -1888,14 +2017,14 @@ kafka:
         // Untouched fields in the same section keep defaults
         assert_eq!(config.buffer.flush_bytes, 1_048_576);
         assert_eq!(config.buffer.flush_age_secs, 5);
-        // Other sections untouched — all use their Default impl via serde
+        // Other sections untouched -- all use their Default impl via serde
         assert_eq!(config.kafka.brokers, vec!["localhost:9092"]);
         assert_eq!(config.routing.default_db, "dfe");
     }
 
     #[test]
     fn test_serde_parse_only_required_kafka_block() {
-        // Config with only Kafka block — rest must get defaults
+        // Config with only Kafka block -- rest must get defaults
         let yaml = r"
 kafka:
   brokers: [localhost:9092]
@@ -1941,7 +2070,7 @@ kafka:
     }
 
     // ========================================================================
-    // ApplyFlatEnv trait — direct testing (no process-wide env state)
+    // ApplyFlatEnv trait -- direct testing (no process-wide env state)
     // ========================================================================
 
     #[test]
@@ -2071,7 +2200,7 @@ kafka:
     }
 
     // ========================================================================
-    // Normalize trait — side-effects
+    // Normalize trait -- side-effects
     // ========================================================================
 
     #[test]
@@ -2142,7 +2271,7 @@ kafka:
 
         config.normalize();
 
-        // All creds empty → stays disabled
+        // All creds empty -> stays disabled
         assert!(!config.kafka.sasl.as_ref().unwrap().enabled);
     }
 
@@ -2382,14 +2511,6 @@ logging:
     // ========================================================================
 
     #[test]
-    fn test_load_with_nonexistent_path_uses_defaults() {
-        // Path doesn't exist → not read, defaults used. apply_flat_env / figment
-        // may still affect but should succeed.
-        let result = Config::load(Some("/nonexistent/path/config.yaml"));
-        assert!(result.is_ok(), "nonexistent path should not error");
-    }
-
-    #[test]
     fn test_load_with_explicit_file_parses_yaml() {
         // NOTE: env vars from other tests may override YAML values.
         // We only verify load succeeds and returns a parseable config.
@@ -2409,7 +2530,7 @@ clickhouse:
 
         let path = tmp.path().to_string_lossy().into_owned();
         let result = Config::load(Some(&path));
-        // Load should succeed; env override is acceptable
+        // Load succeeds, and an env override is acceptable
         assert!(result.is_ok(), "load should succeed: {:?}", result.err());
         let config = result.unwrap();
         // At minimum, config should have non-empty brokers
@@ -2428,24 +2549,59 @@ clickhouse:
         let _ = result;
     }
 
+    /// A zero flush threshold never flushes, and a zero period panics the
+    /// interval it builds, so each is refused by name.
     #[test]
-    fn test_validate_zero_flush_rows() {
-        let mut config = Config::default();
-        config.buffer.flush_rows = 0;
-        let result = config.validate();
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(err.contains("flush_rows") || err.contains("greater than 0"));
-    }
-
-    #[test]
-    fn test_validate_zero_flush_bytes() {
-        let mut config = Config::default();
-        config.buffer.flush_bytes = 0;
-        let result = config.validate();
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(err.contains("flush_bytes") || err.contains("greater than 0"));
+    fn a_zero_buffer_or_poll_bound_is_refused() {
+        type Set = fn(&mut Config);
+        let cases: [(&str, Set, Option<&str>); 6] = [
+            (
+                "flush_rows",
+                |c| c.buffer.flush_rows = 0,
+                Some("buffer.flush_rows"),
+            ),
+            (
+                "flush_bytes",
+                |c| c.buffer.flush_bytes = 0,
+                Some("buffer.flush_bytes"),
+            ),
+            (
+                "flush_age",
+                |c| c.buffer.flush_age_secs = 0,
+                Some("buffer.flush_age_secs"),
+            ),
+            (
+                "poll_interval_watched",
+                |c| {
+                    c.hot_reload.enabled = true;
+                    c.hot_reload.poll_interval_secs = 0;
+                },
+                Some("hot_reload.poll_interval_secs"),
+            ),
+            (
+                "poll_interval_unwatched",
+                |c| {
+                    c.hot_reload.enabled = false;
+                    c.hot_reload.poll_interval_secs = 0;
+                },
+                None,
+            ),
+            ("flush_age_one", |c| c.buffer.flush_age_secs = 1, None),
+        ];
+        for (case, set, refused) in cases {
+            let mut config = Config::default();
+            set(&mut config);
+            match (config.validate(), refused) {
+                (Ok(()), None) => {}
+                (Err(e), Some(key)) => {
+                    assert!(
+                        e.to_string().contains(key),
+                        "{case}: refused for {e}, not {key}"
+                    );
+                }
+                (outcome, want) => panic!("{case}: validate gave {outcome:?}, wanted {want:?}"),
+            }
+        }
     }
 
     #[test]
