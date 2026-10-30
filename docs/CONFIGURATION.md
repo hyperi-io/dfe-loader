@@ -10,23 +10,20 @@
 
 # Configuration
 
-dfe-loader is configured through an 8-layer cascade (scalo). Higher
-layers win. Every setting has a safe default, so an empty config boots.
+dfe-loader reads its config in four layers. Higher layers win. Every setting has a safe default, so a loader started with no config file boots.
 
 ```mermaid
 flowchart TB
-    CLI["1. CLI args (--clickhouse.protocol=http)"]
-    ENV["2. ENV (DFE_LOADER_CLICKHOUSE__PROTOCOL=http)"]
-    DOTENV["3. ./.env in the working directory (gitignored)"]
-    ENVYAML["4. settings.{env}.yaml"]
-    YAML["5. settings.yaml"]
-    DEF["6. defaults.yaml"]
-    LIB["7. scalo built-ins"]
-    HARD["8. hard-coded"]
-    CLI --> ENV --> DOTENV --> ENVYAML --> YAML --> DEF --> LIB --> HARD
+    FLAT["1. Flat ENV (DFE_LOADER_CLICKHOUSE_HOSTS=a:8123,b:8123)"]
+    ENV["2. Nested ENV (DFE_LOADER_CLICKHOUSE__PROTOCOL=http), ./.env included"]
+    YAML["3. The YAML file --config or DFE_LOADER_CONFIG names, else ./config.yaml"]
+    HARD["4. hard-coded defaults"]
+    FLAT --> ENV --> YAML --> HARD
 ```
 
-ENV names are auto-derived: `clickhouse.protocol` -> `DFE_LOADER_CLICKHOUSE__PROTOCOL` (a double underscore for each level of nesting).
+Nested ENV names are derived from the key: `clickhouse.protocol` -> `DFE_LOADER_CLICKHOUSE__PROTOCOL` (a double underscore for each level of nesting). A nested ENV value is parsed as a number, bool or list where it looks like one, so `DFE_LOADER_BUFFER__FLUSH_ROWS=50000` is a number. A secret field is the exception and is read as the exact string, so a numeric password or MaxMind account ID arrives as written.
+
+A file that `--config` or `DFE_LOADER_CONFIG` names must exist. A missing one refuses startup rather than running on the defaults.
 
 Only the `.env` in the working directory is read. A `.env` in a parent directory belongs to another project and is never loaded.
 
