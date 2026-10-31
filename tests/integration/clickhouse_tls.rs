@@ -23,7 +23,7 @@ use dfe_loader::clickhouse::{ChClient, ClickHouseConfig, ClickHouseQueryClient, 
 
 use crate::common::containers::{
     CLICKHOUSE_HTTP_PORT, CLICKHOUSE_HTTPS_PORT, CLICKHOUSE_NATIVE_TLS_PORT, private_ca,
-    shared_clickhouse, shared_clickhouse_ca,
+    shared_clickhouse, shared_clickhouse_ca, tls_name,
 };
 
 fn config(transport: Transport, host: &str, port: u16, tls: bool) -> ClickHouseConfig {
@@ -86,8 +86,8 @@ async fn tls_is_verified_against_the_system_trust_store_on_both_protocols() {
     let ca_pem = shared_clickhouse_ca().await;
     let other_ca = private_ca("unrelated CA");
     // The certificate names this host, and not its address.
-    let named = shared.host.clone();
-    let unnamed = (named.as_str(), 0)
+    let named = tls_name(&shared.host).to_string();
+    let unnamed = (shared.host.as_str(), 0)
         .to_socket_addrs()
         .expect("resolve the Docker host")
         .find(std::net::SocketAddr::is_ipv4)

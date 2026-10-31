@@ -277,12 +277,7 @@ pub async fn require_e2e_services(need_kafka: bool) {
         let _ = start_clickhouse_container().await;
         if need_kafka {
             let kafka = containers::shared_kafka().await;
-            let host = if kafka.host == "localhost" {
-                "127.0.0.1"
-            } else {
-                kafka.host.as_str()
-            };
-            let _ = KAFKA_ENDPOINT.set(format!("{host}:{}", kafka.port(9092)));
+            let _ = KAFKA_ENDPOINT.set(kafka.addr(containers::KAFKA_PORT));
         }
     }
     let ch = ClickHouseTestConfig::from_env();

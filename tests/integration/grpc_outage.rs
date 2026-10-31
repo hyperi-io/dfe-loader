@@ -351,13 +351,7 @@ pub(super) async fn wait_landed(
 /// The `ClickHouse` container's HTTP address.
 pub(super) async fn clickhouse_address(infra: &TestInfrastructure) -> String {
     let container = infra.clickhouse.as_ref().expect("ClickHouse container");
-    let http_port = container.port(8123);
-    // `localhost` can resolve to ::1 where loopback has no IPv6.
-    let host = match container.host() {
-        h if h == "localhost" => "127.0.0.1".to_string(),
-        h => h,
-    };
-    format!("{host}:{http_port}")
+    format!("{}:{}", container.host(), container.port(8123))
 }
 
 /// A query client that talks to `ClickHouse` directly, never through a proxy.

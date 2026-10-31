@@ -21,7 +21,7 @@
 //! `HYPERI_TEST_ENV_FILE`, and [`pets_allowed`] says when a run may use them.
 
 use std::io::{Read, Write};
-use std::net::{TcpStream, ToSocketAddrs};
+use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -265,7 +265,7 @@ impl Daemon {
     #[must_use]
     pub fn binding(&self, suite: &Suite) -> (String, String) {
         match self {
-            Self::Local | Self::Ssh { .. } => ("127.0.0.1".into(), "localhost".into()),
+            Self::Local | Self::Ssh { .. } => ("127.0.0.1".into(), "127.0.0.1".into()),
             Self::Tcp { host } => {
                 let bind = lookup(suite, "HYPERI_TEST_DOCKER_BIND").unwrap_or_else(|| {
                     panic!(
@@ -789,11 +789,8 @@ fn wait_ready(container: &SharedContainer, ready: &Ready, deadline: Instant) {
 fn wait_reachable(container: &SharedContainer, deadline: Instant) {
     for &(_, port) in &container.ports {
         loop {
-            let reachable = (container.host.as_str(), port)
-                .to_socket_addrs()
-                .ok()
-                .and_then(|mut a| a.next())
-                .is_some_and(|a| TcpStream::connect_timeout(&a, Duration::from_secs(1)).is_ok());
+            let reachable =
+                connect_any(resolve(&container.host, port), Duration::from_secs(1)).is_some();
             if reachable {
                 break;
             }
@@ -809,11 +806,34 @@ fn wait_reachable(container: &SharedContainer, deadline: Instant) {
     }
 }
 
+/// Every address `host` resolves to on `port`, in resolver order.
+fn resolve(host: &str, port: u16) -> Vec<SocketAddr> {
+    (host, port)
+        .to_socket_addrs()
+        .map(Iterator::collect)
+        .unwrap_or_default()
+}
+
+/// The first of `addrs` that accepts a connection, tried in order, so a name
+/// that resolves to ::1 first still reaches a service on 127.0.0.1.
+fn connect_any(
+    addrs: impl IntoIterator<Item = SocketAddr>,
+    timeout: Duration,
+) -> Option<TcpStream> {
+    addrs
+        .into_iter()
+        .find_map(|addr| TcpStream::connect_timeout(&addr, timeout).ok())
+}
+
 /// `GET path` over plain HTTP/1.0: the status code and the body.
 #[must_use]
 pub fn http_get(host: &str, port: u16, path: &str) -> Option<(u16, String)> {
-    let addr = (host, port).to_socket_addrs().ok()?.next()?;
-    let mut stream = TcpStream::connect_timeout(&addr, Duration::from_secs(2)).ok()?;
+    http_get_at(resolve(host, port), host, path)
+}
+
+/// `GET path` on the first of `addrs` that accepts, naming `host` in the request.
+fn http_get_at(addrs: Vec<SocketAddr>, host: &str, path: &str) -> Option<(u16, String)> {
+    let mut stream = connect_any(addrs, Duration::from_secs(2))?;
     stream.set_read_timeout(Some(Duration::from_secs(2))).ok()?;
     write!(stream, "GET {path} HTTP/1.0\r\nHost: {host}\r\n\r\n").ok()?;
     let mut response = String::new();
@@ -913,7 +933,39 @@ fn path_str(path: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Daemon, Labelled, Suite, parse_listing, sweep_removes};
+    use super::{Daemon, Labelled, Suite, connect_any, http_get_at, parse_listing, sweep_removes};
+
+    /// A resolver that answers ::1 before 127.0.0.1 still reaches a service
+    /// bound to 127.0.0.1 alone, for both the reachability probe and `GET`.
+    #[test]
+    fn the_probes_try_every_resolved_address() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let port = listener.local_addr().expect("local addr").port();
+        let server = std::thread::spawn(move || {
+            for stream in listener.incoming().take(2) {
+                let mut stream = stream.expect("accept");
+                let mut request = [0u8; 256];
+                let _ = stream.read(&mut request);
+                let _ = stream.write_all(b"HTTP/1.0 200 OK\r\n\r\nOk.");
+            }
+        });
+        let v6_first: Vec<std::net::SocketAddr> = vec![
+            format!("[::1]:{port}").parse().expect("v6 addr"),
+            format!("127.0.0.1:{port}").parse().expect("v4 addr"),
+        ];
+        let timeout = std::time::Duration::from_secs(1);
+        assert!(
+            connect_any(v6_first.clone(), timeout).is_some(),
+            "the reachability probe stopped at ::1"
+        );
+        assert_eq!(
+            http_get_at(v6_first, "localhost", "/ping"),
+            Some((200, "Ok.".to_string())),
+            "the readiness GET stopped at ::1"
+        );
+        server.join().expect("test server");
+    }
 
     const SUITE: Suite = Suite {
         repo: "r",
@@ -922,7 +974,7 @@ mod tests {
 
     #[test]
     fn daemons_and_where_their_ports_bind() {
-        let local = ("127.0.0.1".to_string(), "localhost".to_string());
+        let local = ("127.0.0.1".to_string(), "127.0.0.1".to_string());
         for (endpoint, want, binding) in [
             ("unix:///var/run/docker.sock", Daemon::Local, Some(&local)),
             ("", Daemon::Local, Some(&local)),

@@ -201,8 +201,13 @@ impl ClickHouseTarget {
         tls: bool,
         database: &str,
     ) -> ClickHouseConfig {
+        let host = if tls {
+            crate::common::containers::tls_name(&self.host)
+        } else {
+            self.host.as_str()
+        };
         ClickHouseConfig {
-            hosts: vec![format!("{}:{port}", self.host)],
+            hosts: vec![format!("{host}:{port}")],
             transport,
             database: database.to_string(),
             username: self.user.clone(),
@@ -535,14 +540,9 @@ async fn kafka_target() -> KafkaTarget {
         return pet;
     }
     let shared = shared_kafka().await;
-    let host = if shared.host == "localhost" {
-        "127.0.0.1"
-    } else {
-        shared.host.as_str()
-    };
     KafkaTarget {
         rung: "container",
-        bootstrap: format!("{host}:{}", shared.port(9092)),
+        bootstrap: shared.addr(9092),
         security_protocol: "PLAINTEXT".into(),
         sasl: None,
         ca_file: None,

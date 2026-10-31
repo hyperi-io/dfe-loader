@@ -186,6 +186,16 @@ mod testcontainers_impl {
         ]
     }
 
+    /// The name to verify a ClickHouse container's certificate against when
+    /// connecting to `host`: its certificate names `localhost`, not loopback's address.
+    #[must_use]
+    pub fn tls_name(host: &str) -> &str {
+        match host.parse::<std::net::IpAddr>() {
+            Ok(ip) if ip.is_loopback() => "localhost",
+            _ => host,
+        }
+    }
+
     /// A self-signed CA named `name`.
     #[must_use]
     pub fn private_ca(name: &str) -> CertifiedIssuer<'static, KeyPair> {
@@ -260,7 +270,7 @@ mod testcontainers_impl {
     /// The broker advertises the published port, which only exists once the
     /// container runs, so the entrypoint waits for this script.
     fn write_kafka_start_script(container: &SharedContainer) {
-        let host = advertised(&container.host);
+        let host = &container.host;
         let port = container.port(KAFKA_PORT);
         let script = format!(
             "printf '#!/usr/bin/env bash\\nexport \
@@ -268,15 +278,6 @@ mod testcontainers_impl {
              /etc/kafka/docker/run\\n' > {KAFKA_START_SCRIPT}"
         );
         let _ = container.exec(&["sh", "-c", &script]);
-    }
-
-    /// `localhost` can resolve to ::1 where loopback has no IPv6.
-    fn advertised(host: &str) -> &str {
-        if host == "localhost" {
-            "127.0.0.1"
-        } else {
-            host
-        }
     }
 
     /// The run's shared ClickHouse, started by the first process to ask.
@@ -540,5 +541,5 @@ pub use testcontainers_impl::{
     CLICKHOUSE_DIGEST, CLICKHOUSE_HTTP_PORT, CLICKHOUSE_HTTPS_PORT, CLICKHOUSE_NATIVE_PORT,
     CLICKHOUSE_NATIVE_TLS_PORT, CLICKHOUSE_TAG, CLICKHOUSE_USER, KAFKA_PORT, SUITE, Service,
     clickhouse_password, private_ca, shared_clickhouse, shared_clickhouse_ca, shared_kafka,
-    start_kafka_on,
+    start_kafka_on, tls_name,
 };
