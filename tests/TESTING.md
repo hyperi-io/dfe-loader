@@ -30,7 +30,7 @@ Full adds every other real-server test: the inserter, readiness, data type, DLQ,
 
 The ClickHouse pin lives in `tests/common/containers.rs` and follows dfe-infra `versions.yaml`. The Kafka pin is scalo's `transport::kafka::test_support::KAFKA_IMAGE`, the line the DFE stack deploys.
 
-Each ClickHouse container gets a random password for `default`, never logged, which tests read with `clickhouse_password()`. `default` may create users and grant to them. Its certificate names `localhost` and the Docker host, signed by a CA made for the run, which tests read back with `shared_clickhouse_ca()`. Kafka is one KRaft broker advertising the host port Docker published.
+Each ClickHouse container gets a random password for `default`, never logged, which tests read with `clickhouse_password()`. `default` may create users and grant to them. An embedded single-node Keeper backs the `dfe_replicated` database (`Replicated` engine) that the `ReplicatedMergeTree()` tests in `inserter.rs` and `rls.rs` write to. Those tests fail, not skip, when it is missing (`require_replicated!`). Its certificate names `localhost` and the Docker host, signed by a CA made for the run, which tests read back with `shared_clickhouse_ca()`. Kafka is one KRaft broker advertising the host port Docker published.
 
 `tests/common/shared_service.rs` gives every test process in a run the same container per service:
 
@@ -57,16 +57,16 @@ A local core run can use always-present pet servers instead of the containers. T
 Each `HYPERI_TEST_*` setting is read from the process environment, then the project `.env`, then the file named by `HYPERI_TEST_ENV_FILE`:
 
 - ClickHouse: `HYPERI_TEST_CLICKHOUSE_HOST`, `_HTTP_PORT`, `_HTTPS_PORT`, `_NATIVE_PORT`, `_NATIVE_TLS_PORT`, `_USER`, `_PASSWORD`, `_CA_FILE`, `_CLUSTER`, `_DB_PREFIX`
-- Kafka: `HYPERI_TEST_KAFKA_BOOTSTRAP`, `_SECURITY_PROTOCOL`, `_SASL_MECHANISM`, `_USER`, `_PASSWORD`, `_TOPIC_PREFIX`
+- Kafka: `HYPERI_TEST_KAFKA_BOOTSTRAP`, `_SECURITY_PROTOCOL`, `_SASL_MECHANISM`, `_USER`, `_PASSWORD`, `_CA_FILE`, `_TOPIC_PREFIX`
 
-On HyperI dev machines `hyperi-ai secrets devex-env` writes them to `~/.config/hyperi-ai/devex-test.env`. Point `HYPERI_TEST_ENV_FILE` at that file. No host, port or credential belongs in this repo.
+On HyperI dev machines `hyperi-ai secrets devex-env` (hyperi-ai 4.1.30 or later) writes them to `~/.config/hyperi-ai/devex-test.env`, mode 0600, and prints only the path and the key count. Point `HYPERI_TEST_ENV_FILE` at that file. No host, port or credential belongs in this repo.
 
 A run on a pet creates what it needs and drops it:
 
 - ClickHouse: a run database `<DB_PREFIX>t<epoch>_<run>`. With `_CLUSTER` set it is created `ON CLUSTER` with the `Replicated` engine and `ReplicatedMergeTree` tables, so every replica behind the pet's hostname sees them, and dropped `ON CLUSTER`.
 - Kafka: a run topic `<TOPIC_PREFIX>t<epoch>-<run>` and its group, created and deleted by the test, since the pet does not auto-create topics.
 - Run databases and topics older than 6 hours are swept at the start of a run.
-- The TLS cases need `_CA_FILE`. Without it they are left out on the pet, and a Kafka pet that needs TLS falls back to the container.
+- The TLS cases need the service's `_CA_FILE`. Without it the ClickHouse TLS cases are left out on the pet, and a Kafka pet that needs TLS falls back to the container.
 
 ## Re-capturing the fixtures
 

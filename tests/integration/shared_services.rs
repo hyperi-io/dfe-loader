@@ -490,8 +490,7 @@ fn kafka_pet() -> Option<KafkaTarget> {
     }
     let bootstrap = key("BOOTSTRAP")?;
     let security_protocol = key("SECURITY_PROTOCOL").unwrap_or_else(|| "PLAINTEXT".into());
-    // The contract names one CA file for the pets.
-    let ca_file = lookup(&SUITE, "HYPERI_TEST_CLICKHOUSE_CA_FILE");
+    let ca_file = key("CA_FILE");
     if security_protocol.contains("SSL") && ca_file.is_none() {
         record("Kafka pet needs TLS and no CA file is set, using the shared container");
         return None;

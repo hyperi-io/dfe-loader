@@ -94,6 +94,30 @@ mod testcontainers_impl {
 </clickhouse>
 ";
 
+    /// A single-node embedded Keeper, so a `Replicated` database can run.
+    const CLICKHOUSE_KEEPER_CONFIG: &str = r"<clickhouse>
+    <keeper_server>
+        <tcp_port>9181</tcp_port>
+        <server_id>1</server_id>
+        <log_storage_path>/var/lib/clickhouse/coordination/log</log_storage_path>
+        <snapshot_storage_path>/var/lib/clickhouse/coordination/snapshots</snapshot_storage_path>
+        <raft_configuration>
+            <server>
+                <id>1</id>
+                <hostname>localhost</hostname>
+                <port>9234</port>
+            </server>
+        </raft_configuration>
+    </keeper_server>
+    <zookeeper>
+        <node>
+            <host>localhost</host>
+            <port>9181</port>
+        </node>
+    </zookeeper>
+</clickhouse>
+";
+
     /// A ClickHouse with HTTP, native, HTTPS and native TLS, where `default`
     /// has a password made for the container and may manage users.
     fn clickhouse_spec() -> ServiceSpec {
@@ -138,6 +162,10 @@ mod testcontainers_impl {
             (
                 "/etc/clickhouse-server/config.d/dfe-tls.xml".into(),
                 CLICKHOUSE_TLS_CONFIG.into(),
+            ),
+            (
+                "/etc/clickhouse-server/config.d/dfe-keeper.xml".into(),
+                CLICKHOUSE_KEEPER_CONFIG.into(),
             ),
             (
                 "/etc/clickhouse-server/users.d/dfe-test-users.xml".into(),
@@ -256,7 +284,46 @@ mod testcontainers_impl {
         static SHARED: OnceLock<SharedContainer> = OnceLock::new();
         let container = shared(&SHARED, clickhouse_spec).await;
         remember_password(&container).await;
+        ensure_replicated_database(&container).await;
         container
+    }
+
+    /// Create [`crate::common::REPLICATED_DATABASE`] on the embedded Keeper,
+    /// once per process. Every process may race to it, so it retries until the
+    /// database reads back as `Replicated`.
+    async fn ensure_replicated_database(container: &SharedContainer) {
+        static READY: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
+        let db = crate::common::REPLICATED_DATABASE;
+        let client = clickhouse::Client::default()
+            .with_url(format!("http://{}", container.addr(CLICKHOUSE_HTTP_PORT)))
+            .with_user(CLICKHOUSE_USER)
+            .with_password(clickhouse_password());
+        READY
+            .get_or_init(|| async move {
+                let create = format!(
+                    "CREATE DATABASE IF NOT EXISTS {db} \
+                     ENGINE = Replicated('/clickhouse/databases/{db}', 'shard1', 'replica1')"
+                );
+                let deadline = std::time::Instant::now() + STARTUP_TIMEOUT;
+                loop {
+                    let created = client.query(&create).execute().await;
+                    let engine: Option<String> = client
+                        .query("SELECT engine FROM system.databases WHERE name = ?")
+                        .bind(db)
+                        .fetch_optional()
+                        .await
+                        .unwrap_or(None);
+                    if engine.as_deref() == Some("Replicated") {
+                        return;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "the Replicated database {db} never came up: {created:?}, engine {engine:?}"
+                    );
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                }
+            })
+            .await;
     }
 
     /// The run's shared Kafka, started by the first process to ask.

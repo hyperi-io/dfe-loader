@@ -17,7 +17,7 @@ use crate::common::{
     create_ch_test_client, create_http_test_client, drop_http_test_table,
     unique_qualified_table_name, unique_table_name,
 };
-use crate::{require_clickhouse, skip_if_not_replicated};
+use crate::{require_clickhouse, require_replicated};
 
 /// Helper: create JSON rows for testing
 fn make_test_rows(count: usize) -> Vec<Map<String, Value>> {
@@ -43,12 +43,8 @@ fn make_test_rows(count: usize) -> Vec<Map<String, Value>> {
 async fn test_inserter_basic_insert() {
     require_clickhouse!();
 
-    let client = if let Some(c) = create_http_test_client() {
-        Arc::new(c)
-    } else {
-        eprintln!("Could not create HTTP client");
-        return;
-    };
+    let client =
+        Arc::new(create_http_test_client().expect("a client for the ClickHouse just acquired"));
     let table_name = unique_qualified_table_name("test_inserter_basic");
     let oc = crate::common::on_cluster_clause();
 
@@ -350,18 +346,14 @@ fn test_inserter_config_defaults() {
 #[tokio::test]
 async fn test_rowbinary_json_from_raw_payload() {
     require_clickhouse!();
-    skip_if_not_replicated!();
+    require_replicated!();
 
-    let client = if let Some(c) = create_http_test_client() {
-        Arc::new(c)
-    } else {
-        eprintln!("Could not create HTTP client");
-        return;
-    };
+    let client =
+        Arc::new(create_http_test_client().expect("a client for the ClickHouse just acquired"));
     let oc = crate::common::on_cluster_clause();
 
     let table_name = unique_table_name("test_rb_json_raw");
-    let full_name = format!("default.{table_name}");
+    let full_name = format!("{}.{table_name}", crate::common::REPLICATED_DATABASE);
 
     // Create table with Nullable(JSON) _json column — matches Common Header v2.
     let ddl = format!(
@@ -445,16 +437,13 @@ async fn test_rowbinary_json_from_raw_payload() {
 #[tokio::test]
 async fn test_raw_only_mode_raw_populated_json_null() {
     require_clickhouse!();
-    skip_if_not_replicated!();
+    require_replicated!();
 
-    let client = if let Some(c) = create_http_test_client() {
-        Arc::new(c)
-    } else {
-        return;
-    };
+    let client =
+        Arc::new(create_http_test_client().expect("a client for the ClickHouse just acquired"));
     let oc = crate::common::on_cluster_clause();
     let table_name = unique_table_name("test_raw_only");
-    let full_name = format!("default.{table_name}");
+    let full_name = format!("{}.{table_name}", crate::common::REPLICATED_DATABASE);
 
     let ddl = format!(
         "CREATE TABLE {full_name} (
@@ -529,16 +518,13 @@ async fn test_raw_only_mode_raw_populated_json_null() {
 #[tokio::test]
 async fn test_extracted_only_mode_both_null() {
     require_clickhouse!();
-    skip_if_not_replicated!();
+    require_replicated!();
 
-    let client = if let Some(c) = create_http_test_client() {
-        Arc::new(c)
-    } else {
-        return;
-    };
+    let client =
+        Arc::new(create_http_test_client().expect("a client for the ClickHouse just acquired"));
     let oc = crate::common::on_cluster_clause();
     let table_name = unique_table_name("test_extracted_only");
-    let full_name = format!("default.{table_name}");
+    let full_name = format!("{}.{table_name}", crate::common::REPLICATED_DATABASE);
 
     let ddl = format!(
         "CREATE TABLE {full_name} (

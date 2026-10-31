@@ -148,17 +148,10 @@ impl ClickHouseTestConfig {
         self.is_configured() && clickhouse_http_ping_ok(&self.http_url())
     }
 
-    /// Probe whether the connected `ClickHouse`'s `default` database uses the
-    /// `Replicated` engine.
-    ///
-    /// Tests that create `ReplicatedMergeTree()` tables with no explicit
-    /// ZooKeeper path rely on the Replicated database engine to expand the
-    /// `{uuid}` macro and auto-fill that path. Against a single-node Atomic
-    /// `default` database the server rejects the DDL (error 36), so such tests
-    /// must skip. This is capability-based (queries `system.databases`) rather
-    /// than mode-based, so it also catches a single-node `ClickHouse` in `remote` mode.
-    pub fn has_replicated_default_db(&self) -> bool {
-        clickhouse_default_db_is_replicated(&self.http_url(), &self.user, &self.password)
+    /// Whether `database` on the connected `ClickHouse` uses the `Replicated`
+    /// engine, which `ReplicatedMergeTree()` with no Keeper path needs.
+    pub fn is_replicated(&self, database: &str) -> bool {
+        clickhouse_db_is_replicated(&self.http_url(), &self.user, &self.password, database)
     }
 
     pub fn http_addr(&self) -> String {
@@ -561,28 +554,25 @@ macro_rules! require_clickhouse {
     };
 }
 
-/// Skip test unless the connected `ClickHouse`'s `default` database is the
-/// `Replicated` engine.
-///
-/// Capability-based skip for tests that create
-/// `ReplicatedMergeTree()` tables with no ZooKeeper path: those need the
-/// `Replicated` database engine so the `{uuid}` macro expands. It skips against
-/// a single-node `ClickHouse` such as the test container, where the DDL would fail
-/// with server error 36. Call after `require_clickhouse!`, which guarantees the
-/// probe target is reachable.
+/// The `Replicated` database the shared ClickHouse carries, on its embedded
+/// Keeper, for tables made with `ReplicatedMergeTree()` and no Keeper path.
+pub const REPLICATED_DATABASE: &str = "dfe_replicated";
+
+/// Fail the test unless the connected `ClickHouse` has [`REPLICATED_DATABASE`]
+/// on the `Replicated` engine. These tests run in the full level, which owes
+/// them a run, so a missing database is a failure and never a skip. Call after
+/// `require_clickhouse!`.
 #[macro_export]
-macro_rules! skip_if_not_replicated {
+macro_rules! require_replicated {
     () => {
         let ch = $crate::common::ClickHouseTestConfig::from_env();
-        if !ch.has_replicated_default_db() {
-            eprintln!(
-                "Skipping: test requires a Replicated-cluster ClickHouse at {} (TEST_MODE={}); \
-                 the default database is not the Replicated engine",
-                ch.http_addr(),
-                $crate::common::TestMode::detect()
-            );
-            return;
-        }
+        assert!(
+            ch.is_replicated($crate::common::REPLICATED_DATABASE),
+            "the ClickHouse at {} (TEST_MODE={}) has no Replicated database {}",
+            ch.http_addr(),
+            $crate::common::TestMode::detect(),
+            $crate::common::REPLICATED_DATABASE
+        );
     };
 }
 
@@ -772,17 +762,18 @@ fn clickhouse_http_ping_ok(base_url: &str) -> bool {
     .unwrap_or(false)
 }
 
-/// Query `system.databases` over HTTP and report whether the `default` database
-/// uses the `Replicated` engine. Returns `false` on any error (unreachable,
-/// auth failure, non-Replicated engine).
+/// Query `system.databases` over HTTP and report whether `database` uses the
+/// `Replicated` engine. Returns `false` on any error (unreachable, auth
+/// failure, non-Replicated engine).
 ///
 /// Same thread-isolated `reqwest::blocking` pattern as `clickhouse_http_ping_ok`
 /// — the fresh `std::thread::spawn` keeps reqwest's internal runtime from
 /// panicking on drop inside the outer `#[tokio::test]` runtime.
-fn clickhouse_default_db_is_replicated(base_url: &str, user: &str, password: &str) -> bool {
+fn clickhouse_db_is_replicated(base_url: &str, user: &str, password: &str, database: &str) -> bool {
     let url = base_url.trim_end_matches('/').to_string();
     let user = user.to_string();
     let password = password.to_string();
+    let query = format!("SELECT engine FROM system.databases WHERE name = '{database}'");
     std::thread::spawn(move || -> Option<bool> {
         let client = reqwest::blocking::Client::builder()
             .timeout(Duration::from_secs(3))
@@ -792,10 +783,7 @@ fn clickhouse_default_db_is_replicated(base_url: &str, user: &str, password: &st
             .get(&url)
             .header("X-ClickHouse-User", user)
             .header("X-ClickHouse-Key", password)
-            .query(&[(
-                "query",
-                "SELECT engine FROM system.databases WHERE name = 'default'",
-            )])
+            .query(&[("query", query)])
             .send()
             .ok()?;
         if !resp.status().is_success() {
