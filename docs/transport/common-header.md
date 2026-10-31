@@ -1,6 +1,6 @@
 <!--
   Project:      dfe-loader
-  File:         docs/transport/COMMON-HEADER.md
+  File:         docs/transport/common-header.md
   Purpose:      Common header schema injected into every event table
   Language:     Markdown
 
@@ -739,7 +739,7 @@ pub fn best_engine(&self) -> TableEngine {
 
 ## Source field mapping
 
-Using the DDL Expression Language (see [../clickhouse/DDL-DIRECTIVES.md](../clickhouse/DDL-DIRECTIVES.md)):
+Using the DDL Expression Language (see [../clickhouse/ddl-directives.md](../clickhouse/ddl-directives.md)):
 
 | Column | Expression | Description |
 |--------|------------|-------------|
@@ -816,7 +816,7 @@ topic_replication_factor = 1
 The profile YAML itself lives in
 [dfe-schemas](https://github.com/hyperi-io/dfe-schemas) under `common-header/`
 and reaches the loader only as deployed ClickHouse columns -- see
-[SCHEMAS.md](../deployment/SCHEMAS.md).
+[schemas.md](../deployment/schemas.md).
 
 ## Migration from v1
 
@@ -920,7 +920,7 @@ profiles:
 
 ## References
 
-- [../clickhouse/DDL-DIRECTIVES.md](../clickhouse/DDL-DIRECTIVES.md) -- field mapping expression language
+- [../clickhouse/ddl-directives.md](../clickhouse/ddl-directives.md) -- field mapping expression language
 - [ClickHouse MergeTree](https://clickhouse.com/docs/en/engines/table-engines/mergetree-family/mergetree)
 - [ClickHouse JSON Type](https://clickhouse.com/docs/en/sql-reference/data-types/json)
 - [Row-Level Security](https://clickhouse.com/docs/en/guides/sre/user-management/row-level-security)

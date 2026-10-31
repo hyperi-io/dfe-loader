@@ -15,7 +15,7 @@ ClickHouse. Point it at a topic, give it a routing rule, and it parses, routes,
 promotes schema columns, enriches, buffers per table, and inserts -- RowBinary
 by default so ClickHouse skips JSON parsing, with at-least-once Kafka delivery.
 
-This is the index. Read [ARCHITECTURE.md](ARCHITECTURE.md) for the 10,000-foot
+This is the index. Read [architecture.md](architecture.md) for the 10,000-foot
 view, [clickhouse/](clickhouse/) for the insert layer (the part that changed in
 the hyperi-port migration), and [pipeline/](pipeline/) for the hot path.
 
@@ -78,10 +78,10 @@ flowchart TB
 
 | Area | Doc | Covers |
 |------|-----|--------|
-| System shape | [ARCHITECTURE.md](ARCHITECTURE.md) | Layers, the `clickhouse_ext` boundary, the fork dependency |
-| Configuration | [CONFIGURATION.md](CONFIGURATION.md) | The cascade and the settings that change behaviour |
-| Operations | [OPERATIONS.md](OPERATIONS.md) | Running, config-check, metrics/top, hot-reload, DLQ |
-| Build features | [FEATURE-FLAGS.md](FEATURE-FLAGS.md) | Cargo features and the fork patch mechanism |
+| System shape | [architecture.md](architecture.md) | Layers, the `clickhouse_ext` boundary, the fork dependency |
+| Configuration | [configuration.md](configuration.md) | The cascade and the settings that change behaviour |
+| Operations | [operations.md](operations.md) | Running, config-check, metrics/top, hot-reload, DLQ |
+| Build features | [feature-flags.md](feature-flags.md) | Cargo features and the fork patch mechanism |
 | Insert layer | [clickhouse/](clickhouse/) | RowBinary vs JSONEachRow, `clickhouse_ext`, schema cache, type handling, TLS, DDL directives |
 | Hot path | [pipeline/](pipeline/) | Routing, extraction, enrichment, capture modes, buffering |
 | Transports | [transport/](transport/) | Kafka / gRPC / Memory, the common header |
@@ -96,4 +96,4 @@ dfe-loader inserts through a HyperI fork of `clickhouse-rs` (the `hyperi-port/*`
 chain), pinned via `[patch.crates-io]` to an immutable tag. The dynamic
 RowBinary layer that the fork deliberately keeps out of scope -- runtime
 `Map<String,Value>` encoding -- lives in this repo at `src/clickhouse_ext/`. See
-[clickhouse/CLICKHOUSE-EXT.md](clickhouse/CLICKHOUSE-EXT.md).
+[clickhouse/clickhouse-ext.md](clickhouse/clickhouse-ext.md).

@@ -1,6 +1,6 @@
 <!--
   Project:      dfe-loader
-  File:         docs/clickhouse/INSERT-FORMATS.md
+  File:         docs/clickhouse/insert-formats.md
   Purpose:      Insert formats and transports, and how they compose
   Language:     Markdown
 
@@ -99,8 +99,8 @@ On the RowBinary path the loader sets
 `input_format_binary_read_json_as_string=1` on the insert so the server reads
 that string back as a JSON value rather than a literal `String`. The setting is
 applied automatically whenever the resolved schema contains a JSON column -- no
-configuration needed. See [CLICKHOUSE-EXT.md](CLICKHOUSE-EXT.md) for the seam
-and [TYPES.md](TYPES.md) for per-type encoding.
+configuration needed. See [clickhouse-ext.md](clickhouse-ext.md) for the seam
+and [types.md](types.md) for per-type encoding.
 
 ## When the schema drifts
 
@@ -110,9 +110,9 @@ error: a drift signal (`TYPE_MISMATCH`, `NO_SUCH_COLUMN`, `CANNOT_PARSE`, code
 117, and friends) surfaces as `DynamicError::SchemaMismatch`, and the cache is
 invalidated so the next attempt re-fetches from `system.columns` and re-encodes.
 A non-drift error (network, auth) is returned as-is. See
-[SCHEMA-CACHE.md](SCHEMA-CACHE.md).
+[schema-cache.md](schema-cache.md).
 
-The same codes come back for a row the server can never accept, so the server's code decides, never the words beside it: a code on the retry list holds the batch, and any other refusal against a table unchanged since the rows were encoded is the rows' own, so salvage dead-letters the bad row and the rest land. The list and the reason for each group are in [SCHEMA-CACHE.md](SCHEMA-CACHE.md#mismatch-recovery).
+The same codes come back for a row the server can never accept, so the server's code decides, never the words beside it: a code on the retry list holds the batch, and any other refusal against a table unchanged since the rows were encoded is the rows' own, so salvage dead-letters the bad row and the rest land. The list and the reason for each group are in [schema-cache.md](schema-cache.md#mismatch-recovery).
 
 A type change is caught before any row is read. RowBinary is positional, so bytes encoded for a column's old type can parse as other rows: ten `(id UInt64, v UInt8)` rows are 90 bytes, which an `(id UInt64, v UInt16)` table reads as nine whole rows of garbage, with no error. The header carries the type each column was encoded for, and with `input_format_with_types_use_header=1` (the default, and pinned on the insert with `input_format_with_names_use_header`) the server refuses a mismatch with code 117 ("Type of 'v' must be UInt16, not UInt8"). That refusal against a changed table takes the drift path above. The header costs one column count plus each name and type string once per INSERT, 235 bytes for a 10-column landing table.
 
@@ -134,4 +134,4 @@ line `Insert format configured format=...` reports the value that was applied.
 
 Both are restart-required -- they are baked into the `Client` at build time, so
 a hot-reload of either is logged and deferred to the next start. See
-[../CONFIGURATION.md](../CONFIGURATION.md).
+[../configuration.md](../configuration.md).

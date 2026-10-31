@@ -1,6 +1,6 @@
 <!--
   Project:      dfe-loader
-  File:         docs/clickhouse/TYPES.md
+  File:         docs/clickhouse/types.md
   Purpose:      ClickHouse data type reference and native-protocol serialisation notes
   Language:     Markdown
 
@@ -20,8 +20,8 @@ to cover a type it does not yet handle.
 Nothing here is loader-invented: it is the ClickHouse type system as of the
 24.8+ line, annotated with how each type lands on the native wire. For how those
 bytes are actually shipped (HTTP RowBinary vs native/TCP), see
-[INSERT-FORMATS.md](INSERT-FORMATS.md); for the encoder seam itself, see
-[CLICKHOUSE-EXT.md](CLICKHOUSE-EXT.md).
+[insert-formats.md](insert-formats.md); for the encoder seam itself, see
+[clickhouse-ext.md](clickhouse-ext.md).
 
 Sources:
 
@@ -291,7 +291,7 @@ The fork keeps insertion typed -- compile-time `T: Row` schemas -- which is the
 right upstream default. The loader's rows are not typed at compile time: their
 columns come from `system.columns` at runtime, so the dynamic encoding layer
 lives in this repo at `src/clickhouse_ext/`, on top of the fork's stable public
-surface. See [CLICKHOUSE-EXT.md](CLICKHOUSE-EXT.md) for that seam.
+surface. See [clickhouse-ext.md](clickhouse-ext.md) for that seam.
 
 The loader writes in one of two formats, dispatched by `clickhouse.insert_format`:
 
@@ -305,7 +305,7 @@ The loader writes in one of two formats, dispatched by `clickhouse.insert_format
 `input_format_binary_read_json_as_string=1` for JSON-typed columns. The loader
 never calls `clickhouse::Row` -- everything is dynamic. DDL and schema queries go
 through the same fork via `ClickHouseQueryClient`. The full transport x format
-matrix (HTTP vs native/TCP) is in [INSERT-FORMATS.md](INSERT-FORMATS.md).
+matrix (HTTP vs native/TCP) is in [insert-formats.md](insert-formats.md).
 
 ### Type coverage beyond upstream
 
@@ -375,7 +375,7 @@ On the RowBinary path the loader sets `input_format_binary_read_json_as_string=1
 on the insert so the server reads that string back as a JSON value rather than a
 literal `String`. The setting is applied automatically whenever the resolved
 schema contains a JSON column -- no configuration needed. See
-[INSERT-FORMATS.md](INSERT-FORMATS.md).
+[insert-formats.md](insert-formats.md).
 
 ---
 
@@ -383,7 +383,7 @@ schema contains a JSON column -- no configuration needed. See
 
 **RowBinary (default):** encoded by `clickhouse_ext::DynamicInsert` from the reflected schema. It covers the integer, float, decimal, bool, string, date and time, UUID, IP, enum, `Array`, `Map`, JSON and geo types, inside `Nullable` and `LowCardinality`. `Decimal(P, S)` resolves to the concrete Decimal32/64/128/256 at encode time based on precision. A value bound for a type the encoder has no arm for (`Tuple`, `Variant`, `Dynamic`, `Nested`, ...) is refused with `UnsupportedType`, which holds the batch for retry rather than writing wrong bytes.
 
-**JSONEachRow (fallback):** the server parses each type itself. Before it does, the loader shapes the values it would refuse by the same rules as RowBinary: a JSON column's non-object, every geo_point form (sent as `[lon, lat]`), and a single value bound for an `Array`. Set `insert_format = "json_each_row"` to opt in (HTTP transport only -- see the config guard in [INSERT-FORMATS.md](INSERT-FORMATS.md)).
+**JSONEachRow (fallback):** the server parses each type itself. Before it does, the loader shapes the values it would refuse by the same rules as RowBinary: a JSON column's non-object, every geo_point form (sent as `[lon, lat]`), and a single value bound for an `Array`. Set `insert_format = "json_each_row"` to opt in (HTTP transport only -- see the config guard in [insert-formats.md](insert-formats.md)).
 
 ### Geo points
 

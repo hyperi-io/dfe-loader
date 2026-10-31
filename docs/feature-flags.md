@@ -1,6 +1,6 @@
 <!--
   Project:      dfe-loader
-  File:         docs/FEATURE-FLAGS.md
+  File:         docs/feature-flags.md
   Purpose:      Cargo feature flags and the fork patch mechanism
   Language:     Markdown
 
@@ -44,7 +44,7 @@ force-pushed on every cascade, so a branch pin floats and old lockfiles rot. The
 loader's `[dependencies]` entry for `clickhouse` is unchanged; the patch
 re-points it. The fork's own features (`tcp`, `inserter`, the rustls TLS
 features) are selected through that dependency. See
-[clickhouse/CLICKHOUSE-EXT.md](clickhouse/CLICKHOUSE-EXT.md).
+[clickhouse/clickhouse-ext.md](clickhouse/clickhouse-ext.md).
 
 ## scalo features
 
@@ -53,4 +53,4 @@ cascade, logging, metrics, health, shutdown, transports, memory guard, CLI,
 top). Those are selected in the `scalo` dependency entry, pinned to a
 crates.io release (never a path or patch override). For the scalo feature tree
 see the scalo docs; for how the loader wires them at startup see
-[ARCHITECTURE.md](ARCHITECTURE.md).
+[architecture.md](architecture.md).

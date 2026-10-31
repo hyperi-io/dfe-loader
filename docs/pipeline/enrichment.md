@@ -1,6 +1,6 @@
 <!--
   Project:      dfe-loader
-  File:         docs/pipeline/ENRICHMENT.md
+  File:         docs/pipeline/enrichment.md
   Purpose:      IP enrichment: GeoIP, reputation, risk scoring
   Language:     Markdown
 
@@ -70,5 +70,5 @@ follows.
 Like every config-cascade switch in the loader, an enrichment toggle is only
 meaningful if the row that lands reflects it: enable GeoIP and the geo columns
 on the written row are populated; leave it off and they are not. See
-[../CONFIGURATION.md](../CONFIGURATION.md) and the hot-path context in
-[OVERVIEW.md](OVERVIEW.md).
+[../configuration.md](../configuration.md) and the hot-path context in
+[overview.md](overview.md).

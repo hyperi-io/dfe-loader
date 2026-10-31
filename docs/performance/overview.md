@@ -1,6 +1,6 @@
 <!--
   Project:      dfe-loader
-  File:         docs/performance/OVERVIEW.md
+  File:         docs/performance/overview.md
   Purpose:      Performance optimisation guide: build optimisations and runtime tuning
   Language:     Markdown
 

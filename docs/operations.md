@@ -1,6 +1,6 @@
 <!--
   Project:      dfe-loader
-  File:         docs/OPERATIONS.md
+  File:         docs/operations.md
   Purpose:      Running, observing, and operating the loader
   Language:     Markdown
 
@@ -28,7 +28,7 @@ scalo). The default subcommand is `run`.
 
 Environment variables use generic names (`LOG_LEVEL`, not a loader-specific
 prefix); the config cascade derives the prefixed forms. See
-[CONFIGURATION.md](CONFIGURATION.md).
+[configuration.md](configuration.md).
 
 ## Check before you boot
 
@@ -41,7 +41,7 @@ include the transport/format matrix:
   row_binary` (which works on both).
 - Port/transport mismatches (native on 8123, HTTP on 9000/9440) are flagged.
 
-See [clickhouse/INSERT-FORMATS.md](clickhouse/INSERT-FORMATS.md).
+See [clickhouse/insert-formats.md](clickhouse/insert-formats.md).
 
 ## Observe
 
@@ -74,7 +74,7 @@ Config changes are picked up live. Fields that only affect the running pipeline
 (`clickhouse.protocol`, ClickHouse URL/hosts, `insert_format`, TLS settings,
 Kafka connection, `routing.dlq`, `field_mapping`, `enrichment`) are restart-required: the reloader logs a warning naming the
 field and keeps the running value rather than applying a half-change. See
-[CONFIGURATION.md](CONFIGURATION.md#hot-reload).
+[configuration.md](configuration.md#hot-reload).
 
 ## When inserts fail
 
@@ -89,7 +89,7 @@ The insert tail is built to degrade, not stall:
   the DLQ. The batch is held and retried (below).
 - **Schema-cache recovery** -- a drift error (a column added by an out-of-band
   `ALTER`) invalidates the cached schema and the retry re-fetches and
-  re-encodes. Any server code outside the retry list (a busy server, the network, Keeper, the disk or object store under the table, or an operator fix such as a missing table or grant) is a refusal of the rows: against a table that has not changed it is the row's own data, never drift, so salvage dead-letters that row and the rest of the batch lands. See [clickhouse/SCHEMA-CACHE.md](clickhouse/SCHEMA-CACHE.md).
+  re-encodes. Any server code outside the retry list (a busy server, the network, Keeper, the disk or object store under the table, or an operator fix such as a missing table or grant) is a refusal of the rows: against a table that has not changed it is the row's own data, never drift, so salvage dead-letters that row and the rest of the batch lands. See [clickhouse/schema-cache.md](clickhouse/schema-cache.md).
 - **One commit per flush cycle** -- Kafka offsets commit once per cycle, after the inserts and the DLQ hand-over. On each partition the commit stops below the lowest offset not placed yet: a buffered row, a row waiting on its schema, a failed batch, or a dead letter the DLQ refused. The loader holds a failed batch or refused dead letter and retries it with jittered backoff until it lands. A dead letter no DLQ backend can ever hold -- one over a Kafka-only DLQ's `message.max.bytes` once its payload is base64'd -- is dropped and counted in `pipeline_dead_letters_dropped_total{reason="too_large"}` instead, so it never holds a commit for good. A held batch whose table ClickHouse has since reported absent is retried against the default table, where new records for that table already go, and counted in `dfe_loader_unknown_table_fallback_total`. When a routing reload removes the source a batch is held for, the loader asks ClickHouse about its table at once, so the batch moves on the next retry, within about `buffer.flush_age_secs`. A table the routing still names is expected back and is not asked about. For any other dropped table the loader only learns it is gone when it next re-reads that table's schema, so until then the affected partition's commit stays below the held batch -- up to about `schema.cache_ttl_secs` (default 300 s) plus the 60 s schema refresh interval. Rows above the floor re-deliver as duplicates after a restart (at-least-once).
 
 ## Rebalances
@@ -126,4 +126,4 @@ The figure it checks is what the kernel charges the loader. On scalo 2.12.2 and 
 | Version | `git describe --tags` / `version` subcommand |
 | Tasks | GitHub Issues |
 | History | `git log` |
-| Config schema | [CONFIGURATION.md](CONFIGURATION.md) |
+| Config schema | [configuration.md](configuration.md) |

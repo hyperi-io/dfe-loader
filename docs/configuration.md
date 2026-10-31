@@ -1,6 +1,6 @@
 <!--
   Project:      dfe-loader
-  File:         docs/CONFIGURATION.md
+  File:         docs/configuration.md
   Purpose:      Config cascade and the settings that change behaviour
   Language:     Markdown
 
@@ -62,7 +62,7 @@ path; `json_each_row` is the diagnostic fallback:
 | `json_each_row` | `insert_formatted_with` FORMAT JSONEachRow | refused at startup |
 
 Both formats insert over HTTP -- see
-[clickhouse/INSERT-FORMATS.md](clickhouse/INSERT-FORMATS.md).
+[clickhouse/insert-formats.md](clickhouse/insert-formats.md).
 
 ### Transport security (TLS, private CAs)
 
@@ -73,7 +73,7 @@ HTTPS verifies the server's certificate and host name against the container's sy
 | `clickhouse.tls.enabled` | bool | HTTPS for the connection. When `clickhouse.tls` is absent, a host on 8443/9440 or under `clickhouse.cloud` turns it on |
 | `clickhouse.tls.ca_cert_file`, `cert_file`, `key_file`, `skip_verify` | -- | refused at startup: no client reads them |
 
-See [clickhouse/TLS.md](clickhouse/TLS.md).
+See [clickhouse/tls.md](clickhouse/tls.md).
 
 ### ClickHouse timeouts
 
@@ -91,7 +91,7 @@ Idle connections close on the client side after 2 s.
 
 | Setting | Values | Effect |
 |---------|--------|--------|
-| `metadata.capture_mode` | `full` (default), `json_only`, `raw_only`, `extracted_only` | `_json` + `_raw` population -- see [ARCHITECTURE.md](ARCHITECTURE.md#capture-modes) |
+| `metadata.capture_mode` | `full` (default), `json_only`, `raw_only`, `extracted_only` | `_json` + `_raw` population -- see [architecture.md](architecture.md#capture-modes) |
 | `metadata.table_capture_modes` | map | per-table override of `capture_mode` |
 | DDL `@capture_mode: <mode>` | comment tag | highest-priority override, per table |
 
@@ -110,12 +110,12 @@ Precedence, highest wins: **DDL tag > per-table > global**.
 
 | Setting | Effect |
 |---------|--------|
-| `geoip`, `enrichment.reputation` / `risk_scoring` | inject enriched columns on the promoted row -- see [pipeline/ENRICHMENT.md](pipeline/ENRICHMENT.md) |
+| `geoip`, `enrichment.reputation` / `risk_scoring` | inject enriched columns on the promoted row -- see [pipeline/enrichment.md](pipeline/enrichment.md) |
 | `buffer.flush_rows` / `flush_bytes` / `flush_age_secs` | per-table flush triggers |
 
-Insert retry, batch salvage and insert concurrency are not settings. Every build retries a transient insert failure up to 5 times with jittered backoff, binary-splits a batch with a data error down to the bad rows, and runs at most 8 inserts at once. A batch that still fails is held and retried as described in [OPERATIONS.md](OPERATIONS.md).
+Insert retry, batch salvage and insert concurrency are not settings. Every build retries a transient insert failure up to 5 times with jittered backoff, binary-splits a batch with a data error down to the bad rows, and runs at most 8 inserts at once. A batch that still fails is held and retried as described in [operations.md](operations.md).
 
-`schema.refresh_on_error` (default `true`) decides whether a RowBinary insert that fails on schema drift drops the table's cached schema. With `false` the stale schema is kept until it expires -- see [clickhouse/SCHEMA-CACHE.md](clickhouse/SCHEMA-CACHE.md#mismatch-recovery).
+`schema.refresh_on_error` (default `true`) decides whether a RowBinary insert that fails on schema drift drops the table's cached schema. With `false` the stale schema is kept until it expires -- see [clickhouse/schema-cache.md](clickhouse/schema-cache.md#mismatch-recovery).
 
 ## Hot-reload
 

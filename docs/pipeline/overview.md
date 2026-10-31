@@ -1,6 +1,6 @@
 <!--
   Project:      dfe-loader
-  File:         docs/pipeline/OVERVIEW.md
+  File:         docs/pipeline/overview.md
   Purpose:      The per-message hot path, stage by stage
   Language:     Markdown
 
@@ -71,12 +71,12 @@ JSON is the only payload format. MessagePack, supported in DFE/XDR 2.0 and 2.1, 
 
 ## 2. Route
 
-Routing picks `db.table` from the message before any flattening, using the configured `routing.table_fields` (dot-notation for nested access). No field carrying a value falls back to the topic's source, then `routing.default_table`. The database is `routing.default_db` unless `routing.org_routes` lists the record's `_org_id` tenant. See [ROUTING.md](ROUTING.md).
+Routing picks `db.table` from the message before any flattening, using the configured `routing.table_fields` (dot-notation for nested access). No field carrying a value falls back to the topic's source, then `routing.default_table`. The database is `routing.default_db` unless `routing.org_routes` lists the record's `_org_id` tenant. See [routing.md](routing.md).
 
 ## 3. Extract
 
 The target table's schema (reflected and cached, see
-[../clickhouse/SCHEMA-CACHE.md](../clickhouse/SCHEMA-CACHE.md)) decides which
+[../clickhouse/schema-cache.md](../clickhouse/schema-cache.md)) decides which
 fields are promoted to typed columns. The header extractor pulls the common
 header fields; the rest of the declared columns are pulled from the payload by
 name. Anything not promoted stays in the payload, available as `_json`.
@@ -85,21 +85,21 @@ name. Anything not promoted stays in the payload, available as `_json`.
 
 Optional enrichment (`geoip`, `reputation`, `risk`) injects flat columns onto
 the promoted row only -- never into `_json`. Each is a toggle; the lookups are
-cached. See [ENRICHMENT.md](ENRICHMENT.md).
+cached. See [enrichment.md](enrichment.md).
 
 ## 5. Buffer and capture
 
 The promoted row, plus whatever `capture_mode` dictates for `_json` and `_raw`,
 lands in the per-table buffer (rows + raw payloads + Kafka offsets). Capture
 mode is resolved per table with a three-level precedence (DDL directive >
-per-table config > global). See [CAPTURE-MODES.md](CAPTURE-MODES.md).
+per-table config > global). See [capture-modes.md](capture-modes.md).
 
 ## 6. Insert and commit
 
-The encoder reshapes only the values ClickHouse cannot take as sent: epoch vs ISO timestamps, hyphen-less UUIDs, integer IPv4, every geo_point form for a `Point`, and a single value for an `Array` (see [../clickhouse/TYPES.md](../clickhouse/TYPES.md)). Each table's buffer flushes on its own triggers (`flush_rows` / `flush_bytes` / `flush_age_secs`). The batch is encoded and inserted through `clickhouse_ext` (RowBinary by default). Kafka offsets commit once per flush cycle, and on each partition stop below the lowest offset not placed yet -- at-least-once. Batch salvage isolates a row ClickHouse rejects for good and sends it to the DLQ. A batch that fails for any other reason is held and retried with jittered backoff until it lands. See [../ARCHITECTURE.md](../ARCHITECTURE.md#resilience) and [../clickhouse/INSERT-FORMATS.md](../clickhouse/INSERT-FORMATS.md).
+The encoder reshapes only the values ClickHouse cannot take as sent: epoch vs ISO timestamps, hyphen-less UUIDs, integer IPv4, every geo_point form for a `Point`, and a single value for an `Array` (see [../clickhouse/types.md](../clickhouse/types.md)). Each table's buffer flushes on its own triggers (`flush_rows` / `flush_bytes` / `flush_age_secs`). The batch is encoded and inserted through `clickhouse_ext` (RowBinary by default). Kafka offsets commit once per flush cycle, and on each partition stop below the lowest offset not placed yet -- at-least-once. Batch salvage isolates a row ClickHouse rejects for good and sends it to the DLQ. A batch that fails for any other reason is held and retried with jittered backoff until it lands. See [../architecture.md](../architecture.md#resilience) and [../clickhouse/insert-formats.md](../clickhouse/insert-formats.md).
 
 ## Parallelism
 
 The hot path scales across a worker pool with per-table batching downstream. The
 remediation playbook for parallel correctness is in
-[PARALLELISM.md](PARALLELISM.md).
+[parallelism.md](parallelism.md).

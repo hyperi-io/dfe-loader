@@ -68,7 +68,7 @@ Environment overrides use the `DFE_LOADER` prefix in two forms, and the differen
 | `buffer.flush_rows` / `flush_bytes` / `flush_age_secs` | `20000` / `1048576` / `5` | Per-table flush triggers, each greater than 0 |
 | `metrics.address` | `0.0.0.0:9090` | |
 
-Full cascade and per-setting behaviour: [docs/CONFIGURATION.md](docs/CONFIGURATION.md).
+Full cascade and per-setting behaviour: [docs/configuration.md](docs/configuration.md).
 
 ## Documentation
 
@@ -76,9 +76,9 @@ Full cascade and per-setting behaviour: [docs/CONFIGURATION.md](docs/CONFIGURATI
 
 | Topic | Doc |
 |-------|-----|
-| Layers and the `clickhouse_ext` boundary | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) |
-| Config cascade and behaviour | [docs/CONFIGURATION.md](docs/CONFIGURATION.md) |
-| Running, metrics, hot-reload, DLQ | [docs/OPERATIONS.md](docs/OPERATIONS.md) |
+| Layers and the `clickhouse_ext` boundary | [docs/architecture.md](docs/architecture.md) |
+| Config cascade and behaviour | [docs/configuration.md](docs/configuration.md) |
+| Running, metrics, hot-reload, DLQ | [docs/operations.md](docs/operations.md) |
 | Insert formats, schema cache, types, TLS, DDL directives | [docs/clickhouse/](docs/clickhouse/) |
 | Routing, coercion, enrichment, capture modes | [docs/pipeline/](docs/pipeline/) |
 | Kafka, gRPC, the common header | [docs/transport/](docs/transport/) |
@@ -89,7 +89,7 @@ Full cascade and per-setting behaviour: [docs/CONFIGURATION.md](docs/CONFIGURATI
 
 ## Issues
 
-Open bugs: [this repo](https://github.com/hyperi-io/dfe-loader/issues?q=is%3Aopen+is%3Aissue+type%3ABug+-label%3Abacklog+-label%3Anext-minor) | [whole DFE suite](https://github.com/search?type=issues&q=is%3Aopen+is%3Aissue+type%3ABug+-label%3Abacklog+-label%3Anext-minor+repo%3Ahyperi-io%2Fdfe-infra+repo%3Ahyperi-io%2Fdfe-docker+repo%3Ahyperi-io%2Fdfe-deploy+repo%3Ahyperi-io%2Fdfe-engine+repo%3Ahyperi-io%2Fdfe-loader+repo%3Ahyperi-io%2Fdfe-receiver+repo%3Ahyperi-io%2Fdfe-fetcher+repo%3Ahyperi-io%2Fdfe-archiver+repo%3Ahyperi-io%2Fdfe-transform-vrl+repo%3Ahyperi-io%2Fdfe-transform-vector+repo%3Ahyperi-io%2Fdfe-transform-elastic+repo%3Ahyperi-io%2Fdfe-ui+repo%3Ahyperi-io%2Fdfe-hyperdx+repo%3Ahyperi-io%2Fscalo-rs+repo%3Ahyperi-io%2Fscalo-py+repo%3Ahyperi-io%2Flogreducer+repo%3Ahyperi-io%2Fdfe-schemas+repo%3Ahyperi-io%2Fvector-vrl+repo%3Ahyperi-io%2Fculvert+repo%3Ahyperi-io%2Fclickhouse-dfe+repo%3Ahyperi-io%2Ffactbook-rs)
+Open bugs: [this repo](https://github.com/hyperi-io/dfe-loader/issues?q=is%3Aopen+is%3Aissue+type%3ABug+-label%3Abacklog+-label%3Anext-minor) | [whole DFE suite](https://github.com/search?type=issues&q=is%3Aopen+is%3Aissue+type%3ABug+-label%3Abacklog+-label%3Anext-minor+repo%3Ahyperi-io%2Fdfe-infra+repo%3Ahyperi-io%2Fdfe-docker+repo%3Ahyperi-io%2Fdfe-deploy+repo%3Ahyperi-io%2Fdfe-engine+repo%3Ahyperi-io%2Fdfe-loader+repo%3Ahyperi-io%2Fdfe-receiver+repo%3Ahyperi-io%2Fdfe-fetcher+repo%3Ahyperi-io%2Fdfe-archiver+repo%3Ahyperi-io%2Fdfe-transform-vrl+repo%3Ahyperi-io%2Fdfe-transform-vector+repo%3Ahyperi-io%2Fdfe-transform-elastic+repo%3Ahyperi-io%2Fdfe-ui+repo%3Ahyperi-io%2Fdfe-hyperdx+repo%3Ahyperi-io%2Fscalo-rs+repo%3Ahyperi-io%2Fscalo-py+repo%3Ahyperi-io%2Flogreducer+repo%3Ahyperi-io%2Fdfe-schemas+repo%3Ahyperi-io%2Fvector-vrl+repo%3Ahyperi-io%2Fculvert+repo%3Ahyperi-io%2Fdfe-clickhouse-rs+repo%3Ahyperi-io%2Ffactbook-rs)
 
 ## License
 

@@ -1,6 +1,6 @@
 <!--
   Project:      dfe-loader
-  File:         docs/pipeline/PARALLELISM.md
+  File:         docs/pipeline/parallelism.md
   Purpose:      Pipeline parallelisation playbook (parallel-then-sequential)
   Language:     Markdown
 
@@ -252,5 +252,5 @@ For each remediated project:
 
 ## See also
 
-- [../ARCHITECTURE.md](../ARCHITECTURE.md) -- layers and the per-message hot
+- [../architecture.md](../architecture.md) -- layers and the per-message hot
   path the worker pool parallelises.

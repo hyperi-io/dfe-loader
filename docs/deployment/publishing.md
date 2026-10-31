@@ -1,6 +1,6 @@
 <!--
   Project:      dfe-loader
-  File:         docs/deployment/PUBLISHING.md
+  File:         docs/deployment/publishing.md
   Purpose:      Container image + Helm chart publishing via CI
   Language:     Markdown
 

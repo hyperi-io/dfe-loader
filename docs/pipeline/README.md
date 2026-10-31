@@ -21,13 +21,13 @@ flowchart LR
 
 ## Docs
 
-- [OVERVIEW.md](OVERVIEW.md) -- the six stages, in order.
-- [ROUTING.md](ROUTING.md) -- choosing `db.table` from message fields.
-- [CAPTURE-MODES.md](CAPTURE-MODES.md) -- what is stored as `_json` / `_raw`,
+- [overview.md](overview.md) -- the six stages, in order.
+- [routing.md](routing.md) -- choosing `db.table` from message fields.
+- [capture-modes.md](capture-modes.md) -- what is stored as `_json` / `_raw`,
   and the three-level precedence.
-- [ENRICHMENT.md](ENRICHMENT.md) -- GeoIP, reputation, risk scoring.
-- [PARALLELISM.md](PARALLELISM.md) -- the parallelisation playbook.
+- [enrichment.md](enrichment.md) -- GeoIP, reputation, risk scoring.
+- [parallelism.md](parallelism.md) -- the parallelisation playbook.
 
 For the buffer-and-insert tail see
-[../clickhouse/INSERT-FORMATS.md](../clickhouse/INSERT-FORMATS.md) and the
-resilience model in [../ARCHITECTURE.md](../ARCHITECTURE.md#resilience).
+[../clickhouse/insert-formats.md](../clickhouse/insert-formats.md) and the
+resilience model in [../architecture.md](../architecture.md#resilience).

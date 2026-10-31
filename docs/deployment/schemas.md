@@ -1,6 +1,6 @@
 <!--
   Project:      dfe-loader
-  File:         docs/deployment/SCHEMAS.md
+  File:         docs/deployment/schemas.md
   Purpose:      Loader-side reference for the shared dfe-schemas definitions
   Language:     Markdown
 
@@ -65,7 +65,7 @@ the schema's `default:` and `attribute:` fields, not by parsing the
 `@generated:` text. `@config: path` documents that a mapping is driven by
 loader config (for example `routing.org_id_field`) rather than hardcoded;
 nothing reads the comment text itself. See
-[DDL-DIRECTIVES.md](../clickhouse/DDL-DIRECTIVES.md) for the whole expression
+[ddl-directives.md](../clickhouse/ddl-directives.md) for the whole expression
 language.
 
 ## Getting the tables there in the first place
@@ -78,6 +78,6 @@ applied finds no columns and says so.
 
 ## Related docs
 
-- [COMMON-HEADER.md](../transport/COMMON-HEADER.md) -- the common header columns and their DDL
-- [DDL-DIRECTIVES.md](../clickhouse/DDL-DIRECTIVES.md) -- field mapping expression language
+- [common-header.md](../transport/common-header.md) -- the common header columns and their DDL
+- [ddl-directives.md](../clickhouse/ddl-directives.md) -- field mapping expression language
 - [dfe-schemas](https://github.com/hyperi-io/dfe-schemas) -- canonical schema documentation

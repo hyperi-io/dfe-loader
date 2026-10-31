@@ -1,6 +1,6 @@
 <!--
   Project:      dfe-loader
-  File:         docs/pipeline/ROUTING.md
+  File:         docs/pipeline/routing.md
   Purpose:      How a message is routed to a database and table
   Language:     Markdown
 
@@ -97,4 +97,4 @@ config selects (`process_routes_to_table_from_event_category`,
 `a_record_with_no_routing_field_on_a_source_topic_lands_in_that_source_table` in
 `src/pipeline/processor.rs`). Change the routing fields and the destination
 table the row lands in changes with it. See
-[../CONFIGURATION.md](../CONFIGURATION.md#routing).
+[../configuration.md](../configuration.md#routing).
