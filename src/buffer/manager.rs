@@ -194,6 +194,8 @@ struct TableBuffer {
     raw_payloads: Vec<Arc<[u8]>>,
     /// Memory-guard bytes held for each row, parallel to rows
     reserved: Vec<u64>,
+    /// Input bytes of the buffered rows, the `flush_bytes` trigger's count
+    bytes: u64,
     /// Created timestamp
     created_at: Instant,
     /// Target batch size
@@ -207,9 +209,16 @@ impl TableBuffer {
             offsets: Vec::new(),
             raw_payloads: Vec::with_capacity(batch_size),
             reserved: Vec::with_capacity(batch_size),
+            bytes: 0,
             created_at: Instant::now(),
             batch_size,
         }
+    }
+
+    /// Input bytes a row counts for: what its message reserved on receipt, else
+    /// its raw payload.
+    fn row_bytes(reserved: u64, raw: &[u8]) -> u64 {
+        reserved.max(raw.len() as u64)
     }
 
     fn push(
@@ -225,12 +234,23 @@ impl TableBuffer {
         }
         // Always push to keep raw_payloads parallel with rows.
         // Empty slice for transformer-path rows (they already have _json in the map).
-        self.raw_payloads.push(raw.unwrap_or_default());
+        let raw = raw.unwrap_or_default();
+        self.bytes += Self::row_bytes(reserved, &raw);
+        self.raw_payloads.push(raw);
         self.reserved.push(reserved);
     }
 
-    fn is_ready(&self, flush_rows: usize, flush_age_secs: u64) -> bool {
-        self.rows.len() >= flush_rows || self.created_at.elapsed().as_secs() >= flush_age_secs
+    /// What the buffer has reached, if any trigger: rows, bytes or age.
+    fn trigger(&self, thresholds: &Thresholds) -> Option<&'static str> {
+        if self.rows.len() >= thresholds.rows {
+            Some("records")
+        } else if self.bytes >= thresholds.bytes {
+            Some("bytes")
+        } else if self.created_at.elapsed().as_secs() >= thresholds.age_secs {
+            Some("age")
+        } else {
+            None
+        }
     }
 
     fn build(&mut self) -> Option<BufferBuildResult> {
@@ -242,6 +262,7 @@ impl TableBuffer {
         let offsets = std::mem::take(&mut self.offsets);
         let raw_payloads = std::mem::take(&mut self.raw_payloads);
         let reserved = std::mem::take(&mut self.reserved);
+        self.bytes = 0;
         self.rows = Vec::with_capacity(self.batch_size);
         self.raw_payloads = Vec::with_capacity(self.batch_size);
         self.reserved = Vec::with_capacity(self.batch_size);
@@ -251,6 +272,11 @@ impl TableBuffer {
 
     fn len(&self) -> usize {
         self.rows.len()
+    }
+
+    /// The buffered input bytes, for stats.
+    fn bytes_usize(&self) -> usize {
+        usize::try_from(self.bytes).unwrap_or(usize::MAX)
     }
 
     fn is_empty(&self) -> bool {
@@ -269,6 +295,30 @@ impl TableBuffer {
             partition,
             purged,
         );
+        self.bytes = self
+            .reserved
+            .iter()
+            .zip(&self.raw_payloads)
+            .map(|(reserved, raw)| Self::row_bytes(*reserved, raw))
+            .sum();
+    }
+}
+
+/// The flush triggers a buffer is checked against.
+#[derive(Debug, Clone, Copy)]
+struct Thresholds {
+    rows: usize,
+    bytes: u64,
+    age_secs: u64,
+}
+
+impl From<&BufferConfig> for Thresholds {
+    fn from(config: &BufferConfig) -> Self {
+        Self {
+            rows: config.flush_rows,
+            bytes: config.flush_bytes as u64,
+            age_secs: config.flush_age_secs,
+        }
     }
 }
 
@@ -284,17 +334,15 @@ pub struct BufferStats {
 /// Per-table row buffer manager.
 ///
 /// Each destination table (db.table) has its own row buffer.
-/// Rows are accumulated as `Map<String, Value>` and flushed when
-/// row count or age thresholds are reached.
+/// Rows are accumulated as `Map<String, Value>` and flushed when the row
+/// count, input bytes or age threshold is reached.
 pub struct BufferManager {
     /// Per-table buffers: key is "db.table"
     buffers: FxHashMap<String, TableBuffer>,
     /// Batch size per table buffer
     batch_size: usize,
-    /// Flush trigger: row count
-    flush_rows: usize,
-    /// Flush trigger: age in seconds
-    flush_age_secs: u64,
+    /// Flush triggers
+    thresholds: Thresholds,
 }
 
 impl BufferManager {
@@ -303,8 +351,7 @@ impl BufferManager {
         Self {
             buffers: FxHashMap::default(),
             batch_size: config.flush_rows.max(100),
-            flush_rows: config.flush_rows,
-            flush_age_secs: config.flush_age_secs,
+            thresholds: Thresholds::from(config),
         }
     }
 
@@ -313,8 +360,7 @@ impl BufferManager {
     /// Updates flush thresholds without clearing existing buffers.
     pub fn update_config(&mut self, config: &BufferConfig) {
         self.batch_size = config.flush_rows.max(100);
-        self.flush_rows = config.flush_rows;
-        self.flush_age_secs = config.flush_age_secs;
+        self.thresholds = Thresholds::from(config);
     }
 
     /// Push a promoted row the memory guard holds no bytes for.
@@ -360,7 +406,7 @@ impl BufferManager {
     pub fn should_flush(&self) -> bool {
         self.buffers
             .values()
-            .any(|buf| buf.is_ready(self.flush_rows, self.flush_age_secs))
+            .any(|buf| buf.trigger(&self.thresholds).is_some())
     }
 
     /// Get batches ready for flush.
@@ -368,25 +414,17 @@ impl BufferManager {
     /// Single-pass over buffers — no count pre-pass, no `should_flush()` guard needed.
     /// Returns an empty Vec when nothing is ready (caller should check `!batches.is_empty()`).
     pub fn get_ready_for_flush(&mut self) -> Vec<FlushBatch> {
-        let flush_rows = self.flush_rows;
-        let flush_age_secs = self.flush_age_secs;
+        let thresholds = self.thresholds;
         let mut flush_batches = Vec::new();
 
         for (table, buffer) in &mut self.buffers {
-            if buffer.is_ready(flush_rows, flush_age_secs) {
-                // Determine trigger reason before consuming buffer
-                let trigger = if buffer.len() >= flush_rows {
-                    "records"
-                } else {
-                    "age"
-                };
+            if let Some(trigger) = buffer.trigger(&thresholds) {
+                let bytes = buffer.bytes;
                 if let Some((rows, offsets, raw_payloads, reserved)) = buffer.build() {
-                    let row_count = rows.len();
-                    let byte_estimate = row_count * 200;
                     debug!(
                         table = %table,
-                        rows = row_count,
-                        bytes = byte_estimate,
+                        rows = rows.len(),
+                        bytes = bytes,
                         trigger = trigger,
                         "Buffer flush triggered"
                     );
@@ -445,25 +483,21 @@ impl BufferManager {
         };
 
         for buffer in self.buffers.values() {
-            let rows = buffer.len();
-            stats.pending_rows += rows;
+            stats.pending_rows += buffer.len();
             stats.pending_chunks += usize::from(!buffer.is_empty());
-            stats.pending_bytes += rows * 200;
         }
+        stats.pending_bytes = self.pending_bytes();
 
         stats
     }
 
     /// Per-table buffer stats for metrics emission.
     ///
-    /// Returns `(table_name, rows, estimated_bytes)` for each active buffer.
+    /// Returns `(table_name, rows, input_bytes)` for each active buffer.
     pub fn per_table_stats(&self) -> Vec<(&str, usize, usize)> {
         self.buffers
             .iter()
-            .map(|(table, buf)| {
-                let rows = buf.len();
-                (table.as_str(), rows, rows * 200)
-            })
+            .map(|(table, buf)| (table.as_str(), buf.len(), buf.bytes_usize()))
             .collect()
     }
 
@@ -506,10 +540,9 @@ impl BufferManager {
         self.buffers.values().map(TableBuffer::len).sum()
     }
 
-    /// Get pending bytes (estimate)
+    /// Input bytes of every buffered row, the count `flush_bytes` is checked against.
     pub fn pending_bytes(&self) -> usize {
-        // Rough estimate: 200 bytes per row average
-        self.pending_rows() * 200
+        self.buffers.values().map(TableBuffer::bytes_usize).sum()
     }
 
     /// Clear all buffers
@@ -532,8 +565,7 @@ impl Default for BufferManager {
         Self {
             buffers: FxHashMap::default(),
             batch_size: 1000,
-            flush_rows: 20_000,
-            flush_age_secs: 5,
+            thresholds: Thresholds::from(&BufferConfig::default()),
         }
     }
 }
@@ -688,7 +720,7 @@ mod tests {
         let config = test_config();
         let mut manager = BufferManager::new(&config);
 
-        assert_eq!(manager.flush_rows, 5);
+        assert_eq!(manager.thresholds.rows, 5);
 
         let data = json!({"id": 1}).as_object().unwrap().clone();
         manager.push("db.events", data, None, None);
@@ -701,8 +733,9 @@ mod tests {
         };
         manager.update_config(&new_config);
 
-        assert_eq!(manager.flush_rows, 100);
-        assert_eq!(manager.flush_age_secs, 30);
+        assert_eq!(manager.thresholds.rows, 100);
+        assert_eq!(manager.thresholds.bytes, 2 * 1024 * 1024);
+        assert_eq!(manager.thresholds.age_secs, 30);
         assert_eq!(manager.pending_rows(), 1);
     }
 
@@ -791,23 +824,107 @@ mod tests {
         assert_eq!(s.table_count, 0);
     }
 
+    /// A buffer flushes once its rows' input bytes reach `flush_bytes`, below
+    /// the row count and the age. A row counts the bytes its message took on
+    /// receipt, else its raw payload.
+    #[test_case::test_case(&[400, 400], 0, false ; "below_the_bound")]
+    #[test_case::test_case(&[400, 400, 200], 0, true ; "at_the_bound")]
+    #[test_case::test_case(&[400, 400, 400], 0, true ; "past_the_bound")]
+    #[test_case::test_case(&[], 999, false ; "one_raw_payload_below_the_bound")]
+    #[test_case::test_case(&[], 1000, true ; "one_raw_payload_at_the_bound")]
+    #[test_case::test_case(&[0, 0, 0], 0, false ; "rows_that_carry_no_bytes")]
+    fn a_buffer_flushes_once_its_bytes_reach_flush_bytes(
+        reserved: &[u64],
+        raw_len: usize,
+        flushes: bool,
+    ) {
+        let mut m = BufferManager::new(&BufferConfig {
+            flush_bytes: 1000,
+            flush_rows: 1000,
+            flush_age_secs: 3600,
+        });
+        for (i, bytes) in reserved.iter().enumerate() {
+            let data = json!({"id": i}).as_object().unwrap().clone();
+            m.push_reserved("db.t", data, None, None, *bytes);
+        }
+        if raw_len > 0 {
+            let data = json!({"id": "raw"}).as_object().unwrap().clone();
+            let raw: Arc<[u8]> = Arc::from(vec![b'x'; raw_len].as_slice());
+            m.push("db.t", data, None, Some(raw));
+        }
+        let rows = m.pending_rows();
+        assert_eq!(m.should_flush(), flushes, "should_flush");
+        let batches = m.get_ready_for_flush();
+        if flushes {
+            assert_eq!(batches.len(), 1, "one batch for the one table");
+            assert_eq!(batches[0].rows.len(), rows, "the whole buffer goes");
+            assert!(
+                !m.should_flush(),
+                "an emptied buffer starts its count again"
+            );
+        } else {
+            assert!(batches.is_empty(), "nothing flushes below flush_bytes");
+        }
+    }
+
+    /// A hot reload that lowers `flush_bytes` takes effect on rows already
+    /// buffered, and a purge takes its rows' bytes off the count.
+    #[test]
+    fn flush_bytes_follows_a_reload_and_a_purge() {
+        let config = BufferConfig {
+            flush_bytes: 1000,
+            flush_rows: 1000,
+            flush_age_secs: 3600,
+        };
+        let mut m = BufferManager::new(&config);
+        for (partition, offset) in [(0, 1), (1, 2)] {
+            let data = json!({"id": offset}).as_object().unwrap().clone();
+            m.push_reserved(
+                "db.t",
+                data,
+                Some(KafkaOffset::new("t", partition, offset)),
+                None,
+                400,
+            );
+        }
+        assert!(!m.should_flush(), "800 bytes is below 1000");
+        let mut purged = Purged::default();
+        m.purge_partition("t", 1, &mut purged);
+        m.update_config(&BufferConfig {
+            flush_bytes: 600,
+            ..config
+        });
+        assert!(
+            !m.should_flush(),
+            "400 bytes left after the purge, below 600"
+        );
+        m.update_config(&BufferConfig {
+            flush_bytes: 400,
+            ..config
+        });
+        assert!(m.should_flush(), "400 bytes reaches a bound of 400");
+    }
+
     #[test]
     fn test_buffer_manager_stats_with_data() {
         let mut m = BufferManager::new(&test_config());
         for i in 0..3 {
             let data = json!({"id": i}).as_object().unwrap().clone();
-            m.push("db.a", data, None, None);
+            m.push_reserved("db.a", data, None, None, 100);
         }
         for i in 0..2 {
             let data = json!({"id": i}).as_object().unwrap().clone();
-            m.push("db.b", data, None, None);
+            m.push_reserved("db.b", data, None, None, 30);
         }
 
         let s = m.stats();
         assert_eq!(s.table_count, 2);
         assert_eq!(s.pending_rows, 5);
         assert_eq!(s.pending_chunks, 2, "Two non-empty buffers");
-        assert!(s.pending_bytes > 0);
+        assert_eq!(
+            s.pending_bytes, 360,
+            "the rows' input bytes, 3 x 100 + 2 x 30"
+        );
     }
 
     #[test]
@@ -832,13 +949,14 @@ mod tests {
             "db.a",
             json!({"id": 1}).as_object().unwrap().clone(),
             None,
-            None,
+            Some(Arc::from(vec![b'x'; 70].as_slice())),
         );
-        m.push(
+        m.push_reserved(
             "db.b",
             json!({"id": 2}).as_object().unwrap().clone(),
             None,
             None,
+            500,
         );
         m.push(
             "db.b",
@@ -852,8 +970,9 @@ mod tests {
             .into_iter()
             .map(|(t, r, b)| (t, (r, b)))
             .collect();
-        assert_eq!(stats["db.a"], (1, 200));
-        assert_eq!(stats["db.b"], (2, 400));
+        // A raw payload counts its length, a reservation its bytes, a bare row nothing.
+        assert_eq!(stats["db.a"], (1, 70));
+        assert_eq!(stats["db.b"], (2, 500));
     }
 
     #[test]
@@ -925,21 +1044,6 @@ mod tests {
         };
         let m = BufferManager::new(&tiny_config);
         assert_eq!(m.batch_size, 100, "batch_size should be clamped to 100");
-    }
-
-    #[test]
-    fn test_buffer_manager_pending_bytes_estimate() {
-        let mut m = BufferManager::new(&test_config());
-        // 5 rows × 200 bytes each = 1000
-        for i in 0..5 {
-            m.push(
-                "db.a",
-                json!({"id": i}).as_object().unwrap().clone(),
-                None,
-                None,
-            );
-        }
-        assert_eq!(m.pending_bytes(), 1000);
     }
 
     #[test]

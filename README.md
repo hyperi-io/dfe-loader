@@ -78,7 +78,7 @@ Environment overrides use the `DFE_LOADER` prefix in two forms, and the differen
 | `clickhouse.tls.enabled` | unset | The ONLY honoured TLS key. Mount a private CA into the container trust store rather than naming cert files |
 | `kafka.group` | `dfe-loader` | |
 | `routing.default_db` / `default_table` | `dfe` / `main` | Where a record lands when no routing field matches |
-| `buffer.flush_rows` / `flush_bytes` / `flush_age_secs` | `20000` / `1048576` / `5` | Per-table flush triggers, each greater than 0 |
+| `buffer.flush_rows` / `flush_bytes` / `flush_age_secs` | `20000` / `67108864` (64 MiB) / `5` | Per-table flush triggers, each greater than 0 |
 | `metrics.address` | `0.0.0.0:9090` | |
 
 Full cascade and per-setting behaviour: [docs/configuration.md](docs/configuration.md).

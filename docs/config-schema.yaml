@@ -205,7 +205,7 @@ properties:
     description: Buffer flush thresholds. **Hot-reloaded.**
     $ref: "#/$defs/BufferConfig"
     default:
-      flush_bytes: 1048576
+      flush_bytes: 67108864
       flush_rows: 20000
       flush_age_secs: 5
   memory:
@@ -1277,16 +1277,21 @@ $defs:
     type: object
     properties:
       flush_bytes:
+        description: |-
+          Flush a table's buffer once its rows' input bytes reach this. A row
+          counts the bytes of the message it came from.
         type: integer
         format: uint
         minimum: 0
-        default: 1048576
+        default: 67108864
       flush_rows:
+        description: Flush a table's buffer once it holds this many rows.
         type: integer
         format: uint
         minimum: 0
         default: 20000
       flush_age_secs:
+        description: Flush a table's buffer once this many seconds have passed since it last flushed.
         type: integer
         format: uint64
         minimum: 0

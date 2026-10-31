@@ -194,7 +194,7 @@ via `Client::insert_formatted_with`. Tuning below applies to both formats.
 Larger batches amortise per-insert overhead. Default flush thresholds:
 
 - `flush_rows = 20000` rows
-- `flush_bytes = 1048576` (1MB)
+- `flush_bytes = 67108864` (64 MiB)
 - `flush_age_secs = 5`
 
 Increase `flush_rows` and `flush_bytes` for higher throughput at the cost of
@@ -219,7 +219,7 @@ mimalloc was removed on 2026-04-17 per the DFE allocator policy.
 | Setting | Default | Tuning guidance |
 |---------|---------|-----------------|
 | `flush_rows` | 20,000 | Increase for throughput, decrease for latency |
-| `flush_bytes` | 1MB | Match to typical batch memory size |
+| `flush_bytes` | 64 MiB | A ceiling for oversized rows: at 1-2 KB rows the 20,000-row trigger fires first |
 | `flush_age_secs` | 5s | Lower for real-time, higher for batch |
 
 ### Concurrent inserts

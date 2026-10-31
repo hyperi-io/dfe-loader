@@ -514,15 +514,20 @@ impl Default for BatchProcessingConfig {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct BufferConfig {
+    /// Flush a table's buffer once its rows' input bytes reach this. A row
+    /// counts the bytes of the message it came from.
     pub flush_bytes: usize,
+    /// Flush a table's buffer once it holds this many rows.
     pub flush_rows: usize,
+    /// Flush a table's buffer once this many seconds have passed since it last flushed.
     pub flush_age_secs: u64,
 }
 
 impl Default for BufferConfig {
     fn default() -> Self {
         Self {
-            flush_bytes: 1_048_576, // 1MB
+            // 64 MiB: 20000 rows of 1-2 KB trigger first, so this only caps oversized rows.
+            flush_bytes: 64 * 1024 * 1024,
             flush_rows: 20_000,
             flush_age_secs: 5,
         }

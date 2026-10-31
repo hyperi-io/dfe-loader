@@ -160,7 +160,7 @@ routing:
     # kafka_send_timeout_ms: 5000
 
 buffer:
-  flush_bytes: 1048576    # 1MB
+  flush_bytes: 67108864    # 64 MiB, a ceiling for oversized rows: rows trigger first
   flush_rows: 10000
   flush_age_secs: 5
 
