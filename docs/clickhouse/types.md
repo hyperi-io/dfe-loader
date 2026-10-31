@@ -20,7 +20,7 @@ to cover a type it does not yet handle.
 Nothing here is loader-invented: it is the ClickHouse type system as of the
 24.8+ line, annotated with how each type lands on the native wire. For how those
 bytes are actually shipped (HTTP RowBinary vs native/TCP), see
-[insert-formats.md](insert-formats.md); for the encoder seam itself, see
+[insert-formats.md](insert-formats.md). For where the encoder hands its bytes to the fork's insert calls, see
 [clickhouse-ext.md](clickhouse-ext.md).
 
 Sources:
@@ -291,7 +291,7 @@ The fork keeps insertion typed -- compile-time `T: Row` schemas -- which is the
 right upstream default. The loader's rows are not typed at compile time: their
 columns come from `system.columns` at runtime, so the dynamic encoding layer
 lives in this repo at `src/clickhouse_ext/`, on top of the fork's stable public
-surface. See [clickhouse-ext.md](clickhouse-ext.md) for that seam.
+surface. See [clickhouse-ext.md](clickhouse-ext.md) for where the encoder calls into that surface.
 
 The loader writes in one of two formats, dispatched by `clickhouse.insert_format`:
 
@@ -403,7 +403,7 @@ A third coordinate is read and ignored. A geohash, a latitude outside -90 to 90,
 
 ### A single value bound for an Array
 
-Elasticsearch lets any field carry one value or many, so a scalar bound for an `Array(T)` column is written as a one-element array, and T's own rules then decide whether it is valid. `"related_ip": "52.108.0.3"` lands in an `Array(IPv6)` column as `['::ffff:52.108.0.3']`. An object is wrapped only where the element is read from one (`JSON`, `Map`, `Point`); bound for an array of scalars it stays an encoding error. A null or absent array is the empty array. For an `Array(Point)` column, a bare `[lon, lat]` is one point, as Elasticsearch reads it.
+Elasticsearch lets any field carry one value or many, so a scalar bound for an `Array(T)` column is written as a one-element array, and T's own rules then decide whether it is valid. `"related_ip": "52.108.0.3"` lands in an `Array(IPv6)` column as `['::ffff:52.108.0.3']`. An object is wrapped only where the element is read from one (`JSON`, `Map`, `Point`). Bound for an array of scalars, it stays an encoding error. A null or absent array is the empty array. For an `Array(Point)` column, a bare `[lon, lat]` is one point, as Elasticsearch reads it.
 
 The rationale for RowBinary as the default: schema-reflected RowBinary skips the
 server-side JSON parse, cuts ClickHouse CPU, and gives full type support without
