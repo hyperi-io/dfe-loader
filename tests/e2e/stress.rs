@@ -14,16 +14,13 @@ use dfe_loader::buffer::{BufferManager, KafkaOffset};
 use dfe_loader::config::BufferConfig;
 
 use crate::common::{
-    check_clickhouse_reachable, create_http_test_client, drop_http_test_table, load_dotenv,
-    unique_table_name,
+    create_http_test_client, drop_http_test_table, require_e2e_services, unique_table_name,
 };
 
-fn skip_if_no_clickhouse() -> bool {
-    load_dotenv();
-    if !crate::common::has_clickhouse() {
-        return true;
-    }
-    !check_clickhouse_reachable()
+/// The query client for the e2e ClickHouse, failing the test when there is none.
+async fn e2e_client() -> dfe_loader::clickhouse::ClickHouseQueryClient {
+    require_e2e_services(false).await;
+    create_http_test_client().expect("a query client for the e2e ClickHouse")
 }
 
 fn make_stress_rows(
@@ -68,15 +65,7 @@ fn make_stress_rows(
 #[tokio::test]
 #[ignore = "requires infrastructure"]
 async fn test_stress_10k_single_batch() {
-    if skip_if_no_clickhouse() {
-        eprintln!("Skipping stress test: no ClickHouse available");
-        return;
-    }
-
-    let client = match create_http_test_client() {
-        Some(c) => c,
-        None => return,
-    };
+    let client = e2e_client().await;
 
     let oc = crate::common::on_cluster_clause();
     let table_name = unique_table_name("stress_10k");
@@ -110,15 +99,7 @@ async fn test_stress_10k_single_batch() {
 #[tokio::test]
 #[ignore = "requires infrastructure"]
 async fn test_stress_50k_single_batch() {
-    if skip_if_no_clickhouse() {
-        eprintln!("Skipping stress test: no ClickHouse available");
-        return;
-    }
-
-    let client = match create_http_test_client() {
-        Some(c) => c,
-        None => return,
-    };
+    let client = e2e_client().await;
 
     let oc = crate::common::on_cluster_clause();
     let table_name = unique_table_name("stress_50k");
@@ -152,15 +133,7 @@ async fn test_stress_50k_single_batch() {
 #[tokio::test]
 #[ignore = "requires infrastructure"]
 async fn test_stress_multiple_batches() {
-    if skip_if_no_clickhouse() {
-        eprintln!("Skipping stress test: no ClickHouse available");
-        return;
-    }
-
-    let client = match create_http_test_client() {
-        Some(c) => c,
-        None => return,
-    };
+    let client = e2e_client().await;
 
     let oc = crate::common::on_cluster_clause();
     let table_name = unique_table_name("stress_multi");
@@ -214,15 +187,7 @@ async fn test_stress_multiple_batches() {
 #[tokio::test]
 #[ignore = "requires infrastructure"]
 async fn test_stress_concurrent_inserts() {
-    if skip_if_no_clickhouse() {
-        eprintln!("Skipping stress test: no ClickHouse available");
-        return;
-    }
-
-    let client = Arc::new(match create_http_test_client() {
-        Some(c) => c,
-        None => return,
-    });
+    let client = Arc::new(e2e_client().await);
 
     let oc = crate::common::on_cluster_clause();
     let table_name = unique_table_name("stress_concurrent");

@@ -3,9 +3,7 @@
 
 //! Full pipeline E2E tests
 //!
-//! These tests require both Kafka and `ClickHouse` to be available
-
-use std::env;
+//! Transform, routing and buffer stages chained in process. No server needed.
 
 use serde_json::json;
 
@@ -14,16 +12,7 @@ use dfe_loader::config::{BufferConfig, DlqConfig, RoutingConfig};
 use dfe_loader::routing::Router;
 use dfe_loader::transform::Transformer;
 
-/// Skip test if no full test environment available
-fn skip_if_no_env() -> bool {
-    if env::var("CLICKHOUSE_HOST").is_ok() && env::var("KAFKA_BROKERS").is_ok() {
-        return false; // Don't skip, env vars set
-    }
-    true
-}
-
 #[tokio::test]
-#[ignore = "requires infrastructure"]
 async fn test_transform_pipeline_unit() {
     // Test the transform pipeline without external dependencies
     let transformer = Transformer::default();
@@ -47,7 +36,6 @@ async fn test_transform_pipeline_unit() {
 }
 
 #[tokio::test]
-#[ignore = "requires infrastructure"]
 async fn test_routing_and_buffer() {
     // Test routing and buffering without external dependencies
     // db.table routing: db from the _org_id tenant, table from category field
@@ -119,7 +107,6 @@ async fn test_routing_and_buffer() {
 }
 
 #[tokio::test]
-#[ignore = "requires infrastructure"]
 async fn test_buffer_flush_thresholds() {
     let mut buffer_manager = BufferManager::new(&BufferConfig {
         flush_rows: 5, // Flush at 5 rows
@@ -146,21 +133,6 @@ async fn test_buffer_flush_thresholds() {
 }
 
 #[tokio::test]
-#[ignore = "requires infrastructure"]
-async fn test_full_pipeline_e2e() {
-    if skip_if_no_env() {
-        eprintln!("Skipping E2E test: no full test environment available");
-        eprintln!("Set CLICKHOUSE_HOST and KAFKA_BROKERS env vars to run");
-        return;
-    }
-
-    // This test requires actual Kafka and ClickHouse
-    // TODO: Implement full E2E test with testcontainers or external services
-    eprintln!("E2E test environment available - implement full test");
-}
-
-#[tokio::test]
-#[ignore = "requires infrastructure"]
 async fn test_metrics_server_integration() {
     use dfe_loader::metrics::ServerState;
     use std::sync::Arc;

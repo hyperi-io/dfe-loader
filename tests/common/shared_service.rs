@@ -701,8 +701,9 @@ fn state(name: &str) -> State {
     let out = docker(&["inspect", "--format", "{{.State.Status}}", name]);
     let stderr = String::from_utf8_lossy(&out.stderr);
     if !out.status.success() {
+        let lower = stderr.to_ascii_lowercase();
         assert!(
-            stderr.to_ascii_lowercase().contains("no such"),
+            lower.contains("no such object") || lower.contains("no such container"),
             "Docker is needed for the shared test containers: {stderr}"
         );
         return State::Absent;

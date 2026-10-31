@@ -10,7 +10,7 @@ The general rules are hyperi-ai's testing standard (`standards/universal/testing
 | full | nightly (`schedule` in `.github/workflows/ci.yml`) and before every release (`test.full.required_for_release: true`) | `cargo nextest run --all-features --run-ignored all --ignore-default-filter` |
 | stack | dfe-infra's post-deploy acceptance, not this repo | - |
 
-Core is nextest's default selection. The `default-filter` in `.config/nextest.toml` holds every test that needs a real ClickHouse or Kafka out of it, bar the two in `tests/integration/shared_services.rs`. The `#[ignore]` tests in `tests/e2e/` need a live loader environment and run only under full. hyperi-ci runs core on push and PR, and full on the schedule, on a release, or on a dispatch with `test-tier: full`.
+Core is nextest's default selection. The `default-filter` in `.config/nextest.toml` holds every test that needs a real ClickHouse or Kafka out of it, bar the two in `tests/integration/shared_services.rs`. The `#[ignore]` tests in `tests/e2e/` run only under full, against the shared ClickHouse and Kafka (`require_e2e_services`). A missing service fails them, it never skips them. hyperi-ci runs core on push and PR, and full on the schedule, on a release, or on a dispatch with `test-tier: full`.
 
 Core holds:
 

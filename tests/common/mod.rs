@@ -266,6 +266,51 @@ async fn start_clickhouse_container() -> Option<ClickHouseLease> {
     None
 }
 
+/// The run's shared Kafka bootstrap, published by `require_e2e_services`.
+static KAFKA_ENDPOINT: OnceLock<String> = OnceLock::new();
+
+/// Point `ClickHouseTestConfig` and `KafkaTestConfig` at the services an e2e
+/// test runs against: dfe-docker under `TEST_MODE=docker`, else the run's
+/// shared containers.
+///
+/// # Panics
+///
+/// Panics when a service is missing or does not answer. The e2e tests run in
+/// the full level, which owes them a run, so a missing service is a failure
+/// and never a skip.
+pub async fn require_e2e_services(need_kafka: bool) {
+    #[cfg(feature = "testcontainers")]
+    if TestMode::detect() == TestMode::Remote {
+        let _ = start_clickhouse_container().await;
+        if need_kafka {
+            let kafka = containers::shared_kafka().await;
+            let host = if kafka.host == "localhost" {
+                "127.0.0.1"
+            } else {
+                kafka.host.as_str()
+            };
+            let _ = KAFKA_ENDPOINT.set(format!("{host}:{}", kafka.port(9092)));
+        }
+    }
+    let ch = ClickHouseTestConfig::from_env();
+    assert!(
+        ch.is_reachable(),
+        "e2e tests need a ClickHouse and none answered at {:?} (TEST_MODE={}); \
+         the shared container needs --features testcontainers and Docker",
+        ch.http_addr(),
+        TestMode::detect()
+    );
+    if need_kafka {
+        let kf = KafkaTestConfig::from_env();
+        assert!(
+            kf.is_reachable(),
+            "e2e tests need a Kafka and none answered at {:?} (TEST_MODE={})",
+            kf.brokers,
+            TestMode::detect()
+        );
+    }
+}
+
 // ============================================================================
 // Kafka Test Config
 // ============================================================================
@@ -291,13 +336,14 @@ impl KafkaTestConfig {
                 sasl_user: None,
                 sasl_password: None,
             },
+            // The run's shared broker once `require_e2e_services` published it,
+            // else none: an empty broker list is never reachable.
             TestMode::Remote => Self {
-                brokers: env::var("KAFKA_BROKERS").unwrap_or_else(|_| "localhost:9092".into()),
-                security_protocol: env::var("KAFKA_SECURITY_PROTOCOL")
-                    .unwrap_or_else(|_| "SASL_PLAINTEXT".into()),
-                sasl_mechanism: env::var("KAFKA_SASL_MECHANISM").ok(),
-                sasl_user: env::var("KAFKA_SASL_USER").ok(),
-                sasl_password: env::var("KAFKA_SASL_PASSWORD").ok(),
+                brokers: KAFKA_ENDPOINT.get().cloned().unwrap_or_default(),
+                security_protocol: "PLAINTEXT".into(),
+                sasl_mechanism: None,
+                sasl_user: None,
+                sasl_password: None,
             },
         }
     }
@@ -501,22 +547,6 @@ pub fn containers_prefix() -> String {
     .prefix()
 }
 
-/// Skip test if no test environment is available (either mode)
-#[macro_export]
-macro_rules! skip_if_no_env {
-    () => {
-        let ch = $crate::common::ClickHouseTestConfig::from_env();
-        let kf = $crate::common::KafkaTestConfig::from_env();
-        if !ch.is_reachable() && !kf.is_reachable() {
-            eprintln!(
-                "Skipping: no test environment reachable (TEST_MODE={})",
-                $crate::common::TestMode::detect()
-            );
-            return;
-        }
-    };
-}
-
 /// Hold a `ClickHouse` for the rest of the test, or return when there is none.
 ///
 /// Use as the first line of an `async` test. The binding it leaves keeps the
@@ -531,43 +561,13 @@ macro_rules! require_clickhouse {
     };
 }
 
-/// Skip test if Kafka is not reachable in current mode
-#[macro_export]
-macro_rules! skip_if_no_kafka {
-    () => {
-        let kf = $crate::common::KafkaTestConfig::from_env();
-        if !kf.is_reachable() {
-            eprintln!(
-                "Skipping: Kafka not reachable at {} (TEST_MODE={})",
-                kf.brokers,
-                $crate::common::TestMode::detect()
-            );
-            return;
-        }
-    };
-}
-
-/// Skip test in Docker mode — use for tests requiring Replicated DB or multi-node cluster.
-#[macro_export]
-macro_rules! skip_if_docker {
-    () => {
-        if $crate::common::TestMode::detect() == $crate::common::TestMode::Docker {
-            eprintln!(
-                "Skipping: test requires replicated cluster (TEST_MODE=docker is single-node)"
-            );
-            return;
-        }
-    };
-}
-
 /// Skip test unless the connected `ClickHouse`'s `default` database is the
 /// `Replicated` engine.
 ///
-/// Capability-based replacement for `skip_if_docker!` on tests that create
+/// Capability-based skip for tests that create
 /// `ReplicatedMergeTree()` tables with no ZooKeeper path: those need the
-/// `Replicated` database engine so the `{uuid}` macro expands. Unlike the
-/// mode-based `skip_if_docker!`, this also skips against a single-node
-/// `ClickHouse` such as the test container, where the DDL would otherwise fail
+/// `Replicated` database engine so the `{uuid}` macro expands. It skips against
+/// a single-node `ClickHouse` such as the test container, where the DDL would fail
 /// with server error 36. Call after `require_clickhouse!`, which guarantees the
 /// probe target is reachable.
 #[macro_export]

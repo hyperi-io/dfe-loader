@@ -26,27 +26,7 @@ use dfe_loader::config::{
 };
 use dfe_loader::pipeline::Orchestrator;
 
-use crate::common::{ClickHouseTestConfig, KafkaTestConfig, TestMode};
-
-// ─── Skip guard ──────────────────────────────────────────────────────────────
-
-fn skip_if_no_env() -> bool {
-    let ch = ClickHouseTestConfig::from_env();
-    let kf = KafkaTestConfig::from_env();
-    if !kf.is_reachable() {
-        eprintln!(
-            "Skipping: Kafka not reachable at {} (TEST_MODE={})",
-            kf.brokers,
-            TestMode::detect()
-        );
-        return true;
-    }
-    if !ch.is_reachable() {
-        eprintln!("Skipping: ClickHouse not reachable");
-        return true;
-    }
-    false
-}
+use crate::common::{ClickHouseTestConfig, KafkaTestConfig, require_e2e_services};
 
 // ─── ClickHouse HTTP helpers ──────────────────────────────────────────────────
 
@@ -337,9 +317,7 @@ fn syslog_rfc_parsed_messages(count: usize, org_id: &str, source: &str) -> Vec<V
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires infrastructure"]
 async fn test_kafka_to_clickhouse_bulk_load() {
-    if skip_if_no_env() {
-        return;
-    }
+    require_e2e_services(true).await;
 
     let oc = crate::common::on_cluster_clause();
     let pid = std::process::id();
@@ -516,9 +494,7 @@ async fn test_kafka_to_clickhouse_bulk_load() {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires infrastructure"]
 async fn test_kafka_to_clickhouse_org_routing() {
-    if skip_if_no_env() {
-        return;
-    }
+    require_e2e_services(true).await;
 
     let oc = crate::common::on_cluster_clause();
     let pid = std::process::id();
