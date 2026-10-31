@@ -18,10 +18,11 @@
 //!
 //! # Sink
 //!
-//! The only sink is `Client::insert_formatted_with(... FORMAT
-//! RowBinaryWithNamesAndTypes)` over HTTP: a header naming each column and the
-//! type it was encoded for, then row-wise `encode()` bytes.
-//! `clickhouse.protocol: native` is refused at startup.
+//! Over HTTP the sink is `Client::insert_formatted_with(... FORMAT
+//! RowBinaryWithNamesAndTypes)`: a header naming each column and the type it
+//! was encoded for, then row-wise `encode()` bytes. Over native
+//! (`clickhouse.protocol: native`) the same encoded rows go out as `FORMAT
+//! Native` blocks through `dfe_clickhouse::TcpClient`.
 
 use std::sync::Arc;
 

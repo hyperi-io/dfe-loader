@@ -8,51 +8,23 @@
 //! accepted when its CA is there and refused when it is not, when another CA
 //! is, and when the host name is not the one the certificate names.
 //!
+//! Runs against the run's shared `ClickHouse`, whose certificate names
+//! `localhost` and the Docker host and chains to a CA made for the run.
 //! Gated behind `#[cfg(feature = "testcontainers")]`. Needs process-per-test
 //! (nextest): it sets `SSL_CERT_FILE` for the whole process.
 
 #![cfg(feature = "testcontainers")]
 
+use std::net::ToSocketAddrs;
 use std::path::Path;
 
 use dfe_loader::clickhouse::client_http::build_client;
 use dfe_loader::clickhouse::{ChClient, ClickHouseConfig, ClickHouseQueryClient, Transport};
-use rcgen::{
-    BasicConstraints, CertificateParams, CertifiedIssuer, DnType, IsCa, KeyPair, KeyUsagePurpose,
+
+use crate::common::containers::{
+    CLICKHOUSE_HTTP_PORT, CLICKHOUSE_HTTPS_PORT, CLICKHOUSE_NATIVE_TLS_PORT, private_ca,
+    shared_clickhouse, shared_clickhouse_ca,
 };
-
-use super::grpc_outage::free_port;
-use crate::common::containers::start_clickhouse_https;
-use crate::test_name;
-
-/// A self-signed CA named `name`.
-fn private_ca(name: &str) -> CertifiedIssuer<'static, KeyPair> {
-    let mut params = CertificateParams::new(Vec::<String>::new()).expect("CA params");
-    params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-    params.distinguished_name.push(DnType::CommonName, name);
-    params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
-    CertifiedIssuer::self_signed(params, KeyPair::generate().expect("CA key")).expect("CA cert")
-}
-
-/// A server certificate for `localhost` only, signed by `ca`, as (cert, key) PEM.
-fn localhost_cert(ca: &CertifiedIssuer<'static, KeyPair>) -> (String, String) {
-    let key = KeyPair::generate().expect("server key");
-    let mut params = CertificateParams::new(vec!["localhost".to_string()]).expect("server params");
-    params
-        .distinguished_name
-        .push(DnType::CommonName, "localhost");
-    let cert = params.signed_by(&key, ca).expect("server cert");
-    (cert.pem(), key.serialize_pem())
-}
-
-/// Three distinct free host ports.
-fn three_free_ports() -> (u16, u16, u16) {
-    let first = free_port();
-    let _first = std::net::TcpListener::bind(("127.0.0.1", first)).expect("hold the first port");
-    let second = free_port();
-    let _second = std::net::TcpListener::bind(("127.0.0.1", second)).expect("hold the second port");
-    (first, second, free_port())
-}
 
 fn config(transport: Transport, host: &str, port: u16, tls: bool) -> ClickHouseConfig {
     ClickHouseConfig {
@@ -109,28 +81,30 @@ async fn select_one(config: &ClickHouseConfig) -> Result<(), String> {
 /// checked against the same trust-store cases.
 #[tokio::test(flavor = "multi_thread")]
 async fn tls_is_verified_against_the_system_trust_store_on_both_protocols() {
-    let ca = private_ca("dfe-loader test CA");
+    let shared = shared_clickhouse().await;
+    let ca_pem = shared_clickhouse_ca().await;
     let other_ca = private_ca("unrelated CA");
-    let (cert, key) = localhost_cert(&ca);
-    let (http_port, https_port, native_tls_port) = three_free_ports();
-    let _clickhouse = start_clickhouse_https(
-        test_name!(),
-        cert,
-        key,
-        http_port,
-        https_port,
-        native_tls_port,
-    )
-    .await;
+    // The certificate names this host, and not its address.
+    let named = shared.host.clone();
+    let unnamed = (named.as_str(), 0)
+        .to_socket_addrs()
+        .expect("resolve the Docker host")
+        .find(std::net::SocketAddr::is_ipv4)
+        .expect("an IPv4 address for the Docker host")
+        .ip()
+        .to_string();
+    let http_port = shared.port(CLICKHOUSE_HTTP_PORT);
+    let https_port = shared.port(CLICKHOUSE_HTTPS_PORT);
+    let native_tls_port = shared.port(CLICKHOUSE_NATIVE_TLS_PORT);
 
     let dir = tempfile::tempdir().expect("CA bundle directory");
     let ca_bundle = dir.path().join("private-ca.pem");
     let other_bundle = dir.path().join("other-ca.pem");
-    std::fs::write(&ca_bundle, ca.pem()).expect("write CA bundle");
+    std::fs::write(&ca_bundle, &ca_pem).expect("write CA bundle");
     std::fs::write(&other_bundle, other_ca.pem()).expect("write other CA bundle");
 
     trust(Some(&ca_bundle));
-    let plain_http = select_one(&config(Transport::Http, "localhost", http_port, false)).await;
+    let plain_http = select_one(&config(Transport::Http, &named, http_port, false)).await;
     assert!(
         plain_http.is_ok(),
         "plain HTTP with TLS off failed: {plain_http:?}"
@@ -141,18 +115,18 @@ async fn tls_is_verified_against_the_system_trust_store_on_both_protocols() {
         (Transport::Native, native_tls_port),
     ] {
         trust(Some(&ca_bundle));
-        let with_its_ca = select_one(&config(transport, "localhost", port, true)).await;
-        let query_client = ClickHouseQueryClient::new(&config(transport, "localhost", port, true))
+        let with_its_ca = select_one(&config(transport, &named, port, true)).await;
+        let query_client = ClickHouseQueryClient::new(&config(transport, &named, port, true))
             .expect("query client")
             .health_check()
             .await;
-        let wrong_name = select_one(&config(transport, "127.0.0.1", port, true)).await;
+        let wrong_name = select_one(&config(transport, &unnamed, port, true)).await;
 
         trust(Some(&other_bundle));
-        let wrong_ca = select_one(&config(transport, "localhost", port, true)).await;
+        let wrong_ca = select_one(&config(transport, &named, port, true)).await;
 
         trust(None);
-        let no_ca = select_one(&config(transport, "localhost", port, true)).await;
+        let no_ca = select_one(&config(transport, &named, port, true)).await;
 
         assert!(
             with_its_ca.is_ok(),

@@ -6,6 +6,7 @@
 #[cfg(feature = "testcontainers")]
 mod broker_startup;
 mod clickhouse;
+mod clickhouse_error_bodies;
 #[cfg(feature = "testcontainers")]
 mod clickhouse_inserter_e2e;
 #[cfg(feature = "testcontainers")]
@@ -57,6 +58,7 @@ mod resilience;
 mod rls;
 mod schema;
 mod schema_pending_e2e;
+mod shared_services;
 #[cfg(feature = "testcontainers")]
 mod tenancy;
 mod transport;

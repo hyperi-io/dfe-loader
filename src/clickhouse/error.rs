@@ -329,7 +329,7 @@ pub fn classify_json_insert_error(err: &clickhouse::error::Error) -> ErrorCatego
 const ERROR_TEXT_CAP: usize = 1 << 20;
 
 /// The text a client error is classified, logged and dead-lettered by, at most
-/// [`ERROR_TEXT_CAP`] bytes. A server rejection reads
+/// `ERROR_TEXT_CAP` bytes. A server rejection reads
 /// `server error code {code}: {message}`, which [`server_code`] reads back.
 #[must_use]
 pub fn error_text(err: &clickhouse::error::Error) -> String {
@@ -741,34 +741,23 @@ mod tests {
         );
     }
 
-    // Bodies a 26.3.42.3 server returned over HTTP, verbatim, except 319,
-    // which needs a lost Keeper session to produce and is written in the same
-    // shape.
-    const BODY_117: &str = "Code: 117. DB::Exception: JSON object should start with '{': \
-        (while reading the value of key _json): (at row 1)\n: While executing \
-        WaitForAsyncInsert. (INCORRECT_DATA) (version 26.3.42.3 (official build))";
-    const BODY_60: &str = "Code: 60. DB::Exception: Table default.events does not exist. \
-        Maybe you meant system.events?. (UNKNOWN_TABLE) (version 26.3.42.3 (official build))";
-    const BODY_192: &str = "Code: 192. DB::Exception: There is no user `loader_writer` in \
-        `user directories`. (UNKNOWN_USER) (version 26.3.42.3 (official build))";
-    const BODY_241: &str = "Code: 241. DB::Exception: Query memory limit exceeded: would use \
-        13.68 MiB (attempt to allocate chunk of 7.50 MiB), maximum: 9.54 MiB. \
-        (MEMORY_LIMIT_EXCEEDED) (version 26.3.42.3 (official build))";
-    const BODY_252_PARTS: &str = "Code: 252. DB::Exception: Too many parts (2 with average \
-        size of 519.00 B) in table 'default.j (487a5f99-ac66-4c00-826b-340d12bd5b1f)'. Merges \
-        are processing significantly slower than inserts. (TOO_MANY_PARTS) (version 26.3.42.3 \
-        (official build))";
-    const BODY_252_PARTITIONS: &str = "Code: 252. DB::Exception: Too many partitions for \
-        single INSERT block (more than 1). The limit is controlled by \
-        'max_partitions_per_insert_block' setting. Large number of partitions is a common \
-        misconception. It will lead to severe negative performance impact, including slow \
-        server startup, slow INSERT queries and slow SELECT queries. Recommended total number \
-        of partitions for a table is under 1000..10000. Please note, that partitioning is not \
-        intended to speed up SELECT queries (ORDER BY key is sufficient to make range queries \
-        fast). Partitions are intended for data manipulation (DROP PARTITION, etc): While \
-        executing WaitForAsyncInsert. (TOO_MANY_PARTS) (version 26.3.42.3 (official build))";
-    const BODY_319: &str = "Code: 319. DB::Exception: Unknown status, client must retry. \
-        Reason: Connection loss. (UNKNOWN_STATUS_OF_INSERT) (version 26.3.42.3 (official build))";
+    // Bodies a ClickHouse server returned over HTTP, captured by
+    // scripts/capture-clickhouse-fixtures.py, except 319, which needs a lost
+    // Keeper session to produce and is written in the same shape.
+    const BODY_117: &str =
+        include_str!("../../tests/fixtures/clickhouse/errors/incorrect_data_117.txt");
+    const BODY_60: &str =
+        include_str!("../../tests/fixtures/clickhouse/errors/unknown_table_60.txt");
+    const BODY_192: &str =
+        include_str!("../../tests/fixtures/clickhouse/errors/unknown_user_192.txt");
+    const BODY_241: &str =
+        include_str!("../../tests/fixtures/clickhouse/errors/memory_limit_exceeded_241.txt");
+    const BODY_252_PARTS: &str =
+        include_str!("../../tests/fixtures/clickhouse/errors/too_many_parts_252.txt");
+    const BODY_252_PARTITIONS: &str =
+        include_str!("../../tests/fixtures/clickhouse/errors/too_many_partitions_252.txt");
+    const BODY_319: &str =
+        include_str!("../../tests/fixtures/clickhouse/errors/unknown_status_of_insert_319.txt");
 
     /// Each body reaches the verdict by its code on both insert paths:
     /// `JSONEachRow` reads the client error, `RowBinary` the text it was kept as.

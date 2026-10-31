@@ -67,8 +67,8 @@ pub enum InsertFormat {
     /// Fetches schema from `system.columns`, encodes values to binary client-side.
     /// `ClickHouse` receives pre-columnarised data — zero server-side parsing.
     /// Total CPU (client + cluster) is significantly lower than `JSONEachRow`.
-    // No `native` alias: `protocol: native` is refused at boot, so the same
-    // word accepted on one key and rejected on the other contradicts itself.
+    // No `native` alias: `native` is a `protocol` value, and RowBinary rows go
+    // out over either protocol.
     #[default]
     #[serde(alias = "rowbinary", alias = "row_binary", alias = "binary")]
     RowBinary,
@@ -513,7 +513,7 @@ mod tests {
         assert_eq!(rb, InsertFormat::RowBinary);
         let rb: InsertFormat = serde_json::from_str(r#""binary""#).unwrap();
         assert_eq!(rb, InsertFormat::RowBinary);
-        // `native` names a protocol the config rejects; it is not a format.
+        // `native` names a protocol, not a format.
         assert!(serde_json::from_str::<InsertFormat>(r#""native""#).is_err());
 
         let je: InsertFormat = serde_json::from_str(r#""jsoneachrow""#).unwrap();

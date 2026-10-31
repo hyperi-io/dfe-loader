@@ -8,8 +8,13 @@
 //! wall of random hex and nobody can tell what is safe to remove. These tests
 //! pin the scheme so it cannot drift back to testcontainers' defaults.
 
-use crate::common::{TEST_SUITE_LABEL, container_name};
+use crate::common::{TEST_SUITE_LABEL, container_name, containers_prefix};
 use crate::test_name;
+
+/// The suite part of every name: `dfe-loader-test-integration` by default.
+fn base() -> String {
+    format!("{}-integration", containers_prefix())
+}
 
 /// A per-test instance carries the test name between the suite and the service,
 /// so two tests owning their own container do not collide.
@@ -19,7 +24,8 @@ fn per_test_container_name_includes_the_test() {
     assert_eq!(
         name,
         format!(
-            "dfe-loader-test-integration-inserter-basic-clickhouse-p{}",
+            "{}-inserter-basic-clickhouse-p{}",
+            base(),
             std::process::id()
         )
     );
@@ -31,19 +37,15 @@ fn binary_scoped_container_name_omits_the_test() {
     let name = container_name(None, "clickhouse");
     assert_eq!(
         name,
-        format!(
-            "dfe-loader-test-integration-clickhouse-p{}",
-            std::process::id()
-        )
+        format!("{}-clickhouse-p{}", base(), std::process::id())
     );
 }
 
 /// Two tests asking for the same service must get DIFFERENT names.
 ///
-/// nextest runs each test in its own process, so the 15 tests calling `spin_up`
-/// start 15 ClickHouse containers -- they do not share one. On a single name the
-/// first create wins and the other 14 fail with "name is already in use", and
-/// those tests then skip or panic. Either way the coverage is gone.
+/// nextest runs each test in its own process, so two tests each owning a
+/// container start two. On a single name the first create wins and the other
+/// fails with "name is already in use", and its coverage is gone.
 #[test]
 fn two_tests_wanting_one_service_do_not_collide() {
     assert_ne!(
@@ -55,10 +57,9 @@ fn two_tests_wanting_one_service_do_not_collide() {
 /// `test_name!()` must report the test it expands in, not the helper it is
 /// passed to and not the module.
 ///
-/// This is what makes the 15 `spin_up(test_name!())` call sites distinct without
-/// 15 hand-written literals that drift as tests get renamed. If the macro ever
-/// resolved to something constant, every container would collide again -- so the
-/// property is asserted rather than assumed.
+/// This is what keeps every `exclusive(test_name!(), ..)` call site distinct
+/// without hand-written literals that drift as tests get renamed. If the macro
+/// ever resolved to something constant, those containers would collide.
 #[test]
 fn test_name_reports_the_calling_test() {
     assert_eq!(test_name!(), "test_name_reports_the_calling_test");
@@ -85,7 +86,8 @@ fn container_name_is_a_legal_docker_name() {
     assert_eq!(
         name,
         format!(
-            "dfe-loader-test-integration-clickhouse-inserter-e2e--test-basic-clickhouse-p{}",
+            "{}-clickhouse-inserter-e2e--test-basic-clickhouse-p{}",
+            base(),
             std::process::id()
         )
     );
@@ -113,7 +115,7 @@ unlabelled
 ";
     let alive = |pid: u32| pid == 200;
     assert_eq!(
-        crate::common::dead_owner_names(listing, alive),
+        crate::common::shared_service::dead_owner_names(listing, alive),
         vec![
             "dfe-loader-test-integration-a-clickhouse-p100",
             "dfe-loader-test-integration-c-kafka-p300"
@@ -131,7 +133,7 @@ fn names_share_one_greppable_prefix() {
         container_name(Some("some_test"), "clickhouse"),
     ] {
         assert!(
-            name.starts_with("dfe-loader-test-integration-"),
+            name.starts_with(&format!("{}-", base())),
             "{name} does not carry the suite prefix"
         );
     }
@@ -172,7 +174,8 @@ async fn a_started_container_carries_the_name_and_label_then_goes_away() {
 
     {
         let _infra =
-            crate::common::containers::TestInfrastructure::new(test_name!(), true, false).await;
+            crate::common::containers::TestInfrastructure::exclusive(test_name!(), true, false)
+                .await;
 
         let name =
             inspect("{{.Name}}").expect("docker must know the container by its expected name");
@@ -207,4 +210,112 @@ async fn a_started_container_carries_the_name_and_label_then_goes_away() {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
     panic!("{expected} still exists after the holder was dropped -- the suite leaks containers");
+}
+
+/// Value of `field` from `docker inspect` on `name`, or `None` once it is gone.
+#[cfg(feature = "testcontainers")]
+fn inspect(name: &str, field: &str) -> Option<String> {
+    std::process::Command::new("docker")
+        .args(["inspect", name, "--format", field])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+}
+
+/// The run's shared ClickHouse is named for the run and labelled with the run
+/// and the process whose exit removes it, which under nextest is nextest.
+#[cfg(feature = "testcontainers")]
+#[tokio::test(flavor = "multi_thread")]
+async fn the_shared_container_is_named_and_labelled_for_the_run() {
+    use crate::common::shared_service::{run_id, run_owner_pid};
+
+    let shared = crate::common::containers::shared_clickhouse().await;
+    assert_eq!(
+        shared.name,
+        format!("{}-clickhouse-r{}", base(), run_id()),
+        "the shared container is not named for the run"
+    );
+    let label = |key: &str| {
+        inspect(
+            &shared.name,
+            &format!("{{{{index .Config.Labels \"{key}\"}}}}"),
+        )
+    };
+    assert_eq!(
+        label(TEST_SUITE_LABEL.0).as_deref(),
+        Some(TEST_SUITE_LABEL.1)
+    );
+    assert_eq!(label("io.hyperi.test.run"), Some(run_id()));
+    assert_eq!(
+        label("io.hyperi.test.owner-pid"),
+        Some(run_owner_pid().to_string())
+    );
+    if std::env::var_os("NEXTEST_RUN_ID").is_some() {
+        let owner = std::fs::read_to_string(format!("/proc/{}/cmdline", run_owner_pid()))
+            .unwrap_or_default();
+        assert!(
+            owner.contains("nextest"),
+            "the owner pid {} is not the nextest process: {owner:?}",
+            run_owner_pid()
+        );
+    }
+}
+
+/// The watcher leaves a shared container alone while its owner lives, and
+/// removes it once the owner exits, however the owner exits.
+#[cfg(feature = "testcontainers")]
+#[tokio::test(flavor = "multi_thread")]
+async fn the_watcher_removes_the_container_once_its_owner_exits() {
+    crate::common::require_docker_in_ci();
+    if !crate::common::has_docker() {
+        eprintln!("skipping: no Docker daemon");
+        return;
+    }
+    let name = format!("{}-watcher-p{}", base(), std::process::id());
+    let image = format!(
+        "clickhouse/clickhouse-server:{}@{}",
+        crate::common::containers::CLICKHOUSE_TAG,
+        crate::common::containers::CLICKHOUSE_DIGEST
+    );
+    let created = std::process::Command::new("docker")
+        .args(["create", "--name", &name, "--label"])
+        .arg(format!("{}={}", TEST_SUITE_LABEL.0, TEST_SUITE_LABEL.1))
+        .arg(&image)
+        .output()
+        .expect("run docker create");
+    assert!(
+        created.status.success(),
+        "create {name}: {}",
+        String::from_utf8_lossy(&created.stderr)
+    );
+
+    let mut owner = std::process::Command::new("sleep")
+        .arg("600")
+        .spawn()
+        .expect("start a stand-in owner");
+    crate::common::shared_service::spawn_watcher(owner.id(), &name);
+
+    // Long enough for a watcher that ignored its owner to have acted.
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    let alive_while_owned = inspect(&name, "{{.Name}}").is_some();
+
+    owner.kill().expect("end the stand-in owner");
+    owner.wait().expect("reap the stand-in owner");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while inspect(&name, "{{.Name}}").is_some() && std::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    let gone = inspect(&name, "{{.Name}}").is_none();
+    let _ = std::process::Command::new("docker")
+        .args(["rm", "--force", &name])
+        .output();
+    assert!(
+        alive_while_owned,
+        "the watcher removed {name} while its owner was alive"
+    );
+    assert!(
+        gone,
+        "{name} survived its owner by 30 s: the watcher did not remove it"
+    );
 }

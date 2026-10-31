@@ -1,0 +1,1 @@
+Code: 319. DB::Exception: Unknown status, client must retry. Reason: Connection loss. (UNKNOWN_STATUS_OF_INSERT) (version 26.3.42.3 (official build))

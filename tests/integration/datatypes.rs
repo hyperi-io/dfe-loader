@@ -60,11 +60,7 @@ impl Target {
 
         let infra = TestInfrastructure::new(test, true, false).await;
         let container = infra.clickhouse.as_ref().expect("ClickHouse container");
-        let host = container
-            .get_host()
-            .await
-            .expect("container host")
-            .to_string();
+        let host = container.get_host().await.expect("container host");
         let port = container
             .get_host_port_ipv4(8123)
             .await

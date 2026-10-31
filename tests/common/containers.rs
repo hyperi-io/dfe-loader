@@ -3,19 +3,27 @@
 
 #![allow(dead_code)]
 
-//! Testcontainers infrastructure for isolated integration testing
+//! The backing services the suite tests against, and how a test gets one.
 //!
-//! Provides Docker-based `ClickHouse` and Kafka containers for tests.
+//! [`TestInfrastructure::new`] hands every test the run's one shared
+//! `ClickHouse` and one shared Kafka, started by [`super::shared_service`].
+//! [`TestInfrastructure::exclusive`] starts containers a test owns alone, for
+//! a test that needs the whole server or broker to itself.
 //! Only available with `--features testcontainers`.
 
 #[cfg(feature = "testcontainers")]
 mod testcontainers_impl {
+    use std::sync::OnceLock;
     use std::time::Duration;
 
-    use testcontainers::core::WaitFor;
+    use rcgen::{
+        BasicConstraints, CertificateParams, CertifiedIssuer, DnType, IsCa, KeyPair,
+        KeyUsagePurpose,
+    };
     use testcontainers::core::logs::LogFrame;
     use testcontainers::core::wait::HttpWaitStrategy;
-    use testcontainers::{ContainerAsync, ImageExt, runners::AsyncRunner};
+    use testcontainers::core::{ContainerPort, WaitFor};
+    use testcontainers::{ContainerAsync, Image, ImageExt, runners::AsyncRunner};
     use testcontainers_modules::clickhouse::{CLICKHOUSE_PORT, ClickHouse as ClickHouseImage};
     // The `apache` module, NOT the crate's default (`confluentinc/cp-kafka`).
     // cp-kafka is amd64-only, so on arm64 it runs a JVM under QEMU: ~30s to
@@ -24,99 +32,363 @@ mod testcontainers_impl {
     // are multi-arch, so neither pays that cost.
     use testcontainers_modules::kafka::apache::{KAFKA_PORT, Kafka as KafkaImage};
 
+    use crate::common::shared_service::{self, Ready, ServiceSpec, SharedContainer, Suite};
+
+    /// This suite, for container names, labels and the `HYPERI_TEST_*` lookup.
+    pub const SUITE: Suite = Suite {
+        repo: "dfe-loader",
+        manifest_dir: env!("CARGO_MANIFEST_DIR"),
+    };
+
     /// ClickHouse to test against -- the server dfe-infra `versions.yaml`
     /// deploys and `docker-compose.dev.yaml` runs, pinned to the patch and its
     /// digest rather than the 26.3 minor, so a rebuild of that tag cannot
-    /// change what a green run tested against. Not the module default of
-    /// 23.3.8.21-alpine, which is from March 2023: testing three years behind
-    /// the deployed server is how a query that works in CI meets a changed
-    /// default in production.
+    /// change what a green run tested against.
     ///
     /// Tag and digest are separate consts because the org Renovate regex reads
     /// a bare tag on the line below the annotation and stops at a colon, so a
     /// `tag@sha256:...` value would take the pin out of review.
     // renovate: datasource=docker depName=clickhouse/clickhouse-server
-    const CLICKHOUSE_TAG: &str = "26.3.42.3";
+    pub const CLICKHOUSE_TAG: &str = "26.3.42.3";
 
     /// Digest of `CLICKHOUSE_TAG`. Docker resolves the reference by digest, so
     /// a tag moved without this one still pulls the old server.
-    const CLICKHOUSE_DIGEST: &str =
+    pub const CLICKHOUSE_DIGEST: &str =
         "sha256:21d572843e59539c7d100286b6f5a6053c341fe4b33c2d7b74b1ff7cb24c5399";
+
+    /// ClickHouse's HTTP port inside the container.
+    pub const CLICKHOUSE_HTTP_PORT: u16 = 8123;
+
+    /// ClickHouse's native port inside the container.
+    pub const CLICKHOUSE_NATIVE_PORT: u16 = 9000;
+
+    /// ClickHouse's HTTPS port inside the container.
+    pub const CLICKHOUSE_HTTPS_PORT: u16 = 8443;
+
+    /// ClickHouse's native TLS port inside the container.
+    pub const CLICKHOUSE_NATIVE_TLS_PORT: u16 = 9440;
+
+    /// Where the shared ClickHouse keeps the CA that signed its certificate.
+    pub const CLICKHOUSE_CA_PATH: &str = "/etc/clickhouse-server/certs/ca.crt";
 
     /// Bound on one ClickHouse readiness probe, so a hung connection costs a
     /// retry instead of the whole startup budget.
     const READINESS_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
-    use dfe_loader::config::{ClickHouseConfig, KafkaConfig};
+    /// A JVM broker or a cold ClickHouse under CI container contention can take
+    /// most of a minute, so 60 s is too tight.
+    const STARTUP_TIMEOUT: Duration = Duration::from_secs(180);
 
-    /// Test infrastructure with isolated Docker containers
+    /// Where the Kafka entrypoint waits for its start script.
+    const KAFKA_START_SCRIPT: &str = "/opt/kafka/hyperi_start.sh";
+
+    /// Server config that opens HTTPS on 8443 and native TLS on 9440 with the
+    /// certificate copied in beside it.
+    const CLICKHOUSE_TLS_CONFIG: &str = r"<clickhouse>
+    <https_port>8443</https_port>
+    <tcp_port_secure>9440</tcp_port_secure>
+    <openSSL>
+        <server>
+            <certificateFile>/etc/clickhouse-server/certs/server.crt</certificateFile>
+            <privateKeyFile>/etc/clickhouse-server/certs/server.key</privateKeyFile>
+            <verificationMode>none</verificationMode>
+            <loadDefaultCAFile>false</loadDefaultCAFile>
+        </server>
+    </openSSL>
+</clickhouse>
+";
+
+    /// Users config that lets `default` create users and grant to them.
+    const CLICKHOUSE_ACCESS_MANAGEMENT: &str = r"<clickhouse>
+    <users>
+        <default>
+            <access_management>1</access_management>
+        </default>
+    </users>
+</clickhouse>
+";
+
+    /// The run's ClickHouse: HTTP, native, HTTPS and native TLS, with
+    /// `default` passwordless and allowed to manage users.
+    fn clickhouse_spec() -> ServiceSpec {
+        ServiceSpec {
+            service: "clickhouse",
+            image: format!("clickhouse/clickhouse-server:{CLICKHOUSE_TAG}@{CLICKHOUSE_DIGEST}"),
+            ports: vec![
+                CLICKHOUSE_HTTP_PORT,
+                CLICKHOUSE_NATIVE_PORT,
+                CLICKHOUSE_HTTPS_PORT,
+                CLICKHOUSE_NATIVE_TLS_PORT,
+            ],
+            // From 25.x the entrypoint refuses to leave `default` passwordless
+            // unless told to, and rejects every connection instead.
+            env: vec![("CLICKHOUSE_SKIP_USER_SETUP".into(), "1".into())],
+            entrypoint: None,
+            args: Vec::new(),
+            files: clickhouse_files,
+            after_start: |_| {},
+            ready: Ready::Http {
+                port: CLICKHOUSE_HTTP_PORT,
+                path: "/ping",
+                body: "Ok.",
+            },
+            startup_timeout: STARTUP_TIMEOUT,
+        }
+    }
+
+    /// TLS and users config, and a certificate for `localhost` and `host`
+    /// signed by a CA made for this run.
+    fn clickhouse_files(host: &str) -> Vec<(String, Vec<u8>)> {
+        let ca = private_ca("dfe-loader shared ClickHouse CA");
+        let (cert, key) = server_cert(&ca, host);
+        vec![
+            (
+                "/etc/clickhouse-server/config.d/dfe-tls.xml".into(),
+                CLICKHOUSE_TLS_CONFIG.into(),
+            ),
+            (
+                "/etc/clickhouse-server/users.d/dfe-test-users.xml".into(),
+                CLICKHOUSE_ACCESS_MANAGEMENT.into(),
+            ),
+            ("/etc/clickhouse-server/certs/".into(), Vec::new()),
+            (CLICKHOUSE_CA_PATH.into(), ca.pem().into_bytes()),
+            (
+                "/etc/clickhouse-server/certs/server.crt".into(),
+                cert.into_bytes(),
+            ),
+            (
+                "/etc/clickhouse-server/certs/server.key".into(),
+                key.into_bytes(),
+            ),
+        ]
+    }
+
+    /// A self-signed CA named `name`.
+    #[must_use]
+    pub fn private_ca(name: &str) -> CertifiedIssuer<'static, KeyPair> {
+        let mut params = CertificateParams::new(Vec::<String>::new()).expect("CA params");
+        params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        params.distinguished_name.push(DnType::CommonName, name);
+        params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+        CertifiedIssuer::self_signed(params, KeyPair::generate().expect("CA key")).expect("CA cert")
+    }
+
+    /// A server certificate for `localhost` and `host`, as (cert, key) PEM.
+    fn server_cert(ca: &CertifiedIssuer<'static, KeyPair>, host: &str) -> (String, String) {
+        let key = KeyPair::generate().expect("server key");
+        let mut names = vec!["localhost".to_string()];
+        if host != "localhost" && host.parse::<std::net::IpAddr>().is_err() {
+            names.push(host.to_string());
+        }
+        let mut params = CertificateParams::new(names).expect("server params");
+        params
+            .distinguished_name
+            .push(DnType::CommonName, "localhost");
+        let cert = params.signed_by(&key, ca).expect("server cert");
+        (cert.pem(), key.serialize_pem())
+    }
+
+    /// The run's Kafka: one KRaft broker, PLAINTEXT, advertised on the host
+    /// port Docker picked.
+    fn kafka_spec() -> ServiceSpec {
+        let wait = format!(
+            "while [ ! -f {KAFKA_START_SCRIPT} ]; do sleep 0.1; done; \
+             chmod 755 {KAFKA_START_SCRIPT} && {KAFKA_START_SCRIPT}"
+        );
+        let env = [
+            (
+                "KAFKA_LISTENERS",
+                "PLAINTEXT://0.0.0.0:9092,BROKER://0.0.0.0:9093,CONTROLLER://0.0.0.0:9094",
+            ),
+            ("CLUSTER_ID", "5L6g3nShT-eMCtK--X86sw"),
+            ("KAFKA_PROCESS_ROLES", "broker,controller"),
+            ("KAFKA_CONTROLLER_LISTENER_NAMES", "CONTROLLER"),
+            (
+                "KAFKA_LISTENER_SECURITY_PROTOCOL_MAP",
+                "BROKER:PLAINTEXT,PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT",
+            ),
+            ("KAFKA_INTER_BROKER_LISTENER_NAME", "BROKER"),
+            ("KAFKA_NODE_ID", "1"),
+            ("KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR", "1"),
+            ("KAFKA_CONTROLLER_QUORUM_VOTERS", "1@localhost:9094"),
+        ];
+        ServiceSpec {
+            service: "kafka",
+            image: scalo::transport::kafka::test_support::KAFKA_IMAGE.to_string(),
+            ports: vec![KAFKA_PORT.as_u16()],
+            env: env
+                .iter()
+                .map(|(k, v)| ((*k).into(), (*v).into()))
+                .collect(),
+            entrypoint: Some("bash".into()),
+            args: vec!["-c".into(), wait],
+            files: |_| Vec::new(),
+            after_start: write_kafka_start_script,
+            ready: Ready::Log("Kafka Server started"),
+            startup_timeout: STARTUP_TIMEOUT,
+        }
+    }
+
+    /// The broker advertises the published port, which only exists once the
+    /// container runs, so the entrypoint waits for this script.
+    fn write_kafka_start_script(container: &SharedContainer) {
+        let host = advertised(&container.host);
+        let port = container.port(KAFKA_PORT.as_u16());
+        let script = format!(
+            "printf '#!/usr/bin/env bash\\nexport \
+             KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://{host}:{port},BROKER://localhost:9093\\n\
+             /etc/kafka/docker/run\\n' > {KAFKA_START_SCRIPT}"
+        );
+        let _ = container.exec(&["sh", "-c", &script]);
+    }
+
+    /// `localhost` can resolve to ::1 where loopback has no IPv6.
+    fn advertised(host: &str) -> &str {
+        if host == "localhost" {
+            "127.0.0.1"
+        } else {
+            host
+        }
+    }
+
+    /// The run's shared ClickHouse, started by the first process to ask.
+    pub async fn shared_clickhouse() -> SharedContainer {
+        static SHARED: OnceLock<SharedContainer> = OnceLock::new();
+        shared(&SHARED, clickhouse_spec).await
+    }
+
+    /// The run's shared Kafka, started by the first process to ask.
+    pub async fn shared_kafka() -> SharedContainer {
+        static SHARED: OnceLock<SharedContainer> = OnceLock::new();
+        shared(&SHARED, kafka_spec).await
+    }
+
+    async fn shared(
+        cell: &'static OnceLock<SharedContainer>,
+        spec: fn() -> ServiceSpec,
+    ) -> SharedContainer {
+        if let Some(container) = cell.get() {
+            return container.clone();
+        }
+        crate::common::require_docker_in_ci();
+        tokio::task::spawn_blocking(move || {
+            cell.get_or_init(|| shared_service::acquire(&SUITE, &spec()))
+                .clone()
+        })
+        .await
+        .expect("acquire a shared container")
+    }
+
+    /// PEM of the CA the shared ClickHouse's certificate chains to.
+    pub async fn shared_clickhouse_ca() -> Vec<u8> {
+        let container = shared_clickhouse().await;
+        tokio::task::spawn_blocking(move || container.read_file(CLICKHOUSE_CA_PATH))
+            .await
+            .expect("read the shared ClickHouse CA")
+    }
+
+    /// A backing service a test holds: the run's shared one, or its own.
+    pub enum Service<I: Image> {
+        Shared(SharedContainer),
+        Owned(Box<ContainerAsync<I>>),
+    }
+
+    impl<I: Image> Service<I> {
+        /// Host the service's ports are published on.
+        ///
+        /// # Errors
+        ///
+        /// The container runtime could not report it.
+        pub async fn get_host(&self) -> Result<String, String> {
+            match self {
+                Self::Shared(c) => Ok(c.host.clone()),
+                Self::Owned(c) => c
+                    .get_host()
+                    .await
+                    .map(|h| h.to_string())
+                    .map_err(|e| e.to_string()),
+            }
+        }
+
+        /// Host port a container port is published on.
+        ///
+        /// # Errors
+        ///
+        /// The container runtime could not report it.
+        pub async fn get_host_port_ipv4(
+            &self,
+            port: impl Into<ContainerPort>,
+        ) -> Result<u16, String> {
+            let port: ContainerPort = port.into();
+            match self {
+                Self::Shared(c) => Ok(c.port(port.as_u16())),
+                Self::Owned(c) => c.get_host_port_ipv4(port).await.map_err(|e| e.to_string()),
+            }
+        }
+    }
+
+    /// The containers one test runs against.
     pub struct TestInfrastructure {
-        pub clickhouse: Option<ContainerAsync<ClickHouseImage>>,
-        pub kafka: Option<ContainerAsync<KafkaImage>>,
+        pub clickhouse: Option<Service<ClickHouseImage>>,
+        pub kafka: Option<Service<KafkaImage>>,
     }
 
     impl TestInfrastructure {
-        /// Create new test infrastructure
+        /// The run's shared ClickHouse and Kafka, as the test asks for them.
+        ///
+        /// `test` is unused here and kept so a test can move between this and
+        /// [`Self::exclusive`] by changing the constructor alone.
+        pub async fn new(_test: &str, need_clickhouse: bool, need_kafka: bool) -> Self {
+            crate::common::test_logging::init();
+            let clickhouse = if need_clickhouse {
+                Some(Service::Shared(shared_clickhouse().await))
+            } else {
+                None
+            };
+            let kafka = if need_kafka {
+                Some(Service::Shared(shared_kafka().await))
+            } else {
+                None
+            };
+            Self { clickhouse, kafka }
+        }
+
+        /// ClickHouse where `default` may create users and grant to them, with
+        /// Kafka beside it if `need_kafka`. The shared ClickHouse allows it.
+        pub async fn clickhouse_managing_users(test: &str, need_kafka: bool) -> Self {
+            Self::new(test, true, need_kafka).await
+        }
+
+        /// Containers `test` owns alone, for a test whose assertions cover the
+        /// whole server or broker. Each is removed when the test drops it.
         ///
         /// # Arguments
         /// * `test` - The calling test, which names the containers it starts.
         ///   Pass `test_name!()`. Two tests must not share a name: nextest runs
         ///   each in its own process, so they start their own containers and a
         ///   shared name collides rather than sharing.
-        /// * `need_clickhouse` - Start ClickHouse container
-        /// * `need_kafka` - Start Kafka container
-        pub async fn new(test: &str, need_clickhouse: bool, need_kafka: bool) -> Self {
+        pub async fn exclusive(test: &str, need_clickhouse: bool, need_kafka: bool) -> Self {
             crate::common::test_logging::init();
-
-            // CI provides the daemon, so its absence here means these tests
-            // would silently exercise nothing. Fail loudly instead. Locally a
-            // missing daemon is just a developer with Docker stopped, and the
-            // container start below reports that plainly enough.
             crate::common::require_docker_in_ci();
-
             let clickhouse = if need_clickhouse {
-                Some(start_clickhouse(test).await)
+                Some(Service::Owned(Box::new(start_clickhouse(test).await)))
             } else {
                 None
             };
-
             let kafka = if need_kafka {
-                Some(start_kafka(test).await)
+                Some(Service::Owned(Box::new(start_kafka_with(test, None).await)))
             } else {
                 None
             };
-
             Self { clickhouse, kafka }
-        }
-
-        /// ClickHouse where the passwordless `default` user may create users
-        /// and grant to them, with Kafka beside it if `need_kafka`.
-        pub async fn clickhouse_managing_users(test: &str, need_kafka: bool) -> Self {
-            crate::common::test_logging::init();
-            crate::common::require_docker_in_ci();
-            let clickhouse = start_clickhouse_with(test, Some(CLICKHOUSE_ACCESS_MANAGEMENT)).await;
-            let kafka = if need_kafka {
-                Some(start_kafka(test).await)
-            } else {
-                None
-            };
-            Self {
-                clickhouse: Some(clickhouse),
-                kafka,
-            }
         }
 
         /// Spin up exactly the containers the app declares it depends on.
         ///
         /// Reads `Config::deployment_contract().depends_on` (the same list that
-        /// drives Helm/Compose generation) and starts the corresponding
-        /// testcontainers. Keeps test infra in lockstep with deployment infra
-        /// — when the app gains a new `depends_on` entry, tests pick it up
-        /// automatically.
-        ///
-        /// Currently recognises: `kafka`, `clickhouse`. Unknown entries are
-        /// logged and ignored (so a new dep doesn't break existing tests
-        /// before a corresponding image is wired in).
+        /// drives Helm/Compose generation), so test infra follows deployment
+        /// infra when the app gains a dependency. Unknown entries are logged
+        /// and ignored until an image is wired in.
         pub async fn from_contract(test: &str) -> Self {
             let contract = dfe_loader::config::Config::deployment_contract();
             let mut need_clickhouse = false;
@@ -128,50 +400,12 @@ mod testcontainers_impl {
                     other => {
                         eprintln!(
                             "TestInfrastructure::from_contract: ignoring unknown dependency \
-                             '{other}' — wire up an image in containers.rs to support it"
+                             '{other}' -- wire up an image in containers.rs to support it"
                         );
                     }
                 }
             }
             Self::new(test, need_clickhouse, need_kafka).await
-        }
-
-        /// Get ClickHouse configuration
-        pub async fn clickhouse_config(&self) -> Option<ClickHouseConfig> {
-            let container = self.clickhouse.as_ref()?;
-            let host = container.get_host().await.ok()?;
-            let native_port = container.get_host_port_ipv4(9000).await.ok()?;
-            let _http_port = container.get_host_port_ipv4(8123).await.ok()?;
-
-            Some(ClickHouseConfig {
-                hosts: vec![format!("{}:{}", host, native_port)],
-                database: "default".to_string(),
-                username: "default".to_string(),
-                password: scalo::config::sensitive::SensitiveString::default(),
-                protocol: "native".to_string(),
-                insert_format: dfe_loader::clickhouse::InsertFormat::default(),
-                tables: Vec::new(),
-                tls: None,
-                ..Default::default()
-            })
-        }
-
-        /// Get Kafka configuration
-        pub async fn kafka_config(&self) -> Option<KafkaConfig> {
-            let container = self.kafka.as_ref()?;
-            let host = container.get_host().await.ok()?;
-            let port = container.get_host_port_ipv4(KAFKA_PORT).await.ok()?;
-
-            Some(KafkaConfig {
-                brokers: vec![format!("{}:{}", host, port)],
-                topics: vec!["test-events".to_string()],
-                group: "test-group".to_string(),
-                topic_regex: None,
-                client_id: "test-client".to_string(),
-                sasl: None,
-                tls: None,
-                ..Default::default()
-            })
         }
     }
 
@@ -205,130 +439,25 @@ mod testcontainers_impl {
         }
     }
 
-    /// Users config that lets `default` create users and grant to them.
-    const CLICKHOUSE_ACCESS_MANAGEMENT: &str = r"<clickhouse>
-    <users>
-        <default>
-            <access_management>1</access_management>
-        </default>
-    </users>
-</clickhouse>
-";
-
-    /// Start ClickHouse container
+    /// A ClickHouse this test owns alone.
     async fn start_clickhouse(test: &str) -> ContainerAsync<ClickHouseImage> {
-        start_clickhouse_with(test, None).await
-    }
-
-    /// Start ClickHouse, with `users_config` added under `users.d` if given.
-    async fn start_clickhouse_with(
-        test: &str,
-        users_config: Option<&str>,
-    ) -> ContainerAsync<ClickHouseImage> {
-        let name = crate::common::container_name(Some(test), "clickhouse");
-        crate::common::reap_stale(&name);
-        let mut image = ClickHouseImage::default()
-            .with_tag(format!("{CLICKHOUSE_TAG}@{CLICKHOUSE_DIGEST}"))
-            // From 25.x the entrypoint refuses to leave `default` passwordless
-            // unless told to, and rejects every connection with "Authentication
-            // failed" instead. The module's own config predates that. Tests
-            // connect as default with no password, so keep that and say so.
-            .with_env_var("CLICKHOUSE_SKIP_USER_SETUP", "1");
-        if let Some(users_config) = users_config {
-            image = image.with_copy_to(
-                "/etc/clickhouse-server/users.d/dfe-test-users.xml",
-                users_config.as_bytes().to_vec(),
-            );
-        }
-        image
-            .with_container_name(&name)
-            .with_labels(crate::common::test_labels("clickhouse"))
-            .with_ready_conditions(vec![clickhouse_ready()])
-            .with_log_consumer(echo_logs(name.clone()))
-            // The 60s testcontainers default is too tight under CI container
-            // contention: the server cold-start intermittently overruns it and
-            // fails the run with WaitContainer(StartupTimeout).
-            .with_startup_timeout(Duration::from_secs(180))
-            .start()
-            .await
-            .expect("Failed to start ClickHouse container")
-    }
-
-    /// ClickHouse's HTTPS port inside the container.
-    const CLICKHOUSE_HTTPS_PORT: u16 = 8443;
-
-    /// ClickHouse's native TLS port inside the container.
-    const CLICKHOUSE_NATIVE_TLS_PORT: u16 = 9440;
-
-    /// Server config that opens HTTPS on 8443 and native TLS on 9440 with the
-    /// certificate copied in beside it.
-    const CLICKHOUSE_HTTPS_CONFIG: &str = r"<clickhouse>
-    <https_port>8443</https_port>
-    <tcp_port_secure>9440</tcp_port_secure>
-    <openSSL>
-        <server>
-            <certificateFile>/etc/clickhouse-server/certs/server.crt</certificateFile>
-            <privateKeyFile>/etc/clickhouse-server/certs/server.key</privateKeyFile>
-            <verificationMode>none</verificationMode>
-            <loadDefaultCAFile>false</loadDefaultCAFile>
-        </server>
-    </openSSL>
-</clickhouse>
-";
-
-    /// Start ClickHouse serving HTTP on `http_host_port`, and HTTPS and native
-    /// TLS with `cert_pem` and `key_pem` on `https_host_port` and
-    /// `native_tls_host_port`.
-    ///
-    /// Each is mapped explicitly: one explicit mapping turns off publishing
-    /// the image's own ports, and the readiness probe needs 8123.
-    pub async fn start_clickhouse_https(
-        test: &str,
-        cert_pem: String,
-        key_pem: String,
-        http_host_port: u16,
-        https_host_port: u16,
-        native_tls_host_port: u16,
-    ) -> ContainerAsync<ClickHouseImage> {
         let name = crate::common::container_name(Some(test), "clickhouse");
         crate::common::reap_stale(&name);
         ClickHouseImage::default()
             .with_tag(format!("{CLICKHOUSE_TAG}@{CLICKHOUSE_DIGEST}"))
             .with_env_var("CLICKHOUSE_SKIP_USER_SETUP", "1")
             .with_copy_to(
-                "/etc/clickhouse-server/config.d/dfe-https.xml",
-                CLICKHOUSE_HTTPS_CONFIG.as_bytes().to_vec(),
-            )
-            .with_copy_to(
-                "/etc/clickhouse-server/certs/server.crt",
-                cert_pem.into_bytes(),
-            )
-            .with_copy_to(
-                "/etc/clickhouse-server/certs/server.key",
-                key_pem.into_bytes(),
-            )
-            .with_mapped_port(http_host_port, CLICKHOUSE_PORT)
-            .with_mapped_port(
-                https_host_port,
-                testcontainers::core::ContainerPort::Tcp(CLICKHOUSE_HTTPS_PORT),
-            )
-            .with_mapped_port(
-                native_tls_host_port,
-                testcontainers::core::ContainerPort::Tcp(CLICKHOUSE_NATIVE_TLS_PORT),
+                "/etc/clickhouse-server/users.d/dfe-test-users.xml",
+                CLICKHOUSE_ACCESS_MANAGEMENT.as_bytes().to_vec(),
             )
             .with_container_name(&name)
             .with_labels(crate::common::test_labels("clickhouse"))
             .with_ready_conditions(vec![clickhouse_ready()])
             .with_log_consumer(echo_logs(name.clone()))
-            .with_startup_timeout(Duration::from_secs(180))
+            .with_startup_timeout(STARTUP_TIMEOUT)
             .start()
             .await
-            .expect("Failed to start ClickHouse container with HTTPS")
-    }
-
-    /// Start Kafka container
-    async fn start_kafka(test: &str) -> ContainerAsync<KafkaImage> {
-        start_kafka_with(test, None).await
+            .expect("Failed to start ClickHouse container")
     }
 
     /// Start Kafka listening on `host_port`, for a loader configured with that
@@ -337,7 +466,7 @@ mod testcontainers_impl {
         start_kafka_with(test, Some(host_port)).await
     }
 
-    /// Start Kafka, on `host_port` if given.
+    /// A Kafka this test owns alone, on `host_port` if given.
     async fn start_kafka_with(test: &str, host_port: Option<u16>) -> ContainerAsync<KafkaImage> {
         let name = crate::common::container_name(Some(test), "kafka");
         crate::common::reap_stale(&name);
@@ -352,10 +481,7 @@ mod testcontainers_impl {
         image
             .with_container_name(&name)
             .with_labels(crate::common::test_labels("kafka"))
-            // A JVM broker takes tens of seconds to print "Kafka Server
-            // started", which the 60s testcontainers default cuts too close
-            // under CI container contention.
-            .with_startup_timeout(Duration::from_secs(180))
+            .with_startup_timeout(STARTUP_TIMEOUT)
             .start()
             .await
             .expect("Failed to start Kafka container")
@@ -406,11 +532,14 @@ mod testcontainers_impl {
     }
 }
 
-// Re-export so tests can use `crate::common::containers::TestInfrastructure`
-// regardless of whether the feature is enabled. Unused in binaries that don't
-// reference it — hence the allow.
+// Re-exported so tests reach these through `crate::common::containers`
+// whichever features are on. Unused in binaries that don't reference them.
 #[allow(unused_imports)]
 pub use testcontainers_impl::TestInfrastructure;
 #[cfg(feature = "testcontainers")]
 #[allow(unused_imports)]
-pub use testcontainers_impl::{start_clickhouse_https, start_kafka_on};
+pub use testcontainers_impl::{
+    CLICKHOUSE_DIGEST, CLICKHOUSE_HTTP_PORT, CLICKHOUSE_HTTPS_PORT, CLICKHOUSE_NATIVE_PORT,
+    CLICKHOUSE_NATIVE_TLS_PORT, CLICKHOUSE_TAG, SUITE, Service, private_ca, shared_clickhouse,
+    shared_clickhouse_ca, shared_kafka, start_kafka_on,
+};

@@ -1,21 +1,22 @@
 # SPDX-License-Identifier: BUSL-1.1
 # Copyright (c) 2026 HYPERI PTY LIMITED
 
-# Container-backed tests get their own concurrency budget. Each one starts a
-# real Kafka or ClickHouse container and waits for it to become ready, so
-# letting all of them start at once starves each other of CPU and pushes them
-# past testcontainers' readiness timeout.
-#
-# Capping the GROUP rather than the whole run is the point: the other ~1600
-# tests are pure CPU and stay fully parallel.
-[test-groups]
-containers = { max-threads = 2 }
-
-[[profile.default.overrides]]
-filter = 'test(/kafka_transport_e2e::/) or test(/clickhouse_inserter_e2e::/) or test(/clickhouse_readiness::/) or test(/broker_startup::/) or test(/kafka_offset_floor::/) or test(/grpc_outage::/) or test(/container_hygiene::/) or test(/json_depth::/)'
-test-group = 'containers'
-
+# Core is the default selection: unit tests, captured-fixture tests and one
+# shared-instance table test per heavy service (integration::shared_services).
+# Every other test that needs a real ClickHouse or Kafka is full, which runs
+# with `--run-ignored all --ignore-default-filter`. tests/TESTING.md lists both.
 [profile.default]
+default-filter = '''
+not (
+    test(/^integration::(broker_startup|clickhouse|clickhouse_inserter_e2e|clickhouse_readiness|clickhouse_tls|datatypes|grpc_outage|grpc_startup|header_keys|hot_reload|json_depth|kafka_dlq_metrics|kafka_offset_floor|kafka_rebalance|kafka_tls_startup|kafka_transport_e2e|memory_balance|schema_pending_e2e|tenancy)::/)
+    or test(=integration::clickhouse_error_bodies::the_server_still_answers_as_the_fixtures_say)
+    or test(/^integration::errors::test_error_(insert_nonexistent_table|insert_schema_mismatch|insert_missing_column|insert_extra_column|empty_batch_insert)$/)
+    or test(/^integration::inserter::(test_inserter_basic_insert|rowbinary_multirow_lands_over_http|test_inserter_large_batch|test_concurrent_inserts|test_inserter_batch_salvage|test_rowbinary_json_from_raw_payload|test_raw_only_mode_raw_populated_json_null|test_extracted_only_mode_both_null)$/)
+    or test(/^integration::rls::test_org_id_insert_to_clickhouse$/)
+    or test(/^integration::schema::(test_schema_introspection_from_clickhouse|test_schema_cache_with_clickhouse|test_schema_cache_background_refresh_keeps_warm)$/)
+    or test(/^integration::container_hygiene::(a_started_container_carries_the_name_and_label_then_goes_away|the_shared_container_is_named_and_labelled_for_the_run|the_watcher_removes_the_container_once_its_owner_exits)$/)
+)
+'''
 # No retries, deliberately. Retries here previously masked three real defects:
 # an amd64-only Kafka image running under emulation, a broker probed before it
 # served consumers, and tests asserting a cold consumer's first poll is clean.
@@ -24,6 +25,22 @@ retries = 0
 # These tests are legitimately slower than unit tests; warn rather than kill,
 # but do not let a wedged container run forever.
 slow-timeout = { period = "60s", terminate-after = 5 }
+
+# Tests that start a container of their own get their own concurrency budget:
+# each waits for a cold server or broker, and letting all of them start at once
+# starves each other of CPU and pushes them past the readiness timeout. The
+# shared instances start once per run, so tests on them stay fully parallel.
+[test-groups]
+own-containers = { max-threads = 2 }
+
+[[profile.default.overrides]]
+filter = 'test(/^integration::broker_startup::/) or test(=integration::kafka_transport_e2e::test_auto_discovery_subscribes_only_land_and_load_topics) or test(/^integration::kafka_tls_startup::/) or test(=integration::container_hygiene::a_started_container_carries_the_name_and_label_then_goes_away)'
+test-group = 'own-containers'
+
+# The shared-instance tests print which rung and which containers this run used.
+[[profile.default.overrides]]
+filter = 'test(/^integration::shared_services::/)'
+success-output = "final"
 
 [profile.ci]
 retries = 0

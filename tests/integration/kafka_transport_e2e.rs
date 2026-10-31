@@ -49,17 +49,27 @@ use crate::common::containers::TestInfrastructure;
 /// Spin up an isolated Kafka container and return it along with the
 /// bootstrap broker string and a ready-to-use loader `KafkaConfig`.
 ///
-/// Keep `infra` in scope until the end of the test — dropping it stops and
-/// removes the container.
+/// The broker is the run's shared one, so `group` and the topics must be
+/// distinct per test: two tests sharing a group would divide the partitions
+/// between them and consume each other's messages.
 async fn spin_up_kafka(
     group: &str,
     topics: Vec<String>,
 ) -> (TestInfrastructure, String, KafkaConfig) {
-    // The consumer group doubles as the container discriminator. It has to be
-    // distinct per test anyway -- two tests sharing a group would divide the
-    // partitions between them and consume each other's messages -- so it is
-    // already exactly what the container name needs.
-    let infra = TestInfrastructure::new(group, false, true).await;
+    connect(
+        TestInfrastructure::new(group, false, true).await,
+        group,
+        topics,
+    )
+    .await
+}
+
+/// The broker in `infra`, with a loader `KafkaConfig` for `group` and `topics`.
+async fn connect(
+    infra: TestInfrastructure,
+    group: &str,
+    topics: Vec<String>,
+) -> (TestInfrastructure, String, KafkaConfig) {
     let container = infra
         .kafka
         .as_ref()
@@ -382,9 +392,9 @@ async fn test_kafka_transport_commit_offset() {
         .map(|m| KafkaOffset {
             topic: m.topic.clone(),
             partition: m.partition,
-            // Kafka commit semantics: offset = "next message to consume", so
-            // we commit last_offset + 1.
-            offset: m.offset + 1,
+            // The offset of the last message handled: the transport commits
+            // the one after it, as the orchestrator relies on.
+            offset: m.offset,
         })
         .collect();
 
@@ -393,6 +403,9 @@ async fn test_kafka_transport_commit_offset() {
         .await
         .expect("commit should succeed");
     adapter_a.close().await.expect("close first adapter");
+    // The consumer leaves the group on drop, not on close, and a member still
+    // in the group holds the partition from the second adapter.
+    drop(adapter_a);
 
     // Empty-offset commit is a no-op — exercise the early-return branch.
     let adapter_noop = TransportAdapter::new(&config, &DlqConfig::default(), None)
@@ -403,6 +416,7 @@ async fn test_kafka_transport_commit_offset() {
         .await
         .expect("commit of empty slice should succeed as no-op");
     adapter_noop.close().await.expect("close noop adapter");
+    drop(adapter_noop);
 
     // --- Second consumer, same group: should NOT see the first 3 ---
     let adapter_b = TransportAdapter::new(&config, &DlqConfig::default(), None)
@@ -412,7 +426,13 @@ async fn test_kafka_transport_commit_offset() {
     let second_batch = recv_until(&adapter_b, 3, Duration::from_secs(30)).await;
 
     // The committed offset should make Kafka deliver only messages 3..=5 (3
-    // remaining). We assert none of the first 3 payloads reappear.
+    // remaining), and none of the first 3 reappear.
+    let rest: Vec<&[u8]> = second_batch.iter().map(|m| m.payload.as_slice()).collect();
+    assert_eq!(
+        rest,
+        [&b"msg-3"[..], b"msg-4", b"msg-5"],
+        "the group must resume at the committed offset"
+    );
     for msg in &second_batch {
         for already_committed in first_batch.iter().take(3) {
             assert_ne!(
@@ -650,11 +670,16 @@ async fn wait_for_topics(bootstrap: &str, want: &[&str]) {
 /// An empty topic list on a broker that also carries Strimzi, Connect and
 /// schema-registry topics, plus a DLQ named like a landing topic. Only the two
 /// landing topics may be subscribed, and only their records may arrive.
+///
+/// Its own broker: discovery reads every topic on the broker, and the shared
+/// one carries other tests' landing topics.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_auto_discovery_subscribes_only_land_and_load_topics() {
     use scalo::transport::kafka::TopicResolver;
 
-    let (_infra, bootstrap, config) = spin_up_kafka("autodiscover-land-load-group", vec![]).await;
+    let group = "autodiscover-land-load-group";
+    let infra = TestInfrastructure::exclusive(group, false, true).await;
+    let (_infra, bootstrap, config) = connect(infra, group, vec![]).await;
 
     let loader_topics = ["main_land", "x_load"];
     let foreign_topics = [

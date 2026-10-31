@@ -21,7 +21,7 @@ PGO build.
 |---------|---------|----------|---------|
 | `jemalloc` | off | `tikv-jemallocator`, `tikv-jemalloc-ctl` | jemalloc allocator (DFE policy: jemalloc at every channel, no mimalloc) |
 | `transport-memory` | off | `scalo/transport-memory` | in-process Memory transport for unit tests |
-| `testcontainers` | off | -- | enable Docker-backed integration tests (`TEST_MODE=docker`) |
+| `testcontainers` | off | -- | enable the integration tests that run against real ClickHouse and Kafka containers, see `tests/TESTING.md` |
 | `pgo-driver` | off | `rdkafka` | build the PGO workload producer binary; the main loader binary is unaffected |
 
 `default = []`. Production builds opt in to `jemalloc` explicitly; CI opts in to

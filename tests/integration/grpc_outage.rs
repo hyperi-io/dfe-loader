@@ -352,12 +352,7 @@ pub(super) async fn clickhouse_address(infra: &TestInfrastructure) -> String {
         .await
         .expect("HTTP port mapping");
     // `localhost` can resolve to ::1 where loopback has no IPv6.
-    let host = match container
-        .get_host()
-        .await
-        .expect("container host")
-        .to_string()
-    {
+    let host = match container.get_host().await.expect("container host") {
         h if h == "localhost" => "127.0.0.1".to_string(),
         h => h,
     };

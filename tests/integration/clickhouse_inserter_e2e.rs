@@ -58,11 +58,7 @@ async fn spin_up(
         .as_ref()
         .expect("ClickHouse container must be running");
 
-    let host = container
-        .get_host()
-        .await
-        .expect("container get_host")
-        .to_string();
+    let host = container.get_host().await.expect("container get_host");
     let http_port = container
         .get_host_port_ipv4(8123)
         .await
@@ -2204,17 +2200,18 @@ async fn common_header_survives(test: &str, format: InsertFormat) {
 
     let (_infra, client, ch) = spin_up(test).await;
     let reader = ch.clone();
-    let table = "filebeat-vector";
-    create_per_source_table(&client, table).await;
+    // Hyphenated like a source name, and one per test on the shared server.
+    let table = format!("filebeat-vector-{}", std::process::id());
+    create_per_source_table(&client, &table).await;
 
     // Read the schema and comments back out of ClickHouse, as the background
     // schema resolver does.
     let schema = client
-        .fetch_table_schema(table)
+        .fetch_table_schema(&table)
         .await
         .expect("fetch schema");
     let comments = client
-        .fetch_column_comments(table)
+        .fetch_column_comments(&table)
         .await
         .expect("fetch column comments");
     let qualified = format!("{}.{}", schema.database, schema.table);
