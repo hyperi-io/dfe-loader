@@ -39,23 +39,27 @@ flowchart TB
         EXT["clickhouse_ext<br/>ParsedType, encoder, DynamicInsert"]
         SC["SchemaCache"]
     end
-    subgraph Fork["clickhouse-rs fork (hyperi-port, patched in)"]
-        CLIENT["Client (HTTP + TCP)"]
+    subgraph Client["crates.io clickhouse + dfe-clickhouse"]
+        CLIENT["ChClient: clickhouse::Client (HTTP) or dfe_clickhouse::TcpClient (native)"]
+        EXC["dfe_clickhouse::ServerException"]
     end
 
     ORC --> PROC --> L3 --> BUF --> INS
     INS --> EXT --> CLIENT
     INS --> QC --> CLIENT
+    INS --> EXC
     EXT --> SC
     QC --> SC
 ```
 
-A higher layer depends on lower layers, never the reverse. The only external
-dependency for the insert path is the patched `clickhouse::Client`.
+A higher layer depends on lower layers, never the reverse. The insert path's
+external dependencies are the official `clickhouse` crate's HTTP `Client`, and
+`dfe-clickhouse` for the native-protocol `TcpClient` and for reading the
+server's exception code out of an HTTP rejection so the inserter can classify it.
 
 ## The clickhouse_ext boundary
 
-The hyperi-port fork keeps insertion typed (`T: Row`, compile-time schema) --
+The `clickhouse` crate keeps insertion typed (`T: Row`, compile-time schema) --
 that is the right upstream default. dfe-loader inserts runtime-shaped
 `Map<String,Value>` rows whose columns come from `system.columns` at runtime.
 That dynamic layer is HyperI-specific and lives in this repo, on top of the
@@ -72,28 +76,22 @@ flowchart LR
             DI["DynamicInsert<br/>write_map + recovery"]
         end
     end
-    subgraph fork["clickhouse::Client (patched)"]
+    subgraph client["clickhouse::Client"]
         IFW["insert_formatted_with<br/>FORMAT RowBinaryWithNamesAndTypes | JSONEachRow (HTTP)"]
-        INC["insert_native_with_columns<br/>with_columns_tcp (waits on #15)"]
     end
 
     INS --> DI
     DI --> ENC --> PT
     DI --> SCH
     DI -->|RowBinary| IFW
-    DI -.->|not wired| INC
     INS -->|JSONEachRow fallback| IFW
 ```
 
-Every insert goes over HTTP `insert_formatted_with`: row-wise `encode()` bytes
-behind a `FORMAT RowBinaryWithNamesAndTypes` header, or `JSONEachRow`. The
-encoder also has a per-column `Serialize` mode for the native/TCP
-`with_columns_tcp` sink, which is not wired: it waits on
-[clickhouse-rs#15](https://github.com/hyperi-io/clickhouse-rs/issues/15), and
-`clickhouse.protocol: native` is refused at startup. `clickhouse_ext` uses only
-the fork's stable public surface (`Client`, `insert_formatted_with`,
-`row`/`rowbinary` primitives), so it is unaffected by the fork's routine cascade
-re-pushes. See [clickhouse/clickhouse-ext.md](clickhouse/clickhouse-ext.md).
+Over HTTP every insert goes through `insert_formatted_with`: row-wise `encode()`
+bytes behind a `FORMAT RowBinaryWithNamesAndTypes` header, or `JSONEachRow`.
+With `clickhouse.protocol: native` the same row bytes go out as `FORMAT Native`
+blocks through `TcpClient::insert_native`, and `JSONEachRow` is refused at
+startup. See [clickhouse/clickhouse-ext.md](clickhouse/clickhouse-ext.md).
 
 ## Insert dispatch
 
@@ -115,10 +113,14 @@ flowchart TB
 
 The RowBinary path ships row-wise `FORMAT RowBinaryWithNamesAndTypes` through
 `insert_formatted_with`, whose header lets the server refuse bytes encoded for
-a column type the table no longer has. Both formats go over HTTP:
-`clickhouse.protocol: native` is refused at startup, and the native/TCP sink
-(`insert_native_with_columns`, `with_columns_tcp`) waits on
-[clickhouse-rs#15](https://github.com/hyperi-io/clickhouse-rs/issues/15).
+a column type the table no longer has. Over native the block declares the
+types instead.
+
+A rejected insert is classified by the server's exception code, read with
+`dfe_clickhouse::ServerException::parse` over HTTP and carried structurally
+over native, never by the words of the message:
+a parse rejection echoes the offending row back. The loader keeps at most 1 MiB
+of any error text, because the client reads a whole error body into memory.
 
 ## Capture modes
 

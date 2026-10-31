@@ -3,7 +3,7 @@
 
 // Project:   dfe-loader
 // File:      src/clickhouse_ext/insert.rs
-// Purpose:   DynamicInsert adapter over the clickhouse-rs RowBinary/Native sinks
+// Purpose:   DynamicInsert adapter over the ClickHouse HTTP RowBinary sink
 // Language:  Rust
 //
 // License:   BUSL-1.1
@@ -13,35 +13,42 @@
 //!
 //! `DynamicInsert` fetches the table schema from `system.columns` on first
 //! write, encodes each `Map<String, Value>` against it, and ships the rows
-//! through a clickhouse-rs sink. On a schema-mismatch error it invalidates the
+//! through the HTTP client. On a schema-mismatch error it invalidates the
 //! cached schema so the next insert re-fetches.
 //!
-//! # Sink abstraction
+//! # Sink
 //!
 //! The only sink is `Client::insert_formatted_with(... FORMAT
 //! RowBinaryWithNamesAndTypes)` over HTTP: a header naming each column and the
-//! type it was encoded for, then row-wise `encode()` bytes. FORMAT Native over
-//! HTTP (`InsertNative::with_columns`) mis-frames the block on this server and
-//! is tracked as clickhouse-rs#15.
-//!
-//! The native/TCP sink (`insert_native_with_columns` -> `with_columns_tcp`,
-//! clickhouse-rs#14) waits on #15 and is not wired; `clickhouse.protocol:
-//! native` is refused at startup. Only the `ensure_sink` internals here change
-//! when it lands -- the encoder and the public `write_map` API are unaffected.
+//! type it was encoded for, then row-wise `encode()` bytes.
+//! `clickhouse.protocol: native` is refused at startup.
 
 use std::sync::Arc;
 
 use serde_json::{Map, Value};
 
-use clickhouse::Client;
+use dfe_clickhouse::TcpClient;
+use dfe_clickhouse::native::{ColumnSchema, encode_columns};
 
 use super::encode::{ColumnDef, DynamicRow};
 use super::error::DynamicError;
 use super::schema::{DynamicSchema, DynamicSchemaCache, fetch_dynamic_schema};
 use crate::clickhouse::Timeouts;
-use crate::clickhouse::client_http::{ReadBound, insert_sink};
+use crate::clickhouse::client_http::{ChClient, ReadBound, insert_sink};
+use crate::clickhouse::error::{error_text, native_error_text};
 
-/// The clickhouse-rs setting that makes the server read a length-prefixed
+/// Bytes of encoded rows per native block, so one wide batch is not one
+/// unbounded block.
+const NATIVE_BLOCK_BYTES: usize = 1 << 20;
+
+/// Where the encoded rows go: an HTTP request body, or rows held for the
+/// native-protocol INSERT that [`DynamicInsert::end`] sends.
+enum Sink {
+    Http(clickhouse::insert_formatted::BufInsertFormatted),
+    Native { sql: String, rows: Vec<Vec<u8>> },
+}
+
+/// The server setting that makes it read a length-prefixed
 /// string as a JSON value, which is how the dynamic encoder writes JSON
 /// columns on the wire.
 const JSON_AS_STRING_SETTING: &str = "input_format_binary_read_json_as_string";
@@ -95,16 +102,15 @@ fn escape_ident(name: &str) -> String {
 /// but binary on the wire so the server skips JSON parsing.
 #[must_use = "a DynamicInsert must be finished with `.end().await` to commit the rows"]
 pub struct DynamicInsert {
-    client: Client,
+    client: ChClient,
     database: String,
     table: String,
     schema_cache: Arc<DynamicSchemaCache>,
     schema: Option<DynamicSchema>,
     /// Resolved column subset for the active INSERT (fixed from the first row).
     insert_columns: Option<Vec<ColumnDef>>,
-    /// The active sink (HTTP `FORMAT RowBinaryWithNamesAndTypes`), created
-    /// lazily on first write.
-    sink: Option<clickhouse::insert_formatted::BufInsertFormatted>,
+    /// The active sink, created lazily on first write.
+    sink: Option<Sink>,
     rows_written: u64,
     /// Whether a schema-mismatch error at `end` drops the cached schema.
     refresh_on_error: bool,
@@ -117,13 +123,13 @@ pub struct DynamicInsert {
 impl DynamicInsert {
     /// Create a `DynamicInsert`. The schema is fetched lazily on first write.
     pub fn new(
-        client: Client,
+        client: impl Into<ChClient>,
         database: impl Into<String>,
         table: impl Into<String>,
         schema_cache: Arc<DynamicSchemaCache>,
     ) -> Self {
         Self {
-            client,
+            client: client.into(),
             database: database.into(),
             table: table.into(),
             schema_cache,
@@ -214,26 +220,38 @@ impl DynamicInsert {
         }
         // Bytes encoded against a stale schema can parse as other rows, so the
         // header names the types they were encoded for and the server refuses
-        // a mismatch. (FORMAT Native is rejected here; tracked as a fork issue.)
+        // a mismatch.
         let cols_sql = columns
             .iter()
             .map(|c| escape_ident(&c.name))
             .collect::<Vec<_>>()
             .join(", ");
-        let sql = format!(
-            "INSERT INTO {}.{} ({cols_sql}) FORMAT RowBinaryWithNamesAndTypes",
+        let target = format!(
+            "{}.{} ({cols_sql})",
             escape_ident(&self.database),
             escape_ident(&self.table),
         );
-        let mut client = self.client.clone();
-        for setting in HEADER_CHECK_SETTINGS {
-            client = client.with_setting(setting, "1");
-        }
-        if schema.has_json_columns() {
-            client = client.with_setting(JSON_AS_STRING_SETTING, "1");
-        }
-        let mut sink = insert_sink(&client, sql, self.timeouts).buffered();
-        sink.write_buffered(&names_and_types_header(&columns));
+        let sink = match &self.client {
+            ChClient::Http(client) => {
+                let sql = format!("INSERT INTO {target} FORMAT RowBinaryWithNamesAndTypes");
+                let mut client = client.clone();
+                for setting in HEADER_CHECK_SETTINGS {
+                    client = client.with_setting(setting, "1");
+                }
+                if schema.has_json_columns() {
+                    client = client.with_setting(JSON_AS_STRING_SETTING, "1");
+                }
+                let mut sink = insert_sink(&client, sql, self.timeouts).buffered();
+                sink.write_buffered(&names_and_types_header(&columns));
+                Sink::Http(sink)
+            }
+            // A native block declares each column's type, and a JSON column is
+            // declared String, which the server casts.
+            ChClient::Native(_) => Sink::Native {
+                sql: format!("INSERT INTO {target} FORMAT Native"),
+                rows: Vec::new(),
+            },
+        };
 
         self.sink = Some(sink);
         self.insert_columns = Some(columns);
@@ -306,7 +324,10 @@ impl DynamicInsert {
                 column: String::new(),
                 message: "sink not initialised".to_string(),
             })?;
-        sink.write_buffered(&bytes);
+        match sink {
+            Sink::Http(insert) => insert.write_buffered(&bytes),
+            Sink::Native { rows, .. } => rows.push(bytes),
+        }
         self.rows_written += 1;
         Ok(())
     }
@@ -322,21 +343,50 @@ impl DynamicInsert {
     /// Returns [`DynamicError`] if the server rejects the insert, or
     /// [`DynamicError::TimedOut`] if its answer does not arrive within the bound.
     pub async fn end(mut self) -> Result<u64, DynamicError> {
-        if let Some(mut sink) = self.sink.take()
-            && let Err(e) = sink.end().await
-        {
-            if matches!(e, clickhouse::error::Error::TimedOut) {
-                return Err(DynamicError::TimedOut {
-                    table: self.full_table(),
-                });
+        let outcome = match self.sink.take() {
+            None => Ok(()),
+            Some(Sink::Http(mut insert)) => insert.end().await.map_err(|e| {
+                if matches!(e, clickhouse::error::Error::TimedOut) {
+                    None
+                } else {
+                    Some(error_text(&e))
+                }
+            }),
+            Some(Sink::Native { sql, rows }) => {
+                let columns = self.insert_columns.take().unwrap_or_default();
+                let sent = match &self.client {
+                    ChClient::Native(client) => {
+                        tokio::time::timeout(
+                            self.timeouts.insert,
+                            send_native(client, &sql, &columns, &rows),
+                        )
+                        .await
+                    }
+                    ChClient::Http(_) => unreachable!("a native sink is opened on a native client"),
+                };
+                sent.unwrap_or(Err(dfe_clickhouse::Error::TimedOut))
+                    .map_err(|e| {
+                        if matches!(e, dfe_clickhouse::Error::TimedOut) {
+                            None
+                        } else {
+                            Some(native_error_text(&e))
+                        }
+                    })
             }
-            let err = classify_error(&self.full_table(), &e);
-            if self.refresh_on_error && matches!(err, DynamicError::SchemaMismatch { .. }) {
-                self.schema_cache.invalidate(&self.full_table());
+        };
+        match outcome {
+            Ok(()) => Ok(self.rows_written),
+            Err(None) => Err(DynamicError::TimedOut {
+                table: self.full_table(),
+            }),
+            Err(Some(message)) => {
+                let err = classify_error(&self.full_table(), message);
+                if self.refresh_on_error && matches!(err, DynamicError::SchemaMismatch { .. }) {
+                    self.schema_cache.invalidate(&self.full_table());
+                }
+                Err(err)
             }
-            return Err(err);
         }
-        Ok(self.rows_written)
     }
 
     /// Invalidate the cached schema, forcing a re-fetch on the next insert.
@@ -383,11 +433,50 @@ fn select_columns(
         .collect()
 }
 
-/// Classify a clickhouse-rs error as a schema mismatch (cached schema is stale)
-/// or a generic encoding/transport error. Schema mismatch covers explicit
-/// column/type errors and the data-format errors that indicate schema drift.
-fn classify_error(full_table: &str, e: &clickhouse::error::Error) -> DynamicError {
-    let msg = e.to_string();
+/// Send `rows` as native blocks of at most [`NATIVE_BLOCK_BYTES`] and commit.
+async fn send_native(
+    client: &TcpClient,
+    sql: &str,
+    columns: &[ColumnDef],
+    rows: &[Vec<u8>],
+) -> dfe_clickhouse::Result<()> {
+    let headers: Vec<(String, String)> = columns
+        .iter()
+        .map(|c| (c.name.clone(), c.type_string.clone()))
+        .collect();
+    let schema = ColumnSchema::from_headers(&headers)?;
+    // Empty query id: the server assigns one.
+    let session = client.insert_native("", sql).await?;
+    let mut start = 0;
+    while start < rows.len() {
+        let mut end = start;
+        let mut bytes = 0;
+        while end < rows.len() && (end == start || bytes + rows[end].len() <= NATIVE_BLOCK_BYTES) {
+            bytes += rows[end].len();
+            end += 1;
+        }
+        let sent = match encode_columns(&rows[start..end], &schema, session.server_revision) {
+            Ok(block) => {
+                session
+                    .send_block(block, schema.len() as u64, (end - start) as u64)
+                    .await
+            }
+            Err(e) => Err(e),
+        };
+        if let Err(e) = sent {
+            session.abort();
+            return Err(e);
+        }
+        start = end;
+    }
+    session.finish().await
+}
+
+/// Classify a client error's text as a schema mismatch (cached schema is
+/// stale) or a generic encoding/transport error. Schema mismatch covers
+/// explicit column/type errors and the data-format errors that indicate
+/// schema drift.
+fn classify_error(full_table: &str, msg: String) -> DynamicError {
     let mismatch = msg.contains("UNKNOWN_IDENTIFIER")
         || msg.contains("NO_SUCH_COLUMN")
         || msg.contains("THERE_IS_NO_COLUMN")
@@ -472,15 +561,28 @@ mod tests {
 
     #[test]
     fn classify_recognises_schema_drift() {
-        let e = clickhouse::error::Error::Custom("Code: 117. DB::Exception: incorrect data".into());
+        let e = clickhouse::error::Error::BadResponse(
+            "Code: 117. DB::Exception: incorrect data (version 26.3.42.3 (official build))".into(),
+        );
         assert!(matches!(
-            classify_error("db.t", &e),
+            classify_error("db.t", error_text(&e)),
+            DynamicError::SchemaMismatch { .. }
+        ));
+
+        let e = dfe_clickhouse::Error::ServerException {
+            code: 117,
+            name: Some("INCORRECT_DATA".into()),
+            message: "incorrect data".into(),
+            stack_trace: None,
+        };
+        assert!(matches!(
+            classify_error("db.t", native_error_text(&e)),
             DynamicError::SchemaMismatch { .. }
         ));
 
         let e = clickhouse::error::Error::Custom("network reset".into());
         assert!(matches!(
-            classify_error("db.t", &e),
+            classify_error("db.t", error_text(&e)),
             DynamicError::EncodingError { .. }
         ));
     }

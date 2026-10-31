@@ -43,9 +43,9 @@ file drives the loader's own weights and is reported as a mismatch at startup.
 
 | Setting | Values | Effect |
 |---------|--------|--------|
-| `clickhouse.protocol` | `http` (default), `native` | HTTP (8123), HTTPS (8443). `native` is refused at startup: the pinned client has no TCP row fetch, and the native insert sink waits on clickhouse-rs#15 |
+| `clickhouse.protocol` | `http` (default), `native` | HTTP (8123), HTTPS (8443), or the native protocol (9000, 9440 with TLS) through `dfe_clickhouse::TcpClient` |
 | `clickhouse.insert_format` | `row_binary` (default), `json_each_row` | binary (server skips JSON parsing) vs self-describing JSON |
-| `clickhouse.hosts` | list | multi-host failover (native pool round-robins, skips a refusing endpoint) |
+| `clickhouse.hosts` | list | `native` fails over across every host, round-robin. `http` uses the first host only. With TLS, `native` verifies every host against the first one's name |
 | `clickhouse.database` | string, `dfe` (default) | database the connection targets -- DDL, schema reflection, and any table name that arrives without a `db.` prefix |
 
 `clickhouse.database` is the CONNECTION database and is separate from
@@ -58,11 +58,10 @@ path; `json_each_row` is the diagnostic fallback:
 
 | `insert_format` | `protocol = http` | `protocol = native` |
 |-----------------|-------------------|---------------------|
-| `row_binary` (default) | `insert_formatted_with` FORMAT RowBinaryWithNamesAndTypes | refused at startup |
+| `row_binary` (default) | `insert_formatted_with` FORMAT RowBinaryWithNamesAndTypes | `FORMAT Native` blocks over the native protocol |
 | `json_each_row` | `insert_formatted_with` FORMAT JSONEachRow | refused at startup |
 
-Both formats insert over HTTP -- see
-[clickhouse/insert-formats.md](clickhouse/insert-formats.md).
+See [clickhouse/insert-formats.md](clickhouse/insert-formats.md).
 
 ### Transport security (TLS, private CAs)
 

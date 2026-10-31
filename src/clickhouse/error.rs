@@ -22,6 +22,7 @@
 //! - **Fatal**: Don't retry, fail the batch
 //!   - Auth failures, unknown table, syntax errors
 
+use dfe_clickhouse::ServerException;
 use thiserror::Error;
 
 /// Errors from `ClickHouse` operations.
@@ -110,8 +111,8 @@ impl ClickHouseError {
 /// Returns true if the error message suggests the RowBinary schema may be stale.
 ///
 /// These are errors where ClickHouse rejected data because the encoding
-/// doesn't match the current table schema — different from `SchemaMismatch`
-/// which the fork detects locally during `write_map()`.
+/// doesn't match the current table schema, beyond what
+/// `DynamicError::SchemaMismatch` already carries.
 pub fn is_schema_drift_error(err: &str) -> bool {
     let lower = err.to_lowercase();
     lower.contains("cannot parse")
@@ -308,24 +309,61 @@ pub fn classify_json_insert_error(err: &clickhouse::error::Error) -> ErrorCatego
         return ErrorCategory::Transient;
     }
 
-    if let ChError::ServerException { code, message, .. } = err {
-        return if retries(*code, message) {
+    if let Some(exception) = ServerException::parse(err) {
+        return if retries(exception.code, &exception.message) {
             ErrorCategory::Transient
         } else {
             ErrorCategory::Data
         };
     }
 
-    match classify_from_message(&err.to_string()) {
+    match classify_from_message(&error_text(err)) {
         ErrorCategory::Data => ErrorCategory::Transient,
         category => category,
     }
 }
 
-/// The server's exception code in a clickhouse-rs error's text, which reads
-/// `server error code {code}: {message}` wherever it is nested. The code
-/// precedes the message, so the first marker is the server's and not one a
-/// row echoed back inside the message.
+/// Longest client error text the loader keeps: the client reads a whole error
+/// body into memory, and a proxy page that size would otherwise ride into every
+/// log line and dead-letter reason.
+const ERROR_TEXT_CAP: usize = 1 << 20;
+
+/// The text a client error is classified, logged and dead-lettered by, at most
+/// [`ERROR_TEXT_CAP`] bytes. A server rejection reads
+/// `server error code {code}: {message}`, which [`server_code`] reads back.
+#[must_use]
+pub fn error_text(err: &clickhouse::error::Error) -> String {
+    capped(match ServerException::parse(err) {
+        Some(exception) => server_text(exception.code, &exception.message),
+        None => err.to_string(),
+    })
+}
+
+/// [`error_text`] for an error off the native protocol, which carries the
+/// server's code structurally.
+#[must_use]
+pub fn native_error_text(err: &dfe_clickhouse::Error) -> String {
+    capped(match err {
+        dfe_clickhouse::Error::ServerException { code, message, .. } => server_text(*code, message),
+        dfe_clickhouse::Error::BadResponse(body) => {
+            return error_text(&clickhouse::error::Error::BadResponse(body.clone()));
+        }
+        other => other.to_string(),
+    })
+}
+
+fn server_text(code: i32, message: &str) -> String {
+    format!("server error code {code}: {message}")
+}
+
+fn capped(mut text: String) -> String {
+    text.truncate(text.floor_char_boundary(ERROR_TEXT_CAP));
+    text
+}
+
+/// The server's exception code in text [`error_text`] wrote, wherever it is
+/// nested. The code precedes the message, so the first marker is the server's
+/// and not one a row echoed back inside the message.
 #[must_use]
 pub fn server_code(msg: &str) -> Option<i32> {
     const MARKER: &str = "server error code ";
@@ -539,7 +577,7 @@ mod tests {
     fn fetch_failure(message: &str) -> DynamicError {
         DynamicError::SchemaFetch {
             table: "dfe.filebeat".to_string(),
-            source: clickhouse::error::Error::Custom(message.to_string()),
+            source: dfe_clickhouse::Error::Custom(message.to_string()),
         }
     }
 
@@ -629,10 +667,10 @@ mod tests {
         // including a marker of its own.
         let refusal = format!(
             "RowBinary insert: encoding error for column '': {}",
-            server_exception(
+            error_text(&server_exception(
                 117,
                 "Cannot parse JSON object here: {\"reason\":\"server error code 241\",\"big\":1}"
-            )
+            ))
         );
         assert_eq!(server_code(&refusal), Some(117));
         assert_eq!(
@@ -668,13 +706,11 @@ mod tests {
     // words it chose, because a parse rejection quotes the row back at us.
     // ========================================================================
 
+    /// A rejection as the HTTP client hands it over: the server's body, verbatim.
     fn server_exception(code: i32, message: &str) -> clickhouse::error::Error {
-        clickhouse::error::Error::ServerException {
-            code,
-            name: None,
-            message: message.to_string(),
-            stack_trace: None,
-        }
+        clickhouse::error::Error::BadResponse(format!(
+            "Code: {code}. DB::Exception: {message} (version 26.3.42.3 (official build))"
+        ))
     }
 
     #[test_case::test_case(198 ; "dns_error")]
@@ -692,7 +728,10 @@ mod tests {
             is_retry_code(code),
             "code {code} would dead-letter rows a retry lands"
         );
-        let row_binary = format!("RowBinary insert: {}", server_exception(code, message));
+        let row_binary = format!(
+            "RowBinary insert: {}",
+            error_text(&server_exception(code, message))
+        );
         assert_eq!(server_code(&row_binary), Some(code));
         assert!(retries(code, &row_binary), "code {code} on RowBinary");
         assert_eq!(
@@ -700,6 +739,71 @@ mod tests {
             ErrorCategory::Transient,
             "code {code} on JSONEachRow"
         );
+    }
+
+    // Bodies a 26.3.42.3 server returned over HTTP, verbatim, except 319,
+    // which needs a lost Keeper session to produce and is written in the same
+    // shape.
+    const BODY_117: &str = "Code: 117. DB::Exception: JSON object should start with '{': \
+        (while reading the value of key _json): (at row 1)\n: While executing \
+        WaitForAsyncInsert. (INCORRECT_DATA) (version 26.3.42.3 (official build))";
+    const BODY_60: &str = "Code: 60. DB::Exception: Table default.events does not exist. \
+        Maybe you meant system.events?. (UNKNOWN_TABLE) (version 26.3.42.3 (official build))";
+    const BODY_192: &str = "Code: 192. DB::Exception: There is no user `loader_writer` in \
+        `user directories`. (UNKNOWN_USER) (version 26.3.42.3 (official build))";
+    const BODY_241: &str = "Code: 241. DB::Exception: Query memory limit exceeded: would use \
+        13.68 MiB (attempt to allocate chunk of 7.50 MiB), maximum: 9.54 MiB. \
+        (MEMORY_LIMIT_EXCEEDED) (version 26.3.42.3 (official build))";
+    const BODY_252_PARTS: &str = "Code: 252. DB::Exception: Too many parts (2 with average \
+        size of 519.00 B) in table 'default.j (487a5f99-ac66-4c00-826b-340d12bd5b1f)'. Merges \
+        are processing significantly slower than inserts. (TOO_MANY_PARTS) (version 26.3.42.3 \
+        (official build))";
+    const BODY_252_PARTITIONS: &str = "Code: 252. DB::Exception: Too many partitions for \
+        single INSERT block (more than 1). The limit is controlled by \
+        'max_partitions_per_insert_block' setting. Large number of partitions is a common \
+        misconception. It will lead to severe negative performance impact, including slow \
+        server startup, slow INSERT queries and slow SELECT queries. Recommended total number \
+        of partitions for a table is under 1000..10000. Please note, that partitioning is not \
+        intended to speed up SELECT queries (ORDER BY key is sufficient to make range queries \
+        fast). Partitions are intended for data manipulation (DROP PARTITION, etc): While \
+        executing WaitForAsyncInsert. (TOO_MANY_PARTS) (version 26.3.42.3 (official build))";
+    const BODY_319: &str = "Code: 319. DB::Exception: Unknown status, client must retry. \
+        Reason: Connection loss. (UNKNOWN_STATUS_OF_INSERT) (version 26.3.42.3 (official build))";
+
+    /// Each body reaches the verdict by its code on both insert paths:
+    /// `JSONEachRow` reads the client error, `RowBinary` the text it was kept as.
+    #[test_case::test_case(BODY_117, 117, ErrorCategory::Data ; "incorrect_data")]
+    #[test_case::test_case(BODY_60, 60, ErrorCategory::Transient ; "unknown_table")]
+    #[test_case::test_case(BODY_192, 192, ErrorCategory::Transient ; "unknown_user")]
+    #[test_case::test_case(BODY_241, 241, ErrorCategory::Transient ; "memory_limit_exceeded")]
+    #[test_case::test_case(BODY_252_PARTS, 252, ErrorCategory::Transient ; "too_many_parts")]
+    #[test_case::test_case(BODY_252_PARTITIONS, 252, ErrorCategory::Data ; "too_many_partitions")]
+    #[test_case::test_case(BODY_319, 319, ErrorCategory::Transient ; "unknown_status_of_insert")]
+    fn a_server_body_is_classified_by_its_code(body: &str, code: i32, expected: ErrorCategory) {
+        let err = clickhouse::error::Error::BadResponse(body.to_string());
+        assert_eq!(classify_json_insert_error(&err), expected, "JSONEachRow");
+
+        let row_binary = format!(
+            "RowBinary insert: encoding error for column '': {}",
+            error_text(&err)
+        );
+        assert_eq!(server_code(&row_binary), Some(code), "{row_binary}");
+        assert_eq!(
+            retries(code, &row_binary),
+            expected == ErrorCategory::Transient,
+            "RowBinary"
+        );
+    }
+
+    #[test]
+    fn error_text_is_capped_on_a_char_boundary() {
+        let page = format!(
+            "Code: 1000. DB::Exception: {}x",
+            "\u{e9}".repeat(ERROR_TEXT_CAP)
+        );
+        let text = error_text(&clickhouse::error::Error::BadResponse(page));
+        assert!(text.len() <= ERROR_TEXT_CAP, "{}", text.len());
+        assert!(text.starts_with("server error code 1000: "));
     }
 
     #[test]

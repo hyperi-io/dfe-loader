@@ -77,10 +77,12 @@ tikv-jemallocator = { version = ">=0.7.0, <0.8", optional = true }
 # GeoIP enrichment (mmap for long-running apps). scalo's geoip-download provisions the files.
 maxminddb = { version = ">=0.32.0, <0.33", features = ["mmap"] }
 
-# ClickHouse crate (HyperI fork with native TCP + unified client)
-# rustls-tls + rustls-tls-native-roots: HTTPS for clients built with Client::default()
-# native-transport + native-tls-rustls: native TCP with TLS
-clickhouse = { version = ">=0.15.0, <0.16", features = ["lz4", "time", "rustls-tls", "rustls-tls-native-roots", "tcp", "native-tls-rustls", "inserter"] }
+# The official ClickHouse HTTP client. rustls-tls + rustls-tls-native-roots:
+# HTTPS for clients built with Client::default().
+clickhouse = { version = ">=0.15.3, <0.16", features = ["lz4", "time", "rustls-tls", "rustls-tls-native-roots", "inserter"] }
+# `ext` reads the server's exception code out of an HTTP rejection; `tls`
+# (implies `tcp`) is the native-protocol client, rustls only.
+dfe-clickhouse = { version = ">=0.1.5, <0.2", default-features = false, features = ["ext", "tls"] }
 time = ">=0.3.55, <0.4"
 
 # The HTTP client handed to clickhouse::Client::with_http_client: connect timeout,
@@ -134,8 +136,8 @@ testcontainers-reqwest = { package = "reqwest", version = ">=0.13.5, <0.14", def
 # Kafka producer for e2e tests (test message injection)
 rdkafka = { version = ">=0.39.0, <0.40", features = ["dynamic-linking"] }
 
-# ClickHouse crate (HyperI fork) — integration tests need all features
-clickhouse = { version = ">=0.15.0, <0.16", features = ["lz4", "time", "rustls-tls", "rustls-tls-native-roots", "tcp", "native-tls-rustls", "inserter"] }
+# ClickHouse crate -- integration tests need all features
+clickhouse = { version = ">=0.15.3, <0.16", features = ["lz4", "time", "rustls-tls", "rustls-tls-native-roots", "inserter"] }
 time = ">=0.3.55, <0.4"
 
 # Private CA and server certificates for the TLS ClickHouse tests
@@ -305,20 +307,6 @@ duration_suboptimal_units = "allow"
 # `.map(|x| ...).unwrap_or(false)` is clearer than `.is_ok_and()` for some
 # readers. Stylistic.
 map_unwrap_or = "allow"
-
-# =============================================================================
-# clickhouse: the HyperI fork (hyperi-io/clickhouse-rs), pinned by rev
-# =============================================================================
-#
-# This patch is active: every `clickhouse` dependency above builds from the fork
-# at this rev, the tip of its hyperi-port/06d-tcp-tls-new branch. It stays for
-# GA because the manifest cannot resolve without it: the `tcp` and
-# `native-tls-rustls` features requested above, and the `Client::tcp` and
-# `with_tcp_addrs` calls in src/clickhouse/client_http.rs, exist only on the
-# fork, not in crates.io clickhouse 0.15.x. Retiring it is #133.
-[patch.crates-io]
-clickhouse = { git = "https://github.com/hyperi-io/clickhouse-rs.git", rev = "6f9acd9694acc9c596ff687c908aa215af100887" }
-# =============================================================================
 
 [features]
 default = []

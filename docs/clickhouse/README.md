@@ -10,8 +10,7 @@
 
 # ClickHouse insert layer
 
-This is the part of dfe-loader that changed most in the hyperi-port migration:
-the dynamic insert path over the HyperI fork of `clickhouse-rs`. The loader
+The dynamic insert path over the official `clickhouse` crate. The loader
 reflects each table's schema at runtime and encodes `Map<String, Value>` rows
 straight to binary -- no compile-time `Row` types.
 
@@ -21,7 +20,7 @@ flowchart LR
     DI["DynamicInsert"]
     SC["SchemaCache"]
     ENC["encoder"]
-    CL["clickhouse::Client (fork)"]
+    CL["clickhouse::Client (HTTP)"]
     INS --> DI --> ENC
     DI --> SC
     DI --> CL
@@ -30,7 +29,7 @@ flowchart LR
 ## Read in this order
 
 - [clickhouse-ext.md](clickhouse-ext.md) -- the `src/clickhouse_ext/` layer:
-  what it is, the seam over the fork, and what stays the fork's job.
+  what it is, where it meets the `clickhouse` crate, and what stays the crate's job.
 - [insert-formats.md](insert-formats.md) -- RowBinary vs JSONEachRow, the
   transport x format matrix, and why RowBinary is the default.
 - [schema-cache.md](schema-cache.md) -- reflecting `system.columns`, the TTL
@@ -41,9 +40,6 @@ flowchart LR
   loader reads off table DDL (capture mode, field mapping).
 - [tls.md](tls.md) -- TLS transport security and private-CA trust.
 
-## The fork, in one line
+## The client, in one line
 
-dfe-loader inserts through a HyperI fork of `clickhouse-rs` (the
-`hyperi-port/*` chain), pinned via `[patch.crates-io]` to an immutable tag, with
-the dynamic encoding layer kept in this repo at `src/clickhouse_ext/`. See
-[clickhouse-ext.md](clickhouse-ext.md) for why the split sits where it does.
+dfe-loader inserts through crates.io `clickhouse` and reads rejection codes with `dfe-clickhouse`, with the dynamic encoding layer kept in this repo at `src/clickhouse_ext/`. See [clickhouse-ext.md](clickhouse-ext.md) for why the split sits where it does.

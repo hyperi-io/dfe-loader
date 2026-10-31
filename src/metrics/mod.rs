@@ -67,7 +67,7 @@ pub struct Metrics {
     pub pool_idle: Gauge,
     pub pool_waiting: Gauge,
 
-    // Insert byte/transaction counters (from fork commit callbacks)
+    // Insert byte/transaction counters, recorded per committed batch
     pub insert_bytes: Counter,
     pub insert_transactions: Counter,
 
@@ -208,7 +208,7 @@ impl Metrics {
             pool_waiting: manager
                 .gauge("clickhouse_pool_waiting", "Tasks waiting for a connection"),
 
-            // Insert byte/transaction counters (from fork commit callbacks)
+            // Insert byte/transaction counters, recorded per committed batch
             insert_bytes: manager.counter(
                 "insert_bytes_total",
                 "Total uncompressed bytes inserted to ClickHouse",

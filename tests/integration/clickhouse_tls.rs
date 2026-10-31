@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 // Copyright (c) 2026 HYPERI PTY LIMITED
 
-//! HTTPS to `ClickHouse` is verified against the system trust store.
+//! HTTPS and native TLS to `ClickHouse` are verified against the system trust store.
 //!
 //! A private CA reaches the loader's client the only way the config allows,
 //! through the trust store (`SSL_CERT_FILE` here), so the same server is
@@ -16,7 +16,7 @@
 use std::path::Path;
 
 use dfe_loader::clickhouse::client_http::build_client;
-use dfe_loader::clickhouse::{ClickHouseConfig, ClickHouseQueryClient, Transport};
+use dfe_loader::clickhouse::{ChClient, ClickHouseConfig, ClickHouseQueryClient, Transport};
 use rcgen::{
     BasicConstraints, CertificateParams, CertifiedIssuer, DnType, IsCa, KeyPair, KeyUsagePurpose,
 };
@@ -45,17 +45,19 @@ fn localhost_cert(ca: &CertifiedIssuer<'static, KeyPair>) -> (String, String) {
     (cert.pem(), key.serialize_pem())
 }
 
-/// Two distinct free host ports.
-fn two_free_ports() -> (u16, u16) {
+/// Three distinct free host ports.
+fn three_free_ports() -> (u16, u16, u16) {
     let first = free_port();
-    let _held = std::net::TcpListener::bind(("127.0.0.1", first)).expect("hold the first port");
-    (first, free_port())
+    let _first = std::net::TcpListener::bind(("127.0.0.1", first)).expect("hold the first port");
+    let second = free_port();
+    let _second = std::net::TcpListener::bind(("127.0.0.1", second)).expect("hold the second port");
+    (first, second, free_port())
 }
 
-fn config(host: &str, port: u16, tls: bool) -> ClickHouseConfig {
+fn config(transport: Transport, host: &str, port: u16, tls: bool) -> ClickHouseConfig {
     ClickHouseConfig {
         hosts: vec![format!("{host}:{port}")],
-        transport: Transport::Http,
+        transport,
         database: "default".to_string(),
         tls,
         ..Default::default()
@@ -89,21 +91,37 @@ fn chain(err: &(dyn std::error::Error + 'static)) -> String {
 
 /// `SELECT 1` through the loader's client, with the trust store as it now stands.
 async fn select_one(config: &ClickHouseConfig) -> Result<(), String> {
-    let client = build_client(config).map_err(|e| e.to_string())?;
-    client
-        .query("SELECT 1")
-        .execute()
-        .await
-        .map_err(|e| chain(&e))
+    match build_client(config).map_err(|e| e.to_string())? {
+        ChClient::Http(client) => client
+            .query("SELECT 1")
+            .execute()
+            .await
+            .map_err(|e| chain(&e)),
+        ChClient::Native(client) => client
+            .query("SELECT 1")
+            .execute()
+            .await
+            .map_err(|e| chain(&e)),
+    }
 }
 
+/// HTTPS on its port, and the native protocol over TLS on its own, each
+/// checked against the same trust-store cases.
 #[tokio::test(flavor = "multi_thread")]
-async fn https_is_verified_against_the_system_trust_store() {
+async fn tls_is_verified_against_the_system_trust_store_on_both_protocols() {
     let ca = private_ca("dfe-loader test CA");
     let other_ca = private_ca("unrelated CA");
     let (cert, key) = localhost_cert(&ca);
-    let (http_port, https_port) = two_free_ports();
-    let _clickhouse = start_clickhouse_https(test_name!(), cert, key, http_port, https_port).await;
+    let (http_port, https_port, native_tls_port) = three_free_ports();
+    let _clickhouse = start_clickhouse_https(
+        test_name!(),
+        cert,
+        key,
+        http_port,
+        https_port,
+        native_tls_port,
+    )
+    .await;
 
     let dir = tempfile::tempdir().expect("CA bundle directory");
     let ca_bundle = dir.path().join("private-ca.pem");
@@ -112,46 +130,55 @@ async fn https_is_verified_against_the_system_trust_store() {
     std::fs::write(&other_bundle, other_ca.pem()).expect("write other CA bundle");
 
     trust(Some(&ca_bundle));
-    let with_its_ca = select_one(&config("localhost", https_port, true)).await;
-    let query_client = ClickHouseQueryClient::new(&config("localhost", https_port, true))
-        .expect("query client")
-        .health_check()
-        .await;
-    let wrong_name = select_one(&config("127.0.0.1", https_port, true)).await;
-    let plain_http = select_one(&config("localhost", http_port, false)).await;
-
-    trust(Some(&other_bundle));
-    let wrong_ca = select_one(&config("localhost", https_port, true)).await;
-
-    trust(None);
-    let no_ca = select_one(&config("localhost", https_port, true)).await;
-
-    assert!(
-        with_its_ca.is_ok(),
-        "HTTPS was refused with the server's CA in the trust store: {with_its_ca:?}"
-    );
-    assert!(
-        query_client.is_ok(),
-        "the query client was refused with the server's CA in the trust store: {query_client:?}"
-    );
+    let plain_http = select_one(&config(Transport::Http, "localhost", http_port, false)).await;
     assert!(
         plain_http.is_ok(),
         "plain HTTP with TLS off failed: {plain_http:?}"
     );
-    for (case, result) in [
-        ("a host name the certificate does not name", &wrong_name),
-        ("only an unrelated CA in the trust store", &wrong_ca),
-        ("the platform trust store alone", &no_ca),
+
+    for (transport, port) in [
+        (Transport::Http, https_port),
+        (Transport::Native, native_tls_port),
     ] {
-        let err = result
-            .as_ref()
-            .expect_err(&format!("HTTPS was accepted with {case}"));
-        // A platform store with no CA in it fails at the client build instead.
+        trust(Some(&ca_bundle));
+        let with_its_ca = select_one(&config(transport, "localhost", port, true)).await;
+        let query_client = ClickHouseQueryClient::new(&config(transport, "localhost", port, true))
+            .expect("query client")
+            .health_check()
+            .await;
+        let wrong_name = select_one(&config(transport, "127.0.0.1", port, true)).await;
+
+        trust(Some(&other_bundle));
+        let wrong_ca = select_one(&config(transport, "localhost", port, true)).await;
+
+        trust(None);
+        let no_ca = select_one(&config(transport, "localhost", port, true)).await;
+
         assert!(
-            err.contains("invalid peer certificate")
-                || err.contains("no CA certificate could be read"),
-            "with {case} the request failed for a reason other than certificate \
-             verification: {err}"
+            with_its_ca.is_ok(),
+            "{transport}: refused with the server's CA in the trust store: {with_its_ca:?}"
         );
+        assert!(
+            query_client.is_ok(),
+            "{transport}: the query client was refused with the server's CA in the trust \
+             store: {query_client:?}"
+        );
+        for (case, result) in [
+            ("a host name the certificate does not name", &wrong_name),
+            ("only an unrelated CA in the trust store", &wrong_ca),
+            ("the platform trust store alone", &no_ca),
+        ] {
+            let err = result
+                .as_ref()
+                .expect_err(&format!("{transport}: TLS was accepted with {case}"));
+            // A platform store with no usable CA fails at the client build instead.
+            assert!(
+                err.contains("invalid peer certificate")
+                    || err.contains("no CA certificate could be read")
+                    || err.contains("trust store is empty"),
+                "{transport}: with {case} the request failed for a reason other than \
+                 certificate verification: {err}"
+            );
+        }
     }
 }

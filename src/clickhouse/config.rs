@@ -27,10 +27,8 @@ where
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Transport {
-    /// Native TCP protocol (port 9000).
-    ///
-    /// Highest performance, supports all features including streaming inserts
-    /// and native compression. Recommended for production workloads.
+    /// Native TCP protocol (port 9000, 9440 with TLS), through
+    /// `dfe_clickhouse::TcpClient`. `RowBinary` inserts only.
     #[default]
     Native,
 
@@ -358,8 +356,8 @@ impl ClickHouseConfig {
         if self.transport == Transport::Native && self.insert_format == InsertFormat::JsonEachRow {
             return Err(
                 "insert_format 'json_each_row' requires protocol 'http' (JSONEachRow is \
-                 sent over HTTP). Set protocol = 'http': no insert format runs over \
-                 'native' until the native sink lands (clickhouse-rs#15)."
+                 sent over HTTP). Set protocol = 'http', or insert_format = 'rowbinary' \
+                 to stay on 'native'."
                     .to_string(),
             );
         }
@@ -688,9 +686,10 @@ mod tests {
         let err = config.validate().unwrap_err();
         assert!(err.contains("json_each_row"), "message: {err}");
         assert!(err.contains("protocol = 'http'"), "message: {err}");
-        // RowBinary does not run over native either, so the message must not
-        // offer it as the way out.
-        assert!(!err.contains("rowbinary"), "message: {err}");
-        assert!(err.contains("clickhouse-rs#15"), "message: {err}");
+        // RowBinary runs over native, so the message offers it as the way out.
+        assert!(
+            err.contains("insert_format = 'rowbinary'"),
+            "message: {err}"
+        );
     }
 }

@@ -12,9 +12,9 @@
 //! Production dynamic RowBinary encoder.
 //!
 //! Turns a runtime-shaped `serde_json::Map<String, Value>` plus its resolved
-//! ClickHouse column schema into RowBinary wire bytes, and feeds those bytes
-//! through the new clickhouse-rs chain via the proven `DynamicRow: Row +
-//! Serialize` seam (see `crate::spike` for why this seam is correct).
+//! ClickHouse column schema into RowBinary wire bytes. `DynamicRow` also
+//! implements `clickhouse::Row + Serialize`, so the same bytes can go through
+//! the client's RowBinary serializer.
 //!
 //! # Why a pure byte function under the serde seam
 //!
@@ -28,7 +28,7 @@
 //!
 //! ## Pushing raw bytes through the serializer without a length prefix
 //!
-//! The new chain's RowBinary serializer runs with a no-op validator on the
+//! The client's RowBinary serializer runs with a no-op validator on the
 //! `with_columns` path, so most serde calls (`serialize_str`, the integer
 //! methods, `serialize_seq`, ...) emit exactly the RowBinary bytes ClickHouse
 //! expects. But there is no serde call that writes an arbitrary byte run with
@@ -120,7 +120,7 @@ impl ColumnDef {
 }
 
 /// The serde newtype name that routes a payload through the serializer's
-/// raw-bytes-without-length-prefix path. It must start with the chain's
+/// raw-bytes-without-length-prefix path. It must start with the client's
 /// internal 256-bit-integer module path for the special case to trigger.
 const RAW_PASSTHROUGH_NAME: &str = "clickhouse::types::int256::__dfe_raw_row";
 

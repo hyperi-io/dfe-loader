@@ -257,9 +257,14 @@ mod testcontainers_impl {
     /// ClickHouse's HTTPS port inside the container.
     const CLICKHOUSE_HTTPS_PORT: u16 = 8443;
 
-    /// Server config that opens HTTPS on 8443 with the certificate copied in beside it.
+    /// ClickHouse's native TLS port inside the container.
+    const CLICKHOUSE_NATIVE_TLS_PORT: u16 = 9440;
+
+    /// Server config that opens HTTPS on 8443 and native TLS on 9440 with the
+    /// certificate copied in beside it.
     const CLICKHOUSE_HTTPS_CONFIG: &str = r"<clickhouse>
     <https_port>8443</https_port>
+    <tcp_port_secure>9440</tcp_port_secure>
     <openSSL>
         <server>
             <certificateFile>/etc/clickhouse-server/certs/server.crt</certificateFile>
@@ -271,10 +276,11 @@ mod testcontainers_impl {
 </clickhouse>
 ";
 
-    /// Start ClickHouse serving HTTP on `http_host_port` and HTTPS with
-    /// `cert_pem` and `key_pem` on `https_host_port`.
+    /// Start ClickHouse serving HTTP on `http_host_port`, and HTTPS and native
+    /// TLS with `cert_pem` and `key_pem` on `https_host_port` and
+    /// `native_tls_host_port`.
     ///
-    /// Both are mapped explicitly: one explicit mapping turns off publishing
+    /// Each is mapped explicitly: one explicit mapping turns off publishing
     /// the image's own ports, and the readiness probe needs 8123.
     pub async fn start_clickhouse_https(
         test: &str,
@@ -282,6 +288,7 @@ mod testcontainers_impl {
         key_pem: String,
         http_host_port: u16,
         https_host_port: u16,
+        native_tls_host_port: u16,
     ) -> ContainerAsync<ClickHouseImage> {
         let name = crate::common::container_name(Some(test), "clickhouse");
         crate::common::reap_stale(&name);
@@ -304,6 +311,10 @@ mod testcontainers_impl {
             .with_mapped_port(
                 https_host_port,
                 testcontainers::core::ContainerPort::Tcp(CLICKHOUSE_HTTPS_PORT),
+            )
+            .with_mapped_port(
+                native_tls_host_port,
+                testcontainers::core::ContainerPort::Tcp(CLICKHOUSE_NATIVE_TLS_PORT),
             )
             .with_container_name(&name)
             .with_labels(crate::common::test_labels("clickhouse"))

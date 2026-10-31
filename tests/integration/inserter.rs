@@ -88,11 +88,6 @@ async fn test_inserter_basic_insert() {
 /// ClickHouse. A successful end() (the server returns 200 after parsing the
 /// RowBinary body) proves the dynamic encoder + the FORMAT RowBinaryWithNamesAndTypes insert
 /// path actually land data -- the offline byte tests cannot.
-///
-/// RowBinary goes over HTTP. The TCP/native dynamic insert would use the
-/// fork's FORMAT Native path, which this server rejects (Native block
-/// mis-frame, even single-row) -- tracked as a fork issue -- so it is not
-/// exercised here.
 #[tokio::test]
 async fn rowbinary_multirow_lands_over_http() {
     require_clickhouse!();

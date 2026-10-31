@@ -11,8 +11,8 @@
 
 //! `ClickHouse` client for DDL, schema queries, and health checks.
 //!
-//! Uses a single `clickhouse::Client` (from the `HyperI` fork) -- HTTP or
-//! native TCP based on config. Data inserts go through `DynamicInsert`
+//! Uses a single `clickhouse::Client` over HTTP or HTTPS. Data inserts go
+//! through `DynamicInsert`
 //! (`RowBinary`, via `clickhouse_ext`) or `InsertFormatted` (`JSONEachRow`)
 //! -- see `Inserter` for insert dispatch.
 //!
@@ -27,6 +27,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
+use dfe_clickhouse::TcpClient;
+use dfe_clickhouse::native::DecodedBlock;
+use dfe_clickhouse::tls::TlsTrust;
 use hyper_rustls::HttpsConnectorBuilder;
 use hyper_util::client::legacy::Client as HyperClient;
 use hyper_util::client::legacy::connect::HttpConnector;
@@ -54,12 +57,10 @@ const READ_BOUND_CEILING: Duration = Duration::from_secs(300);
 
 /// `ClickHouse` client for DDL, schema queries, and health checks.
 ///
-/// Wraps a single `clickhouse::Client` (HTTP or TCP per config). Data inserts
-/// are handled by `Inserter` via `DynamicInsert` (RowBinary) or
-/// `InsertFormatted` (JSONEachRow).
+/// Wraps a single [`ChClient`]. Data inserts are handled by `Inserter` via
+/// `DynamicInsert` (RowBinary) or `InsertFormatted` (JSONEachRow).
 pub struct ClickHouseQueryClient {
-    /// The fork client -- HTTP or native TCP depending on config transport.
-    ch_client: clickhouse::Client,
+    ch_client: ChClient,
     /// Database name.
     database: String,
     /// Bounds on each insert.
@@ -68,14 +69,74 @@ pub struct ClickHouseQueryClient {
     read_bound: Arc<ReadBound>,
 }
 
+/// A ClickHouse client over the protocol `clickhouse.protocol` selects.
+#[derive(Clone)]
+pub enum ChClient {
+    /// HTTP or HTTPS, port 8123 or 8443.
+    Http(clickhouse::Client),
+    /// The native protocol, port 9000 or 9440.
+    Native(TcpClient),
+}
+
+impl From<clickhouse::Client> for ChClient {
+    fn from(client: clickhouse::Client) -> Self {
+        Self::Http(client)
+    }
+}
+
+impl From<TcpClient> for ChClient {
+    fn from(client: TcpClient) -> Self {
+        Self::Native(client)
+    }
+}
+
+impl ChClient {
+    /// Add a per-query setting on whichever protocol this client speaks.
+    #[must_use]
+    pub fn with_setting(self, name: &str, value: &str) -> Self {
+        match self {
+            Self::Http(client) => Self::Http(client.with_setting(name, value)),
+            Self::Native(client) => Self::Native(client.with_setting(name, value)),
+        }
+    }
+}
+
+/// A client error that can say it timed out, so one bound serves both protocols.
+pub trait TimesOut {
+    /// The error a request that ran past its bound fails with.
+    fn timed_out() -> Self;
+    /// Whether this is that error.
+    fn is_timed_out(&self) -> bool;
+}
+
+impl TimesOut for clickhouse::error::Error {
+    fn timed_out() -> Self {
+        Self::TimedOut
+    }
+
+    fn is_timed_out(&self) -> bool {
+        matches!(self, Self::TimedOut)
+    }
+}
+
+impl TimesOut for dfe_clickhouse::Error {
+    fn timed_out() -> Self {
+        Self::TimedOut
+    }
+
+    fn is_timed_out(&self) -> bool {
+        matches!(self, Self::TimedOut)
+    }
+}
+
 /// Run `request`, failing it with `TimedOut` once `bound` passes.
-pub(crate) async fn bounded<T>(
+pub(crate) async fn bounded<T, E: TimesOut>(
     bound: Duration,
-    request: impl Future<Output = clickhouse::error::Result<T>>,
-) -> clickhouse::error::Result<T> {
+    request: impl Future<Output = std::result::Result<T, E>>,
+) -> std::result::Result<T, E> {
     tokio::time::timeout(bound, request)
         .await
-        .unwrap_or(Err(clickhouse::error::Error::TimedOut))
+        .unwrap_or_else(|_| Err(E::timed_out()))
 }
 
 /// The bound on `ClickHouse` reads, which widens while reads keep timing out.
@@ -119,14 +180,14 @@ impl ReadBound {
 
     /// Run `read` under the current bound, widening it after a timeout and
     /// narrowing it after a quick answer.
-    pub async fn run<T>(
+    pub async fn run<T, E: TimesOut>(
         &self,
-        read: impl Future<Output = clickhouse::error::Result<T>>,
-    ) -> clickhouse::error::Result<T> {
+        read: impl Future<Output = std::result::Result<T, E>>,
+    ) -> std::result::Result<T, E> {
         let level = self.level.load(Ordering::Relaxed);
         let started = tokio::time::Instant::now();
         let result = bounded(self.at(level), read).await;
-        if matches!(result, Err(clickhouse::error::Error::TimedOut)) {
+        if result.as_ref().is_err_and(TimesOut::is_timed_out) {
             if self.at(level) < self.ceiling {
                 self.level.fetch_max(level + 1, Ordering::Relaxed);
             }
@@ -179,12 +240,10 @@ fn http_transport(config: &ClickHouseConfig) -> Result<clickhouse::Client> {
     Ok(clickhouse::Client::with_http_client(pool.build(https)))
 }
 
-/// Connection-pool statistics for the native TCP transport.
+/// Connection-pool statistics for the `clickhouse_pool_*` gauges.
 ///
-/// The hyperi-port chain's deadpool TCP pool does not yet expose its status
-/// publicly (the pool handle is crate-private), so `Inserter::pool_stats`
-/// returns `None` and these gauges stay flat. Follow-up: surface deadpool
-/// `Status` on the fork `Client`, then map it here.
+/// The HTTP client exposes no pool status, so `Inserter::pool_stats` returns
+/// `None` and these gauges stay flat.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct PoolStats {
     /// Configured maximum pool size.
@@ -197,15 +256,14 @@ pub struct PoolStats {
     pub waiting: usize,
 }
 
-/// Build a `clickhouse::Client` from config, selecting HTTP or native TCP
-/// transport. Shared by the query client and the inserter so both use an
-/// identically-configured client.
+/// Build the HTTP `clickhouse::Client` from config. Shared by the query client
+/// and the inserter so both use an identically-configured client.
 ///
 /// # Errors
 ///
-/// Returns an error if the config has no hosts, or if TLS is on and no CA
-/// certificate can be read from the system trust store.
-pub fn build_client(config: &ClickHouseConfig) -> Result<clickhouse::Client> {
+/// Returns an error if the config has no hosts, names the native transport,
+/// or has TLS on and no CA certificate can be read from the system trust store.
+pub fn build_client(config: &ClickHouseConfig) -> Result<ChClient> {
     use super::config::Transport;
 
     let endpoint = config
@@ -222,33 +280,46 @@ pub fn build_client(config: &ClickHouseConfig) -> Result<clickhouse::Client> {
             if !config.password.is_empty() {
                 c = c.with_password(&config.password);
             }
-            c
+            ChClient::Http(c)
         }
-        Transport::Native => {
-            // Strip the port for the TLS SNI server name.
-            let host = endpoint.split(':').next().unwrap_or(&endpoint).to_string();
-            let mut c = if config.tls {
-                clickhouse::Client::tcp_tls(endpoint.clone(), host)
-            } else {
-                clickhouse::Client::tcp(endpoint.clone())
-            };
-            c = c
-                .with_user(&config.username)
-                .with_database(&config.database)
-                .with_compression(clickhouse::Compression::Lz4);
-            if !config.password.is_empty() {
-                c = c.with_password(&config.password);
-            }
-            // Multi-host failover: the pool round-robins the endpoint list and
-            // skips a refusing endpoint within one acquire pass.
-            if config.hosts.len() > 1 {
-                c = c.with_tcp_addrs(config.hosts.iter().cloned());
-            }
-            c
-        }
+        Transport::Native => ChClient::Native(native_transport(config, &endpoint)),
     };
 
     Ok(client)
+}
+
+/// The native-protocol client: the same credentials, database and bounds as
+/// HTTP, every configured host in its failover list, and with TLS on, the
+/// server verified against the system trust store only, as HTTPS is.
+fn native_transport(config: &ClickHouseConfig, endpoint: &str) -> TcpClient {
+    let mut client = if config.tls {
+        // The certificate is verified against the first host's name.
+        let server_name = endpoint.rsplit_once(':').map_or(endpoint, |(host, _)| host);
+        let mut trust = TlsTrust::default();
+        trust.webpki_roots = false;
+        TcpClient::new_tls(endpoint, server_name).with_tls_trust(trust)
+    } else {
+        TcpClient::new(endpoint)
+    };
+    if config.hosts.len() > 1 {
+        let port = config.default_port();
+        client = client.with_addrs(config.hosts.iter().map(|host| {
+            if host.contains(':') {
+                host.clone()
+            } else {
+                format!("{host}:{port}")
+            }
+        }));
+    }
+    client = client
+        .with_user(&config.username)
+        .with_database(&config.database)
+        .with_pool_create_timeout(Some(config.connect_timeout()))
+        .with_read_timeout(Some(config.timeouts().request));
+    if !config.password.is_empty() {
+        client = client.with_password(&config.password);
+    }
+    client
 }
 
 /// Row type for system.columns queries.
@@ -262,6 +333,57 @@ struct SystemColumn {
     comment: String,
     is_in_primary_key: u8,
     is_in_sorting_key: u8,
+}
+
+/// Every value of column `name` across `blocks`, in server order.
+fn column<T: dfe_clickhouse::native::FromColumn>(
+    blocks: &[DecodedBlock],
+    name: &str,
+) -> dfe_clickhouse::Result<Vec<T>> {
+    let mut values = Vec::new();
+    for block in blocks {
+        values.extend(block.column_as::<T>(name)?);
+    }
+    Ok(values)
+}
+
+/// The `system.columns` rows a native-protocol schema query returned.
+fn system_columns(blocks: &[DecodedBlock]) -> dfe_clickhouse::Result<Vec<SystemColumn>> {
+    let names: Vec<String> = column(blocks, "name")?;
+    let types: Vec<String> = column(blocks, "type")?;
+    let positions: Vec<u64> = column(blocks, "position")?;
+    let default_kinds: Vec<String> = column(blocks, "default_kind")?;
+    let default_expressions: Vec<String> = column(blocks, "default_expression")?;
+    let comments: Vec<String> = column(blocks, "comment")?;
+    let primary: Vec<u8> = column(blocks, "is_in_primary_key")?;
+    let sorting: Vec<u8> = column(blocks, "is_in_sorting_key")?;
+    Ok(names
+        .into_iter()
+        .zip(types)
+        .zip(positions)
+        .zip(default_kinds)
+        .zip(default_expressions)
+        .zip(comments)
+        .zip(primary)
+        .zip(sorting)
+        .map(
+            |(
+                ((((((name, r#type), position), default_kind), default_expression), comment), pk),
+                sk,
+            )| {
+                SystemColumn {
+                    name,
+                    r#type,
+                    position,
+                    default_kind,
+                    default_expression,
+                    comment,
+                    is_in_primary_key: pk,
+                    is_in_sorting_key: sk,
+                }
+            },
+        )
+        .collect())
 }
 
 /// Row type for single-string result queries.
@@ -287,11 +409,11 @@ struct CountRow {
 }
 
 impl ClickHouseQueryClient {
-    /// Create a new client from config, dispatching to HTTP or native TCP.
+    /// Create a new client from config.
     ///
     /// # Errors
     ///
-    /// Returns an error if the config has no hosts.
+    /// Returns an error if the config has no hosts or names the native transport.
     pub fn new(config: &ClickHouseConfig) -> Result<Self> {
         let ch_client = build_client(config)?;
         let timeouts = config.timeouts();
@@ -315,11 +437,30 @@ impl ClickHouseQueryClient {
     ///
     /// Returns an error if the query fails.
     pub async fn execute(&self, sql: &str) -> Result<()> {
+        match &self.ch_client {
+            ChClient::Http(client) => self
+                .read_bound
+                .run(client.query(sql).execute())
+                .await
+                .map_err(|e| ClickHouseError::Query(super::error::error_text(&e))),
+            ChClient::Native(client) => self
+                .read_bound
+                .run(client.query(sql).execute())
+                .await
+                .map_err(|e| ClickHouseError::Query(super::error::native_error_text(&e))),
+        }
+    }
+
+    /// Every block a native-protocol `sql` returns, under the read bound.
+    async fn native_blocks(
+        &self,
+        client: &TcpClient,
+        sql: &str,
+    ) -> std::result::Result<Vec<DecodedBlock>, String> {
         self.read_bound
-            .run(self.ch_client.query(sql).execute())
+            .run(client.query(sql).fetch_blocks())
             .await
-            .map_err(|e| ClickHouseError::Query(format!("{e}")))?;
-        Ok(())
+            .map_err(|e| super::error::native_error_text(&e))
     }
 
     /// Fetch table schema from system.columns.
@@ -343,13 +484,18 @@ impl ClickHouseQueryClient {
             escape_string(&tbl)
         );
 
-        let rows: Vec<SystemColumn> = self
-            .read_bound
-            .run(self.ch_client.query(&sql).fetch_all())
-            .await
-            .map_err(|e| {
-                ClickHouseError::Schema(format!("Failed to fetch schema for {table}: {e}"))
-            })?;
+        let rows: Vec<SystemColumn> = match &self.ch_client {
+            ChClient::Http(client) => self
+                .read_bound
+                .run(client.query(&sql).fetch_all())
+                .await
+                .map_err(|e| super::error::error_text(&e)),
+            ChClient::Native(client) => self
+                .native_blocks(client, &sql)
+                .await
+                .and_then(|blocks| system_columns(&blocks).map_err(|e| e.to_string())),
+        }
+        .map_err(|e| ClickHouseError::Schema(format!("Failed to fetch schema for {table}: {e}")))?;
 
         // The query succeeded and system.columns has nothing: the table really is
         // absent. Distinct from Schema above, which a transient outage produces.
@@ -393,13 +539,21 @@ impl ClickHouseQueryClient {
             escape_string(&tbl)
         );
 
-        let rows: Vec<SingleString> = self
-            .read_bound
-            .run(self.ch_client.query(&sql).fetch_all())
-            .await
-            .map_err(|e| ClickHouseError::Schema(format!("Failed to fetch table comment: {e}")))?;
+        let values: Vec<String> = match &self.ch_client {
+            ChClient::Http(client) => self
+                .read_bound
+                .run(client.query(&sql).fetch_all::<SingleString>())
+                .await
+                .map(|rows| rows.into_iter().map(|r| r.value).collect())
+                .map_err(|e| super::error::error_text(&e)),
+            ChClient::Native(client) => self
+                .native_blocks(client, &sql)
+                .await
+                .and_then(|blocks| column(&blocks, "value").map_err(|e| e.to_string())),
+        }
+        .map_err(|e| ClickHouseError::Schema(format!("Failed to fetch table comment: {e}")))?;
 
-        Ok(rows.into_iter().next().map(|r| r.value).unwrap_or_default())
+        Ok(values.into_iter().next().unwrap_or_default())
     }
 
     /// Fetch column comments for a table.
@@ -423,19 +577,23 @@ impl ClickHouseQueryClient {
             comment: String,
         }
 
-        let rows: Vec<NameComment> = self
-            .read_bound
-            .run(self.ch_client.query(&sql).fetch_all())
-            .await
-            .map_err(|e| {
-                ClickHouseError::Schema(format!("Failed to fetch column comments: {e}"))
-            })?;
-
-        let mut comments = FxHashMap::default();
-        for row in rows {
-            comments.insert(row.name, row.comment);
+        let rows: Vec<(String, String)> = match &self.ch_client {
+            ChClient::Http(client) => self
+                .read_bound
+                .run(client.query(&sql).fetch_all::<NameComment>())
+                .await
+                .map(|rows| rows.into_iter().map(|r| (r.name, r.comment)).collect())
+                .map_err(|e| super::error::error_text(&e)),
+            ChClient::Native(client) => self.native_blocks(client, &sql).await.and_then(|blocks| {
+                let names: Vec<String> = column(&blocks, "name").map_err(|e| e.to_string())?;
+                let comments: Vec<String> =
+                    column(&blocks, "comment").map_err(|e| e.to_string())?;
+                Ok(names.into_iter().zip(comments).collect())
+            }),
         }
-        Ok(comments)
+        .map_err(|e| ClickHouseError::Schema(format!("Failed to fetch column comments: {e}")))?;
+
+        Ok(rows.into_iter().collect())
     }
 
     /// Check if a table exists.
@@ -458,13 +616,19 @@ impl ClickHouseQueryClient {
             escape_string(&self.database)
         );
 
-        let rows: Vec<TableName> = self
-            .read_bound
-            .run(self.ch_client.query(&sql).fetch_all())
-            .await
-            .map_err(|e| ClickHouseError::Schema(format!("Failed to list tables: {e}")))?;
-
-        Ok(rows.into_iter().map(|r| r.name).collect())
+        match &self.ch_client {
+            ChClient::Http(client) => self
+                .read_bound
+                .run(client.query(&sql).fetch_all::<TableName>())
+                .await
+                .map(|rows| rows.into_iter().map(|r| r.name).collect())
+                .map_err(|e| super::error::error_text(&e)),
+            ChClient::Native(client) => self
+                .native_blocks(client, &sql)
+                .await
+                .and_then(|blocks| column(&blocks, "name").map_err(|e| e.to_string())),
+        }
+        .map_err(|e| ClickHouseError::Schema(format!("Failed to list tables: {e}")))
     }
 
     /// Execute a `SELECT COUNT(*)` query and return the count.
@@ -494,22 +658,49 @@ impl ClickHouseQueryClient {
             None => format!("SELECT COUNT(*) AS _dfe_count FROM {fq_table}"),
         };
 
-        let row: CountRow = self
-            .read_bound
-            .run(self.ch_client.query(&sql).fetch_one())
+        let count = self
+            .fetch_count(&sql)
             .await
-            .map_err(|e| ClickHouseError::Query(format!("{e}")))?;
+            .map_err(ClickHouseError::Query)?;
 
-        Ok(row.count as usize)
+        Ok(count as usize)
+    }
+
+    /// The `_dfe_count` a one-row count query returns.
+    async fn fetch_count(&self, sql: &str) -> std::result::Result<u64, String> {
+        match &self.ch_client {
+            ChClient::Http(client) => self
+                .read_bound
+                .run(client.query(sql).fetch_one::<CountRow>())
+                .await
+                .map(|row| row.count)
+                .map_err(|e| super::error::error_text(&e)),
+            ChClient::Native(client) => {
+                let blocks = self.native_blocks(client, sql).await?;
+                let counts: Vec<u64> = column(&blocks, "_dfe_count").map_err(|e| e.to_string())?;
+                counts
+                    .first()
+                    .copied()
+                    .ok_or_else(|| "a count query returned no row".to_string())
+            }
+        }
     }
 
     /// Health check — executes `SELECT 1`.
     pub async fn health_check(&self) -> Result<()> {
-        self.read_bound
-            .run(self.ch_client.query("SELECT 1").execute())
-            .await
-            .map_err(|e| ClickHouseError::Connection(format!("Health check failed: {e}")))?;
-        Ok(())
+        match &self.ch_client {
+            ChClient::Http(client) => self
+                .read_bound
+                .run(client.query("SELECT 1").execute())
+                .await
+                .map_err(|e| super::error::error_text(&e)),
+            ChClient::Native(client) => self
+                .read_bound
+                .run(client.query("SELECT 1").execute())
+                .await
+                .map_err(|e| super::error::native_error_text(&e)),
+        }
+        .map_err(|e| ClickHouseError::Connection(format!("Health check failed: {e}")))
     }
 
     /// Log in as the configured user and read `system.tables` and
@@ -526,9 +717,7 @@ impl ClickHouseQueryClient {
                 "SELECT count() AS _dfe_count FROM {table} WHERE database = {}",
                 escape_string(&self.database)
             );
-            let _: CountRow = self
-                .read_bound
-                .run(self.ch_client.query(&sql).fetch_one())
+            self.fetch_count(&sql)
                 .await
                 .map_err(|e| ClickHouseError::Query(format!("reading {table}: {e}")))?;
         }
@@ -551,7 +740,7 @@ impl ClickHouseQueryClient {
     ///
     /// # Errors
     ///
-    /// Returns an error if the insert fails (HTTP-only — errors on native transport).
+    /// Returns an error if the insert fails.
     pub async fn insert_json_rows(
         &self,
         table: &str,
@@ -578,14 +767,19 @@ impl ClickHouseQueryClient {
             escape_identifier(&db),
             escape_identifier(&tbl)
         );
-        let mut insert = insert_sink(&self.ch_client, sql, self.timeouts).buffered();
+        let ChClient::Http(client) = &self.ch_client else {
+            return Err(ClickHouseError::Insert(
+                "JSONEachRow is sent over HTTP: this client speaks the native protocol".into(),
+            ));
+        };
+        let mut insert = insert_sink(client, sql, self.timeouts).buffered();
 
         insert.write_buffered(&body);
 
         insert
             .end()
             .await
-            .map_err(|e| ClickHouseError::Insert(format!("{e}")))?;
+            .map_err(|e| ClickHouseError::Insert(super::error::error_text(&e)))?;
 
         Ok(rows.len())
     }
@@ -653,7 +847,7 @@ fn validate_where_clause(s: &str) -> Result<()> {
 /// Escape a ClickHouse identifier (database, table, column name) with backticks.
 ///
 /// Escapes backslashes, single quotes, backticks, tabs, and newlines inside
-/// the identifier. Mirrors the fork's `sql::escape::identifier()`.
+/// the identifier. Mirrors the client's `sql::escape::identifier()`.
 pub(crate) fn escape_identifier(name: &str) -> String {
     let mut out = String::with_capacity(name.len() + 2);
     out.push('`');
@@ -673,8 +867,8 @@ pub(crate) fn escape_identifier(name: &str) -> String {
 /// Escape a ClickHouse string value with single quotes.
 ///
 /// Escapes backslashes, single quotes, backticks, tabs, and newlines inside
-/// the value. Mirrors the fork's `sql::escape::string()`.
-fn escape_string(value: &str) -> String {
+/// the value. Mirrors the client's `sql::escape::string()`.
+pub(crate) fn escape_string(value: &str) -> String {
     let mut out = String::with_capacity(value.len() + 2);
     out.push('\'');
     for ch in value.chars() {
@@ -920,7 +1114,7 @@ mod tests {
     }
 
     // ============================================================
-    // Client construction — HTTP and Native transports
+    // Client construction
     // ============================================================
 
     #[test]
@@ -935,16 +1129,23 @@ mod tests {
         assert_eq!(client.database(), "events");
     }
 
-    #[test]
-    fn test_client_new_native_transport() {
+    #[test_case::test_case(&["localhost:9000"], "", false ; "single_host")]
+    #[test_case::test_case(&["clickhouse.example.com:9000"], "password", false ; "with_password")]
+    #[test_case::test_case(&["ch.example.com:9440"], "", true ; "with_tls")]
+    #[test_case::test_case(&["127.0.0.1:9000", "127.0.0.1:9001"], "", false ; "multi_host")]
+    fn the_native_transport_builds_a_native_client(hosts: &[&str], password: &str, tls: bool) {
         let config = ClickHouseConfig {
-            hosts: vec!["localhost:9000".to_string()],
+            hosts: hosts.iter().map(ToString::to_string).collect(),
             transport: super::super::config::Transport::Native,
-            database: "logs".to_string(),
+            password: password.to_string(),
+            tls,
             ..Default::default()
         };
-        let client = ClickHouseQueryClient::new(&config).unwrap();
-        assert_eq!(client.database(), "logs");
+        // Building connects nothing: the pool dials on first use.
+        assert!(matches!(
+            build_client(&config).expect("a native config builds"),
+            ChClient::Native(_)
+        ));
     }
 
     #[test]
@@ -977,59 +1178,6 @@ mod tests {
     }
 
     #[test]
-    fn test_client_new_native_with_password_no_tls() {
-        // Native + password, no TLS — exercises the password branch without
-        // needing a rustls CryptoProvider.
-        let config = ClickHouseConfig {
-            hosts: vec!["clickhouse.example.com:9000".to_string()],
-            transport: super::super::config::Transport::Native,
-            database: "prod".to_string(),
-            username: "app".to_string(),
-            password: "password".to_string(),
-            tls: false,
-            ..Default::default()
-        };
-        let client = ClickHouseQueryClient::new(&config).unwrap();
-        assert_eq!(client.database(), "prod");
-    }
-
-    #[test]
-    fn test_client_new_native_multi_host_failover() {
-        // Multi-host config should produce a client with multi-host failover on native.
-        // We cannot reach the server — we only verify construction succeeds.
-        let config = ClickHouseConfig {
-            hosts: vec![
-                "127.0.0.1:9000".to_string(),
-                "127.0.0.1:9001".to_string(),
-                "127.0.0.1:9002".to_string(),
-            ],
-            transport: super::super::config::Transport::Native,
-            database: "default".to_string(),
-            ..Default::default()
-        };
-        let client = ClickHouseQueryClient::new(&config).unwrap();
-        assert_eq!(client.database(), "default");
-    }
-
-    #[test]
-    fn test_client_new_native_multi_host_unresolvable() {
-        // Hostnames that cannot resolve are filtered out by filter_map.
-        // Construction still succeeds (may fall back to single host).
-        let config = ClickHouseConfig {
-            hosts: vec![
-                "this-host-will-never-resolve.invalid.example:9000".to_string(),
-                "127.0.0.1:9000".to_string(),
-            ],
-            transport: super::super::config::Transport::Native,
-            database: "default".to_string(),
-            ..Default::default()
-        };
-        // Either succeeds (at least one resolves) or fails — both are acceptable,
-        // the test asserts the call doesn't panic.
-        let _ = ClickHouseQueryClient::new(&config);
-    }
-
-    #[test]
     fn test_client_new_empty_hosts_returns_connection_error() {
         let config = ClickHouseConfig {
             hosts: vec![],
@@ -1053,7 +1201,8 @@ mod tests {
         // Exercise the database() accessor across a few realistic names.
         for db in ["default", "events", "prod_logs", "db-with-dash", "数据库"] {
             let config = ClickHouseConfig {
-                hosts: vec!["localhost:9000".to_string()],
+                hosts: vec!["localhost:8123".to_string()],
+                transport: super::super::config::Transport::Http,
                 database: db.to_string(),
                 ..Default::default()
             };
@@ -1065,29 +1214,10 @@ mod tests {
     #[test]
     fn test_client_new_empty_password_skips_builder_branch() {
         // Empty password (explicit or default) bypasses the with_password() call.
-        // Both HTTP and Native branches must still build successfully.
         let mut http_config = ClickHouseConfig::default();
         http_config.transport = super::super::config::Transport::Http;
         http_config.password = String::new();
         assert!(ClickHouseQueryClient::new(&http_config).is_ok());
-
-        let mut native_config = ClickHouseConfig::default();
-        native_config.transport = super::super::config::Transport::Native;
-        native_config.password = String::new();
-        assert!(ClickHouseQueryClient::new(&native_config).is_ok());
-    }
-
-    #[test]
-    fn test_client_new_host_without_tls_builds() {
-        // Native + host:port, no TLS — builder does not touch rustls.
-        let config = ClickHouseConfig {
-            hosts: vec!["ch.example.com:9000".to_string()],
-            transport: super::super::config::Transport::Native,
-            tls: false,
-            database: "default".to_string(),
-            ..Default::default()
-        };
-        assert!(ClickHouseQueryClient::new(&config).is_ok());
     }
 
     // ============================================================
@@ -1232,7 +1362,10 @@ mod tests {
             (read, answered.elapsed())
         });
 
-        let client = build_client(&http_config(addr, 5_000, 30_000)).unwrap();
+        let ChClient::Http(client) = build_client(&http_config(addr, 5_000, 30_000)).unwrap()
+        else {
+            panic!("an http config builds an HTTP client")
+        };
         client.query("SELECT 1").execute().await.unwrap();
 
         let (read, idle) = tokio::time::timeout(Duration::from_secs(8), server)
@@ -1251,7 +1384,9 @@ mod tests {
     #[tokio::test]
     async fn connect_timeout_bounds_a_connect_that_never_completes() {
         let (_listener, _queued, addr) = listener_that_never_completes_a_connect().await;
-        let client = build_client(&http_config(addr, 300, 30_000)).unwrap();
+        let ChClient::Http(client) = build_client(&http_config(addr, 300, 30_000)).unwrap() else {
+            panic!("an http config builds an HTTP client")
+        };
 
         let started = Instant::now();
         let result =

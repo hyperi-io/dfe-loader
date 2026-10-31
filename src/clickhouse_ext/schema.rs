@@ -11,7 +11,7 @@
 
 //! Schema reflection for dynamic inserts.
 //!
-//! Fetches column definitions from `system.columns` over the new clickhouse-rs
+//! Fetches column definitions from `system.columns` over the `clickhouse`
 //! `Client` and caches them with a TTL. Each column's parsed type (carried on
 //! [`ColumnDef`]) drives the runtime RowBinary encoding in `crate::encode`.
 
@@ -19,11 +19,9 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
-use clickhouse::Client;
-
 use super::encode::ColumnDef;
 use super::error::DynamicError;
-use crate::clickhouse::client_http::ReadBound;
+use crate::clickhouse::client_http::{ChClient, ReadBound, TimesOut, escape_string};
 
 /// Resolved schema for a single table -- an ordered list of columns plus a
 /// name index for O(1) lookup during encoding.
@@ -115,6 +113,26 @@ struct SysColumn {
     default_kind: String,
 }
 
+/// The `system.columns` rows a native-protocol schema query returned.
+fn native_sys_columns(
+    blocks: &[dfe_clickhouse::native::DecodedBlock],
+) -> dfe_clickhouse::Result<Vec<SysColumn>> {
+    let mut rows = Vec::new();
+    for block in blocks {
+        let names = block.column_as::<String>("name")?;
+        let types = block.column_as::<String>("col_type")?;
+        let kinds = block.column_as::<String>("default_kind")?;
+        rows.extend(names.into_iter().zip(types).zip(kinds).map(
+            |((name, col_type), default_kind)| SysColumn {
+                name,
+                col_type,
+                default_kind,
+            },
+        ));
+    }
+    Ok(rows)
+}
+
 /// Fetch a table's schema from `system.columns`.
 ///
 /// Uses a parameterised query (no string interpolation) and works over
@@ -128,32 +146,58 @@ struct SysColumn {
 /// [`DynamicError::EmptySchema`] if the table has no columns (or does not
 /// exist).
 pub async fn fetch_dynamic_schema(
-    client: &Client,
+    client: &ChClient,
     database: &str,
     table: &str,
     bound: &ReadBound,
 ) -> Result<DynamicSchema, DynamicError> {
     let full_table = format!("{database}.{table}");
+    let failed = |source: dfe_clickhouse::Error| {
+        if source.is_timed_out() {
+            DynamicError::TimedOut {
+                table: full_table.clone(),
+            }
+        } else {
+            DynamicError::SchemaFetch {
+                table: full_table.clone(),
+                source,
+            }
+        }
+    };
 
-    let query = client
-        .query(
-            "SELECT name, type AS col_type, default_kind \
-             FROM system.columns \
-             WHERE database = ? AND table = ? \
-             ORDER BY position",
-        )
-        .bind(database)
-        .bind(table)
-        .fetch_all::<SysColumn>();
-    let rows = bound.run(query).await.map_err(|source| match source {
-        clickhouse::error::Error::TimedOut => DynamicError::TimedOut {
-            table: full_table.clone(),
-        },
-        source => DynamicError::SchemaFetch {
-            table: full_table.clone(),
-            source,
-        },
-    })?;
+    let rows: Vec<SysColumn> = match client {
+        ChClient::Http(client) => {
+            let query = client
+                .query(
+                    "SELECT name, type AS col_type, default_kind \
+                     FROM system.columns \
+                     WHERE database = ? AND table = ? \
+                     ORDER BY position",
+                )
+                .bind(database)
+                .bind(table)
+                .fetch_all::<SysColumn>();
+            bound
+                .run(query)
+                .await
+                .map_err(|e| failed(dfe_clickhouse::Error::from(e)))?
+        }
+        ChClient::Native(client) => {
+            let sql = format!(
+                "SELECT name, type AS col_type, default_kind \
+                 FROM system.columns \
+                 WHERE database = {} AND table = {} \
+                 ORDER BY position",
+                escape_string(database),
+                escape_string(table)
+            );
+            let blocks = bound
+                .run(client.query(&sql).fetch_blocks())
+                .await
+                .map_err(failed)?;
+            native_sys_columns(&blocks).map_err(failed)?
+        }
+    };
 
     if rows.is_empty() {
         return Err(DynamicError::EmptySchema { table: full_table });

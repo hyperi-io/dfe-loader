@@ -25,7 +25,7 @@ pub enum DynamicError {
     /// Schema fetch from system.columns failed.
     SchemaFetch {
         table: String,
-        source: clickhouse::error::Error,
+        source: dfe_clickhouse::Error,
     },
     /// Table has no columns (or does not exist).
     EmptySchema { table: String },
@@ -46,7 +46,11 @@ impl fmt::Display for DynamicError {
                 write!(f, "schema mismatch for table '{table}': {message}")
             }
             Self::SchemaFetch { table, source } => {
-                write!(f, "failed to fetch schema for '{table}': {source}")
+                write!(
+                    f,
+                    "failed to fetch schema for '{table}': {}",
+                    crate::clickhouse::error::native_error_text(source)
+                )
             }
             Self::EmptySchema { table } => {
                 write!(f, "table '{table}' has no columns or does not exist")

@@ -888,7 +888,7 @@ pub fn create_http_test_client() -> Option<dfe_loader::clickhouse::ClickHouseQue
     dfe_loader::clickhouse::ClickHouseQueryClient::new(&ch_config).ok()
 }
 
-/// Create a clickhouse-rs fork `Client` for integration tests.
+/// Create an HTTP `clickhouse::Client` for integration tests.
 ///
 /// Used by `Inserter` tests that need `DynamicInsert` or `InsertFormatted`.
 /// Defaults to HTTP transport for test compatibility.
@@ -908,28 +908,6 @@ pub fn create_ch_test_client() -> Option<clickhouse::Client> {
             .with_password(&ch.password)
             .with_database(&ch.database),
     )
-}
-
-/// Create a native-TCP fork `Client` for integration tests (port 9000/9440).
-///
-/// Exercises the RowBinary-over-TCP insert path
-/// (`with_columns_tcp`, clickhouse-rs#14). TLS uses the host as the SNI name.
-pub fn create_ch_test_client_tcp() -> Option<clickhouse::Client> {
-    let ch = ClickHouseTestConfig::from_env();
-    if !ch.is_reachable() {
-        return None;
-    }
-    let addr = ch.native_addr();
-    let mut client = if ch.tls {
-        clickhouse::Client::tcp_tls(addr, ch.host.clone())
-    } else {
-        clickhouse::Client::tcp(addr)
-    };
-    client = client.with_user(&ch.user).with_database(&ch.database);
-    if !ch.password.is_empty() {
-        client = client.with_password(&ch.password);
-    }
-    Some(client)
 }
 
 /// Drop a test table — uses ON CLUSTER for remote cluster, plain for Docker.

@@ -2538,7 +2538,7 @@ async fn warm_tables_once(
 fn build_inserter(
     config: &Config,
     http_client: Arc<ClickHouseQueryClient>,
-    ch_client: clickhouse::Client,
+    ch_client: crate::clickhouse::ChClient,
 ) -> Inserter {
     let ch_config: crate::clickhouse::ClickHouseConfig = (&config.clickhouse).into();
     Inserter::new(http_client, ch_client, InserterConfig::default())

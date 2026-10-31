@@ -1,7 +1,7 @@
 <!--
   Project:      dfe-loader
   File:         docs/clickhouse/clickhouse-ext.md
-  Purpose:      The clickhouse_ext layer -- dynamic RowBinary insert over the fork
+  Purpose:      The clickhouse_ext layer -- dynamic RowBinary insert over the clickhouse crate
   Language:     Markdown
 
   License:      BUSL-1.1
@@ -10,37 +10,21 @@
 
 # clickhouse_ext
 
-`src/clickhouse_ext/` is the HyperI dynamic-insert layer over the clickhouse-rs
-`hyperi-port` fork. The fork ships a single `Client` (HTTP + TCP) and public
-RowBinary/Native primitives, but keeps insertion typed (`T: Row`). dfe-loader
-inserts runtime-shaped `Map<String,Value>` rows, so the dynamic encoding lives
-here, on top of the upstream `Client`.
+`src/clickhouse_ext/` is the HyperI dynamic-insert layer over the official `clickhouse` crate from crates.io. Its HTTP `Client` keeps insertion typed (`T: Row`). dfe-loader inserts runtime-shaped `Map<String,Value>` rows, so the dynamic encoding lives here, on top of that `Client`.
 
 ## Modules
 
 | Module | Responsibility |
 |--------|----------------|
 | `parsed_type` | Parse a `system.columns` type string into a structured `ParsedType` (Nullable, LowCardinality, Array, Map, DateTime64, Decimal, Enum, ...) |
-| `encode` | `DynamicRow`: a `Map<String,Value>` + its `ColumnDef` schema. Row-wise `encode()` bytes feed the HTTP FORMAT RowBinaryWithNamesAndTypes sink; the per-column `Serialize` mode is kept for the native/TCP sink that waits on clickhouse-rs#15 |
+| `encode` | `DynamicRow`: a `Map<String,Value>` + its `ColumnDef` schema. Row-wise `encode()` bytes feed the HTTP FORMAT RowBinaryWithNamesAndTypes sink |
 | `schema` | Fetch a table's columns from `system.columns`; TTL cache with invalidation |
 | `insert` | `DynamicInsert`: lazy schema fetch, `write_map` / `write_map_with_raw`, schema-mismatch recovery |
 | `error` | `DynamicError` (`SchemaMismatch`, `UnsupportedType`, ...) |
 
 ## The seam
 
-`DynamicInsert` opens its sink on the first row. There is one sink today:
-
-- **HTTP** -> `Client::insert_formatted_with("INSERT ... FORMAT
-  RowBinaryWithNamesAndTypes")`, fed a header of column names and the types
-  they were encoded for, then row-wise `encode()` bytes. ClickHouse parses the
-  rows directly, row by row, so the loader never relies on server-side block
-  framing.
-- **native/TCP** -> `Client::insert_native_with_columns(table, &columns)` ->
-  `with_columns_tcp`, fed the per-column `Serialize` mode (the fork's
-  [hyperi-io/clickhouse-rs#14](https://github.com/hyperi-io/clickhouse-rs/issues/14)),
-  is NOT wired. It waits on
-  [hyperi-io/clickhouse-rs#15](https://github.com/hyperi-io/clickhouse-rs/issues/15),
-  and `clickhouse.protocol: native` is refused at startup until then.
+`DynamicInsert` opens its sink on the first row. Over HTTP it is `Client::insert_formatted_with("INSERT ... FORMAT RowBinaryWithNamesAndTypes")`, fed a header of column names and the types they were encoded for, then row-wise `encode()` bytes. Over the native protocol the same row bytes are held until `end()`, transposed into `FORMAT Native` blocks of up to 1 MiB by `dfe_clickhouse::native::encode_columns`, and sent through `TcpClient::insert_native`. One encoder serves both protocols.
 
 JSON columns (including `_json`) are written as a length-prefixed string; on the
 RowBinary path the loader sets `input_format_binary_read_json_as_string=1` so
@@ -54,7 +38,6 @@ flowchart LR
     M --> DR
     CD --> DR
     DR -->|"encode() bytes"| IFW["insert_formatted_with<br/>FORMAT RowBinaryWithNamesAndTypes (HTTP)"]
-    DR -.->|per-column Serialize, not wired| INC["insert_native_with_columns<br/>with_columns_tcp (waits on #15)"]
 ```
 
 ## Schema-mismatch recovery
@@ -67,28 +50,22 @@ current schema. A column whose type changed is caught by the header: the server
 refuses bytes encoded for the old type (code 117) instead of reading them as
 other rows. See [insert-formats.md](insert-formats.md#when-the-schema-drifts).
 
-## Consuming the fork
+## The client crates
 
-The fork is patched in via `[patch.crates-io]` in `Cargo.toml`, pinned by
-**rev** to the tip of its `hyperi-port/06d-tcp-tls-new` branch, never by branch
-name.
+Both come from crates.io, with no `[patch]` and no git source:
 
 ```toml
-[patch.crates-io]
-clickhouse = { git = "https://github.com/hyperi-io/clickhouse-rs.git", rev = "<commit sha>" }
+clickhouse = { version = ">=0.15.3, <0.16", features = ["lz4", "time", "rustls-tls", "rustls-tls-native-roots", "inserter"] }
+dfe-clickhouse = { version = ">=0.1.5, <0.2", default-features = false, features = ["ext", "tls"] }
 ```
 
-No tag points at that commit. The `hyperi-port/*` branches were force-pushed on
-every cascade, which would orphan a branch-only rev once git collected it. The
-fork repo is now archived and read-only, so the branch can no longer move and
-the pinned rev stays reachable. It also means no fix can land on the fork:
-retiring the patch for crates.io `clickhouse` is the only way forward (#133).
+From `dfe-clickhouse` the loader takes `ServerException::parse` (`ext`), which reads the code and message out of the `Code: N. DB::Exception: ...` text the HTTP client returns as `Error::BadResponse`, and `TcpClient` with its rustls trust (`tls`, which implies `tcp`) for `clickhouse.protocol: native`. Over native the server's code arrives structurally in `Error::ServerException`. `src/clickhouse/error.rs` renders either as `server error code {code}: {message}`, classifies every insert rejection by that code, and keeps at most 1 MiB of any error text.
 
-The HTTP client is the loader's own. `build_client` in `src/clickhouse/client_http.rs` hands the fork a hyper client through `Client::with_http_client`, carrying the pool timer that closes idle connections after 2 s, the connect timeout and HTTPS verified against the system trust store. Queries and inserts carry the request and insert timeouts on top. #133 still stands for the rest of the fork.
+The HTTP client is the loader's own. `build_client` in `src/clickhouse/client_http.rs` hands `clickhouse::Client` a hyper client through `Client::with_http_client`, carrying the pool timer that closes idle connections after 2 s, the connect timeout and HTTPS verified against the system trust store. Queries and inserts carry the request and insert timeouts on top.
 
 ## What stays out of clickhouse_ext
 
-- The transport, pool, handshake, and Native block framing -- those are the
-  fork's job.
+- The transports and connection pools -- the `clickhouse` crate's and hyper's
+  for HTTP, `dfe-clickhouse`'s for native.
 - Typed (`#[derive(Row)]`) inserts -- use `Client` directly.
 - DDL, queries, schema introspection -- `ClickHouseQueryClient` over `Client`.

@@ -18,8 +18,7 @@ clickhouse:
   database: default
   username: default
   password: ""
-  # http + the 8123-family port: 'native' is rejected at startup, so this file
-  # would not load with it.
+  # http on the 8123-family port, or native on 9000 (9440 with TLS).
   protocol: http
   tables:
     - auth_events

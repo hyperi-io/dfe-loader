@@ -26,7 +26,7 @@
     type: enum
     required: false
     default: http
-    description: "Wire protocol. 'native' is rejected at startup: the pinned clickhouse client has no TCP row fetch, so schema queries stall silently."
+    description: "Wire protocol: 'http' (8123, 8443 with TLS) or 'native' (9000, 9440 with TLS). json_each_row inserts need 'http'."
     enum_values:
     - native
     - http
