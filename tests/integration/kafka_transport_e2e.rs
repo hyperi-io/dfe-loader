@@ -75,14 +75,8 @@ async fn connect(
         .as_ref()
         .expect("Kafka container must be running");
 
-    let host = container.get_host().await.expect("container get_host");
-    // The module's own constant, not a literal -- 9093 was the Confluent
-    // image's broker port and silently stopped existing when the harness moved
-    // to the Apache one.
-    let port = container
-        .get_host_port_ipv4(testcontainers_modules::kafka::apache::KAFKA_PORT)
-        .await
-        .expect("Kafka port mapping");
+    let host = container.host();
+    let port = container.port(crate::common::containers::KAFKA_PORT);
     let bootstrap = format!("{host}:{port}");
     wait_for_broker(&bootstrap).await;
 

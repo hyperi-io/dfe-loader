@@ -127,9 +127,19 @@ fn clickhouse_pet() -> Option<ClickHouseTarget> {
 /// with a CA.
 #[test]
 fn clickhouse_pet_settings() {
-    let cases: &[(&str, &[(&str, &str)], bool, Option<(Option<u16>, Option<u16>)>)] = &[
+    let cases: &[(
+        &str,
+        &[(&str, &str)],
+        bool,
+        Option<(Option<u16>, Option<u16>)>,
+    )] = &[
         ("nothing set", &[], false, None),
-        ("ports without a host", &[("HTTP_PORT", "8123")], false, None),
+        (
+            "ports without a host",
+            &[("HTTP_PORT", "8123")],
+            false,
+            None,
+        ),
         (
             "host and ports, no CA",
             &[("HOST", "h"), ("HTTP_PORT", "8123"), ("HTTPS_PORT", "8443")],
@@ -176,7 +186,7 @@ async fn clickhouse_target() -> ClickHouseTarget {
         native: Some(shared.port(CLICKHOUSE_NATIVE_PORT)),
         native_tls: Some(shared.port(CLICKHOUSE_NATIVE_TLS_PORT)),
         user: "default".into(),
-        password: String::new(),
+        password: crate::common::containers::clickhouse_password(),
         cluster: None,
         ca_pem: Some(shared_clickhouse_ca().await),
         db_prefix: "dfe_loader_test_".into(),

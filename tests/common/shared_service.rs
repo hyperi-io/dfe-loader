@@ -7,8 +7,14 @@
 //! first creates the container under a run-scoped name and the rest join it by
 //! that name. The creator also starts a detached watcher that removes the
 //! container once the run's nextest process exits, whether it passed, failed
-//! or was interrupted. Nothing here names a repo, image or port: the caller
-//! passes a [`Suite`] and a [`ServiceSpec`].
+//! or was interrupted. [`start_alone`] starts a container one test holds by
+//! itself, removed when the holder drops or its process exits. Nothing here
+//! names a repo, image or port: the caller passes a [`Suite`] and a
+//! [`ServiceSpec`].
+//!
+//! Ports publish on the daemon host's loopback, never a wildcard. A daemon
+//! reached over ssh gets an `ssh -L` tunnel per port, on the same port number
+//! at both ends. A remote `tcp://` daemon needs `HYPERI_TEST_DOCKER_BIND`.
 //!
 //! The pet rung lives here too: [`lookup`] reads `HYPERI_TEST_*` settings from
 //! the process environment, then the project `.env`, then the file named by
@@ -18,10 +24,14 @@ use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// Interval between readiness probes and state checks.
 const POLL: Duration = Duration::from_millis(250);
+
+/// How long a container stays another host's after its owner labels it: past
+/// the longest full run, so a sweep from elsewhere never takes a live one.
+pub const LEASE: Duration = Duration::from_secs(4 * 3600);
 
 /// The repo whose suite starts the containers, for names and labels.
 #[derive(Debug, Clone, Copy)]
@@ -60,7 +70,7 @@ pub enum Ready {
     Log(&'static str),
 }
 
-/// One backing service the suite shares across its test processes.
+/// One backing service the suite starts.
 pub struct ServiceSpec {
     /// Service name, used in the container name and the service label.
     pub service: &'static str,
@@ -68,6 +78,8 @@ pub struct ServiceSpec {
     pub image: String,
     /// Container ports to publish, each to a free host port.
     pub ports: Vec<u16>,
+    /// Container ports to publish on a given host port instead, as (container, host).
+    pub pinned_ports: Vec<(u16, u16)>,
     /// Environment for the container.
     pub env: Vec<(String, String)>,
     /// Entrypoint override, when the image's own cannot be used.
@@ -85,12 +97,20 @@ pub struct ServiceSpec {
     pub startup_timeout: Duration,
 }
 
-/// A running shared container and where its ports are published.
+impl ServiceSpec {
+    fn all_ports(&self) -> Vec<u16> {
+        let mut ports = self.ports.clone();
+        ports.extend(self.pinned_ports.iter().map(|&(c, _)| c));
+        ports
+    }
+}
+
+/// A running container and where its ports are reachable.
 #[derive(Debug, Clone)]
 pub struct SharedContainer {
     /// Container name.
     pub name: String,
-    /// Host the published ports are reachable on.
+    /// Host the ports are reachable on from this machine.
     pub host: String,
     ports: Vec<(u16, u16)>,
 }
@@ -152,7 +172,123 @@ impl SharedContainer {
     }
 }
 
-/// The shared container for `spec` in this run, created if no process has yet.
+/// A container one test holds alone, removed with its tunnel when dropped.
+#[derive(Debug)]
+pub struct OwnedContainer {
+    /// Where it is reachable.
+    pub container: SharedContainer,
+    tunnel: Option<u32>,
+}
+
+impl Drop for OwnedContainer {
+    fn drop(&mut self) {
+        let _ = docker(&["rm", "--force", "--volumes", &self.container.name]);
+        if let Some(pid) = self.tunnel {
+            let _ = Command::new("kill").arg(pid.to_string()).status();
+        }
+    }
+}
+
+/// Where the Docker daemon is, which decides how its ports are reached.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Daemon {
+    /// A local socket, or `tcp://` on loopback.
+    Local,
+    /// Over ssh: ports bind to the daemon host's loopback and arrive here
+    /// through a tunnel.
+    Ssh {
+        /// `user@host` or `host`.
+        target: String,
+        /// The ssh port, when the endpoint names one.
+        port: Option<u16>,
+    },
+    /// `tcp://` to another host.
+    Tcp {
+        /// The daemon's host.
+        host: String,
+    },
+}
+
+impl Daemon {
+    /// The daemon `DOCKER_HOST` names, else the current docker context's.
+    #[must_use]
+    pub fn current() -> Self {
+        let endpoint = std::env::var("DOCKER_HOST")
+            .ok()
+            .filter(|h| !h.is_empty())
+            .unwrap_or_else(|| {
+                let out = docker(&[
+                    "context",
+                    "inspect",
+                    "--format",
+                    "{{.Endpoints.docker.Host}}",
+                ]);
+                String::from_utf8_lossy(&out.stdout).trim().to_string()
+            });
+        Self::parse(&endpoint)
+    }
+
+    /// The daemon a Docker endpoint URL names.
+    #[must_use]
+    pub fn parse(endpoint: &str) -> Self {
+        let Some((scheme, rest)) = endpoint.split_once("://") else {
+            return Self::Local;
+        };
+        let authority = rest.split('/').next().unwrap_or(rest);
+        let (user, host_port) = match authority.rsplit_once('@') {
+            Some((user, host_port)) => (Some(user), host_port),
+            None => (None, authority),
+        };
+        let (host, port) = match host_port.rsplit_once(':') {
+            Some((h, p)) => (h, p.parse::<u16>().ok()),
+            None => (host_port, None),
+        };
+        match scheme {
+            "ssh" => Self::Ssh {
+                target: user.map_or_else(|| host.to_string(), |u| format!("{u}@{host}")),
+                port,
+            },
+            "tcp" | "http" | "https" if !is_loopback(host) => Self::Tcp {
+                host: host.to_string(),
+            },
+            _ => Self::Local,
+        }
+    }
+
+    /// The address ports bind to on the daemon host, and the host clients on
+    /// this machine connect to.
+    ///
+    /// # Panics
+    ///
+    /// Panics for a remote `tcp://` daemon without `HYPERI_TEST_DOCKER_BIND`,
+    /// or with a wildcard there: the services carry fixed test credentials.
+    #[must_use]
+    pub fn binding(&self, suite: &Suite) -> (String, String) {
+        match self {
+            Self::Local | Self::Ssh { .. } => ("127.0.0.1".into(), "localhost".into()),
+            Self::Tcp { host } => {
+                let bind = lookup(suite, "HYPERI_TEST_DOCKER_BIND").unwrap_or_else(|| {
+                    panic!(
+                        "Docker at tcp://{host} would publish the test services to its network. \
+                         Set HYPERI_TEST_DOCKER_BIND to a private address on that host, or \
+                         reach the daemon over ssh."
+                    )
+                });
+                assert!(
+                    !matches!(bind.as_str(), "0.0.0.0" | "::" | "[::]" | "*"),
+                    "HYPERI_TEST_DOCKER_BIND must name one address, not {bind}"
+                );
+                (bind.clone(), bind)
+            }
+        }
+    }
+}
+
+fn is_loopback(host: &str) -> bool {
+    matches!(host, "localhost" | "127.0.0.1" | "::1" | "[::1]")
+}
+
+/// The run's container for `spec`, created if no process has yet.
 ///
 /// Blocking: call it from a plain thread or `spawn_blocking`, never directly on
 /// an async runtime thread.
@@ -170,17 +306,28 @@ pub fn acquire(suite: &Suite, spec: &ServiceSpec) -> SharedContainer {
         run_id()
     );
     let deadline = Instant::now() + spec.startup_timeout;
-    let host = docker_host();
+    let daemon = Daemon::current();
+    let (_, host) = daemon.binding(suite);
     loop {
         match state(&name) {
             State::Running => {
-                let container = published(&name, &host, &spec.ports, deadline);
+                let container = published(&name, &host, &spec.all_ports(), deadline);
                 wait_ready(&container, &spec.ready, deadline);
+                wait_reachable(&container, deadline);
                 return container;
             }
             State::Absent => {
-                if create(suite, spec, &name, &host) {
-                    return start_owned(spec, &name, &host, deadline);
+                if create(suite, spec, &name, &daemon, run_owner_pid()) {
+                    let (container, _) =
+                        start_owned(spec, &name, &daemon, &host, run_owner_pid(), deadline);
+                    record(&format!(
+                        "started {} container {name} for run {} (owner pid {}): 1 {} container this run",
+                        spec.service,
+                        run_id(),
+                        run_owner_pid(),
+                        spec.service
+                    ));
+                    return container;
                 }
             }
             // A peer created it and is still copying files in or starting it.
@@ -194,9 +341,36 @@ pub fn acquire(suite: &Suite, spec: &ServiceSpec) -> SharedContainer {
     }
 }
 
-/// Copy the files in, start the container, hand it to a watcher and log it.
-fn start_owned(spec: &ServiceSpec, name: &str, host: &str, deadline: Instant) -> SharedContainer {
-    spawn_watcher(run_owner_pid(), name);
+/// A container named `name` that this test process holds alone.
+///
+/// # Panics
+///
+/// As [`acquire`], and when `name` is already taken.
+#[must_use]
+pub fn start_alone(suite: &Suite, spec: &ServiceSpec, name: &str) -> OwnedContainer {
+    let deadline = Instant::now() + spec.startup_timeout;
+    let daemon = Daemon::current();
+    let (_, host) = daemon.binding(suite);
+    let owner = std::process::id();
+    assert!(
+        create(suite, spec, name, &daemon, owner),
+        "{name} already exists: a second container for one test"
+    );
+    let (container, tunnel) = start_owned(spec, name, &daemon, &host, owner, deadline);
+    OwnedContainer { container, tunnel }
+}
+
+/// Copy the files in, start the container, open its tunnel and hand both to a
+/// watcher that ends them when `owner` exits.
+fn start_owned(
+    spec: &ServiceSpec,
+    name: &str,
+    daemon: &Daemon,
+    host: &str,
+    owner: u32,
+    deadline: Instant,
+) -> (SharedContainer, Option<u32>) {
+    spawn_watcher(owner, Some(name), None);
     let dir = tempfile::tempdir().expect("staging directory for container files");
     for (index, (target, bytes)) in (spec.files)(host).into_iter().enumerate() {
         let staged = dir.path().join(index.to_string());
@@ -222,34 +396,72 @@ fn start_owned(spec: &ServiceSpec, name: &str, host: &str, deadline: Instant) ->
         "start {name}: {}",
         String::from_utf8_lossy(&started.stderr)
     );
-    let container = published(name, host, &spec.ports, deadline);
+    let container = published(name, host, &spec.all_ports(), deadline);
+    let tunnel = match daemon {
+        Daemon::Ssh { target, port } => {
+            let pid = open_tunnel(target, *port, &container);
+            spawn_watcher(owner, None, Some(pid));
+            Some(pid)
+        }
+        Daemon::Local | Daemon::Tcp { .. } => None,
+    };
     (spec.after_start)(&container);
     wait_ready(&container, &spec.ready, deadline);
-    record(&format!(
-        "started {} container {name} on {host} for run {} (owner pid {}): 1 {} container this run",
-        spec.service,
-        run_id(),
-        run_owner_pid(),
-        spec.service
-    ));
-    container
+    wait_reachable(&container, deadline);
+    (container, tunnel)
+}
+
+/// Forward each published port from this machine to the daemon host's
+/// loopback, on the same number at both ends, so an address a service
+/// advertises resolves here too. Returns the ssh process id.
+fn open_tunnel(target: &str, port: Option<u16>, container: &SharedContainer) -> u32 {
+    let mut args: Vec<String> = vec![
+        "-N".into(),
+        "-o".into(),
+        "BatchMode=yes".into(),
+        "-o".into(),
+        "ExitOnForwardFailure=yes".into(),
+    ];
+    if let Some(port) = port {
+        args.extend(["-p".into(), port.to_string()]);
+    }
+    for &(_, host_port) in &container.ports {
+        args.extend([
+            "-L".into(),
+            format!("127.0.0.1:{host_port}:127.0.0.1:{host_port}"),
+        ]);
+    }
+    args.push(target.to_string());
+    let out = Command::new("sh")
+        .args([
+            "-c",
+            r#"ssh "$@" </dev/null >/dev/null 2>&1 & echo $!"#,
+            "shared-service-tunnel",
+        ])
+        .args(&args)
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .expect("start the ssh tunnel");
+    String::from_utf8_lossy(&out.stdout)
+        .trim()
+        .parse()
+        .unwrap_or_else(|_| panic!("no pid for the ssh tunnel to {target}"))
 }
 
 /// Create the container. False when another process created it first.
-fn create(suite: &Suite, spec: &ServiceSpec, name: &str, host: &str) -> bool {
+fn create(suite: &Suite, spec: &ServiceSpec, name: &str, daemon: &Daemon, owner: u32) -> bool {
     reap_dead_owners(suite);
-    // A local daemon publishes on loopback alone, a remote one on every interface.
-    let bind = if host == "localhost" {
-        "127.0.0.1::"
-    } else {
-        ""
-    };
+    let (bind, _) = daemon.binding(suite);
     let mut args: Vec<String> = vec!["create".into(), "--name".into(), name.into()];
-    for (key, value) in labels(suite, spec.service) {
+    for (key, value) in labels(suite, spec.service, owner) {
         args.extend(["--label".into(), format!("{key}={value}")]);
     }
     for port in &spec.ports {
-        args.extend(["--publish".into(), format!("{bind}{port}")]);
+        args.extend(["--publish".into(), format!("{bind}::{port}")]);
+    }
+    for (port, host_port) in &spec.pinned_ports {
+        args.extend(["--publish".into(), format!("{bind}:{host_port}:{port}")]);
     }
     for (key, value) in &spec.env {
         args.extend(["--env".into(), format!("{key}={value}")]);
@@ -272,54 +484,176 @@ fn create(suite: &Suite, spec: &ServiceSpec, name: &str, host: &str) -> bool {
     false
 }
 
-/// Labels on every container: suite, repo, service, run and owning process.
+/// Who owns a container: the machine, the PID namespace, and the process with
+/// its start time, so a reused pid does not pass for the owner.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Owner {
+    /// Hostname and machine id.
+    pub host: String,
+    /// The PID namespace, `/proc/self/ns/pid`.
+    pub pid_ns: String,
+    /// Process id.
+    pub pid: u32,
+    /// The process's start time, `/proc/<pid>/stat` field 22.
+    pub start: String,
+}
+
+impl Owner {
+    /// The identity of local process `pid`.
+    #[must_use]
+    pub fn of(pid: u32) -> Self {
+        Self {
+            host: host_id(),
+            pid_ns: pid_namespace(),
+            pid,
+            start: process_start(pid).unwrap_or_default(),
+        }
+    }
+}
+
+/// Hostname and machine id, so two machines with one hostname still differ.
 #[must_use]
-pub fn labels(suite: &Suite, service: &str) -> Vec<(String, String)> {
+pub fn host_id() -> String {
+    let hostname = std::fs::read_to_string("/proc/sys/kernel/hostname")
+        .ok()
+        .or_else(|| {
+            Command::new("hostname")
+                .output()
+                .ok()
+                .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        })
+        .unwrap_or_default();
+    let machine = std::fs::read_to_string("/etc/machine-id").unwrap_or_default();
+    format!("{}/{}", hostname.trim(), machine.trim())
+}
+
+fn pid_namespace() -> String {
+    std::fs::read_link("/proc/self/ns/pid")
+        .map_or_else(|_| "none".into(), |p| p.to_string_lossy().into_owned())
+}
+
+/// Start time of `pid`, or `None` when no such process exists.
+#[must_use]
+pub fn process_start(pid: u32) -> Option<String> {
+    if let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+        // Field 22 counts from the pid, and the command name before it is
+        // parenthesised and may hold spaces.
+        let after_comm = stat.rsplit_once(')')?.1;
+        return after_comm.split_whitespace().nth(19).map(str::to_string);
+    }
+    if Path::new("/proc/self").exists() {
+        return None;
+    }
+    let out = Command::new("ps")
+        .args(["-o", "lstart=", "-p", &pid.to_string()])
+        .output()
+        .ok()?;
+    let start = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!start.is_empty()).then_some(start)
+}
+
+fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
+/// Labels on every container: suite, repo, service, run, owner and lease.
+#[must_use]
+pub fn labels(suite: &Suite, service: &str, owner_pid: u32) -> Vec<(String, String)> {
+    let owner = Owner::of(owner_pid);
     vec![
         ("io.hyperi.test.suite".into(), suite.label()),
         ("io.hyperi.test.repo".into(), suite.repo.into()),
         ("io.hyperi.test.service".into(), service.into()),
         ("io.hyperi.test.run".into(), run_id()),
+        ("io.hyperi.test.owner-host".into(), owner.host),
+        ("io.hyperi.test.owner-pidns".into(), owner.pid_ns),
+        ("io.hyperi.test.owner-pid".into(), owner.pid.to_string()),
+        ("io.hyperi.test.owner-start".into(), owner.start),
         (
-            "io.hyperi.test.owner-pid".into(),
-            run_owner_pid().to_string(),
+            "io.hyperi.test.lease-until".into(),
+            (now_secs() + LEASE.as_secs()).to_string(),
         ),
     ]
 }
 
-/// Remove this suite's containers whose owning process has gone.
+/// The owner labels a container carries, as read back for a sweep.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Labelled {
+    /// Container name.
+    pub name: String,
+    /// `owner-host`.
+    pub host: String,
+    /// `owner-pidns`.
+    pub pid_ns: String,
+    /// `owner-pid`.
+    pub pid: Option<u32>,
+    /// `owner-start`.
+    pub start: String,
+    /// `lease-until`, epoch seconds.
+    pub lease_until: Option<u64>,
+}
+
+/// Whether a sweep from `here` removes `container`, at `now`.
+///
+/// On the owner's own host and PID namespace it goes once the owner process is
+/// gone or its start time no longer matches. Anywhere else the owner cannot be
+/// seen, so it goes only once its lease has lapsed.
+#[must_use]
+pub fn sweep_removes(
+    container: &Labelled,
+    here_host: &str,
+    here_pid_ns: &str,
+    now: u64,
+    start_of: impl Fn(u32) -> Option<String>,
+) -> bool {
+    if container.host == here_host && container.pid_ns == here_pid_ns {
+        return container
+            .pid
+            .is_some_and(|pid| start_of(pid).is_none_or(|start| start != container.start));
+    }
+    container.lease_until.is_some_and(|until| now > until)
+}
+
+/// Remove this suite's containers whose owner has gone, by [`sweep_removes`].
 pub fn reap_dead_owners(suite: &Suite) {
     let filter = format!("label=io.hyperi.test.suite={}", suite.label());
-    let format = "{{.Names}} {{.Label \"io.hyperi.test.owner-pid\"}}";
+    let format = "{{.Names}}\t{{.Label \"io.hyperi.test.owner-host\"}}\t\
+                  {{.Label \"io.hyperi.test.owner-pidns\"}}\t{{.Label \"io.hyperi.test.owner-pid\"}}\t\
+                  {{.Label \"io.hyperi.test.owner-start\"}}\t{{.Label \"io.hyperi.test.lease-until\"}}";
     let out = docker(&["ps", "--all", "--filter", &filter, "--format", format]);
-    for name in dead_owner_names(&String::from_utf8_lossy(&out.stdout), process_alive) {
-        let _ = docker(&["rm", "--force", "--volumes", &name]);
+    let (host, pid_ns, now) = (host_id(), pid_namespace(), now_secs());
+    for container in parse_listing(&String::from_utf8_lossy(&out.stdout)) {
+        if sweep_removes(&container, &host, &pid_ns, now, process_start) {
+            let _ = docker(&["rm", "--force", "--volumes", &container.name]);
+        }
     }
 }
 
-/// Names from `"<name> <owner-pid>"` lines whose owner is no longer alive.
-pub fn dead_owner_names(listing: &str, alive: impl Fn(u32) -> bool) -> Vec<String> {
+/// The tab-separated listing [`reap_dead_owners`] asks Docker for.
+#[must_use]
+pub fn parse_listing(listing: &str) -> Vec<Labelled> {
     listing
         .lines()
         .filter_map(|line| {
-            let (name, pid) = line.split_once(' ')?;
-            let pid: u32 = pid.trim().parse().ok()?;
-            (!alive(pid)).then(|| name.to_string())
+            let mut fields = line.split('\t');
+            let name = fields.next().filter(|n| !n.is_empty())?.to_string();
+            let mut next = || fields.next().unwrap_or("").trim().to_string();
+            Some(Labelled {
+                name,
+                host: next(),
+                pid_ns: next(),
+                pid: next().parse().ok(),
+                start: next(),
+                lease_until: next().parse().ok(),
+            })
         })
         .collect()
 }
 
-/// Whether a process with this id exists, via `kill -0`.
-fn process_alive(pid: u32) -> bool {
-    Command::new("kill")
-        .args(["-0", &pid.to_string()])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success())
-}
-
-/// Start a detached process that removes container `name` once `owner` exits.
+/// Start a detached process that, once `owner` exits, removes `container` and
+/// ends `process`.
 ///
 /// The shell backgrounds the watcher and exits, so the watcher is reparented
 /// rather than left for this process to reap. It sits in a process group of
@@ -329,18 +663,22 @@ fn process_alive(pid: u32) -> bool {
 /// # Panics
 ///
 /// Panics when `sh` cannot be run.
-pub fn spawn_watcher(owner: u32, name: &str) {
+pub fn spawn_watcher(owner: u32, container: Option<&str>, process: Option<u32>) {
     use std::os::unix::process::CommandExt;
     let script = r#"(
 while kill -0 "$1" 2>/dev/null; do sleep 1; done
-docker rm --force --volumes "$2" >/dev/null 2>&1
-printf '%s removed %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$2" >> "$3"
+if [ -n "$4" ]; then kill "$4" 2>/dev/null; fi
+if [ -n "$2" ]; then
+  docker rm --force --volumes "$2" >/dev/null 2>&1
+  printf '%s removed %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$2" >> "$3"
+fi
 ) </dev/null >/dev/null 2>&1 &"#;
     let started = Command::new("sh")
         .args(["-c", script, "shared-service-watcher"])
         .arg(owner.to_string())
-        .arg(name)
+        .arg(container.unwrap_or(""))
         .arg(log_path())
+        .arg(process.map(|p| p.to_string()).unwrap_or_default())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -403,6 +741,19 @@ fn published(name: &str, host: &str, ports: &[u16], deadline: Instant) -> Shared
     }
 }
 
+/// The addresses each published port is bound to on the daemon host.
+#[must_use]
+pub fn bound_addresses(name: &str) -> Vec<String> {
+    let out = docker(&["port", name]);
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|line| {
+            let (_, bound) = line.split_once(" -> ")?;
+            Some(bound.rsplit_once(':')?.0.to_string())
+        })
+        .collect()
+}
+
 fn wait_ready(container: &SharedContainer, ready: &Ready, deadline: Instant) {
     loop {
         let up = match ready {
@@ -432,6 +783,31 @@ fn wait_ready(container: &SharedContainer, ready: &Ready, deadline: Instant) {
     }
 }
 
+/// Wait until every published port accepts a connection from this machine,
+/// which through a tunnel can lag the container's own readiness.
+fn wait_reachable(container: &SharedContainer, deadline: Instant) {
+    for &(_, port) in &container.ports {
+        loop {
+            let reachable = (container.host.as_str(), port)
+                .to_socket_addrs()
+                .ok()
+                .and_then(|mut a| a.next())
+                .is_some_and(|a| TcpStream::connect_timeout(&a, Duration::from_secs(1)).is_ok());
+            if reachable {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "{} port {port} is not reachable at {}: a tunnel that did not open, \
+                 or a local port already in use",
+                container.name,
+                container.host
+            );
+            std::thread::sleep(POLL);
+        }
+    }
+}
+
 /// `GET path` over plain HTTP/1.0: the status code and the body.
 #[must_use]
 pub fn http_get(host: &str, port: u16, path: &str) -> Option<(u16, String)> {
@@ -444,40 +820,6 @@ pub fn http_get(host: &str, port: u16, path: &str) -> Option<(u16, String)> {
     let (head, body) = response.split_once("\r\n\r\n")?;
     let status: u16 = head.split_whitespace().nth(1)?.parse().ok()?;
     Some((status, body.to_string()))
-}
-
-/// Host the daemon publishes ports on: `localhost` for a local socket, else the
-/// host named by `DOCKER_HOST` or the current docker context.
-#[must_use]
-pub fn docker_host() -> String {
-    let endpoint = std::env::var("DOCKER_HOST")
-        .ok()
-        .filter(|h| !h.is_empty())
-        .unwrap_or_else(|| {
-            let out = docker(&[
-                "context",
-                "inspect",
-                "--format",
-                "{{.Endpoints.docker.Host}}",
-            ]);
-            String::from_utf8_lossy(&out.stdout).trim().to_string()
-        });
-    host_of_endpoint(&endpoint)
-}
-
-/// The host part of a Docker endpoint URL.
-#[must_use]
-pub fn host_of_endpoint(endpoint: &str) -> String {
-    let Some((scheme, rest)) = endpoint.split_once("://") else {
-        return "localhost".into();
-    };
-    if !matches!(scheme, "tcp" | "ssh" | "http" | "https") {
-        return "localhost".into();
-    }
-    let authority = rest.split('/').next().unwrap_or(rest);
-    let host_port = authority.rsplit('@').next().unwrap_or(authority);
-    let host = host_port.rsplit_once(':').map_or(host_port, |(h, _)| h);
-    host.to_string()
 }
 
 /// Short id of this test run: nextest's run id, else this process.
@@ -570,19 +912,136 @@ fn path_str(path: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::host_of_endpoint;
+    use super::{Daemon, Labelled, Suite, parse_listing, sweep_removes};
+
+    const SUITE: Suite = Suite {
+        repo: "r",
+        manifest_dir: "/nonexistent",
+    };
 
     #[test]
-    fn endpoint_hosts() {
-        for (endpoint, want) in [
-            ("unix:///var/run/docker.sock", "localhost"),
-            ("", "localhost"),
-            ("npipe:////./pipe/docker_engine", "localhost"),
-            ("tcp://10.0.0.5:2376", "10.0.0.5"),
-            ("ssh://derek@build.example:22", "build.example"),
-            ("ssh://build.example", "build.example"),
+    fn daemons_and_where_their_ports_bind() {
+        let local = ("127.0.0.1".to_string(), "localhost".to_string());
+        for (endpoint, want, binding) in [
+            ("unix:///var/run/docker.sock", Daemon::Local, Some(&local)),
+            ("", Daemon::Local, Some(&local)),
+            ("tcp://127.0.0.1:2375", Daemon::Local, Some(&local)),
+            ("tcp://localhost:2375", Daemon::Local, Some(&local)),
+            (
+                "ssh://derek@build.example:2222",
+                Daemon::Ssh {
+                    target: "derek@build.example".into(),
+                    port: Some(2222),
+                },
+                Some(&local),
+            ),
+            (
+                "ssh://build.example",
+                Daemon::Ssh {
+                    target: "build.example".into(),
+                    port: None,
+                },
+                Some(&local),
+            ),
+            (
+                "tcp://10.0.0.5:2376",
+                Daemon::Tcp {
+                    host: "10.0.0.5".into(),
+                },
+                None,
+            ),
         ] {
-            assert_eq!(host_of_endpoint(endpoint), want, "{endpoint}");
+            let daemon = Daemon::parse(endpoint);
+            assert_eq!(daemon, want, "{endpoint}");
+            let bound = std::panic::catch_unwind(|| daemon.binding(&SUITE));
+            match binding {
+                Some(b) => assert_eq!(bound.as_ref().ok(), Some(b), "{endpoint}"),
+                None => assert!(
+                    bound.is_err(),
+                    "{endpoint}: a remote tcp daemon must refuse"
+                ),
+            }
         }
+    }
+
+    #[test]
+    fn a_sweep_takes_only_containers_whose_owner_is_gone() {
+        let here = ("h1/m1", "pid:[1]");
+        let container = |host: &str, ns: &str, pid: u32, start: &str, lease: u64| Labelled {
+            name: "c".into(),
+            host: host.into(),
+            pid_ns: ns.into(),
+            pid: Some(pid),
+            start: start.into(),
+            lease_until: Some(lease),
+        };
+        // Process 10, started at 500, is the only one alive here.
+        let start_of = |pid: u32| (pid == 10).then(|| "500".to_string());
+        let now = 1_000;
+        for (label, c, removed) in [
+            (
+                "ours, owner alive",
+                container("h1/m1", "pid:[1]", 10, "500", 2_000),
+                false,
+            ),
+            (
+                "ours, owner gone",
+                container("h1/m1", "pid:[1]", 11, "500", 2_000),
+                true,
+            ),
+            (
+                "ours, pid reused",
+                container("h1/m1", "pid:[1]", 10, "400", 2_000),
+                true,
+            ),
+            (
+                "another host, lease live",
+                container("h2/m2", "pid:[1]", 11, "1", 2_000),
+                false,
+            ),
+            (
+                "another host, lease lapsed",
+                container("h2/m2", "pid:[1]", 11, "1", 900),
+                true,
+            ),
+            (
+                "another namespace, lease live",
+                container("h1/m1", "pid:[9]", 11, "1", 2_000),
+                false,
+            ),
+        ] {
+            assert_eq!(
+                sweep_removes(&c, here.0, here.1, now, start_of),
+                removed,
+                "{label}"
+            );
+        }
+        let unlabelled = Labelled {
+            name: "old".into(),
+            ..Labelled::default()
+        };
+        assert!(
+            !sweep_removes(&unlabelled, here.0, here.1, now, start_of),
+            "a container with no owner labels is never taken"
+        );
+    }
+
+    #[test]
+    fn a_listing_reads_back_into_owner_labels() {
+        let listing = "a\th\tns\t42\t900\t1234\nb\t\t\t\t\t\n\n";
+        let got = parse_listing(listing);
+        assert_eq!(got.len(), 2);
+        assert_eq!(
+            got[0],
+            Labelled {
+                name: "a".into(),
+                host: "h".into(),
+                pid_ns: "ns".into(),
+                pid: Some(42),
+                start: "900".into(),
+                lease_until: Some(1234),
+            }
+        );
+        assert_eq!((got[1].pid, got[1].lease_until), (None, None));
     }
 }

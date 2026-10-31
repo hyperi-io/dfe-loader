@@ -30,18 +30,25 @@ Full adds every other real-server test: the inserter, readiness, data type, DLQ,
 
 The ClickHouse pin lives in `tests/common/containers.rs` and follows dfe-infra `versions.yaml`. The Kafka pin is scalo's `transport::kafka::test_support::KAFKA_IMAGE`, the line the DFE stack deploys.
 
-The shared ClickHouse runs with `CLICKHOUSE_SKIP_USER_SETUP=1`, so `default` has no password, and `default` may create users and grant to them. Its certificate names `localhost` and the Docker host, signed by a CA made for the run, which tests read back with `shared_clickhouse_ca()`. Kafka is one KRaft broker advertising the host port Docker published.
+Each ClickHouse container gets a random password for `default`, never logged, which tests read with `clickhouse_password()`. `default` may create users and grant to them. Its certificate names `localhost` and the Docker host, signed by a CA made for the run, which tests read back with `shared_clickhouse_ca()`. Kafka is one KRaft broker advertising the host port Docker published.
 
 `tests/common/shared_service.rs` gives every test process in a run the same container per service:
 
 - The first process to ask creates it, named `<prefix>-integration-<service>-r<run>`, where `<run>` is the start of `NEXTEST_RUN_ID` and `<prefix>` is `HYPERI_TEST_CONTAINER_PREFIX`, else `dfe-loader-test`. Every other process finds it by that name and waits for it to be ready.
 - The creator starts a watcher in its own process group that waits on the nextest process and removes the container once it exits. That covers a pass, a failure, Ctrl-C and a killed run. nextest's setup scripts are experimental and have no teardown, so the watcher is the teardown.
 - Each creation is logged once, to stderr and to `shared-services-<run>.log` under the target's `tmp/`, with the container count for its service. The watcher appends each removal. `shared_services` prints the log at the end of the run.
-- Containers carry `io.hyperi.test.suite=dfe-loader-integration`, `io.hyperi.test.run` and `io.hyperi.test.owner-pid`. A run that finds this suite's containers with a dead owner removes them.
+- Containers carry `io.hyperi.test.suite=dfe-loader-integration`, `io.hyperi.test.run`, and the owner: `owner-host` (hostname and machine id), `owner-pidns`, `owner-pid`, `owner-start` (the process start time) and `lease-until`.
+- Each create sweeps this suite's containers. One owned on this host and PID namespace goes once its owner process is gone or its start time differs. One owned anywhere else goes only once its 4-hour lease has lapsed, so two machines on one daemon never take each other's live services.
 
-Docker is whatever the environment names: `DOCKER_HOST`, else the current docker context. Ports bind to 127.0.0.1 on a local daemon and to every interface on a remote one. In CI the runner's daemon is used and a missing daemon fails the run.
+Docker is whatever the environment names: `DOCKER_HOST`, else the current docker context. Ports bind to 127.0.0.1 on the daemon host, never a wildcard:
 
-Tests on the shared instances keep to their own names: unique tables (`unique_table_name`), a probe user per process, and topics and consumer groups named for the test. A test that needs a whole server or broker to itself uses `TestInfrastructure::exclusive`, which starts a container only it holds: topic auto-discovery, the hygiene check of per-test names, and the broker started after the loader (`start_kafka_on`).
+- A local daemon, or `tcp://` on loopback, is reached directly.
+- An `ssh://` daemon gets one `ssh -L` tunnel per container, on the same port number at both ends so Kafka's advertised address resolves here. The watcher closes it with the container.
+- A remote `tcp://` daemon is refused unless `HYPERI_TEST_DOCKER_BIND` names a private address on that host.
+
+In CI the runner's daemon is used and a missing daemon fails the run.
+
+Tests on the shared instances keep to their own names: unique tables (`unique_table_name`), a probe user per process, and topics and consumer groups named for the test. A test that needs a whole server or broker to itself uses `TestInfrastructure::exclusive`, which starts a container only it holds, removed when the test drops it or its process exits: topic auto-discovery, the hygiene check of per-test names, and the broker started after the loader (`start_kafka_on`).
 
 ## Pets for local core runs
 

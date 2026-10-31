@@ -126,6 +126,7 @@ fn fixture_path(stem: &str) -> PathBuf {
 async fn the_server_still_answers_as_the_fixtures_say() {
     let shared = shared_clickhouse().await;
     let url = format!("http://{}", shared.addr(CLICKHOUSE_HTTP_PORT));
+    let password = crate::common::containers::clickhouse_password();
     let http = reqwest::Client::new();
     let capture = std::env::var_os("DFE_LOADER_CAPTURE_FIXTURES").is_some();
 
@@ -134,6 +135,7 @@ async fn the_server_still_answers_as_the_fixtures_say() {
         for statement in &case.setup {
             let response = http
                 .post(&url)
+                .basic_auth("default", Some(&password))
                 .body(statement.clone())
                 .send()
                 .await
@@ -148,9 +150,12 @@ async fn the_server_still_answers_as_the_fixtures_say() {
         // A statement with no data goes in the body: a POST needs a length.
         let (query, body) = &case.request;
         let request = if body.is_empty() {
-            http.post(&url).body(query.clone())
+            http.post(&url)
+                .basic_auth("default", Some(&password))
+                .body(query.clone())
         } else {
             http.post(&url)
+                .basic_auth("default", Some(&password))
                 .query(&[("query", query)])
                 .body(body.clone())
         };

@@ -123,15 +123,10 @@ test-case = ">=3.4.0, <4"
 # Held on 0.12: 0.13 drops the rustls-tls-native-roots feature.
 reqwest = { version = ">=0.12, <0.13", default-features = false, features = ["blocking", "rustls-tls-native-roots"] }
 
-# Integration test containers
-testcontainers = ">=0.27.3, <0.28"
 # The Kafka broker image pin and the TLS / mTLS / SASL_SSL broker fixture the
 # Kafka tests share, so neither is copied here. The production dependency above
 # does not carry this feature.
 scalo = { version = "2.14.22", features = ["transport-kafka-test-support"] }
-testcontainers-modules = { version = ">=0.15.0, <0.16", features = ["kafka", "clickhouse"] }
-# The reqwest major testcontainers' HttpWaitStrategy::with_client takes; the lib's own reqwest stays on 0.12.
-testcontainers-reqwest = { package = "reqwest", version = ">=0.13.5, <0.14", default-features = false }
 
 # Kafka producer for e2e tests (test message injection)
 rdkafka = { version = ">=0.39.0, <0.40", features = ["dynamic-linking"] }
@@ -315,7 +310,7 @@ jemalloc = ["dep:tikv-jemallocator", "dep:tikv-jemalloc-ctl"]
 # Transport backends
 transport-memory = ["scalo/transport-memory"]  # Memory transport for unit tests
 # Testing
-testcontainers = []  # Enable testcontainers for CI/CD (Docker required)
+testcontainers = []  # The tests that run real ClickHouse and Kafka containers (Docker required)
 # PGO workload driver (hyperi-ci Tier 2 — see scripts/pgo-workload.sh)
 # Pulls in rdkafka for the producer binary; main loader binary is unaffected.
 pgo-driver = ["dep:rdkafka"]

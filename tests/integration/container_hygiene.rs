@@ -101,28 +101,6 @@ fn container_name_is_a_legal_docker_name() {
     assert!(legal(&container_name(None, "kafka")));
 }
 
-/// Containers a killed run left behind are the ones whose owning process is
-/// gone, and only those. A line that does not parse is left alone.
-#[test]
-fn only_containers_whose_owner_is_gone_are_reaped() {
-    let listing = "\
-dfe-loader-test-integration-a-clickhouse-p100 100
-dfe-loader-test-integration-b-clickhouse-p200 200
-dfe-loader-test-integration-c-kafka-p300 300
-dfe-loader-test-integration-d-kafka-p
-dfe-loader-test-integration-e-kafka-p400 not-a-pid
-unlabelled
-";
-    let alive = |pid: u32| pid == 200;
-    assert_eq!(
-        crate::common::shared_service::dead_owner_names(listing, alive),
-        vec![
-            "dfe-loader-test-integration-a-clickhouse-p100",
-            "dfe-loader-test-integration-c-kafka-p300"
-        ]
-    );
-}
-
 /// Every name is prefixed so one `docker ps` filter finds everything this repo's
 /// suite started, and nothing belonging to another repo.
 #[test]
@@ -248,6 +226,29 @@ async fn the_shared_container_is_named_and_labelled_for_the_run() {
     );
     assert_eq!(label("io.hyperi.test.run"), Some(run_id()));
     assert_eq!(
+        label("io.hyperi.test.owner-host"),
+        Some(crate::common::shared_service::host_id())
+    );
+    let bound = crate::common::shared_service::bound_addresses(&shared.name);
+    assert!(!bound.is_empty(), "docker reports no published port");
+    assert!(
+        bound.iter().all(|addr| addr == "127.0.0.1"),
+        "a shared port is published beyond loopback: {bound:?}"
+    );
+    let port = shared.port(crate::common::containers::CLICKHOUSE_HTTP_PORT);
+    let anonymous =
+        crate::common::shared_service::http_get(&shared.host, port, "/?query=SELECT%201");
+    assert!(
+        anonymous.as_ref().is_some_and(|(status, _)| *status != 200),
+        "the shared ClickHouse answered a query with no password: {anonymous:?}"
+    );
+    let kafka = crate::common::containers::shared_kafka().await;
+    let bound = crate::common::shared_service::bound_addresses(&kafka.name);
+    assert!(
+        !bound.is_empty() && bound.iter().all(|addr| addr == "127.0.0.1"),
+        "a shared Kafka port is published beyond loopback: {bound:?}"
+    );
+    assert_eq!(
         label("io.hyperi.test.owner-pid"),
         Some(run_owner_pid().to_string())
     );
@@ -294,7 +295,7 @@ async fn the_watcher_removes_the_container_once_its_owner_exits() {
         .arg("600")
         .spawn()
         .expect("start a stand-in owner");
-    crate::common::shared_service::spawn_watcher(owner.id(), &name);
+    crate::common::shared_service::spawn_watcher(owner.id(), Some(&name), None);
 
     // Long enough for a watcher that ignored its owner to have acted.
     tokio::time::sleep(std::time::Duration::from_secs(3)).await;
@@ -317,5 +318,73 @@ async fn the_watcher_removes_the_container_once_its_owner_exits() {
     assert!(
         gone,
         "{name} survived its owner by 30 s: the watcher did not remove it"
+    );
+}
+
+/// A sweep on one daemon leaves another owner's live container alone and
+/// removes one whose lease has lapsed, whichever machine runs it.
+#[cfg(feature = "testcontainers")]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_sweep_leaves_another_owners_live_container_and_takes_a_lapsed_one() {
+    crate::common::require_docker_in_ci();
+    if !crate::common::has_docker() {
+        eprintln!("skipping: no Docker daemon");
+        return;
+    }
+    let image = format!(
+        "clickhouse/clickhouse-server:{}@{}",
+        crate::common::containers::CLICKHOUSE_TAG,
+        crate::common::containers::CLICKHOUSE_DIGEST
+    );
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    // Owned elsewhere: no live process here can vouch for either.
+    let foreign = |name: &str, lease_until: u64| {
+        let created = std::process::Command::new("docker")
+            .args(["create", "--name", name])
+            .args([
+                "--label",
+                &format!("{}={}", TEST_SUITE_LABEL.0, TEST_SUITE_LABEL.1),
+            ])
+            .args(["--label", "io.hyperi.test.owner-host=another-host/0000"])
+            .args(["--label", "io.hyperi.test.owner-pidns=pid:[1]"])
+            .args(["--label", "io.hyperi.test.owner-pid=1"])
+            .args(["--label", "io.hyperi.test.owner-start=1"])
+            .args([
+                "--label",
+                &format!("io.hyperi.test.lease-until={lease_until}"),
+            ])
+            .arg(&image)
+            .output()
+            .expect("run docker create");
+        assert!(
+            created.status.success(),
+            "create {name}: {}",
+            String::from_utf8_lossy(&created.stderr)
+        );
+    };
+    let pid = std::process::id();
+    let live = format!("{}-sweep-live-p{pid}", base());
+    let lapsed = format!("{}-sweep-lapsed-p{pid}", base());
+    foreign(&live, now + 3600);
+    foreign(&lapsed, now.saturating_sub(60));
+
+    crate::common::shared_service::reap_dead_owners(&crate::common::containers::SUITE);
+
+    let live_kept = inspect(&live, "{{.Name}}").is_some();
+    let lapsed_kept = inspect(&lapsed, "{{.Name}}").is_some();
+    for name in [&live, &lapsed] {
+        let _ = std::process::Command::new("docker")
+            .args(["rm", "--force", name])
+            .output();
+    }
+    assert!(
+        live_kept,
+        "the sweep removed another owner's container inside its lease"
+    );
+    assert!(
+        !lapsed_kept,
+        "the sweep left a container whose lease had lapsed"
     );
 }

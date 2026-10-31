@@ -58,11 +58,8 @@ async fn spin_up(
         .as_ref()
         .expect("ClickHouse container must be running");
 
-    let host = container.get_host().await.expect("container get_host");
-    let http_port = container
-        .get_host_port_ipv4(8123)
-        .await
-        .expect("HTTP port mapping");
+    let host = container.host();
+    let http_port = container.port(8123);
 
     // HTTP-based ClickHouseQueryClient (for DDL/queries).
     let cfg = ClickHouseConfig {
@@ -70,7 +67,7 @@ async fn spin_up(
         transport: Transport::Http,
         database: "default".to_string(),
         username: "default".to_string(),
-        password: String::new(),
+        password: crate::common::containers::clickhouse_password(),
         tls: false,
         ..Default::default()
     };
@@ -84,6 +81,7 @@ async fn spin_up(
     let unified = clickhouse::Client::default()
         .with_url(&url)
         .with_user("default")
+        .with_password(crate::common::containers::clickhouse_password())
         .with_database("default");
 
     // Wait briefly for the server to be fully responsive (the image reports
@@ -112,17 +110,14 @@ async fn spin_up_over(
         .clickhouse
         .as_ref()
         .expect("ClickHouse container must be running");
-    let host = container.get_host().await.expect("container get_host");
-    let native_port = container
-        .get_host_port_ipv4(9000)
-        .await
-        .expect("native port mapping");
+    let host = container.host();
+    let native_port = container.port(9000);
     let cfg = ClickHouseConfig {
         hosts: vec![format!("{host}:{native_port}")],
         transport: Transport::Native,
         database: "default".to_string(),
         username: "default".to_string(),
-        password: String::new(),
+        password: crate::common::containers::clickhouse_password(),
         tls: false,
         ..Default::default()
     };

@@ -86,7 +86,7 @@ impl ClickHouseTestConfig {
                 native_port: endpoint.native_port,
                 tls: false,
                 user: "default".into(),
-                password: String::new(),
+                password: endpoint.password,
                 database: "default".into(),
                 cluster: None,
             };
@@ -205,6 +205,7 @@ struct ContainerEndpoint {
     host: String,
     http_port: u16,
     native_port: u16,
+    password: String,
 }
 
 /// Published by `acquire_clickhouse` so every `ClickHouseTestConfig::from_env()`
@@ -254,6 +255,7 @@ async fn start_clickhouse_container() -> Option<ClickHouseLease> {
         host: container.host.clone(),
         http_port: container.port(containers::CLICKHOUSE_HTTP_PORT),
         native_port: container.port(containers::CLICKHOUSE_NATIVE_PORT),
+        password: containers::clickhouse_password(),
     });
     Some(ClickHouseLease)
 }
@@ -418,40 +420,17 @@ pub fn require_docker_in_ci() {
 // labels saying which run and process own it, so an operator looking at
 // `docker ps` can tell what left it behind.
 //
-// The run's shared containers are `shared_service`'s: one per service per run,
-// removed by a watcher once the run ends. A container one test owns alone is
-// named here, `<prefix>-integration-<test>-<service>-p<pid>`, and removed when
-// the test drops it. A SIGKILL, abort or Ctrl-C skips that `Drop`, and
-// testcontainers-rs 0.27 has no resource reaper, so `reap_stale` removes this
-// suite's containers whose owning process (the `owner-pid` label) has gone.
+// `shared_service` starts them all. The run's shared containers are one per
+// service per run, removed by a watcher once the run ends. A container one test
+// owns alone is named here, `<prefix>-integration-<test>-<service>-p<pid>`, and
+// removed when the test drops it or its process exits. Each create first sweeps
+// this suite's containers whose owner has gone (`sweep_removes`).
 //
 // A sweep finds them all by label:
 //   docker rm -f $(docker ps -aq --filter label=io.hyperi.test.suite=dfe-loader-integration)
 
 /// Label marking every container this suite starts, for bulk cleanup.
 pub const TEST_SUITE_LABEL: (&str, &str) = ("io.hyperi.test.suite", "dfe-loader-integration");
-
-/// Labels for a container this suite starts: what it is, and whose run owns it.
-///
-/// The name says what and why; these say WHO, which is what you need when
-/// several runs share a machine and one has left something behind. The pid is
-/// the owning test process -- `ps -p <pid>` answers "is that run still alive, or
-/// is this rubbish I can remove?".
-#[must_use]
-pub fn test_labels(service: &str) -> Vec<(String, String)> {
-    vec![
-        (
-            TEST_SUITE_LABEL.0.to_string(),
-            TEST_SUITE_LABEL.1.to_string(),
-        ),
-        ("io.hyperi.test.repo".to_string(), "dfe-loader".to_string()),
-        ("io.hyperi.test.service".to_string(), service.to_string()),
-        (
-            "io.hyperi.test.owner-pid".to_string(),
-            std::process::id().to_string(),
-        ),
-    ]
-}
 
 /// Container name for a backing service in this suite.
 ///
@@ -513,36 +492,6 @@ macro_rules! test_name {
     }};
 }
 
-/// Remove a DEAD container holding `name`, so a leak from a killed run cannot
-/// block this one.
-///
-/// Never touches a RUNNING container. Two concurrent runs of this suite on one
-/// machine share these names, and force-removing a live one would sabotage the
-/// other run -- a confusing mid-test failure in a process that did nothing
-/// wrong. Leaving it means the start below fails with "name is already in use",
-/// which says what actually happened.
-///
-/// Best-effort otherwise: no Docker, nothing to remove, or an already-gone
-/// container are all fine. A failure here must not fail the test -- the start
-/// that follows reports the real problem.
-pub fn reap_stale(name: &str) {
-    reap_dead_owners();
-    let running = std::process::Command::new("docker")
-        .args(["ps", "--quiet", "--filter", &format!("name=^{name}$")])
-        .output();
-    // Non-empty stdout means a container by this name is up. Leave it alone.
-    if let Ok(out) = &running
-        && !out.stdout.is_empty()
-    {
-        return;
-    }
-    let _ = std::process::Command::new("docker")
-        .args(["rm", "--force", "--volumes", name])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status();
-}
-
 /// Container name prefix: `HYPERI_TEST_CONTAINER_PREFIX`, else `dfe-loader-test`.
 pub fn containers_prefix() -> String {
     shared_service::Suite {
@@ -550,14 +499,6 @@ pub fn containers_prefix() -> String {
         manifest_dir: env!("CARGO_MANIFEST_DIR"),
     }
     .prefix()
-}
-
-/// Remove the containers a killed run left behind.
-fn reap_dead_owners() {
-    shared_service::reap_dead_owners(&shared_service::Suite {
-        repo: "dfe-loader",
-        manifest_dir: env!("CARGO_MANIFEST_DIR"),
-    });
 }
 
 /// Skip test if no test environment is available (either mode)

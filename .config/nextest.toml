@@ -14,7 +14,7 @@ not (
     or test(/^integration::inserter::(test_inserter_basic_insert|rowbinary_multirow_lands_over_http|test_inserter_large_batch|test_concurrent_inserts|test_inserter_batch_salvage|test_rowbinary_json_from_raw_payload|test_raw_only_mode_raw_populated_json_null|test_extracted_only_mode_both_null)$/)
     or test(/^integration::rls::test_org_id_insert_to_clickhouse$/)
     or test(/^integration::schema::(test_schema_introspection_from_clickhouse|test_schema_cache_with_clickhouse|test_schema_cache_background_refresh_keeps_warm)$/)
-    or test(/^integration::container_hygiene::(a_started_container_carries_the_name_and_label_then_goes_away|the_shared_container_is_named_and_labelled_for_the_run|the_watcher_removes_the_container_once_its_owner_exits)$/)
+    or test(/^integration::container_hygiene::(a_started_container_carries_the_name_and_label_then_goes_away|the_shared_container_is_named_and_labelled_for_the_run|the_watcher_removes_the_container_once_its_owner_exits|a_sweep_leaves_another_owners_live_container_and_takes_a_lapsed_one)$/)
 )
 '''
 # No retries, deliberately. Retries here previously masked three real defects:
