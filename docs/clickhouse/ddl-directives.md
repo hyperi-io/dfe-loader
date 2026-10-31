@@ -1,6 +1,6 @@
 <!--
   Project:      dfe-loader
-  File:         docs/clickhouse/DDL-DIRECTIVES.md
+  File:         docs/clickhouse/ddl-directives.md
   Purpose:      DDL field-mapping expression language and @-comment directives
   Language:     Markdown
 
@@ -30,9 +30,9 @@ This page is the full reference -- grammar, the directive list, the function
 catalogue with costs, table-level tags, and the control-plane API spec that lets
 a UI compose and validate these expressions.
 
-For the column types these directives target, see [TYPES.md](TYPES.md); for how
+For the column types these directives target, see [types.md](types.md); for how
 capture interacts with `_json` and `_raw`, see capture modes in
-[../ARCHITECTURE.md](../ARCHITECTURE.md).
+[../architecture.md](../architecture.md).
 
 ## Directive resolution
 
@@ -146,8 +146,8 @@ reading the `@generated:` text -- so keep the two in agreement by hand.
 per-column `@`-comment directive. Capture mode has its own tag, but it is a
 **table**-level DDL comment -- `@capture_mode: <mode>` on the `CREATE TABLE`
 itself, resolved ahead of any per-table or global config (see
-[CAPTURE-MODES.md](../pipeline/CAPTURE-MODES.md)). See
-[COMMON-HEADER.md](../transport/COMMON-HEADER.md) for what each capture mode
+[capture-modes.md](../pipeline/capture-modes.md)). See
+[common-header.md](../transport/common-header.md) for what each capture mode
 writes to `_raw` and `_json`.
 
 ### @config

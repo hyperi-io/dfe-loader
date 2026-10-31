@@ -1,6 +1,6 @@
 <!--
   Project:      dfe-loader
-  File:         docs/clickhouse/SCHEMA-CACHE.md
+  File:         docs/clickhouse/schema-cache.md
   Purpose:      Schema reflection, the TTL cache, and mismatch recovery
   Language:     Markdown
 
@@ -41,7 +41,7 @@ structured `ParsedType` (Nullable, LowCardinality, Array, Map, DateTime64,
 Decimal, Enum, ...) that drives encoding. It also records, per column, whether
 the column has a server-side default -- that is what lets the encoder omit an
 absent-but-defaulted column (`_uuid`, `_timestamp_load`) and include every
-required one. See [TYPES.md](TYPES.md).
+required one. See [types.md](types.md).
 
 ## The cache
 
@@ -84,4 +84,4 @@ fetch that failed is still discarded either way.
 
 `src/clickhouse_ext/schema.rs` (`DynamicSchema`, `DynamicSchemaCache`,
 `fetch_dynamic_schema`). The cache is owned by the `Inserter` and handed to each
-`DynamicInsert`. See [CLICKHOUSE-EXT.md](CLICKHOUSE-EXT.md).
+`DynamicInsert`. See [clickhouse-ext.md](clickhouse-ext.md).

@@ -1,6 +1,6 @@
 <!--
   Project:      dfe-loader
-  File:         docs/transport/GRPC.md
+  File:         docs/transport/grpc.md
   Purpose:      gRPC transport design: proto, config, modes, K8s integration
   Language:     Markdown
 

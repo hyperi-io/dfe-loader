@@ -15,5 +15,5 @@ This covers publishing the container image and Helm chart that downstream
 projects (dfe-docker, dfe-operator) pull, and the shared `dfe-schemas`
 definitions the loader resolves at runtime to drive its table DDL.
 
-- [PUBLISHING.md](PUBLISHING.md) -- container image + Helm chart publishing via CI: Dockerfile, `.hyperi-ci.yaml`, generated tags, and consumer usage.
-- [SCHEMAS.md](SCHEMAS.md) -- loader-side reference for the shared schema definitions: submodule setup, resolution order, per-file versioning, and DFE `expr` directives.
+- [publishing.md](publishing.md) -- container image + Helm chart publishing via CI: Dockerfile, `.hyperi-ci.yaml`, generated tags, and consumer usage.
+- [schemas.md](schemas.md) -- loader-side reference for the shared schema definitions: submodule setup, resolution order, per-file versioning, and DFE `expr` directives.

@@ -1838,7 +1838,7 @@ kafka:
             crate::clickhouse::InsertFormat::JsonEachRow
         );
 
-        // The spelling documented in docs/clickhouse/INSERT-FORMATS.md.
+        // The spelling documented in docs/clickhouse/insert-formats.md.
         let yaml = "clickhouse:\n  insert_format: row_binary\n";
         let config: Config =
             scalo::yaml::from_str(yaml, "config.yaml", scalo::yaml::Profile::Config).unwrap();

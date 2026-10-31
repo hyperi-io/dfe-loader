@@ -36,12 +36,12 @@ flowchart LR
 
 ## In this section
 
-- [GRPC.md](GRPC.md) -- the gRPC transport design: proto schema, config surface,
+- [grpc.md](grpc.md) -- the gRPC transport design: proto schema, config surface,
   client/server/bidirectional modes, K8s health and scaling, and the v1 -> v2
   mesh evolution.
-- [COMMON-HEADER.md](COMMON-HEADER.md) -- the common header schema injected into
+- [common-header.md](common-header.md) -- the common header schema injected into
   every event table regardless of transport: full field reference, DDL, ORDER BY
   / PARTITION BY / codec / index design, and profiles.
 
-See [../ARCHITECTURE.md](../ARCHITECTURE.md) for where the transport layer sits in
+See [../architecture.md](../architecture.md) for where the transport layer sits in
 the overall system.

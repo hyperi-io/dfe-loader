@@ -1,6 +1,6 @@
 <!--
   Project:      dfe-loader
-  File:         docs/pipeline/CAPTURE-MODES.md
+  File:         docs/pipeline/capture-modes.md
   Purpose:      capture_mode: what is stored, and the 3-level precedence
   Language:     Markdown
 
@@ -45,7 +45,7 @@ flowchart TB
 
 - **DDL directive** -- a `@capture_mode: <mode>` comment on the table DDL. The
   table owns its capture policy; this wins over any config. See
-  [../clickhouse/DDL-DIRECTIVES.md](../clickhouse/DDL-DIRECTIVES.md).
+  [../clickhouse/ddl-directives.md](../clickhouse/ddl-directives.md).
 - **Per-table config** -- `metadata.table_capture_modes` maps a table to a mode.
 - **Global default** -- `metadata.capture_mode`, applied to any table without a
   more specific setting.
@@ -65,4 +65,4 @@ processor tests assert the observable action, not just that the config parsed
 That is the rule for every config-cascade switch in the loader: the test proves
 the cascade setting changes the real outcome (the columns written), so a
 "turn it on/off" flag cannot silently no-op. See
-[../CONFIGURATION.md](../CONFIGURATION.md#verifying-config-drives-behaviour).
+[../configuration.md](../configuration.md#verifying-config-drives-behaviour).

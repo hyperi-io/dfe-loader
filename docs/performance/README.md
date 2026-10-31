@@ -15,4 +15,4 @@ into build-time optimisations (allocator, LTO, PGO, BOLT -- now CI-automated)
 and runtime tuning (batch sizes, concurrent inserts), with profiling tools for
 finding the hot spots in between.
 
-- [OVERVIEW.md](OVERVIEW.md) -- the optimisation guide: jemalloc, LTO, PGO and BOLT build optimisations, insert-throughput and batch tuning, and CPU/memory/flame-graph profiling.
+- [overview.md](overview.md) -- the optimisation guide: jemalloc, LTO, PGO and BOLT build optimisations, insert-throughput and batch tuning, and CPU/memory/flame-graph profiling.

@@ -1,6 +1,6 @@
 <!--
   Project:      dfe-loader
-  File:         docs/performance/HISTORY.md
+  File:         docs/performance/history.md
   Purpose:      Decision and parser-selection history (the rationale trail)
   Language:     Markdown
 
@@ -17,8 +17,8 @@ Keep it when you re-evaluate: the bake-offs cost real time, and the conclusions
 are still load-bearing.
 
 For the current insert path and the dynamic encoder seam, see
-[../clickhouse/INSERT-FORMATS.md](../clickhouse/INSERT-FORMATS.md) and
-[../clickhouse/CLICKHOUSE-EXT.md](../clickhouse/CLICKHOUSE-EXT.md). This doc is
+[../clickhouse/insert-formats.md](../clickhouse/insert-formats.md) and
+[../clickhouse/clickhouse-ext.md](../clickhouse/clickhouse-ext.md). This doc is
 the "why we landed here", not the "how it works now".
 
 ## Why RowBinary is the default

@@ -68,7 +68,7 @@ Environment overrides use the `DFE_LOADER` prefix in two forms, and the differen
 | `buffer.flush_rows` / `flush_bytes` / `flush_age_secs` | `20000` / `1048576` / `5` | Per-table flush triggers, each greater than 0 |
 | `metrics.address` | `0.0.0.0:9090` | |
 
-Full cascade and per-setting behaviour: [docs/CONFIGURATION.md](docs/CONFIGURATION.md).
+Full cascade and per-setting behaviour: [docs/configuration.md](docs/configuration.md).
 
 ## Documentation
 
@@ -76,9 +76,9 @@ Full cascade and per-setting behaviour: [docs/CONFIGURATION.md](docs/CONFIGURATI
 
 | Topic | Doc |
 |-------|-----|
-| Layers and the `clickhouse_ext` boundary | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) |
-| Config cascade and behaviour | [docs/CONFIGURATION.md](docs/CONFIGURATION.md) |
-| Running, metrics, hot-reload, DLQ | [docs/OPERATIONS.md](docs/OPERATIONS.md) |
+| Layers and the `clickhouse_ext` boundary | [docs/architecture.md](docs/architecture.md) |
+| Config cascade and behaviour | [docs/configuration.md](docs/configuration.md) |
+| Running, metrics, hot-reload, DLQ | [docs/operations.md](docs/operations.md) |
 | Insert formats, schema cache, types, TLS, DDL directives | [docs/clickhouse/](docs/clickhouse/) |
 | Routing, coercion, enrichment, capture modes | [docs/pipeline/](docs/pipeline/) |
 | Kafka, gRPC, the common header | [docs/transport/](docs/transport/) |

@@ -1,6 +1,6 @@
 <!--
   Project:      dfe-loader
-  File:         docs/clickhouse/CLICKHOUSE-EXT.md
+  File:         docs/clickhouse/clickhouse-ext.md
   Purpose:      The clickhouse_ext layer -- dynamic RowBinary insert over the fork
   Language:     Markdown
 
@@ -65,7 +65,7 @@ code 117, ...), it surfaces `DynamicError::SchemaMismatch`; the `Inserter`
 invalidates the cache so the next attempt re-fetches and re-encodes against the
 current schema. A column whose type changed is caught by the header: the server
 refuses bytes encoded for the old type (code 117) instead of reading them as
-other rows. See [INSERT-FORMATS.md](INSERT-FORMATS.md#when-the-schema-drifts).
+other rows. See [insert-formats.md](insert-formats.md#when-the-schema-drifts).
 
 ## Consuming the fork
 

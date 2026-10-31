@@ -498,7 +498,7 @@ pub fn parse_renamed_value(s: &str) -> Vec<String> {
 
 /// Parse the `| fallback` half of an `@source` directive.
 ///
-/// The vocabulary is closed (`docs/clickhouse/DDL-DIRECTIVES.md`): `now()`,
+/// The vocabulary is closed (`docs/clickhouse/ddl-directives.md`): `now()`,
 /// `uuid()`, `topic_name`, `null`, a quoted string literal, a number, a bool.
 /// Anything else is a FIELD REFERENCE the extractor cannot resolve, and
 /// treating it as a literal would write the expression's own text into every
@@ -677,7 +677,7 @@ mod tests {
 
     #[test]
     fn test_parse_source_fallback_vocabulary() {
-        // docs/clickhouse/DDL-DIRECTIVES.md defines exactly these forms.
+        // docs/clickhouse/ddl-directives.md defines exactly these forms.
         let cases: [(&str, Option<Value>); 8] = [
             ("@source: t | now()", Some(Value::String("now()".into()))),
             ("@source: t | uuid()", Some(Value::String("uuid()".into()))),
