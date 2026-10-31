@@ -10,7 +10,20 @@
 
 # dfe-loader
 
-Loads Kafka and gRPC streams into ClickHouse, batching small writes into large inserts. Runs standalone or as part of the HyperI Data Fusion Engine.
+[![Build Status](https://github.com/hyperi-io/dfe-loader/actions/workflows/ci.yml/badge.svg)](https://github.com/hyperi-io/dfe-loader/actions)
+[![License](https://img.shields.io/badge/license-BUSL--1.1-blue)](LICENSE)
+
+Loads Kafka and gRPC streams into ClickHouse, batching small writes into large inserts. In a DFE deployment it is the last hop of the core data path, taking what dfe-receiver sends over Kafka or direct gRPC and landing it in the tables dfe-schemas defines.
+
+## What it gives you
+
+- Routing to `db.table` from fields in each record, so one loader can feed many tables.
+- Columns read from the live table's `system.columns`: matching fields become typed columns and the rest stays in `_json`, with no schema compiled in.
+- RowBinary inserts by default, so ClickHouse does no JSON parsing on the way in.
+- Per-table buffers flushed on row count or age.
+- At-least-once delivery by default: Kafka offsets commit once per flush, never past a row not yet in ClickHouse or the DLQ. `kafka.acknowledgements.enabled: false` commits at receipt instead, and a row only a DLQ could take is dropped and counted in `dfe_loader_rows_lost_total` when no DLQ is working.
+- A batch with a bad row is split until only the bad rows are dead-lettered, and a schema drift error refreshes the cached schema and retries.
+- Optional GeoIP, reputation and risk columns at load time.
 
 ## Quick start
 
@@ -42,7 +55,7 @@ dfe-loader reads records off Kafka or a direct gRPC listener, works out which Cl
 | Route | `db.table` from configured fields, resolved BEFORE flattening |
 | Promote | Schema read from `system.columns`, matching fields become typed columns, the rest stays in `_json` |
 | Enrich | Optional GeoIP, reputation and risk columns |
-| Buffer | Per-table, flushed on row count, byte size or age |
+| Buffer | Per-table, flushed on row count or age |
 | Insert | RowBinary by default, so ClickHouse skips JSON parsing. JSONEachRow is the fallback |
 | Commit | Kafka offsets commit once per flush cycle, never past a row not yet in ClickHouse or the DLQ -- at-least-once |
 
