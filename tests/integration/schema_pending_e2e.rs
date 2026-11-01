@@ -10,7 +10,7 @@
 //! path, which ignores `@renamed`, leaving the column NULL.
 
 use dfe_loader::column_meta::{ColumnDirectivesConfig, ColumnMetaCache, parse_directives};
-use dfe_loader::config::{MetadataConfig, RoutingConfig};
+use dfe_loader::config::{MetadataConfig, RoutingConfig, TimestampDqConfig};
 use dfe_loader::transform::HeaderExtractor;
 use rustc_hash::FxHashMap;
 
@@ -71,7 +71,11 @@ async fn renamed_directive_applied_end_to_end_36() {
 
     // Run the json_primary extractor path on a message carrying the SOURCE
     // field name. Pre-#36-fix this column would be NULL (transformer path).
-    let extractor = HeaderExtractor::new(&MetadataConfig::default(), &RoutingConfig::default());
+    let extractor = HeaderExtractor::new(
+        &MetadataConfig::default(),
+        &RoutingConfig::default(),
+        &TimestampDqConfig::default(),
+    );
     let raw = br#"{"src_field":"hello","id":7}"#;
     let map = extractor
         .extract(raw, &table, &schema, &col_meta, None)

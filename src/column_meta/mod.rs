@@ -180,6 +180,19 @@ impl ColumnMetaCache {
         self.ddl_version.fetch_add(1, Ordering::Release);
     }
 
+    /// Drop a table's DDL layer, for a table that does not exist.
+    pub fn forget(&self, table: &str) {
+        if self.ddl.write().remove(table).is_some() {
+            self.ddl_version.fetch_add(1, Ordering::Release);
+        }
+    }
+
+    /// Number of tables with a DDL layer.
+    #[must_use]
+    pub fn ddl_tables(&self) -> usize {
+        self.ddl.read().len()
+    }
+
     /// Returns the set of column names with `skip = true` for a table.
     ///
     /// Iterates all known column names across config and DDL layers.

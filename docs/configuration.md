@@ -58,7 +58,7 @@ path; `json_each_row` is the diagnostic fallback:
 
 | `insert_format` | `protocol = http` | `protocol = native` |
 |-----------------|-------------------|---------------------|
-| `row_binary` (default) | `insert_formatted_with` FORMAT RowBinaryWithNamesAndTypes | `FORMAT Native` blocks over the native protocol |
+| `row_binary` (default) | `insert_formatted_with` FORMAT RowBinaryWithDefaults | `FORMAT Native` blocks over the native protocol |
 | `json_each_row` | `insert_formatted_with` FORMAT JSONEachRow | refused at startup |
 
 See [clickhouse/insert-formats.md](clickhouse/insert-formats.md).

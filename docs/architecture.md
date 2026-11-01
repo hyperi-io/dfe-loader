@@ -1,7 +1,7 @@
 <!--
   Project:      dfe-loader
   File:         docs/architecture.md
-  Purpose:      System architecture: layers, the clickhouse_ext boundary, insert dispatch
+  Purpose:      System architecture: layers, the dynamic insert, insert dispatch
   Language:     Markdown
 
   License:      BUSL-1.1
@@ -36,7 +36,7 @@ flowchart TB
     end
     subgraph L1["L1 -- ClickHouse layer"]
         QC["ClickHouseQueryClient<br/>DDL, schema, health"]
-        EXT["clickhouse_ext<br/>ParsedType, encoder, DynamicInsert"]
+        EXT["dfe_clickhouse::dynamic<br/>ParsedType, encoder, DynamicInsert"]
         SC["SchemaCache"]
     end
     subgraph Client["crates.io clickhouse + dfe-clickhouse"]
@@ -57,19 +57,19 @@ external dependencies are the official `clickhouse` crate's HTTP `Client`, and
 `dfe-clickhouse` for the native-protocol `TcpClient` and for reading the
 server's exception code out of an HTTP rejection so the inserter can classify it.
 
-## The clickhouse_ext boundary
+## The dynamic insert
 
 The `clickhouse` crate keeps insertion typed (`T: Row`, compile-time schema) --
 that is the right upstream default. dfe-loader inserts runtime-shaped
 `Map<String,Value>` rows whose columns come from `system.columns` at runtime.
-That dynamic layer is HyperI-specific and lives in this repo, on top of the
-upstream `Client`:
+That dynamic layer comes from `dfe-clickhouse`'s `dynamic` module, on top of the upstream
+`Client`:
 
 ```mermaid
 flowchart LR
     subgraph loader["dfe-loader"]
         INS["Inserter"]
-        subgraph ext["src/clickhouse_ext/"]
+        subgraph ext["dfe_clickhouse::dynamic"]
             PT["ParsedType<br/>runtime CH type parser"]
             ENC["DynamicRow encoder<br/>Map -> RowBinary, per column"]
             SCH["schema fetch<br/>system.columns -> ColumnDef"]
@@ -77,7 +77,7 @@ flowchart LR
         end
     end
     subgraph client["clickhouse::Client"]
-        IFW["insert_formatted_with<br/>FORMAT RowBinaryWithNamesAndTypes | JSONEachRow (HTTP)"]
+        IFW["insert_formatted_with<br/>FORMAT RowBinaryWithDefaults | JSONEachRow (HTTP)"]
     end
 
     INS --> DI
@@ -87,11 +87,10 @@ flowchart LR
     INS -->|JSONEachRow fallback| IFW
 ```
 
-Over HTTP every insert goes through `insert_formatted_with`: row-wise `encode()`
-bytes behind a `FORMAT RowBinaryWithNamesAndTypes` header, or `JSONEachRow`.
-With `clickhouse.protocol: native` the same row bytes go out as `FORMAT Native`
-blocks through `TcpClient::insert_native`, and `JSONEachRow` is refused at
-startup. See [clickhouse/clickhouse-ext.md](clickhouse/clickhouse-ext.md).
+Over HTTP every insert goes through `insert_formatted_with`: one
+`FORMAT RowBinaryWithDefaults` INSERT per batch, or `JSONEachRow`. With
+`clickhouse.protocol: native` the rows go out as `FORMAT Native` blocks through
+`TcpClient::insert_native`, and `JSONEachRow` is refused at startup. See [clickhouse/clickhouse-ext.md](clickhouse/clickhouse-ext.md).
 
 ## Insert dispatch
 
@@ -99,7 +98,7 @@ startup. See [clickhouse/clickhouse-ext.md](clickhouse/clickhouse-ext.md).
 flowchart TB
     F{"insert_format?"}
     RB["DynamicInsert.write_map(s)"]
-    HTTP["Client.insert_formatted_with<br/>FORMAT RowBinaryWithNamesAndTypes (HTTP)"]
+    HTTP["Client.insert_formatted_with<br/>FORMAT RowBinaryWithDefaults (HTTP)"]
     JE["Client.insert_formatted_with<br/>FORMAT JSONEachRow (HTTP)"]
     SM{"SchemaMismatch?"}
     REC["invalidate schema cache<br/>re-fetch + retry"]
@@ -111,10 +110,10 @@ flowchart TB
     SM -->|no| OK["offsets join the flush cycle's one commit"]
 ```
 
-The RowBinary path ships row-wise `FORMAT RowBinaryWithNamesAndTypes` through
-`insert_formatted_with`, whose header lets the server refuse bytes encoded for
-a column type the table no longer has. Over native the block declares the
-types instead.
+The RowBinary path ships `FORMAT RowBinaryWithDefaults` through
+`insert_formatted_with`. A refusal is the rows' own only once a fresh read shows
+the table unchanged since they were encoded, and otherwise the retry encodes
+against the current schema. Over native the block declares the types.
 
 A rejected insert is classified by the server's exception code, read with
 `dfe_clickhouse::ServerException::parse` over HTTP and carried structurally

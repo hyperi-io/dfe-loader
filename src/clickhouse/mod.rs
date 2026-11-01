@@ -42,8 +42,7 @@ pub use client_http::{ChClient, ClickHouseQueryClient, PoolStats, SharedQueryCli
 pub use config::{ClickHouseConfig, InsertFormat, Timeouts, Transport, host_implies_tls};
 pub use error::{ClickHouseError, ErrorCategory};
 pub use types::{
-    ColumnInfo, NULL_STRINGS, ParsedType, ParsedTypeExt, TableSchema, default_value_for_category,
-    is_null_string,
+    ColumnInfo, NULL_STRINGS, ParsedType, TableSchema, default_value_for_category, is_null_string,
 };
 
 // Export resilience modules

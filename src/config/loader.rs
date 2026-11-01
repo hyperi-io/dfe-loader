@@ -100,7 +100,8 @@ pub struct Config {
     pub field_sanitization: FieldSanitizationConfig,
     /// Common header injection, tags, _raw handling. **Hot-reloaded.**
     pub metadata: MetadataConfig,
-    /// Type coercion config. **Hot-reloaded.**
+    /// Type coercion config. Refused unless every field is at its default: the
+    /// dynamic insert applies fixed coercion rules.
     pub coercion: CoercionConfig,
     /// Field mapping overrides. **Restart required.**
     pub field_mapping: FieldMappingConfig,
@@ -691,6 +692,8 @@ impl Config {
             }
         }
 
+        self.refuse_unread_settings()?;
+
         // An empty default would land every unstamped record in no org at all.
         if self.routing.default_org_id.is_empty() {
             return Err(crate::Error::Config(
@@ -723,6 +726,60 @@ impl Config {
             }
         }
 
+        Ok(())
+    }
+
+    /// Refuse a setting no code reads, rather than accept it and ignore it.
+    ///
+    /// The dynamic insert applies fixed coercion rules
+    /// (`docs/clickhouse/clickhouse-ext.md`), so the `coercion` section and the
+    /// `coerce` column directive stay at their defaults, and an invalid
+    /// timestamp is always replaced with the ingest time.
+    fn refuse_unread_settings(&self) -> Result<()> {
+        let c = &self.coercion;
+        let d = CoercionConfig::default();
+        let set: Vec<&str> = [
+            ("type_mappings", c.type_mappings != d.type_mappings),
+            (
+                "unknown_type_fallback",
+                c.unknown_type_fallback != d.unknown_type_fallback,
+            ),
+            ("null_handling", c.null_handling != d.null_handling),
+            ("null_strings", c.null_strings != d.null_strings),
+            ("default_timezone", c.default_timezone != d.default_timezone),
+            ("timezone_fields", c.timezone_fields != d.timezone_fields),
+            ("array_to_json", c.array_to_json != d.array_to_json),
+            ("strict", c.strict != d.strict),
+        ]
+        .into_iter()
+        .filter_map(|(name, changed)| changed.then_some(name))
+        .collect();
+        if !set.is_empty() {
+            return Err(crate::Error::Config(format!(
+                "coercion.{} reaches no encoder -- the dynamic insert applies fixed \
+                 coercion rules. Leave the coercion section at its defaults.",
+                set.join(", coercion.")
+            )));
+        }
+        let directives = &self.column_directives;
+        if let Some(column) = directives
+            .global
+            .iter()
+            .chain(directives.tables.values().flatten())
+            .find_map(|(column, entry)| entry.coerce.is_some().then_some(column))
+        {
+            return Err(crate::Error::Config(format!(
+                "column_directives: the coerce directive on {column} reaches no encoder -- \
+                 the dynamic insert applies fixed coercion rules"
+            )));
+        }
+        if self.timestamp_dq.invalid_action != TimestampDqConfig::default().invalid_action {
+            return Err(crate::Error::Config(format!(
+                "timestamp_dq.invalid_action '{}' is not supported -- an invalid \
+                 timestamp is replaced with the ingest time (replace_with_now)",
+                self.timestamp_dq.invalid_action
+            )));
+        }
         Ok(())
     }
 
@@ -841,6 +898,9 @@ impl Config {
             },
             ..DeploymentContract::default()
         }
+        // The default DLQ cascade writes files, so the chart mounts its
+        // directory writable on the read-only root filesystem.
+        .with_dlq(&Config::default().routing.dlq.to_scalo_config())
     }
 
     /// The Secrets the chart mounts as env vars.
@@ -1136,6 +1196,39 @@ mod tests {
             ..Default::default()
         };
         assert!(config.validate().is_ok());
+    }
+
+    /// A setting no code reads is refused rather than accepted and ignored:
+    /// the `coercion` section, a `coerce` column directive, and any
+    /// `timestamp_dq.invalid_action` but the one the loader takes.
+    #[test]
+    fn a_setting_nothing_honours_is_refused() {
+        let cases: [(&str, fn(&mut Config)); 5] = [
+            ("coercion.strict", |c| c.coercion.strict = true),
+            ("coercion.default_timezone", |c| {
+                c.coercion.default_timezone = "Australia/Sydney".into();
+            }),
+            ("coercion.null_strings", |c| c.coercion.null_strings.clear()),
+            ("timestamp_dq.invalid_action", |c| {
+                c.timestamp_dq.invalid_action = "drop".into();
+            }),
+            ("coerce", |c| {
+                c.column_directives.global.insert(
+                    "src_ip".into(),
+                    crate::column_meta::ColumnDirectivesEntry {
+                        coerce: Some("IPv4".into()),
+                        ..Default::default()
+                    },
+                );
+            }),
+        ];
+        for (name, set) in cases {
+            let mut config = Config::default();
+            assert!(config.validate().is_ok());
+            set(&mut config);
+            let err = config.validate().expect_err(name).to_string();
+            assert!(err.contains(name), "{name}: {err}");
+        }
     }
 
     #[test]

@@ -32,7 +32,7 @@ The ClickHouse pin lives in `tests/common/containers.rs` and follows dfe-infra `
 
 Each ClickHouse container gets a random password for `default`, never logged, which tests read with `clickhouse_password()`. `default` may create users and grant to them. An embedded single-node Keeper backs the `dfe_replicated` database (`Replicated` engine) that the `ReplicatedMergeTree()` tests in `inserter.rs` and `rls.rs` write to. Those tests fail, not skip, when it is missing (`require_replicated!`). Its certificate names `localhost` and the Docker host, signed by a CA made for the run, which tests read back with `shared_clickhouse_ca()`. Kafka is one KRaft broker advertising the host port Docker published.
 
-`tests/common/shared_service.rs` gives every test process in a run the same container per service:
+scalo's `deployment::test_support::shared_service` gives every test process in a run the same container per service:
 
 - The first process to ask creates it, named `<prefix>-integration-<service>-r<run>`, where `<run>` is the start of `NEXTEST_RUN_ID` and `<prefix>` is `HYPERI_TEST_CONTAINER_PREFIX`, else `dfe-loader-test`. Every other process finds it by that name and waits for it to be ready.
 - The creator starts a watcher in its own process group that waits on the nextest process and removes the container once it exits. That covers a pass, a failure, Ctrl-C and a killed run. nextest's setup scripts are experimental and have no teardown, so the watcher is the teardown.

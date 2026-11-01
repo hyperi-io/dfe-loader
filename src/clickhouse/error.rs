@@ -23,6 +23,7 @@
 //!   - Auth failures, unknown table, syntax errors
 
 use dfe_clickhouse::ServerException;
+use dfe_clickhouse::dynamic::DynamicError;
 use thiserror::Error;
 
 /// Errors from `ClickHouse` operations.
@@ -140,28 +141,30 @@ pub fn is_max_dynamic_paths_error(err: &str) -> bool {
 /// payload, so it is tested first -- the message alone, never the column name
 /// beside it, which is the customer's (`timeout_ms`, `connection_id`).
 ///
-/// Of the variants, only
-/// [`EncodingError`](crate::clickhouse_ext::DynamicError::EncodingError) is a
-/// payload verdict
-/// -- the encoder held a schema, read the value against it, and could not
-/// represent it, which the next delivery repeats exactly. Every other variant
-/// clears without the payload changing:
+/// Of the variants, only [`EncodingError`](DynamicError::EncodingError) is a
+/// payload verdict -- the encoder held a schema, read the value against it,
+/// and could not represent it, which the next delivery repeats exactly. Every
+/// other variant clears without the payload changing:
 ///
 /// - `SchemaFetch` -- the `system.columns` query never landed. A ClickHouse
 ///   blip during the first flush after a restart hits this on a cold cache.
 /// - `UnsupportedType` -- THIS BUILD has no encoder for the column type. A
 ///   new `Variant` or nested `Tuple` column is a loader gap, not bad data.
 /// - `EmptySchema` -- the table has no columns yet, i.e. it is mid-creation.
-/// - `SchemaMismatch` -- the cached schema is stale; a re-fetch fixes it.
+/// - `SchemaMismatch` -- the cached schema is stale. A re-fetch fixes it.
+/// - `Transport` -- a timeout, a dropped connection or a server code worth
+///   retrying. Nothing is wrong with the rows.
 ///
-/// `ClientUnsupported` is fatal: the client cannot represent what the server
-/// sent, so every retry of that request fails the same way.
+/// A schema read the client cannot represent (`Error::Unsupported`) is fatal:
+/// every retry of that request fails the same way.
 #[must_use]
-pub fn classify_dynamic_error(err: &crate::clickhouse_ext::DynamicError) -> ErrorCategory {
-    use crate::clickhouse_ext::DynamicError;
-
+pub fn classify_dynamic_error(err: &DynamicError) -> ErrorCategory {
     match err {
-        DynamicError::ClientUnsupported { .. } => ErrorCategory::Fatal,
+        DynamicError::SchemaFetch { source, .. }
+            if matches!(**source, dfe_clickhouse::Error::Unsupported(_)) =>
+        {
+            ErrorCategory::Fatal
+        }
         DynamicError::EncodingError { message, .. } => {
             if classify_from_message(message) == ErrorCategory::Transient {
                 ErrorCategory::Transient
@@ -169,12 +172,16 @@ pub fn classify_dynamic_error(err: &crate::clickhouse_ext::DynamicError) -> Erro
                 ErrorCategory::Data
             }
         }
-        DynamicError::SchemaFetch { .. }
-        | DynamicError::UnsupportedType { .. }
-        | DynamicError::EmptySchema { .. }
-        | DynamicError::SchemaMismatch { .. }
-        | DynamicError::TimedOut { .. } => ErrorCategory::Transient,
+        _ => ErrorCategory::Transient,
     }
+}
+
+/// Whether a dynamic-insert error is the server refusing the rows rather than
+/// the encoder: the crate reports both as `EncodingError`, and only an
+/// encoder refusal names the column.
+#[must_use]
+pub fn is_server_refusal(err: &DynamicError) -> bool {
+    matches!(err, DynamicError::EncodingError { column, .. } if column.is_empty())
 }
 
 /// `ClickHouse` error codes an insert is retried on: the rows are not at fault,
@@ -365,13 +372,17 @@ fn capped(mut text: String) -> String {
     text
 }
 
-/// The server's exception code in text [`error_text`] wrote, wherever it is
-/// nested. The code precedes the message, so the first marker is the server's
-/// and not one a row echoed back inside the message.
+/// The server's exception code in error text, wherever it is nested: the
+/// `server error code N` [`error_text`] and the native client write, or the
+/// `Code: N.` head of an HTTP exception body. The code precedes the message,
+/// so the first marker is the server's and not one a row echoed back.
 #[must_use]
 pub fn server_code(msg: &str) -> Option<i32> {
-    const MARKER: &str = "server error code ";
-    let after = &msg[msg.find(MARKER)? + MARKER.len()..];
+    let after = ["server error code ", "Code: "]
+        .iter()
+        .filter_map(|marker| msg.find(marker).map(|at| at + marker.len()))
+        .min()
+        .map(|at| &msg[at..])?;
     let end = after
         .find(|c: char| !c.is_ascii_digit())
         .unwrap_or(after.len());
@@ -576,12 +587,10 @@ mod tests {
     // without passing through here.
     // ========================================================================
 
-    use crate::clickhouse_ext::DynamicError;
-
     fn fetch_failure(message: &str) -> DynamicError {
         DynamicError::SchemaFetch {
             table: "dfe.filebeat".to_string(),
-            source: dfe_clickhouse::Error::Custom(message.to_string()),
+            source: Box::new(dfe_clickhouse::Error::Custom(message.to_string())),
         }
     }
 
@@ -614,11 +623,11 @@ mod tests {
 
     #[test]
     fn a_column_the_client_cannot_represent_is_fatal_whatever_its_wording() {
-        let err = DynamicError::ClientUnsupported {
+        let err = DynamicError::SchemaFetch {
             table: "dfe.filebeat".to_string(),
-            source: dfe_clickhouse::Error::Unsupported(
+            source: Box::new(dfe_clickhouse::Error::Unsupported(
                 "column 'connection_timeout': JSON typed paths".to_string(),
-            ),
+            )),
         };
         assert_eq!(classify_dynamic_error(&err), ErrorCategory::Fatal);
     }
@@ -693,6 +702,20 @@ mod tests {
             None
         );
         assert_eq!(server_code("server error code : empty"), None);
+        // An HTTP exception body as the crate reports it, with a row that
+        // echoes a code of its own after the server's.
+        assert_eq!(
+            server_code("bad response: Code: 469. DB::Exception: row {\"Code: 5\"}"),
+            Some(469)
+        );
+        assert!(is_server_refusal(&DynamicError::EncodingError {
+            column: String::new(),
+            message: "bad response: Code: 469. DB::Exception".into(),
+        }));
+        assert!(!is_server_refusal(&DynamicError::EncodingError {
+            column: "v".into(),
+            message: "UInt8 value out of range".into(),
+        }));
     }
 
     #[test]

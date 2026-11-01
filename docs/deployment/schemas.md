@@ -53,7 +53,7 @@ wins over a COMMENT -- the exact resolution order is in
 | `@source:path` | `renamed:` | Source field path(s) for this column; a `\|` fallback also fills `default:` |
 | `@renamed:path` | `renamed:` | Source field path(s) for this column |
 | `@computed:expr` | `computed:` | CEL expression producing the value |
-| `@coerce:category` | `coerce:` | Override the type category for coercion |
+| `@coerce:category` | `coerce:` | None: the encoder's coercion rules are fixed. The DDL directive logs a warning, the config key is refused |
 
 `@generated` and `@config` are descriptive only: the loader drops both as
 unknown directives (`DIRECTIVE_NAMES` in

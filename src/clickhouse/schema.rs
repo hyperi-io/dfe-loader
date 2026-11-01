@@ -34,7 +34,7 @@ use crate::clickhouse::TableSchema;
 
 /// Cached schema with timestamp and metadata
 struct CachedSchema {
-    schema: TableSchema,
+    schema: Arc<TableSchema>,
     cached_at: Instant,
     /// Number of times this schema has been refreshed
     refresh_count: u32,
@@ -111,14 +111,15 @@ impl SchemaCache {
         }
     }
 
-    /// Get cached schema if valid (not expired)
-    pub fn get(&self, table: &str) -> Option<TableSchema> {
+    /// Get cached schema if valid (not expired). The schema is shared, not
+    /// copied, so a per-record lookup costs a reference count.
+    pub fn get(&self, table: &str) -> Option<Arc<TableSchema>> {
         let schemas = self.schemas.read();
         schemas.get(table).and_then(|cached| {
             if cached.cached_at.elapsed() < self.ttl {
                 self.hits.fetch_add(1, Ordering::Relaxed);
                 debug!(table = %table, "Schema cache hit");
-                Some(cached.schema.clone())
+                Some(Arc::clone(&cached.schema))
             } else {
                 self.misses.fetch_add(1, Ordering::Relaxed);
                 debug!(table = %table, "Schema cache miss (expired)");
@@ -166,7 +167,7 @@ impl SchemaCache {
         schemas.insert(
             table.clone(),
             CachedSchema {
-                schema,
+                schema: Arc::new(schema),
                 cached_at: Instant::now(),
                 refresh_count,
             },
@@ -418,10 +419,11 @@ mod tests {
         // Insert
         cache.insert("events".to_string(), make_test_schema("events"));
 
-        // Now available
+        // Now available, and shared rather than copied per lookup.
         let schema = cache.get("events").unwrap();
         assert_eq!(schema.table, "events");
         assert_eq!(schema.columns.len(), 1);
+        assert!(Arc::ptr_eq(&schema, &cache.get("events").unwrap()));
     }
 
     #[test]

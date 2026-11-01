@@ -56,17 +56,38 @@ use crate::datetime::{self, utc_text};
 
 use crate::clickhouse::TableSchema;
 use crate::column_meta::{ColumnMetaCache, TOPIC_NAME_MARKER};
-use crate::config::{MetadataConfig, RoutingConfig};
+use crate::config::{MetadataConfig, RoutingConfig, TimestampDqConfig};
+use crate::transform::timestamp::{TimestampResult, TimestampValidator};
+
+/// The reason a payload that parsed promoted nothing.
+pub const NO_COLUMN_MATCHED: &str = "no schema column matched the payload";
 
 /// The outcome of one header pass.
 ///
-/// `empty_reason` is `Some` exactly when `fields` is empty, so the caller that
-/// rejects the message logs why without re-deriving it.
+/// `empty_reason` is `Some` exactly when no column was promoted, so the caller
+/// that rejects the message logs why without re-deriving it.
 pub struct HeaderExtraction {
-    /// Promoted columns, keyed by destination column name.
+    /// Promoted columns, keyed by destination column name, then the stage inputs.
     pub fields: Map<String, Value>,
     /// Why nothing was promoted.
     pub empty_reason: Option<&'static str>,
+    /// The fields taken only for a later stage, which no column holds. The
+    /// caller removes them once those stages have run.
+    pub stage_inputs: Vec<String>,
+    /// The payload's top-level fields that land nowhere: no column took them
+    /// and the table has no `_json` column. DFE's own `_` fields are left out.
+    pub unstored: Vec<String>,
+}
+
+impl HeaderExtraction {
+    fn empty(reason: &'static str) -> Self {
+        Self {
+            fields: Map::new(),
+            empty_reason: Some(reason),
+            stage_inputs: Vec::new(),
+            unstored: Vec::new(),
+        }
+    }
 }
 
 /// The source paths one column reads, in the order the extractor tries them.
@@ -130,6 +151,8 @@ struct TablePlan {
     ddl_version: u64,
     /// Source paths more than one column of this table reads.
     contended: FxHashSet<Box<str>>,
+    /// Whether the table has a `_json` column to keep the whole payload in.
+    stores_payload: bool,
 }
 
 impl TablePlan {
@@ -164,13 +187,42 @@ pub struct HeaderExtractor {
     capture_source: bool,
     /// Whether the common header (all `_`-prefixed columns) is enabled.
     metadata_enabled: bool,
+    /// The bounds `_timestamp` is held to, `None` when `timestamp_dq` is off.
+    timestamp_dq: Option<TimestampValidator>,
+    /// The tags column, and the fields it reads (first match wins).
+    tags_output: String,
+    tags_fields: Vec<String>,
+    /// Whether the tags column is left empty.
+    drop_tags: bool,
+    /// The raw-line column, and the fields it reads when `capture_raw` is on:
+    /// the record's own raw field, then `raw_source_fields`.
+    raw_output: String,
+    raw_sources: Option<Vec<String>>,
     /// Per-table plans, built on first use and rebuilt when the table changes.
     plans: RwLock<FxHashMap<String, Arc<TablePlan>>>,
 }
 
 impl HeaderExtractor {
     /// Create from config.
-    pub fn new(metadata: &MetadataConfig, routing: &RoutingConfig) -> Self {
+    pub fn new(
+        metadata: &MetadataConfig,
+        routing: &RoutingConfig,
+        timestamp_dq: &TimestampDqConfig,
+    ) -> Self {
+        let raw_sources = metadata.capture_raw.then(|| {
+            let own = &metadata.raw_output;
+            let mut sources = vec![
+                own.strip_prefix('_').unwrap_or(own).to_string(),
+                own.clone(),
+            ];
+            sources.dedup();
+            for field in &metadata.raw_source_fields {
+                if !sources.contains(field) {
+                    sources.push(field.clone());
+                }
+            }
+            sources
+        });
         Self {
             org_id_field: routing
                 .org_id_field
@@ -180,6 +232,14 @@ impl HeaderExtractor {
             source_fields: metadata.source_fields.clone(),
             capture_source: metadata.capture_source,
             metadata_enabled: metadata.enabled,
+            timestamp_dq: timestamp_dq
+                .enabled
+                .then(|| TimestampValidator::new(timestamp_dq)),
+            tags_output: metadata.tags_output.clone(),
+            tags_fields: metadata.tags_fields.clone(),
+            drop_tags: metadata.drop_tags,
+            raw_output: metadata.raw_output.clone(),
+            raw_sources,
             plans: RwLock::new(FxHashMap::default()),
         }
     }
@@ -205,11 +265,21 @@ impl HeaderExtractor {
         if name == "_timestamp_received" {
             return Sources::FixedThen(RECEIVED_STAMPS, renamed);
         }
-        if skip {
+        if skip || self.drops(name) {
             return Sources::None;
         }
         if !renamed.is_empty() {
             return Sources::List(renamed);
+        }
+        if self.metadata_enabled {
+            if name == self.tags_output && !self.tags_fields.is_empty() {
+                return Sources::List(&self.tags_fields);
+            }
+            if name == self.raw_output
+                && let Some(sources) = &self.raw_sources
+            {
+                return Sources::List(sources);
+            }
         }
         match name {
             "_source" if self.capture_source && self.metadata_enabled => {
@@ -218,6 +288,39 @@ impl HeaderExtractor {
             // _foo reads "foo" before falling back to the literal "_foo".
             _ if name.starts_with('_') => Sources::Pair(&name[1..], Some(name)),
             _ => Sources::Pair(name, None),
+        }
+    }
+
+    /// Whether `drop_tags` leaves this column empty.
+    fn drops(&self, name: &str) -> bool {
+        self.metadata_enabled && self.drop_tags && name == self.tags_output
+    }
+
+    /// `_timestamp` held to `timestamp_dq`: an instant inside the bounds lands
+    /// as UTC text, anything else as the ingest time.
+    fn checked_timestamp(
+        &self,
+        validator: &TimestampValidator,
+        value: &Value,
+        now: &chrono::DateTime<Utc>,
+    ) -> String {
+        let result = match value {
+            Value::String(text) => match datetime::parse(text).ok().and_then(instant_time) {
+                Some(dt) => validator.check_bounds_with_now(dt, *now),
+                None => validator.validate_with_now(text, *now),
+            },
+            Value::Number(n) => epoch_time(n).map_or_else(
+                || TimestampResult::Invalid(format!("Invalid epoch: {n}")),
+                |dt| validator.check_bounds_with_now(dt, *now),
+            ),
+            _ => TimestampResult::Invalid("Timestamp must be string or number".into()),
+        };
+        match result {
+            TimestampResult::Valid(dt) | TimestampResult::Corrected(dt, _) => utc_text(&dt),
+            TimestampResult::Invalid(reason) => {
+                debug!(reason = %reason, "_timestamp replaced with the ingest time");
+                utc_text(now)
+            }
         }
     }
 
@@ -257,7 +360,7 @@ impl HeaderExtractor {
         ddl_version: u64,
     ) -> TablePlan {
         let mut claims: FxHashMap<Box<str>, u32> = FxHashMap::default();
-        for col in &schema.columns {
+        for col in schema.columns.iter().filter(|col| !is_generated(col)) {
             let directives = col_meta.get(table, &col.name);
             let sources = self.sources_for(&col.name, &directives.renamed, directives.skip);
             sources.try_each(|path| {
@@ -286,6 +389,7 @@ impl HeaderExtractor {
             columns: schema.columns.iter().map(|col| col.name.clone()).collect(),
             ddl_version,
             contended,
+            stores_payload: schema.columns.iter().any(|col| col.name == "_json"),
         }
     }
 
@@ -312,43 +416,57 @@ impl HeaderExtractor {
         col_meta: &ColumnMetaCache,
         topic_source: Option<&str>,
     ) -> HeaderExtraction {
+        match sonic_rs::from_slice::<Value>(raw) {
+            Ok(value) => self.extract_value(
+                value,
+                table,
+                schema,
+                col_meta,
+                topic_source,
+                std::iter::empty(),
+            ),
+            Err(e) => {
+                debug!(table = %table, error = %e, "Payload parse failed, skipping extraction");
+                HeaderExtraction::empty("payload did not parse")
+            }
+        }
+    }
+
+    /// [`extract`](Self::extract) over a payload already parsed, which it
+    /// takes apart rather than copies.
+    ///
+    /// `stage_inputs` names fields a later stage reads (a field mapping's
+    /// sources, the enrichment IP fields). One no column took is carried in
+    /// the fields under its own name, and listed in `stage_inputs`.
+    pub fn extract_value<'s>(
+        &self,
+        value: Value,
+        table: &str,
+        schema: &TableSchema,
+        col_meta: &ColumnMetaCache,
+        topic_source: Option<&str>,
+        stage_inputs: impl IntoIterator<Item = &'s str>,
+    ) -> HeaderExtraction {
         // Ingest time is stamped to the millisecond.
         let now = Utc::now().trunc_subsecs(3);
         let mut map = Map::with_capacity(schema.columns.len());
         let plan = self.plan_for(table, schema, col_meta);
         let contended = &plan.contended;
 
-        // Parse once — all schema column lookups are O(1) hash operations on this map.
-        // Misses are free here; with get_from_slice each miss still scans the full document.
-        // Take ownership of the parsed map so we can move Values out (zero-clone).
-        // Each take_path call removes the value from `parsed` and moves it into
-        // the output map -- no Value::clone() on the hot path, except for the
-        // source fields `plan.contended` names, which more than one column reads.
-        // A payload the header pass cannot read used to return an empty map at
-        // debug level, and the row landed with every column at its type default.
-        // Name the reason and let the caller reject it (#144).
-        let mut parsed = match sonic_rs::from_slice::<Value>(raw) {
-            Ok(Value::Object(map)) => map,
-            Ok(_) => {
-                return HeaderExtraction {
-                    fields: map,
-                    empty_reason: Some("payload is not a JSON object"),
-                };
-            }
-            Err(e) => {
-                debug!(table = %table, error = %e, "Payload parse failed, skipping extraction");
-                return HeaderExtraction {
-                    fields: map,
-                    empty_reason: Some("payload did not parse"),
-                };
-            }
+        // Every column lookup is a hash operation on this map. Each take_path
+        // call moves the value out of `parsed` into the output map, with no
+        // Value::clone() except for the source fields `plan.contended` names,
+        // which more than one column reads. A payload that is not an object
+        // names the reason, and the caller rejects it (#144).
+        let Value::Object(mut parsed) = value else {
+            return HeaderExtraction::empty("payload is not a JSON object");
         };
 
         for col in &schema.columns {
             let name = &col.name;
 
             // ClickHouse generates these — never inject from source data.
-            if matches!(name.as_str(), "_uuid" | "_timestamp_load" | "_json") {
+            if matches!(name.as_str(), "_uuid" | "_timestamp_load" | "_json") || is_generated(col) {
                 continue;
             }
 
@@ -386,16 +504,19 @@ impl HeaderExtractor {
                 let found = self
                     .sources_for(name, &[], false)
                     .try_each(|path| take_path(&mut parsed, path, name, &mut map, contended));
-                if found {
-                    normalise_datetime(&mut map, name);
-                } else {
+                if !found {
                     map.insert(name.clone(), Value::String(utc_text(&now)));
+                } else if let Some(validator) = &self.timestamp_dq {
+                    let checked = self.checked_timestamp(validator, &map[name.as_str()], &now);
+                    map.insert(name.clone(), Value::String(checked));
+                } else {
+                    normalise_datetime(&mut map, name);
                 }
                 continue;
             }
 
             let directives = col_meta.get(table, name);
-            if directives.skip {
+            if directives.skip || self.drops(name) {
                 continue;
             }
 
@@ -422,16 +543,80 @@ impl HeaderExtractor {
         }
 
         debug!(table = %table, fields = map.len(), "Extracted promoted fields");
-        // A valid object whose fields match no column promotes nothing too, and
-        // used to reach the caller indistinguishable from a full pass.
-        let empty_reason = map
-            .is_empty()
-            .then_some("no schema column matched the payload");
+        // A valid object whose fields match no column promotes nothing too.
+        let empty_reason = map.is_empty().then_some(NO_COLUMN_MATCHED);
+        let mut taken = Vec::new();
+        let unshared = FxHashSet::default();
+        for path in stage_inputs {
+            if !map.contains_key(path) && take_path(&mut parsed, path, path, &mut map, &unshared) {
+                taken.push(path.to_string());
+            }
+        }
+        let unstored = if plan.stores_payload || parsed.is_empty() {
+            Vec::new()
+        } else {
+            unstored_fields(&parsed, contended)
+        };
         HeaderExtraction {
             fields: map,
             empty_reason,
+            stage_inputs: taken,
+            unstored,
         }
     }
+}
+
+/// The fields left in `parsed` that hold data no column took: not a DFE `_`
+/// field, not a path a column copied, and not an object a column emptied.
+fn unstored_fields(parsed: &Map<String, Value>, contended: &FxHashSet<Box<str>>) -> Vec<String> {
+    parsed
+        .iter()
+        .filter(|(key, value)| {
+            !key.starts_with('_')
+                && !contended.contains(key.as_str())
+                && !matches!(value, Value::Object(object) if object.is_empty())
+        })
+        .map(|(key, _)| key.clone())
+        .collect()
+}
+
+/// Whether `ClickHouse` computes the column and refuses a supplied value.
+#[inline]
+fn is_generated(col: &crate::clickhouse::types::ColumnInfo) -> bool {
+    matches!(col.default_kind.as_str(), "MATERIALIZED" | "ALIAS")
+}
+
+/// The instant parsed date-time text names.
+fn instant_time(instant: datetime::UtcInstant) -> Option<chrono::DateTime<Utc>> {
+    chrono::DateTime::from_timestamp(instant.secs, instant.nanos)
+}
+
+/// A numeric epoch as an instant, its unit told by magnitude as the encoder
+/// tells it: seconds, then milliseconds past 10^12, microseconds past 10^15 and
+/// nanoseconds past 10^18. A fractional number is seconds.
+fn epoch_time(n: &serde_json::Number) -> Option<chrono::DateTime<Utc>> {
+    if let Some(ts) = n.as_i64() {
+        let per_second: i64 = match ts.unsigned_abs() {
+            m if m > 1_000_000_000_000_000_000 => 1_000_000_000,
+            m if m > 1_000_000_000_000_000 => 1_000_000,
+            m if m > 1_000_000_000_000 => 1_000,
+            _ => 1,
+        };
+        let nanos = ts.rem_euclid(per_second) * (1_000_000_000 / per_second);
+        return chrono::DateTime::from_timestamp(
+            ts.div_euclid(per_second),
+            u32::try_from(nanos).ok()?,
+        );
+    }
+    let secs = n.as_f64().filter(|f| f.is_finite())?;
+    let whole = secs.floor();
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "the whole part is range-checked by from_timestamp, the fraction is in [0, 1)"
+    )]
+    let (whole_secs, nanos) = (whole as i64, ((secs - whole) * 1e9) as u32);
+    chrono::DateTime::from_timestamp(whole_secs, nanos)
 }
 
 /// Whether a column takes a `ClickHouse` date-time text value.
@@ -440,16 +625,13 @@ impl HeaderExtractor {
 /// discriminant compare rather than the two `&str` compares a category costs.
 #[inline]
 fn is_datetime(col: &crate::clickhouse::types::ColumnInfo) -> bool {
-    use crate::clickhouse_ext::parsed_type::TypeTag;
+    use dfe_clickhouse::dynamic::TypeTag;
     matches!(col.parsed_type.tag, TypeTag::DateTime | TypeTag::DateTime64)
 }
 
-/// Rewrite a zoned date-time as zone-less UTC text, keeping every fraction digit.
-///
-/// Both transforms and the receiver emit `2026-09-07T05:53:53.385Z`, and
-/// `JSONEachRow`'s `DateTime64` reader stops at the zone suffix and rejects the
-/// whole batch (code 27), so every row in it is lost. The zone-less form and
-/// epoch numbers already parse, and are left alone.
+/// Rewrite a zoned date-time as UTC text, keeping every fraction digit and the
+/// zone, so the insert reads the instant whatever the column's timezone.
+/// Zone-less text and epoch numbers are left alone.
 #[inline]
 fn normalise_datetime(map: &mut Map<String, Value>, name: &str) {
     if let Some(value) = map.get_mut(name) {
@@ -536,6 +718,8 @@ fn get_split<'a>(parsed: &'a Map<String, Value>, path: &str) -> Option<&'a Value
 
 /// Take a source field into the output map, moving it unless it is shared.
 ///
+/// A null reads as absent, so `first()` tries the next path and `@default` applies.
+///
 /// A common-header column used to empty the field it read, so a meta column
 /// reading the same field found nothing and landed NULL. A path in `contended`
 /// is copied instead, which leaves it there for the columns that follow.
@@ -551,17 +735,18 @@ fn take_path(
     contended: &FxHashSet<Box<str>>,
 ) -> bool {
     if !contended.is_empty() && contended.contains(source) {
-        let Some(value) = get_path(parsed, source) else {
+        let Some(value) = get_path(parsed, source).filter(|v| !v.is_null()) else {
             return false;
         };
         map.insert(dest.to_string(), value.clone());
         return true;
     }
-    if let Some(value) = remove_path(parsed, source) {
-        map.insert(dest.to_string(), value);
-        true
-    } else {
-        false
+    match remove_path(parsed, source) {
+        Some(Value::Null) | None => false,
+        Some(value) => {
+            map.insert(dest.to_string(), value);
+            true
+        }
     }
 }
 
@@ -643,7 +828,7 @@ mod tests {
     fn default_extractor() -> HeaderExtractor {
         let metadata = MetadataConfig::default();
         let routing = RoutingConfig::default();
-        HeaderExtractor::new(&metadata, &routing)
+        HeaderExtractor::new(&metadata, &routing, &TimestampDqConfig::default())
     }
 
     #[test]
@@ -759,7 +944,7 @@ mod tests {
         let Some(Value::String(ts)) = value else {
             return false;
         };
-        chrono::NaiveDateTime::parse_from_str(ts, "%Y-%m-%d %H:%M:%S%.3f")
+        chrono::NaiveDateTime::parse_from_str(ts, "%Y-%m-%dT%H:%M:%S%.3fZ")
             .is_ok_and(|parsed| parsed.and_utc() >= before)
     }
 
@@ -795,7 +980,7 @@ mod tests {
         let raw = br#"{"event":"x","_timestamp_received":"2024-01-01T00:00:00.250Z"}"#;
         assert_eq!(
             received_for(raw, None),
-            Some(Value::String("2024-01-01 00:00:00.250".into()))
+            Some(Value::String("2024-01-01T00:00:00.250Z".into()))
         );
     }
 
@@ -813,7 +998,7 @@ mod tests {
         let raw = br#"{"event":"x","received_at":"2024-01-01T00:00:00Z"}"#;
         assert_eq!(
             received_for(raw, directive),
-            Some(Value::String("2024-01-01 00:00:00.000".into()))
+            Some(Value::String("2024-01-01T00:00:00.000Z".into()))
         );
     }
 
@@ -843,7 +1028,7 @@ mod tests {
         );
         assert_eq!(
             map.get("_timestamp_received"),
-            Some(&Value::String("2024-01-01 00:00:00.000".into()))
+            Some(&Value::String("2024-01-01T00:00:00.000Z".into()))
         );
         assert_eq!(
             map.get("received_at"),
@@ -906,7 +1091,11 @@ mod tests {
             default_org_id: "tenant-zero".to_string(),
             ..RoutingConfig::default()
         };
-        let extractor = HeaderExtractor::new(&MetadataConfig::default(), &routing);
+        let extractor = HeaderExtractor::new(
+            &MetadataConfig::default(),
+            &routing,
+            &TimestampDqConfig::default(),
+        );
         let map = extractor
             .extract(
                 br#"{"_org_id": ""}"#,
@@ -1133,7 +1322,11 @@ mod tests {
             capture_source: false,
             ..Default::default()
         };
-        let extractor2 = HeaderExtractor::new(&metadata, &RoutingConfig::default());
+        let extractor2 = HeaderExtractor::new(
+            &metadata,
+            &RoutingConfig::default(),
+            &TimestampDqConfig::default(),
+        );
         let col_meta = empty_col_meta();
 
         let map = extractor2
@@ -1642,7 +1835,7 @@ mod tests {
             .fields;
         assert_eq!(
             map.get("_timestamp"),
-            Some(&Value::String("2026-03-15 10:30:00.123".into()))
+            Some(&Value::String("2026-03-15T10:30:00.123Z".into()))
         );
     }
 
@@ -1661,7 +1854,7 @@ mod tests {
             .fields;
         assert_eq!(
             map.get("_timestamp"),
-            Some(&Value::String("2024-03-05 01:02:03.456".into())),
+            Some(&Value::String("2024-03-05T01:02:03.456Z".into())),
             "_timestamp must carry the event's own time, not the load time"
         );
     }
@@ -1681,7 +1874,7 @@ mod tests {
             .fields;
         assert_eq!(
             map.get("_timestamp"),
-            Some(&Value::String("2026-03-15 10:30:00.123".into()))
+            Some(&Value::String("2026-03-15T10:30:00.123Z".into()))
         );
     }
 
@@ -1700,9 +1893,8 @@ mod tests {
     }
 
     #[test]
-    fn test_timestamp_rfc3339_z_is_normalised() {
-        // The form both transforms and the receiver emit. Left verbatim it
-        // fails the whole JSONEachRow batch with code 27.
+    fn test_timestamp_rfc3339_z_keeps_its_zone() {
+        // The form both transforms and the receiver emit.
         let extractor = default_extractor();
         let raw = br#"{"timestamp": "2026-09-07T05:53:53.385Z"}"#;
         let schema = make_datetime_schema(&["_timestamp"]);
@@ -1713,8 +1905,8 @@ mod tests {
             .fields;
         assert_eq!(
             map.get("_timestamp"),
-            Some(&Value::String("2026-09-07 05:53:53.385".into())),
-            "a Z suffix must be normalised away, not carried to ClickHouse"
+            Some(&Value::String("2026-09-07T05:53:53.385Z".into())),
+            "the UTC zone reaches the insert"
         );
     }
 
@@ -1730,7 +1922,7 @@ mod tests {
             .fields;
         assert_eq!(
             map.get("_timestamp"),
-            Some(&Value::String("2026-09-07 05:53:53.385".into())),
+            Some(&Value::String("2026-09-07T05:53:53.385Z".into())),
             "an offset must be applied, not truncated"
         );
     }
@@ -1748,15 +1940,15 @@ mod tests {
         for (raw, expected) in [
             (
                 br#"{"seen_at": "2026-04-07T17:03:00.123456789+10:00"}"#.as_slice(),
-                "2026-04-07 07:03:00.123456789",
+                "2026-04-07T07:03:00.123456789Z",
             ),
             (
                 br#"{"seen_at": "2026-04-07T01:33:00.123456-05:30"}"#.as_slice(),
-                "2026-04-07 07:03:00.123456",
+                "2026-04-07T07:03:00.123456Z",
             ),
             (
                 br#"{"seen_at": "2026-04-07T07:03:00Z"}"#.as_slice(),
-                "2026-04-07 07:03:00.000",
+                "2026-04-07T07:03:00.000Z",
             ),
         ] {
             let map = extractor
@@ -1780,12 +1972,12 @@ mod tests {
             .fields;
         assert_eq!(
             map.get("seen_at"),
-            Some(&Value::String("2026-09-07 05:53:53.385".into()))
+            Some(&Value::String("2026-09-07T05:53:53.385Z".into()))
         );
     }
 
     #[test]
-    fn test_non_rfc3339_timestamp_is_left_alone() {
+    fn test_epoch_millis_land_as_the_same_instant() {
         let extractor = default_extractor();
         let raw = br#"{"timestamp": 1788760433385}"#;
         let schema = make_datetime_schema(&["_timestamp"]);
@@ -1796,8 +1988,8 @@ mod tests {
             .fields;
         assert_eq!(
             map.get("_timestamp"),
-            Some(&Value::Number(1_788_760_433_385_i64.into())),
-            "epoch millis already parse — normalisation must not touch them"
+            Some(&Value::String("2026-09-07T05:53:53.385Z".into())),
+            "epoch millis are read as the instant they name"
         );
     }
 
@@ -1964,12 +2156,12 @@ mod tests {
 
         assert_eq!(
             map.get("_timestamp"),
-            Some(&Value::String("2026-09-21 04:45:00.000".into())),
+            Some(&Value::String("2026-09-21T04:45:00.000Z".into())),
             "the header column still fills"
         );
         assert_eq!(
             map.get("timestamp"),
-            Some(&Value::String("2026-09-21 04:45:00.000".into())),
+            Some(&Value::String("2026-09-21T04:45:00.000Z".into())),
             "the meta column reading the same field must fill too, not land NULL"
         );
     }
@@ -2109,12 +2301,12 @@ mod tests {
 
         assert_eq!(
             map.get("_timestamp"),
-            Some(&Value::String("2024-03-05 01:02:03.456".into())),
+            Some(&Value::String("2024-03-05T01:02:03.456Z".into())),
             "the header column carries the event's own time"
         );
         assert_eq!(
             map.get("timestamp"),
-            Some(&Value::String("2024-03-05 01:02:03.456".into())),
+            Some(&Value::String("2024-03-05T01:02:03.456Z".into())),
             "the meta column reading the same field must fill too, not land NULL"
         );
     }
@@ -2154,7 +2346,7 @@ mod tests {
         );
         assert_eq!(
             map.get("_timestamp"),
-            Some(&Value::String("2026-09-21 04:45:00.000".into()))
+            Some(&Value::String("2026-09-21T04:45:00.000Z".into()))
         );
     }
 
@@ -2181,5 +2373,253 @@ mod tests {
             "a plan keyed on the old column list would miss the new collision"
         );
         assert_eq!(map.get("_tenant"), Some(&Value::String("acme".into())));
+    }
+
+    fn renamed_meta(column: &str, renamed: &str) -> ColumnMetaCache {
+        use crate::column_meta::ColumnDirectivesEntry;
+        use rustc_hash::FxHashMap;
+
+        let mut config = ColumnDirectivesConfig::default();
+        let mut table_cols = FxHashMap::default();
+        table_cols.insert(
+            column.to_string(),
+            ColumnDirectivesEntry {
+                renamed: Some(renamed.to_string()),
+                ..Default::default()
+            },
+        );
+        config.tables.insert("dfe.events".to_string(), table_cols);
+        ColumnMetaCache::new(config)
+    }
+
+    /// `first(a/b)` takes the first non-null source, and a null alone takes the
+    /// column's `@default`, as the directive reference says.
+    #[test]
+    fn a_null_source_is_absent_to_first_and_to_the_default() {
+        use crate::column_meta::ColumnDirectives;
+        use rustc_hash::FxHashMap;
+
+        let extractor = default_extractor();
+        let schema = make_schema(&["source.ip"]);
+        let col_meta = renamed_meta("source.ip", "first(source_ip/src_ip)");
+        let map = extractor
+            .extract(
+                br#"{"source_ip": null, "src_ip": "10.0.0.1"}"#,
+                "dfe.events",
+                &schema,
+                &col_meta,
+                None,
+            )
+            .fields;
+        assert_eq!(
+            map.get("source.ip"),
+            Some(&Value::String("10.0.0.1".into()))
+        );
+
+        let schema = make_schema(&["severity"]);
+        let col_meta = empty_col_meta();
+        let mut ddl = FxHashMap::default();
+        ddl.insert(
+            "severity".to_string(),
+            ColumnDirectives {
+                default: Some(Value::String("unknown".into())),
+                ..Default::default()
+            },
+        );
+        col_meta.apply_ddl("dfe.events", ddl);
+        let map = extractor
+            .extract(
+                br#"{"severity": null}"#,
+                "dfe.events",
+                &schema,
+                &col_meta,
+                None,
+            )
+            .fields;
+        assert_eq!(map.get("severity"), Some(&Value::String("unknown".into())));
+    }
+
+    /// A MATERIALIZED or ALIAS column refuses a supplied value, so a payload
+    /// field of the same name is left for `_json` rather than sent.
+    #[test]
+    fn a_generated_column_takes_nothing_from_the_payload() {
+        let extractor = default_extractor();
+        let mut schema = make_schema(&["host", "host_upper", "host_alias"]);
+        schema.columns[1].default_kind = "MATERIALIZED".to_string();
+        schema.columns[2].default_kind = "ALIAS".to_string();
+        let map = extractor
+            .extract(
+                br#"{"host": "a", "host_upper": "A", "host_alias": "a"}"#,
+                "dfe.events",
+                &schema,
+                &empty_col_meta(),
+                None,
+            )
+            .fields;
+        assert_eq!(map.get("host"), Some(&Value::String("a".into())));
+        assert!(!map.contains_key("host_upper"), "{map:?}");
+        assert!(!map.contains_key("host_alias"), "{map:?}");
+    }
+
+    fn extractor_with(metadata: &MetadataConfig, dq: &TimestampDqConfig) -> HeaderExtractor {
+        HeaderExtractor::new(metadata, &RoutingConfig::default(), dq)
+    }
+
+    /// `timestamp_dq` bounds `_timestamp` on this path as on the transformer's:
+    /// an event time past `max_future_seconds` lands as the ingest time.
+    #[test]
+    fn timestamp_dq_bounds_the_extracted_timestamp() {
+        let schema = make_datetime_schema(&["_timestamp"]);
+        let col_meta = empty_col_meta();
+        let raw = br#"{"timestamp": "2099-01-01T00:00:00Z"}"#;
+        let dq = TimestampDqConfig {
+            max_future_seconds: 600,
+            ..TimestampDqConfig::default()
+        };
+
+        let checked = extractor_with(&MetadataConfig::default(), &dq)
+            .extract(raw, "dfe.events", &schema, &col_meta, None)
+            .fields;
+        let landed = checked["_timestamp"].as_str().expect("text");
+        assert!(
+            !landed.starts_with("2099"),
+            "a far-future time was kept: {landed}"
+        );
+
+        let off = TimestampDqConfig {
+            enabled: false,
+            ..dq.clone()
+        };
+        let unchecked = extractor_with(&MetadataConfig::default(), &off)
+            .extract(raw, "dfe.events", &schema, &col_meta, None)
+            .fields;
+        assert!(
+            unchecked["_timestamp"]
+                .as_str()
+                .is_some_and(|t| t.starts_with("2099")),
+            "a disabled check keeps the source time: {unchecked:?}"
+        );
+    }
+
+    /// A numeric epoch is read by magnitude, as the encoder reads it, so a
+    /// nanosecond stamp inside the bounds keeps every digit.
+    #[test]
+    fn timestamp_dq_reads_a_numeric_epoch_by_magnitude() {
+        let schema = make_datetime_schema(&["_timestamp"]);
+        let extractor = extractor_with(&MetadataConfig::default(), &TimestampDqConfig::default());
+        for raw in [
+            &br#"{"timestamp": 1788760433}"#[..],
+            br#"{"timestamp": 1788760433385}"#,
+            br#"{"timestamp": 1788760433385000}"#,
+            br#"{"timestamp": 1788760433385000000}"#,
+        ] {
+            let map = extractor
+                .extract(raw, "dfe.events", &schema, &empty_col_meta(), None)
+                .fields;
+            let landed = map["_timestamp"].as_str().expect("text");
+            assert!(
+                landed.starts_with("2026-09-07T05:53:53"),
+                "{raw:?} -> {landed}"
+            );
+        }
+    }
+
+    /// `drop_tags` leaves the tags column empty, and `tags_fields` names where
+    /// it reads from when it is kept.
+    #[test]
+    fn the_tags_column_follows_the_tags_policy() {
+        let schema = make_schema(&["_tags", "host"]);
+        let raw = br#"{"meta": {"env": "prod"}, "host": "a"}"#;
+        let dq = TimestampDqConfig::default();
+
+        let kept = extractor_with(&MetadataConfig::default(), &dq)
+            .extract(raw, "dfe.events", &schema, &empty_col_meta(), None)
+            .fields;
+        assert_eq!(kept.get("_tags"), Some(&serde_json::json!({"env": "prod"})));
+
+        let metadata = MetadataConfig {
+            drop_tags: true,
+            ..MetadataConfig::default()
+        };
+        let dropped = extractor_with(&metadata, &dq)
+            .extract(
+                br#"{"tags": ["a"], "host": "a"}"#,
+                "dfe.events",
+                &schema,
+                &empty_col_meta(),
+                None,
+            )
+            .fields;
+        assert!(!dropped.contains_key("_tags"), "{dropped:?}");
+    }
+
+    /// `metadata.raw_source_fields` fills the raw column, after a raw field of
+    /// the record's own.
+    #[test]
+    fn the_raw_column_reads_the_configured_source_fields() {
+        let schema = make_schema(&["_raw"]);
+        let extractor = default_extractor();
+        let map = extractor
+            .extract(
+                br#"{"logoriginal": "<134>sshd: ok"}"#,
+                "dfe.events",
+                &schema,
+                &empty_col_meta(),
+                None,
+            )
+            .fields;
+        assert_eq!(
+            map.get("_raw"),
+            Some(&Value::String("<134>sshd: ok".into()))
+        );
+
+        let map = extractor
+            .extract(
+                br#"{"_raw": "own", "logoriginal": "other"}"#,
+                "dfe.events",
+                &schema,
+                &empty_col_meta(),
+                None,
+            )
+            .fields;
+        assert_eq!(map.get("_raw"), Some(&Value::String("own".into())));
+    }
+
+    /// A zoned time keeps its zone through extraction, so the `JSONEachRow`
+    /// shaping step sends the instant rather than text a non-UTC column would
+    /// read in its own zone.
+    #[test]
+    fn a_zoned_time_reaches_the_shaping_step_as_the_same_instant() {
+        let schema = make_datetime_schema(&["_timestamp"]);
+        let map = default_extractor()
+            .extract(
+                br#"{"timestamp": "2026-09-07T15:53:53.385+10:00"}"#,
+                "dfe.events",
+                &schema,
+                &empty_col_meta(),
+                None,
+            )
+            .fields;
+        let mut value = map["_timestamp"].clone();
+        let sydney = ParsedType::parse("DateTime64(3, 'Australia/Sydney')");
+        dfe_clickhouse::dynamic::shape_for_type(&mut value, &sydney);
+        assert_eq!(value, Value::String("1788760433.385".into()));
+    }
+
+    /// A table with no `_json` column names the fields that land nowhere, so
+    /// the caller can count them. DFE's own `_` fields and a table that keeps
+    /// the whole payload report none.
+    #[test]
+    fn fields_no_column_holds_are_named_when_nothing_keeps_the_payload() {
+        let raw =
+            br#"{"MetricName": "m", "ScopeName": "s", "_otel_metric_type": "sum", "Resource": {}}"#;
+        let extractor = default_extractor();
+        let schema = make_schema(&["MetricName"]);
+        let got = extractor.extract(raw, "dfe.events", &schema, &empty_col_meta(), None);
+        assert_eq!(got.unstored, ["ScopeName"]);
+
+        let schema = make_schema(&["MetricName", "_json"]);
+        let got = extractor.extract(raw, "dfe.events", &schema, &empty_col_meta(), None);
+        assert!(got.unstored.is_empty(), "{:?}", got.unstored);
     }
 }

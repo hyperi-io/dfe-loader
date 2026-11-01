@@ -55,9 +55,9 @@ flowchart TB
         B["Per-table buffer<br/>rows + raw + offsets"]
     end
 
-    subgraph Sink["ClickHouse insert (clickhouse_ext::DynamicInsert)"]
+    subgraph Sink["ClickHouse insert (dfe_clickhouse::dynamic::DynamicInsert)"]
         CE["DynamicRow encoder<br/>Map + schema -> binary"]
-        HTTP["HTTP: insert_formatted_with<br/>FORMAT RowBinaryWithNamesAndTypes"]
+        HTTP["HTTP: insert_formatted_with<br/>FORMAT RowBinaryWithDefaults"]
         JF["HTTP: insert_formatted_with<br/>FORMAT JSONEachRow (fallback)"]
     end
 
@@ -78,11 +78,11 @@ flowchart TB
 
 | Area | Doc | Covers |
 |------|-----|--------|
-| System shape | [architecture.md](architecture.md) | Layers, the `clickhouse_ext` boundary, the client crates |
+| System shape | [architecture.md](architecture.md) | Layers, the dynamic insert, the client crates |
 | Configuration | [configuration.md](configuration.md) | The cascade and the settings that change behaviour |
 | Operations | [operations.md](operations.md) | Running, config-check, metrics/top, hot-reload, DLQ |
 | Build features | [feature-flags.md](feature-flags.md) | Cargo features and the ClickHouse client crates |
-| Insert layer | [clickhouse/](clickhouse/) | RowBinary vs JSONEachRow, `clickhouse_ext`, schema cache, type handling, TLS, DDL directives |
+| Insert layer | [clickhouse/](clickhouse/) | RowBinary vs JSONEachRow, the dynamic insert, schema cache, type handling, TLS, DDL directives |
 | Hot path | [pipeline/](pipeline/) | Routing, extraction, enrichment, capture modes, buffering |
 | Transports | [transport/](transport/) | Kafka / gRPC / Memory, the common header |
 | Deployment | [deployment/](deployment/) | Container + chart publishing, schemas |
@@ -92,4 +92,4 @@ flowchart TB
 
 ## The client dependency, in one line
 
-dfe-loader inserts through the official `clickhouse` crate from crates.io, with `dfe-clickhouse` reading the server's exception code out of a rejection. The dynamic RowBinary layer the crate keeps out of scope -- runtime `Map<String,Value>` encoding -- lives in this repo at `src/clickhouse_ext/`. See [clickhouse/clickhouse-ext.md](clickhouse/clickhouse-ext.md).
+dfe-loader inserts through the official `clickhouse` crate from crates.io, with `dfe-clickhouse` reading the server's exception code out of a rejection. The dynamic RowBinary layer the `clickhouse` crate keeps out of scope -- runtime `Map<String,Value>` encoding -- comes from `dfe-clickhouse`'s `dynamic` module. See [clickhouse/clickhouse-ext.md](clickhouse/clickhouse-ext.md).

@@ -10,7 +10,7 @@
 
 pub mod containers;
 pub mod metrics;
-pub mod shared_service;
+pub use scalo::deployment::test_support::shared_service;
 pub mod test_logging;
 
 use std::env;
@@ -531,6 +531,7 @@ pub fn containers_prefix() -> String {
     shared_service::Suite {
         repo: "dfe-loader",
         manifest_dir: env!("CARGO_MANIFEST_DIR"),
+        tmp_dir: option_env!("CARGO_TARGET_TMPDIR"),
     }
     .prefix()
 }

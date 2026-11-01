@@ -102,6 +102,10 @@ pub struct Orchestrator {
     /// Dead letters not yet offered to the DLQ. The next flush hands them over
     /// before it commits, so no offset is committed past one.
     dead_letters: Vec<DlqEntry>,
+    /// Offsets of dead letters the DLQ has confirmed written, committed with
+    /// the cycle's other offsets. A partition carrying only rejected records
+    /// has no batch to commit them with otherwise.
+    dlq_placed: Vec<KafkaOffset>,
     /// Received records whose Push answer waits on their rows.
     acks: AckLedger,
     /// Whether the transport answers each Push only once it is released, set
@@ -141,7 +145,11 @@ impl Stages {
                 &config.field_sanitization,
                 &config.routing,
             ),
-            extractor: HeaderExtractor::new(&config.metadata, &config.routing),
+            extractor: HeaderExtractor::new(
+                &config.metadata,
+                &config.routing,
+                &config.timestamp_dq,
+            ),
             default_table: format!(
                 "{}.{}",
                 config.routing.default_db, config.routing.default_table
@@ -173,6 +181,7 @@ impl Orchestrator {
             batch_engine: None,
             sink_circuit_open: false,
             dead_letters: Vec::new(),
+            dlq_placed: Vec::new(),
             acks: AckLedger::default(),
             holds_answers: false,
             commits_at_receipt: false,
@@ -202,6 +211,7 @@ impl Orchestrator {
             batch_engine: None,
             sink_circuit_open: false,
             dead_letters: Vec::new(),
+            dlq_placed: Vec::new(),
             acks: AckLedger::default(),
             holds_answers: false,
             commits_at_receipt: false,
@@ -422,33 +432,29 @@ impl Orchestrator {
         //
         // Capacity 256: enough to buffer a burst of new tables without backpressure on hot path.
         const SCHEMA_RESOLVE_CAPACITY: usize = 256;
-        let (resolve_tx, mut resolve_rx) = mpsc::channel::<String>(SCHEMA_RESOLVE_CAPACITY);
+        let (resolve_tx, resolve_rx) = mpsc::channel::<String>(SCHEMA_RESOLVE_CAPACITY);
         let (schema_result_tx, mut schema_result_rx) =
             mpsc::channel::<TableResolutionResult>(SCHEMA_RESOLVE_CAPACITY);
         {
             let resolver_client = Arc::clone(&http_client);
             let result_tx = schema_result_tx.clone();
             let shutdown_resolver = self.shutdown.clone();
-            tokio::spawn(async move {
-                loop {
-                    tokio::select! {
-                        biased;
-                        () = shutdown_resolver.cancelled() => break,
-                        Some(table) = resolve_rx.recv() => {
-                            let client = Arc::clone(&resolver_client);
-                            let tx = result_tx.clone();
-                            // Each table resolved concurrently — never blocks the resolver loop.
-                            tokio::spawn(async move {
-                                let (result, fault) = resolve_table(&client, table).await;
-                                if let Some(e) = fault {
-                                    debug!(table = %result.table, error = %e, "Schema fetch failed, will retry");
-                                }
-                                let _ = tx.send(result).await;
-                            });
+            tokio::spawn(run_resolver(
+                move |table| {
+                    let client = Arc::clone(&resolver_client);
+                    async move {
+                        let (result, fault) = resolve_table(&client, table).await;
+                        if let Some(e) = fault {
+                            debug!(table = %result.table, error = %e, "Schema fetch failed, will retry");
                         }
+                        result
                     }
-                }
-            });
+                },
+                resolve_rx,
+                result_tx,
+                shutdown_resolver,
+                MAX_CONCURRENT_RESOLUTIONS,
+            ));
         }
 
         // Background refresh — expiring tables go back through the resolver, so a
@@ -728,18 +734,22 @@ impl Orchestrator {
                 Some(result) = schema_result_rx.recv() => {
                     let table = &result.table;
 
-                    // Apply DDL capture tags (only if comment is non-empty)
-                    if !result.comment.is_empty() {
-                        capture_overrides.update_from_comment(table, &result.comment);
+                    // A comment or directives read that failed keeps what the
+                    // table had, so a transient failure erases nothing.
+                    if let Some(comment) = &result.comment {
+                        capture_overrides.update_from_comment(table, comment);
                         debug!(table = %table, "Applied DDL capture tags from background resolver");
                     }
 
                     // Populate ColumnMetaCache DDL layer — must happen before field mapping
                     // and computed column caches, which read from it.
-                    col_meta_cache.apply_ddl(table, result.column_directives);
-
-                    // Apply computed columns (uses ColumnMetaCache for CEL expressions)
-                    computed_column_cache.build_and_cache(table, &col_meta_cache);
+                    apply_directives(
+                        &col_meta_cache,
+                        &mut computed_column_cache,
+                        table,
+                        result.column_directives,
+                        &result.schema,
+                    );
 
                     match result.schema {
                         SchemaResolution::Resolved(schema) => {
@@ -992,11 +1002,10 @@ impl Orchestrator {
                             // skip full parse for messages that will be filtered/DLQ'd.
                             // Messages that pass pre-route are processed by MessageProcessor.
                             let pre_route_filtered = if let Some(ref engine) = self.batch_engine
-                                && let Some(ref field) = engine.config().routing_field
+                                && engine.config().routing_field.is_some()
                             {
                                 use scalo::worker::engine::pre_route::{
-                                    PreRouteOutcome, apply_filters, extract_routing_field,
-                                    filters_from_config,
+                                    PreRouteOutcome, apply_filters, filters_from_config,
                                 };
                                 let filters = filters_from_config(&engine.config().pre_route_filters);
                                 let mut pass_indices: Vec<usize> = Vec::with_capacity(batch.len());
@@ -1004,8 +1013,8 @@ impl Orchestrator {
                                 let mut dlq_entries: Vec<(usize, String)> = Vec::new();
 
                                 for (idx, msg) in batch.iter().enumerate() {
-                                    let extraction = extract_routing_field(&msg.payload, field);
-                                    let outcome = apply_filters(&extraction, &filters);
+                                    // Each filter reads the field it names.
+                                    let outcome = apply_filters(&msg.payload, &filters);
                                     match outcome {
                                         PreRouteOutcome::Continue => pass_indices.push(idx),
                                         PreRouteOutcome::Filtered => {
@@ -1549,6 +1558,7 @@ impl Orchestrator {
         // A Kafka consumer never re-reads a row it has read past, so every row
         // held for another attempt keeps the commit below it until it lands.
         withheld.extend(self.unsettled.offsets());
+        committable.append(&mut self.dlq_placed);
         // ONE commit for the cycle, bounded by the lowest withheld offset on
         // each partition. Doing it per batch buries a sibling table's withheld
         // offset, and `get_ready_for_flush` iterates an FxHashMap, so batch
@@ -1694,7 +1704,10 @@ impl Orchestrator {
             return;
         }
         match place_dead_letters(dlq, &dead_letters, expiry, &self.shutdown).await {
-            Placement::Written => self.count_placed(&dead_letters),
+            Placement::Written => {
+                self.count_placed(&dead_letters);
+                self.dlq_placed.extend(placed_offsets(&dead_letters));
+            }
             Placement::Closed => {
                 warn!(
                     rows = dead_letters.len(),
@@ -1711,6 +1724,14 @@ impl Orchestrator {
                 self.strand_dead_letters(dead_letters);
             }
         }
+    }
+
+    /// The placed dead letters' offsets a cycle with no batch may commit: each
+    /// partition's stays below the lowest offset still held anywhere, as the
+    /// flush cycle's commit does.
+    fn dlq_commit(&mut self, mut withheld: Vec<KafkaOffset>) -> Vec<KafkaOffset> {
+        withheld.extend(self.unsettled.offsets());
+        committable_offsets(std::mem::take(&mut self.dlq_placed), &withheld)
     }
 
     /// Queue dead letters for the next flush, tracking their bytes until then.
@@ -1811,6 +1832,10 @@ impl Orchestrator {
             self.settle_dead_letters(transport, dlq, dead_letters, dlq_deadline)
                 .await;
             self.unsettled.rearm();
+            if !self.commits_at_receipt {
+                let to_commit = self.dlq_commit(still_held);
+                commit_offsets(transport, &self.metrics, &to_commit).await;
+            }
         } else {
             self.flush_batches_transport(
                 inserter, transport, dlq, batches, still_held, buffers, pending,
@@ -2428,6 +2453,58 @@ where
     }
 }
 
+/// Schema resolutions run at once. Each is three `system.columns` and comment
+/// queries, so a burst of new tables against a slow ClickHouse would otherwise
+/// pile up queries and memory without limit.
+const MAX_CONCURRENT_RESOLUTIONS: usize = 8;
+
+/// Resolve each table `requests` names, at most `limit` at a time, sending
+/// each result on `results`. A table already being resolved is not resolved
+/// twice: the result on its way answers the repeat request too.
+async fn run_resolver<F, Fut>(
+    resolve: F,
+    mut requests: mpsc::Receiver<String>,
+    results: mpsc::Sender<TableResolutionResult>,
+    shutdown: CancellationToken,
+    limit: usize,
+) where
+    F: Fn(String) -> Fut + Send + Sync + 'static,
+    Fut: std::future::Future<Output = TableResolutionResult> + Send + 'static,
+{
+    let permits = Arc::new(tokio::sync::Semaphore::new(limit));
+    let in_flight: Arc<parking_lot::Mutex<FxHashSet<String>>> = Arc::default();
+    loop {
+        let table = tokio::select! {
+            biased;
+            () = shutdown.cancelled() => break,
+            table = requests.recv() => match table {
+                Some(table) => table,
+                None => break,
+            },
+        };
+        if !in_flight.lock().insert(table.clone()) {
+            continue;
+        }
+        let permit = tokio::select! {
+            biased;
+            () = shutdown.cancelled() => break,
+            permit = Arc::clone(&permits).acquire_owned() => match permit {
+                Ok(permit) => permit,
+                Err(_) => break,
+            },
+        };
+        let work = resolve(table.clone());
+        let results = results.clone();
+        let in_flight = Arc::clone(&in_flight);
+        tokio::spawn(async move {
+            let result = work.await;
+            in_flight.lock().remove(&table);
+            drop(permit);
+            let _ = results.send(result).await;
+        });
+    }
+}
+
 /// Fetch `table`'s schema, table COMMENT and column directives, with the fetch
 /// error behind an `Unavailable` answer so the caller can name it.
 async fn resolve_table(
@@ -2439,11 +2516,19 @@ async fn resolve_table(
         client.fetch_table_schema(&table),
         client.fetch_column_comments(&table),
     );
-    let column_directives = comments_res
-        .unwrap_or_default()
-        .into_iter()
-        .map(|(col, comment)| (col, parse_directives(&comment)))
-        .collect();
+    let column_directives = directives_from(comments_res);
+    // DDL cannot be refused at startup the way the config's coerce directive is.
+    for (column, _) in column_directives
+        .iter()
+        .flatten()
+        .filter(|(_, directives)| directives.coerce.is_some())
+    {
+        warn!(
+            table = %table,
+            column = %column,
+            "The @coerce directive reaches no encoder -- the dynamic insert applies fixed coercion rules"
+        );
+    }
     // Keep the reason: the event loop can only fall back to the default table
     // safely if it can tell an absent table from an unreachable ClickHouse.
     let (schema, fault) = match schema_res {
@@ -2453,11 +2538,48 @@ async fn resolve_table(
     };
     let result = TableResolutionResult {
         table,
-        comment: comment_res.unwrap_or_default(),
+        comment: comment_res.ok(),
         schema,
         column_directives,
     };
     (result, fault)
+}
+
+/// Apply a resolution's column directives to the directive and computed-column
+/// caches. A table that does not exist keeps no entry in either, so arbitrary
+/// `_source` values cannot grow them, and a read that failed changes nothing.
+fn apply_directives(
+    col_meta: &crate::column_meta::ColumnMetaCache,
+    computed: &mut crate::transform::computed::ComputedColumnCache,
+    table: &str,
+    directives: Option<rustc_hash::FxHashMap<String, crate::column_meta::ColumnDirectives>>,
+    schema: &SchemaResolution,
+) {
+    match (schema, directives) {
+        (SchemaResolution::TableNotFound, _) => {
+            col_meta.forget(table);
+            computed.forget(table);
+        }
+        (_, Some(directives)) => {
+            col_meta.apply_ddl(table, directives);
+            // Computed columns read their CEL expressions from it.
+            computed.build_and_cache(table, col_meta);
+        }
+        (_, None) => {}
+    }
+}
+
+/// Column directives from a column-comment read, or `None` when the read
+/// failed: an empty map would replace the table's working directives.
+fn directives_from<E>(
+    comments: std::result::Result<rustc_hash::FxHashMap<String, String>, E>,
+) -> Option<rustc_hash::FxHashMap<String, crate::column_meta::ColumnDirectives>> {
+    comments.ok().map(|comments| {
+        comments
+            .into_iter()
+            .map(|(col, comment)| (col, parse_directives(&comment)))
+            .collect()
+    })
 }
 
 /// Resolve the tables the config names, retrying a failed fetch within
@@ -2853,13 +2975,24 @@ fn pending_reason_label(reason: &super::pending_schema::ExpireReason) -> &'stati
     }
 }
 
-/// Whether the DLQ will actually keep what it is handed.
+/// The Kafka offsets the dead letters came from, for those that carry one.
+fn placed_offsets(dead_letters: &[DlqEntry]) -> impl Iterator<Item = KafkaOffset> + '_ {
+    dead_letters.iter().filter_map(|entry| {
+        let source = entry.source.as_ref()?;
+        Some(KafkaOffset::new(
+            source.topic.as_deref()?,
+            source.partition?,
+            source.offset?,
+        ))
+    })
+}
+
+/// Whether the DLQ takes what it is handed.
 ///
-/// `Dlq::spawn` returns `Ok(Dlq::disabled())` when the config asks for a DLQ
-/// but no backend builds -- a read-only rootfs on a gRPC-transport pod reaches
-/// that by config alone. A disabled `Dlq` counts a drop and returns `Ok` from
-/// `send`, so `is_some()` answers "was one asked for", never "will it keep
-/// anything". Only the latter may gate an offset commit.
+/// A DLQ the config disables counts a drop and returns `Ok` from `send`, so
+/// `is_some()` answers "was one asked for", never "will it keep anything".
+/// One enabled with no backend started reports enabled and refuses every
+/// confirmed write, which holds the rows at their source.
 fn dlq_accepts(dlq: Option<&Arc<Dlq>>) -> bool {
     dlq.is_some_and(|d| d.is_enabled())
 }
@@ -3755,6 +3888,41 @@ mod tests {
             .collect()
     }
 
+    /// A cycle with no batch, only rejected records, still commits the offsets
+    /// of those the DLQ confirmed, so the partition's backlog clears and a
+    /// restart does not replay them into the DLQ. An offset still held keeps
+    /// its partition's commit below it.
+    #[tokio::test]
+    async fn dead_letters_placed_with_no_batch_are_committed() {
+        let dir = dlq_dir("dlq-only");
+        let dlq = file_dlq(&dir);
+        let payloads: Vec<Arc<[u8]>> =
+            vec![Arc::from(&b"{\"n\":1}"[..]), Arc::from(&b"{\"n\":2}"[..])];
+        let dead_letters = rejected_entries(&payloads, &rejected_rows(2, "code 117"));
+        let mut orchestrator = Orchestrator::new(Config::default());
+        settle(&mut orchestrator, Some(&dlq), dead_letters, in_30s()).await;
+        assert_eq!(orchestrator.stats().messages_dlq, 2);
+
+        let committed = orchestrator.dlq_commit(Vec::new());
+        let offsets: Vec<(i32, i64)> = committed.iter().map(|o| (o.partition, o.offset)).collect();
+        assert_eq!(offsets, [(0, 10), (0, 11)], "the placed rows' offsets");
+        assert!(
+            orchestrator.dlq_commit(Vec::new()).is_empty(),
+            "committed once"
+        );
+
+        let more = rejected_entries(&payloads, &rejected_rows(2, "code 117"));
+        settle(&mut orchestrator, Some(&dlq), more, in_30s()).await;
+        let held = vec![KafkaOffset::new("dfe-events", 0, 11)];
+        let committed = orchestrator.dlq_commit(held);
+        assert!(
+            committed.iter().all(|o| o.offset < 11),
+            "a held offset bounds the commit: {committed:?}"
+        );
+        dlq.shutdown().await.expect("stop the DLQ");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[tokio::test]
     async fn a_batch_larger_than_the_dlq_channel_loses_nothing() {
         // buffer.flush_rows defaults to 20_000, far past any queue in the
@@ -3873,13 +4041,136 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A burst of resolution requests runs at most `limit` at a time, and a
+    /// table already being resolved is not queried again.
     #[tokio::test]
-    async fn a_degraded_dlq_is_not_a_working_one() {
-        // scalo's Dlq::spawn returns Ok(disabled) when the config enables a DLQ
-        // but no backend builds -- a read-only rootfs on a gRPC-transport pod
-        // gets here by config alone. A disabled Dlq counts a drop and returns
-        // Ok from send(), so reading is_some() commits the offsets for rows it
-        // just threw away.
+    async fn the_resolver_bounds_its_work_and_skips_a_table_in_flight() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let running = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let (req_tx, req_rx) = mpsc::channel(256);
+        let (res_tx, mut res_rx) = mpsc::channel(256);
+        let shutdown = CancellationToken::new();
+        let (r, p, c) = (Arc::clone(&running), Arc::clone(&peak), Arc::clone(&calls));
+        let resolver = tokio::spawn(run_resolver(
+            move |table| {
+                let (running, peak, calls) = (Arc::clone(&r), Arc::clone(&p), Arc::clone(&c));
+                async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    let now = running.fetch_add(1, Ordering::SeqCst) + 1;
+                    peak.fetch_max(now, Ordering::SeqCst);
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    running.fetch_sub(1, Ordering::SeqCst);
+                    TableResolutionResult {
+                        table,
+                        comment: None,
+                        schema: SchemaResolution::Unavailable,
+                        column_directives: None,
+                    }
+                }
+            },
+            req_rx,
+            res_tx,
+            shutdown.clone(),
+            3,
+        ));
+        // 20 distinct tables, the first asked for twice while it runs.
+        req_tx.send("dfe.t0".to_string()).await.unwrap();
+        for i in 0..20 {
+            req_tx.send(format!("dfe.t{i}")).await.unwrap();
+        }
+        let mut answered = 0;
+        while answered < 20 {
+            tokio::time::timeout(Duration::from_secs(5), res_rx.recv())
+                .await
+                .expect("every table is answered")
+                .expect("the resolver is running");
+            answered += 1;
+        }
+        assert!(
+            peak.load(Ordering::SeqCst) <= 3,
+            "peak {}",
+            peak.load(Ordering::SeqCst)
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            20,
+            "the repeat in flight was queried again"
+        );
+        shutdown.cancel();
+        resolver.await.unwrap();
+    }
+
+    /// A table that does not exist leaves no directive or computed-column
+    /// entry behind, however many such names arrive.
+    #[test]
+    fn a_missing_table_keeps_no_directives() {
+        let col_meta = crate::column_meta::ColumnMetaCache::new(Default::default());
+        let mut computed = crate::transform::computed::ComputedColumnCache::new(Default::default());
+        for i in 0..100 {
+            apply_directives(
+                &col_meta,
+                &mut computed,
+                &format!("dfe.made_up_{i}"),
+                Some(rustc_hash::FxHashMap::default()),
+                &SchemaResolution::TableNotFound,
+            );
+        }
+        assert_eq!(col_meta.ddl_tables(), 0);
+        assert_eq!(computed.tables(), 0);
+
+        let mut comments = rustc_hash::FxHashMap::default();
+        comments.insert("ip".to_string(), "@renamed: src_ip".to_string());
+        apply_directives(
+            &col_meta,
+            &mut computed,
+            "dfe.real",
+            directives_from(Ok::<_, &str>(comments)),
+            &SchemaResolution::Unavailable,
+        );
+        assert_eq!(
+            col_meta.ddl_tables(),
+            1,
+            "a table that may exist keeps its read"
+        );
+        // The table turns out not to exist: its entries go.
+        apply_directives(
+            &col_meta,
+            &mut computed,
+            "dfe.real",
+            None,
+            &SchemaResolution::TableNotFound,
+        );
+        assert_eq!((col_meta.ddl_tables(), computed.tables()), (0, 0));
+    }
+
+    /// A column-comment read that failed changes nothing, where it used to
+    /// arrive as an empty set that erased the table's renames, defaults and
+    /// computed columns until the next refresh.
+    #[test]
+    fn a_failed_comment_read_keeps_the_directives_the_table_had() {
+        let failed: std::result::Result<rustc_hash::FxHashMap<String, String>, &str> =
+            Err("connection reset");
+        assert!(directives_from(failed).is_none());
+
+        let mut comments = rustc_hash::FxHashMap::default();
+        comments.insert("ip".to_string(), "@renamed: src_ip".to_string());
+        let read = directives_from(Ok::<_, &str>(comments)).expect("a read that answered");
+        assert!(read.contains_key("ip"));
+        assert!(
+            directives_from(Ok::<_, &str>(rustc_hash::FxHashMap::default()))
+                .is_some_and(|d| d.is_empty())
+        );
+    }
+
+    #[tokio::test]
+    async fn a_dlq_with_no_backend_holds_its_rows_rather_than_taking_them() {
+        // The config enables a DLQ but no backend starts -- a read-only rootfs
+        // on a gRPC-transport pod gets here by config alone. scalo's Dlq then
+        // reports enabled and refuses every confirmed write, so the row is
+        // held at its source: not counted as placed, not dropped.
         let config = scalo::dlq::DlqConfig {
             enabled: true,
             mode: scalo::dlq::DlqMode::Cascade,
@@ -3897,27 +4188,23 @@ mod tests {
             Dlq::spawn(&config, "loader", None, CancellationToken::new())
                 .expect("spawn returns Ok"),
         );
-
         assert!(
-            !degraded.is_enabled(),
-            "no backend built, so nothing is kept"
-        );
-        assert!(
-            !dlq_accepts(Some(&degraded)),
-            "is_some() is true here — only is_enabled() may gate a commit"
+            degraded.write_confirmed(Vec::new()).await.is_err(),
+            "a DLQ with no backend refuses a confirmed write"
         );
 
         let payloads: Vec<Arc<[u8]>> = vec![Arc::from(&b"{\"n\":1}"[..])];
         let dead_letters = rejected_entries(&payloads, &rejected_rows(1, "code 117"));
         let mut orchestrator = Orchestrator::new(Config::default());
-        settle(&mut orchestrator, Some(&degraded), dead_letters, in_30s()).await;
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(300);
+        settle(&mut orchestrator, Some(&degraded), dead_letters, deadline).await;
 
         assert_eq!(
             orchestrator.stats().messages_dlq,
             0,
             "a DLQ that keeps nothing was counted as taking the row"
         );
-        assert_eq!(degraded.dropped(), 0, "nothing was handed to it to drop");
+        assert_eq!(degraded.dropped(), 0, "the row was dropped, not held");
     }
 
     #[tokio::test]

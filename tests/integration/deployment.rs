@@ -83,7 +83,9 @@ fn test_generated_compose_fragment() {
     assert!(compose.contains("9090:9090"));
     assert!(compose.contains("kafka:"));
     assert!(compose.contains("clickhouse:"));
-    assert!(compose.contains("localhost:9090/livez"));
+    // The image has no curl, so the check is the image's own bash probe.
+    assert!(compose.contains("/dev/tcp/localhost/9090"));
+    assert!(compose.contains("GET /livez"));
 }
 
 #[test]

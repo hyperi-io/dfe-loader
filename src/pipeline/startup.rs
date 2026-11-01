@@ -34,7 +34,8 @@ where
     F: FnMut() -> Fut,
     Fut: Future<Output = Result<T, E>>,
 {
-    let backoff = SinkStackConfig::from_cascade();
+    // run_app has already refused a sink_stack section that does not parse.
+    let backoff = SinkStackConfig::from_cascade().unwrap_or_default();
     let ceiling = Duration::from_millis(backoff.max_backoff_ms);
     let mut schedule = backoff.backoff().without_max_times().build();
     let mut attempts: u32 = 0;

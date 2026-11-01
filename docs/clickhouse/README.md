@@ -28,8 +28,8 @@ flowchart LR
 
 ## Read in this order
 
-- [clickhouse-ext.md](clickhouse-ext.md) -- the `src/clickhouse_ext/` layer:
-  what it is, where it meets the `clickhouse` crate, and what stays the crate's job.
+- [clickhouse-ext.md](clickhouse-ext.md) -- the dynamic insert from
+  `dfe-clickhouse`'s `dynamic` module, and how the inserter reads its failures.
 - [insert-formats.md](insert-formats.md) -- RowBinary vs JSONEachRow, the
   transport x format matrix, and why RowBinary is the default.
 - [schema-cache.md](schema-cache.md) -- reflecting `system.columns`, the TTL
@@ -42,4 +42,4 @@ flowchart LR
 
 ## The client, in one line
 
-dfe-loader inserts through crates.io `clickhouse` and reads rejection codes with `dfe-clickhouse`, with the dynamic encoding layer kept in this repo at `src/clickhouse_ext/`. See [clickhouse-ext.md](clickhouse-ext.md) for why the split sits where it does.
+dfe-loader inserts through crates.io `clickhouse` and reads rejection codes with `dfe-clickhouse`, with the dynamic encoding layer from `dfe-clickhouse`'s `dynamic` module. See [clickhouse-ext.md](clickhouse-ext.md).

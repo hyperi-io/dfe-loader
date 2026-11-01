@@ -11,17 +11,10 @@
 
 //! `ClickHouse` type system - runtime parsed, not compiled.
 //!
-//! `ParsedType` and `ParsedTypeExt` are re-exported from the loader's
-//! `clickhouse_ext` module (the HyperI dynamic-insert layer over the
-//! `clickhouse` crate). `clickhouse_ext` owns the runtime type
-//! parser; this module re-exports it plus the DFE-specific `ColumnInfo` /
-//! `TableSchema` types.
+//! `ParsedType` is `dfe_clickhouse`'s runtime type parser, re-exported here
+//! beside the DFE-specific `ColumnInfo` and `TableSchema` types.
 
-/// Re-export `ParsedType` + `ParsedTypeExt` from `clickhouse_ext`.
-///
-/// `clickhouse_ext::ParsedType` is the canonical runtime type parser.
-/// `ParsedTypeExt::coercer_category()` returns the DFE coercion category.
-pub use crate::clickhouse_ext::{ParsedType, ParsedTypeExt};
+pub use dfe_clickhouse::dynamic::ParsedType;
 
 /// Column information from `ClickHouse` system.columns.
 #[derive(Debug, Clone)]
@@ -51,12 +44,6 @@ impl ColumnInfo {
     #[must_use]
     pub fn is_nullable(&self) -> bool {
         self.parsed_type.nullable
-    }
-
-    /// Get the coercer category for this column.
-    #[must_use]
-    pub fn coercer_category(&self) -> &str {
-        self.parsed_type.coercer_category()
     }
 }
 
@@ -170,116 +157,6 @@ mod tests {
         }
     }
 
-    // ---- ParsedType tests (existing, kept for regression) ----
-
-    #[test]
-    fn test_parse_simple_types() {
-        let t = ParsedType::parse("String");
-        assert_eq!(t.base, "String");
-        assert!(!t.nullable);
-        assert!(!t.low_cardinality);
-
-        let t = ParsedType::parse("Int64");
-        assert_eq!(t.base, "Int64");
-        assert_eq!(t.coercer_category(), "Int");
-
-        let t = ParsedType::parse("Float64");
-        assert_eq!(t.base, "Float64");
-        assert_eq!(t.coercer_category(), "Float");
-    }
-
-    #[test]
-    fn test_parse_nullable() {
-        let t = ParsedType::parse("Nullable(String)");
-        assert_eq!(t.base, "String");
-        assert!(t.nullable);
-        assert!(!t.low_cardinality);
-    }
-
-    #[test]
-    fn test_parse_low_cardinality() {
-        let t = ParsedType::parse("LowCardinality(String)");
-        assert_eq!(t.base, "String");
-        assert!(!t.nullable);
-        assert!(t.low_cardinality);
-    }
-
-    #[test]
-    fn test_parse_nullable_low_cardinality() {
-        let t = ParsedType::parse("LowCardinality(Nullable(String))");
-        assert_eq!(t.base, "String");
-        assert!(t.nullable);
-        assert!(t.low_cardinality);
-    }
-
-    #[test]
-    fn test_parse_array() {
-        let t = ParsedType::parse("Array(Int64)");
-        assert_eq!(t.base, "Array");
-        assert!(t.array_element.is_some());
-        let elem = t.array_element.as_ref().unwrap();
-        assert_eq!(elem.base, "Int64");
-    }
-
-    #[test]
-    fn test_parse_map() {
-        let t = ParsedType::parse("Map(String, Int64)");
-        assert_eq!(t.base, "Map");
-        assert!(t.map_types.is_some());
-        let (key, value) = t.map_types.as_ref().unwrap();
-        assert_eq!(key.base, "String");
-        assert_eq!(value.base, "Int64");
-    }
-
-    #[test]
-    fn test_parse_datetime64() {
-        let t = ParsedType::parse("DateTime64(3)");
-        assert_eq!(t.base, "DateTime64");
-        assert_eq!(t.precision, Some(3));
-        assert!(t.timezone.is_none());
-
-        let t = ParsedType::parse("DateTime64(6, 'UTC')");
-        assert_eq!(t.base, "DateTime64");
-        assert_eq!(t.precision, Some(6));
-        assert_eq!(t.timezone, Some("UTC".to_string()));
-    }
-
-    #[test]
-    fn test_coercer_categories() {
-        assert_eq!(ParsedType::parse("String").coercer_category(), "String");
-        assert_eq!(ParsedType::parse("Int64").coercer_category(), "Int");
-        assert_eq!(ParsedType::parse("UInt32").coercer_category(), "UInt");
-        assert_eq!(ParsedType::parse("Float64").coercer_category(), "Float");
-        assert_eq!(ParsedType::parse("Bool").coercer_category(), "Bool");
-        assert_eq!(ParsedType::parse("DateTime").coercer_category(), "DateTime");
-        assert_eq!(ParsedType::parse("UUID").coercer_category(), "UUID");
-        assert_eq!(ParsedType::parse("IPv4").coercer_category(), "IPv4");
-        assert_eq!(ParsedType::parse("JSON").coercer_category(), "JSON");
-
-        // Unknown type falls back to String
-        assert_eq!(
-            ParsedType::parse("SomeNewType").coercer_category(),
-            "String"
-        );
-    }
-
-    #[test]
-    fn test_is_helpers() {
-        assert!(ParsedType::parse("Int64").is_numeric());
-        assert!(ParsedType::parse("Float64").is_numeric());
-        assert!(!ParsedType::parse("String").is_numeric());
-
-        assert!(ParsedType::parse("String").is_string());
-        assert!(ParsedType::parse("FixedString(10)").is_string());
-
-        assert!(ParsedType::parse("DateTime").is_datetime());
-        assert!(ParsedType::parse("DateTime64(3)").is_datetime());
-        assert!(ParsedType::parse("Date").is_datetime());
-
-        assert!(ParsedType::parse("IPv4").is_ip());
-        assert!(ParsedType::parse("IPv6").is_ip());
-    }
-
     #[test]
     fn test_null_strings() {
         assert!(is_null_string("null"));
@@ -380,18 +257,6 @@ mod tests {
     fn column_info_is_nullable_lc_nullable() {
         let col = make_column("status", "LowCardinality(Nullable(String))");
         assert!(col.is_nullable());
-    }
-
-    #[test]
-    fn column_info_coercer_category_delegates() {
-        let col = make_column("count", "UInt64");
-        assert_eq!(col.coercer_category(), "UInt");
-
-        let col = make_column("ts", "DateTime64(3)");
-        assert_eq!(col.coercer_category(), "DateTime64");
-
-        let col = make_column("data", "JSON");
-        assert_eq!(col.coercer_category(), "JSON");
     }
 
     #[test]
@@ -503,108 +368,5 @@ mod tests {
         assert!(is_null_string("NaN"));
         assert!(!is_null_string("na")); // not in list
         assert!(!is_null_string("nan")); // not in list
-    }
-
-    // ---- NEW: coercer_category via ParsedTypeExt for additional types ----
-
-    #[test]
-    fn coercer_category_date_types() {
-        assert_eq!(ParsedType::parse("Date").coercer_category(), "Date");
-        assert_eq!(ParsedType::parse("Date32").coercer_category(), "Date");
-    }
-
-    #[test]
-    fn coercer_category_decimal_types() {
-        assert_eq!(
-            ParsedType::parse("Decimal(18, 4)").coercer_category(),
-            "Decimal"
-        );
-        assert_eq!(
-            ParsedType::parse("Decimal32(2)").coercer_category(),
-            "Decimal"
-        );
-        assert_eq!(
-            ParsedType::parse("Decimal64(4)").coercer_category(),
-            "Decimal"
-        );
-        assert_eq!(
-            ParsedType::parse("Decimal128(8)").coercer_category(),
-            "Decimal"
-        );
-    }
-
-    #[test]
-    fn coercer_category_int_widths() {
-        for t in ["Int8", "Int16", "Int32", "Int64", "Int128", "Int256"] {
-            assert_eq!(
-                ParsedType::parse(t).coercer_category(),
-                "Int",
-                "Failed for {t}"
-            );
-        }
-    }
-
-    #[test]
-    fn coercer_category_uint_widths() {
-        for t in ["UInt8", "UInt16", "UInt32", "UInt64", "UInt128", "UInt256"] {
-            assert_eq!(
-                ParsedType::parse(t).coercer_category(),
-                "UInt",
-                "Failed for {t}"
-            );
-        }
-    }
-
-    #[test]
-    fn coercer_category_nullable_preserves_inner() {
-        // Nullable wrapper should not change the category
-        assert_eq!(
-            ParsedType::parse("Nullable(Int64)").coercer_category(),
-            "Int"
-        );
-        assert_eq!(
-            ParsedType::parse("Nullable(UUID)").coercer_category(),
-            "UUID"
-        );
-    }
-
-    #[test]
-    fn coercer_category_lc_preserves_inner() {
-        assert_eq!(
-            ParsedType::parse("LowCardinality(String)").coercer_category(),
-            "String"
-        );
-    }
-
-    // ---- NEW: ParsedType edge cases ----
-
-    #[test]
-    fn parse_empty_string() {
-        let t = ParsedType::parse("");
-        assert_eq!(t.base, "");
-    }
-
-    #[test]
-    fn parse_enum_type() {
-        let t = ParsedType::parse("Enum8('a' = 1, 'b' = 2)");
-        assert_eq!(t.coercer_category(), "Enum");
-    }
-
-    #[test]
-    fn parse_nested_array() {
-        let t = ParsedType::parse("Array(Array(String))");
-        assert_eq!(t.base, "Array");
-        let inner = t.array_element.as_ref().unwrap();
-        assert_eq!(inner.base, "Array");
-        let innermost = inner.array_element.as_ref().unwrap();
-        assert_eq!(innermost.base, "String");
-    }
-
-    #[test]
-    fn parse_fixedstring_with_length() {
-        let t = ParsedType::parse("FixedString(16)");
-        assert_eq!(t.base, "FixedString");
-        assert!(t.is_string());
-        assert_eq!(t.coercer_category(), "String");
     }
 }

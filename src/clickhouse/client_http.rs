@@ -13,7 +13,7 @@
 //!
 //! Uses a single `clickhouse::Client` over HTTP or HTTPS. Data inserts go
 //! through `DynamicInsert`
-//! (`RowBinary`, via `clickhouse_ext`) or `InsertFormatted` (`JSONEachRow`)
+//! (`RowBinary`, via `dfe_clickhouse::dynamic`) or `InsertFormatted` (`JSONEachRow`)
 //! -- see `Inserter` for insert dispatch.
 //!
 //! This client handles:
@@ -126,6 +126,19 @@ impl TimesOut for dfe_clickhouse::Error {
 
     fn is_timed_out(&self) -> bool {
         matches!(self, Self::TimedOut)
+    }
+}
+
+impl TimesOut for dfe_clickhouse::dynamic::DynamicError {
+    fn timed_out() -> Self {
+        Self::SchemaFetch {
+            table: String::new(),
+            source: Box::new(dfe_clickhouse::Error::TimedOut),
+        }
+    }
+
+    fn is_timed_out(&self) -> bool {
+        Self::is_timed_out(self)
     }
 }
 

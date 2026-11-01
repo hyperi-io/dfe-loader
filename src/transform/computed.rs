@@ -45,9 +45,16 @@ struct CompiledColumn {
 #[derive(Debug)]
 pub struct TableComputedColumns {
     columns: Vec<CompiledColumn>,
+    /// The variables the expressions read, each once.
+    inputs: Vec<String>,
 }
 
 impl TableComputedColumns {
+    /// Every variable an expression reads.
+    pub fn inputs(&self) -> impl Iterator<Item = &str> {
+        self.inputs.iter().map(String::as_str)
+    }
+
     /// Evaluate all computed columns against the message data and insert results.
     ///
     /// - Skips columns that already exist in `data` (don't overwrite source data)
@@ -131,6 +138,17 @@ impl ComputedColumnCache {
         self.tables.get(table)
     }
 
+    /// Drop a table's compiled columns, for a table that does not exist.
+    pub fn forget(&mut self, table: &str) {
+        self.tables.remove(table);
+    }
+
+    /// Number of tables with compiled columns.
+    #[must_use]
+    pub fn tables(&self) -> usize {
+        self.tables.len()
+    }
+
     /// Mark a table for async column comment resolution (first time seen).
     pub fn mark_pending(&mut self, table: &str) {
         if !self.tables.contains_key(table) && !self.pending_tables.contains(&table.to_string()) {
@@ -192,8 +210,16 @@ impl ComputedColumnCache {
             debug!(table = %table, count = columns.len(), "Compiled computed columns");
         }
 
+        let mut inputs: Vec<String> = Vec::new();
+        for col in &columns {
+            for variable in col.program.references().variables() {
+                if !inputs.iter().any(|input| input == variable) {
+                    inputs.push(variable.to_string());
+                }
+            }
+        }
         self.tables
-            .insert(table.to_string(), TableComputedColumns { columns });
+            .insert(table.to_string(), TableComputedColumns { columns, inputs });
     }
 }
 

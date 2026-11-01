@@ -28,9 +28,10 @@ use std::time::Duration;
 use rdkafka::ClientConfig;
 use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
 use rdkafka::producer::{FutureProducer, FutureRecord};
-use scalo::transport::kafka::test_support::{SCRAM_PASSWORD, SCRAM_USER, TlsBroker};
+use scalo::transport::kafka::test_support::{SCRAM_USER, TlsBroker, scram_password};
 
 use super::grpc_outage::{clickhouse_address, free_port, query_client, wait_landed};
+use crate::common::containers::SUITE;
 use crate::common::containers::TestInfrastructure;
 use crate::common::{has_docker, require_docker_in_ci, unique_table_name};
 use crate::test_name;
@@ -64,6 +65,27 @@ enum Listener {
     Mtls,
 }
 
+/// The SASL password a loader sends.
+#[derive(Clone, Copy)]
+enum Password {
+    /// None: the listener takes no SASL.
+    None,
+    /// The broker's own, generated per test process.
+    Broker,
+    /// One the broker refuses.
+    Wrong,
+}
+
+impl Password {
+    fn text(self) -> &'static str {
+        match self {
+            Self::None => "",
+            Self::Broker => scram_password(),
+            Self::Wrong => "not-the-password",
+        }
+    }
+}
+
 /// A loader to run against the broker.
 struct Row {
     name: &'static str,
@@ -72,7 +94,7 @@ struct Row {
     /// CA file the loader trusts, a name in the PKI directory.
     ca: &'static str,
     /// Password the loader sends, when the listener is SASL_SSL.
-    password: &'static str,
+    password: Password,
     /// What the broker logs when it turns this loader away. `None` for a loader that must land.
     refused_with: Option<&'static str>,
 }
@@ -83,7 +105,7 @@ const ROWS: &[Row] = &[
         listener: Listener::Tls,
         form: Form::File,
         ca: "ca.crt",
-        password: "",
+        password: Password::None,
         refused_with: None,
     },
     Row {
@@ -91,7 +113,7 @@ const ROWS: &[Row] = &[
         listener: Listener::SaslSsl,
         form: Form::Env,
         ca: "ca.crt",
-        password: SCRAM_PASSWORD,
+        password: Password::Broker,
         refused_with: None,
     },
     Row {
@@ -99,7 +121,7 @@ const ROWS: &[Row] = &[
         listener: Listener::SaslSsl,
         form: Form::File,
         ca: "ca.crt",
-        password: SCRAM_PASSWORD,
+        password: Password::Broker,
         refused_with: None,
     },
     Row {
@@ -107,7 +129,7 @@ const ROWS: &[Row] = &[
         listener: Listener::SaslSsl,
         form: Form::EnvSystemTrust,
         ca: "ca.crt",
-        password: SCRAM_PASSWORD,
+        password: Password::Broker,
         refused_with: None,
     },
     Row {
@@ -115,7 +137,7 @@ const ROWS: &[Row] = &[
         listener: Listener::Mtls,
         form: Form::File,
         ca: "ca.crt",
-        password: "",
+        password: Password::None,
         refused_with: None,
     },
     Row {
@@ -123,7 +145,7 @@ const ROWS: &[Row] = &[
         listener: Listener::Tls,
         form: Form::File,
         ca: "rogue-ca.crt",
-        password: "",
+        password: Password::None,
         refused_with: Some("SSL handshake failed"),
     },
     Row {
@@ -131,7 +153,7 @@ const ROWS: &[Row] = &[
         listener: Listener::SaslSsl,
         form: Form::Env,
         ca: "ca.crt",
-        password: "not-the-password",
+        password: Password::Wrong,
         refused_with: Some("invalid credentials with SASL mechanism SCRAM-SHA-512"),
     },
 ];
@@ -166,7 +188,7 @@ fn good_client(shared: &Shared, listener: Listener) -> ClientConfig {
                 .set("security.protocol", "sasl_ssl")
                 .set("sasl.mechanism", "SCRAM-SHA-512")
                 .set("sasl.username", SCRAM_USER)
-                .set("sasl.password", SCRAM_PASSWORD);
+                .set("sasl.password", scram_password());
         }
         Listener::Mtls => {
             config
@@ -226,7 +248,7 @@ fn config_file(shared: &Shared, row: &Row, table: &str, topic: &str) -> String {
             "  tls:\n    enabled: true\n    ca_cert_file: \"{}\"\n  sasl:\n    enabled: true\n    \
              mechanism: scram_sha_512\n    username: \"{SCRAM_USER}\"\n    password: \"{}\"\n",
             pki.file(row.ca),
-            row.password
+            row.password.text()
         ),
         (Form::File, Listener::Mtls) => format!(
             "  tls:\n    enabled: true\n    ca_cert_file: \"{}\"\n    cert_file: \"{}\"\n    \
@@ -312,7 +334,7 @@ async fn run_row(shared: Arc<Shared>, row: &'static Row) -> Result<String, Strin
             .env("DFE_LOADER_KAFKA_SECURITY_PROTOCOL", "SASL_SSL")
             .env("DFE_LOADER_KAFKA_SASL_MECHANISM", "SCRAM-SHA-512")
             .env("DFE_LOADER_KAFKA_SASL_USERNAME", SCRAM_USER)
-            .env("DFE_LOADER_KAFKA_SASL_PASSWORD", row.password);
+            .env("DFE_LOADER_KAFKA_SASL_PASSWORD", row.password.text());
         if let Form::EnvSystemTrust = row.form {
             command.env("SSL_CERT_FILE", shared.broker.pki.file(row.ca));
         } else {
@@ -366,7 +388,7 @@ async fn the_binary_consumes_from_a_broker_with_tls_on() {
     }
     let test = test_name!();
     let (broker, infra) = tokio::join!(
-        TlsBroker::start("dfe-loader", test),
+        TlsBroker::start(&SUITE, test),
         TestInfrastructure::new(test, true, false)
     );
     let broker = broker.unwrap_or_else(|e| panic!("the TLS broker would not start: {e}"));

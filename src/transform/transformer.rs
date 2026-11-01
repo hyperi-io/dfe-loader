@@ -45,7 +45,8 @@ pub struct Transformer {
     /// Master switch for common header field injection
     common_header_enabled: bool,
 
-    timestamp_validator: TimestampValidator,
+    /// The bounds `_timestamp` is held to, `None` when `timestamp_dq` is off.
+    timestamp_validator: Option<TimestampValidator>,
     extract_collector_timestamp: bool,
     collector_timestamp_path: String,
     strip_at_prefix: bool,
@@ -90,7 +91,9 @@ impl Transformer {
         Self {
             common_header_enabled: metadata_config.enabled,
 
-            timestamp_validator: TimestampValidator::new(timestamp_config),
+            timestamp_validator: timestamp_config
+                .enabled
+                .then(|| TimestampValidator::new(timestamp_config)),
             extract_collector_timestamp: metadata_config.extract_timestamp_collector,
             collector_timestamp_path: metadata_config.collector_timestamp_path.clone(),
             strip_at_prefix: sanitization_config.strip_at_prefix,
@@ -225,38 +228,51 @@ impl Transformer {
             let ts_input = data
                 .remove(TIMESTAMP_INPUT_FIELD)
                 .or_else(|| data.get(TIMESTAMP_ECS_INPUT_FIELD).cloned());
-            if let Some(ts_value) = ts_input {
-                let ts_result = match &ts_value {
-                    Value::String(s) => self.timestamp_validator.validate_with_now(s, now),
-                    Value::Number(n) => {
-                        if let Some(i) = n.as_i64() {
-                            self.timestamp_validator.validate_unix_with_now(i, now)
-                        } else {
-                            TimestampResult::Invalid("Invalid number format".into())
+            match (ts_input, &self.timestamp_validator) {
+                (Some(mut ts_value), None) => {
+                    datetime::normalise_zoned(&mut ts_value);
+                    data.insert(TIMESTAMP_OUTPUT_FIELD.into(), ts_value);
+                }
+                (Some(ts_value), Some(validator)) => {
+                    let ts_result = match &ts_value {
+                        Value::String(s) => validator.validate_with_now(s, now),
+                        Value::Number(n) => {
+                            if let Some(i) = n.as_i64() {
+                                validator.validate_unix_with_now(i, now)
+                            } else {
+                                TimestampResult::Invalid("Invalid number format".into())
+                            }
+                        }
+                        _ => TimestampResult::Invalid("Timestamp must be string or number".into()),
+                    };
+
+                    match ts_result {
+                        TimestampResult::Valid(dt) => {
+                            data.insert(
+                                TIMESTAMP_OUTPUT_FIELD.into(),
+                                Value::String(utc_text(&dt)),
+                            );
+                        }
+                        TimestampResult::Corrected(dt, reason) => {
+                            warnings.get_or_insert_with(Vec::new).push(reason);
+                            data.insert(
+                                TIMESTAMP_OUTPUT_FIELD.into(),
+                                Value::String(utc_text(&dt)),
+                            );
+                        }
+                        TimestampResult::Invalid(reason) => {
+                            warnings.get_or_insert_with(Vec::new).push(reason);
+                            // OPTIMIZATION: Lazy format - only format now() if we actually need it
+                            let ts = now_str.get_or_insert_with(|| utc_text(&now)).clone();
+                            data.insert(TIMESTAMP_OUTPUT_FIELD.into(), Value::String(ts));
                         }
                     }
-                    _ => TimestampResult::Invalid("Timestamp must be string or number".into()),
-                };
-
-                match ts_result {
-                    TimestampResult::Valid(dt) => {
-                        data.insert(TIMESTAMP_OUTPUT_FIELD.into(), Value::String(utc_text(&dt)));
-                    }
-                    TimestampResult::Corrected(dt, reason) => {
-                        warnings.get_or_insert_with(Vec::new).push(reason);
-                        data.insert(TIMESTAMP_OUTPUT_FIELD.into(), Value::String(utc_text(&dt)));
-                    }
-                    TimestampResult::Invalid(reason) => {
-                        warnings.get_or_insert_with(Vec::new).push(reason);
-                        // OPTIMIZATION: Lazy format - only format now() if we actually need it
-                        let ts = now_str.get_or_insert_with(|| utc_text(&now)).clone();
-                        data.insert(TIMESTAMP_OUTPUT_FIELD.into(), Value::String(ts));
-                    }
                 }
-            } else {
-                // No timestamp field - inject current time (lazy format)
-                let ts = now_str.get_or_insert_with(|| utc_text(&now)).clone();
-                data.insert(TIMESTAMP_OUTPUT_FIELD.into(), Value::String(ts));
+                (None, _) => {
+                    // No timestamp field - inject current time (lazy format)
+                    let ts = now_str.get_or_insert_with(|| utc_text(&now)).clone();
+                    data.insert(TIMESTAMP_OUTPUT_FIELD.into(), Value::String(ts));
+                }
             }
 
             // Step 4: Extract collector timestamp if present
@@ -333,7 +349,7 @@ impl Transformer {
     /// Extract tags from the first matching field in `tags_fields`
     ///
     /// Returns the extracted value verbatim; shaping a non-object for the JSON
-    /// `_tags` column happens at the write, in `clickhouse_ext::encode`.
+    /// `_tags` column happens at the write, in `dfe_clickhouse::dynamic`'s encoder.
     /// Uses dot notation for nested field access.
     fn extract_tags(&self, obj: &Map<String, Value>) -> Option<Value> {
         for field in &self.tags_fields {
@@ -495,7 +511,7 @@ impl Default for Transformer {
         Self {
             common_header_enabled: true,
 
-            timestamp_validator: TimestampValidator::default(),
+            timestamp_validator: Some(TimestampValidator::default()),
             extract_collector_timestamp: true,
             collector_timestamp_path: "tags.collector.timestamp".to_string(),
             strip_at_prefix: true,
@@ -563,6 +579,28 @@ mod tests {
         assert_eq!(result.data["user.name"], "test");
     }
 
+    /// A disabled `timestamp_dq` keeps the event's own time however far out it
+    /// is, rather than bounding it anyway.
+    #[test]
+    fn a_disabled_timestamp_dq_keeps_the_event_time() {
+        let dq = TimestampDqConfig {
+            enabled: false,
+            ..TimestampDqConfig::default()
+        };
+        let transformer = Transformer::new(
+            &dq,
+            &MetadataConfig::default(),
+            &FieldSanitizationConfig::default(),
+        );
+        let result = transformer
+            .transform(serde_json::json!({"timestamp": "2099-01-01T00:00:00Z"}))
+            .unwrap();
+        assert_eq!(
+            result.data["_timestamp"],
+            serde_json::json!("2099-01-01T00:00:00.000Z")
+        );
+    }
+
     #[test]
     fn test_transformer_sanitize_at_prefix() {
         let transformer = Transformer::default();
@@ -578,7 +616,7 @@ mod tests {
         // sanitised `timestamp` still appears for a meta column to read.
         assert_eq!(
             result.data["_timestamp"],
-            serde_json::json!("2024-12-24 10:00:00.000"),
+            serde_json::json!("2024-12-24T10:00:00.000Z"),
             "_timestamp must carry the event's own time, not the load time"
         );
         assert!(result.data.contains_key("timestamp")); // sanitized from @timestamp
@@ -955,7 +993,7 @@ mod tests {
 
     #[test]
     fn test_transform_received_and_collector_offsets_land_as_utc_text() {
-        // Left verbatim, a zoned value fails the whole JSONEachRow batch with code 27.
+        // An offset is moved to UTC and the zone kept.
         let transformer = Transformer::default();
         let raw = br#"{"event": "x",
             "timestamp_received": "2026-04-07T17:03:00.123+10:00",
@@ -964,11 +1002,11 @@ mod tests {
         let result = transformer.transform_with_raw(value, None, None).unwrap();
         assert_eq!(
             result.data.get("_timestamp_received"),
-            Some(&Value::String("2026-04-07 07:03:00.123".into()))
+            Some(&Value::String("2026-04-07T07:03:00.123Z".into()))
         );
         assert_eq!(
             result.data.get("_timestamp_collector"),
-            Some(&Value::String("2026-04-07 07:03:00.123456".into()))
+            Some(&Value::String("2026-04-07T07:03:00.123456Z".into()))
         );
     }
 
@@ -990,14 +1028,14 @@ mod tests {
         for (input, expected) in [
             (
                 "2026-04-07T17:03:00.123456+10:00",
-                "2026-04-07 07:03:00.123456",
+                "2026-04-07T07:03:00.123456Z",
             ),
             (
                 "2026-04-07T07:03:00.123456789Z",
-                "2026-04-07 07:03:00.123456789",
+                "2026-04-07T07:03:00.123456789Z",
             ),
-            ("2026-04-07T07:03:00.120Z", "2026-04-07 07:03:00.120"),
-            ("2026-04-07T07:03:00Z", "2026-04-07 07:03:00.000"),
+            ("2026-04-07T07:03:00.120Z", "2026-04-07T07:03:00.120Z"),
+            ("2026-04-07T07:03:00Z", "2026-04-07T07:03:00.000Z"),
         ] {
             let value = serde_json::json!({"event": "x", "timestamp": input});
             let result = transformer.transform_with_raw(value, None, None).unwrap();

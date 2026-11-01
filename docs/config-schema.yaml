@@ -264,7 +264,9 @@ properties:
       disable_raw_tables: []
       remove_routing_fields: true
   coercion:
-    description: Type coercion config. **Hot-reloaded.**
+    description: |-
+      Type coercion config. Refused unless every field is at its default: the
+      dynamic insert applies fixed coercion rules.
     $ref: "#/$defs/CoercionConfig"
     default:
       type_mappings: {}
@@ -1096,7 +1098,7 @@ $defs:
       Filters are evaluated in order. The first filter that matches determines
       the message's [`super::types::PreRouteResult`].
     oneOf:
-    - description: Route to DLQ if a required field is absent.
+    - description: Drop the record, committed with its block, if a required field is absent.
       type: object
       properties:
         type:
@@ -1480,12 +1482,8 @@ $defs:
       const: extracted_only
   CoercionConfig:
     description: |-
-      Type coercion configuration
-
-      Following the Go clickhouse-loader pattern:
-      - Type mappings for custom types
-      - Configurable null handling
-      - Timezone handling for naive timestamps
+      Type coercion configuration. No encoder reads it, so `Config::validate`
+      refuses any field set away from its default.
     type: object
     properties:
       type_mappings:

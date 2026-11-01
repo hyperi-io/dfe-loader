@@ -1,71 +1,49 @@
 <!--
   Project:      dfe-loader
   File:         docs/clickhouse/clickhouse-ext.md
-  Purpose:      The clickhouse_ext layer -- dynamic RowBinary insert over the clickhouse crate
+  Purpose:      The dynamic RowBinary insert the loader takes from dfe-clickhouse
   Language:     Markdown
 
   License:      BUSL-1.1
   Copyright:    (c) 2026 HYPERI PTY LIMITED
 -->
 
-# clickhouse_ext
+# The dynamic insert
 
-`src/clickhouse_ext/` is the HyperI dynamic-insert layer over the official `clickhouse` crate from crates.io. Its HTTP `Client` keeps insertion typed (`T: Row`). dfe-loader inserts runtime-shaped `Map<String,Value>` rows, so the dynamic encoding lives here, on top of that `Client`.
+The official `clickhouse` crate keeps insertion typed (`T: Row`). dfe-loader inserts runtime-shaped `Map<String,Value>` rows whose columns come from `system.columns`, so it takes the dynamic layer from `dfe-clickhouse`'s `dynamic` module (feature `dynamic`). The loader holds no encoder of its own.
 
-## Modules
+## What the crate does
 
-| Module | Responsibility |
-|--------|----------------|
-| `parsed_type` | Parse a `system.columns` type string into a structured `ParsedType` (Nullable, LowCardinality, Array, Map, DateTime64, Decimal, Enum, ...) |
-| `encode` | `DynamicRow`: a `Map<String,Value>` + its `ColumnDef` schema. Row-wise `encode()` bytes feed the HTTP FORMAT RowBinaryWithNamesAndTypes sink |
-| `schema` | Fetch a table's columns from `system.columns`; TTL cache with invalidation |
-| `insert` | `DynamicInsert`: lazy schema fetch, `write_map` / `write_map_with_raw`, schema-mismatch recovery |
-| `error` | `DynamicError` (`SchemaMismatch`, `UnsupportedType`, ...) |
+| Piece | Does |
+|-------|------|
+| `ParsedType` | Parses a `system.columns` type string (Nullable, LowCardinality, Array, Map, DateTime64, Decimal, Enum, the geo shapes, SimpleAggregateFunction) |
+| `DynamicRow` | Encodes one `Map<String,Value>` against its `ColumnDef`s to RowBinary |
+| `DynamicSchema`, `DynamicSchemaCache` | A table's columns, cached with a TTL and capped at 10,000 tables |
+| `fetch_dynamic_schema`, `fetch_dynamic_schema_tcp` | Read a schema over HTTP or the native protocol |
+| `DynamicInsert` | `write_map` / `write_map_with_raw`, then `end` |
+| `shape_for_type` | The same value rules applied to a row map, for the JSONEachRow path |
 
-## The seam
+Over HTTP an insert is one `INSERT ... FORMAT RowBinaryWithDefaults`: a row that omits a defaulted column takes the server's default, so one INSERT carries rows of any shape, and rows go out in 1 MiB chunks as they are written. Over the native protocol rows go out as `FORMAT Native` blocks, and a row that supplies a different set of defaulted columns starts a new INSERT. JSON columns are written as text with `input_format_binary_read_json_as_string=1`.
 
-`DynamicInsert` opens its sink on the first row. Over HTTP it is `Client::insert_formatted_with("INSERT ... FORMAT RowBinaryWithNamesAndTypes")`, fed a header of column names and the types they were encoded for, then row-wise `encode()` bytes. Over the native protocol the same row bytes are held until `end()`, transposed into `FORMAT Native` blocks of up to 1 MiB by `dfe_clickhouse::native::encode_columns`, and sent through `TcpClient::insert_native`. One encoder serves both protocols.
+The coercions a source value gets on the way: a zoned timestamp lands at the instant it names, a numeric DateTime64 epoch is read by magnitude and rescaled to the column's precision, an IPv4 literal lands in an IPv6 column as `::ffff:a.b.c.d`, a JSON column wraps a root array under `list` and a scalar or non-JSON text under `value`, a `Point` takes every Elasticsearch geo_point form inside its coordinate ranges, and one value lands in an `Array` as a one-element array. A value the column cannot hold (an integer past its width, a decimal past its backing, an undeclared enum value) fails the row rather than being written wrong. `tests/integration/insert_coercions.rs` runs each case through the loader's `Inserter` on every protocol the shared ClickHouse offers.
 
-JSON columns (including `_json`) are written as a length-prefixed string; on the
-RowBinary path the loader sets `input_format_binary_read_json_as_string=1` so
-the server reads that string as a JSON value.
+## How the loader drives it
 
-```mermaid
-flowchart LR
-    M["Map<String,Value> + raw _json bytes"]
-    CD["ColumnDef[] (from system.columns)"]
-    DR["DynamicRow"]
-    M --> DR
-    CD --> DR
-    DR -->|"encode() bytes"| IFW["insert_formatted_with<br/>FORMAT RowBinaryWithNamesAndTypes (HTTP)"]
-```
+`Inserter` reads the schema through its own widening read bound and the shared cache, opens the insert with `InsertTimeouts` from `clickhouse.request_timeout_ms` and `clickhouse.insert_timeout_ms`, and sets `SchemaRefresh` from `schema.refresh_on_error`. A failure is read in `Inserter::dynamic_verdict`:
 
-## Schema-mismatch recovery
+- A timeout or a dropped connection returns the batch to be held.
+- A server refusal is read by its code. A retryable code holds the batch. Any other code is the rows' own only once a fresh read shows the table unchanged since they were encoded (`DynamicSchema::same_columns`), and then salvage dead-letters them row by row. Otherwise the table changed under them, and the retry encodes against the current schema.
+- A stale, missing or unreadable schema drops the cached schemas and retries.
+- An encoder refusal (`EncodingError` naming its column) is the payload's, and goes to salvage.
+- A column type the crate cannot encode is a loader gap, so the rows are held.
 
-`DynamicInsert` fetches schema lazily and caches it. When ClickHouse rejects an
-insert with a drift signal (`TYPE_MISMATCH`, `NO_SUCH_COLUMN`, `CANNOT_PARSE`,
-code 117, ...), it surfaces `DynamicError::SchemaMismatch`; the `Inserter`
-invalidates the cache so the next attempt re-fetches and re-encodes against the
-current schema. A column whose type changed is caught by the header: the server
-refuses bytes encoded for the old type (code 117) instead of reading them as
-other rows. See [insert-formats.md](insert-formats.md#when-the-schema-drifts).
-
-## The client crates
-
-Both come from crates.io, with no `[patch]` and no git source:
+Both client crates come from crates.io, with no `[patch]` and no git source:
 
 ```toml
 clickhouse = { version = ">=0.15.3, <0.16", features = ["lz4", "time", "rustls-tls", "rustls-tls-native-roots", "inserter"] }
-dfe-clickhouse = { version = ">=0.1.5, <0.2", default-features = false, features = ["ext", "tls"] }
+dfe-clickhouse = { version = ">=0.1.9, <0.2", default-features = false, features = ["ext", "tls", "dynamic"] }
 ```
 
-From `dfe-clickhouse` the loader takes `ServerException::parse` (`ext`), which reads the code and message out of the `Code: N. DB::Exception: ...` text the HTTP client returns as `Error::BadResponse`, and `TcpClient` with its rustls trust (`tls`, which implies `tcp`) for `clickhouse.protocol: native`. Over native the server's code arrives structurally in `Error::ServerException`. `src/clickhouse/error.rs` renders either as `server error code {code}: {message}`, classifies every insert rejection by that code, and keeps at most 1 MiB of any error text.
+From `dfe-clickhouse` the loader also takes `ServerException::parse` (`ext`), which reads the code and message out of the `Code: N. DB::Exception: ...` text the HTTP client returns as `Error::BadResponse`, and `TcpClient` with its rustls trust (`tls`, which implies `tcp`) for `clickhouse.protocol: native`. `src/clickhouse/error.rs` classifies every insert rejection by the server's code and keeps at most 1 MiB of any error text.
 
-The HTTP client is the loader's own. `build_client` in `src/clickhouse/client_http.rs` hands `clickhouse::Client` a hyper client through `Client::with_http_client`, carrying the pool timer that closes idle connections after 2 s, the connect timeout and HTTPS verified against the system trust store. Queries and inserts carry the request and insert timeouts on top.
-
-## What stays out of clickhouse_ext
-
-- The transports and connection pools -- the `clickhouse` crate's and hyper's
-  for HTTP, `dfe-clickhouse`'s for native.
-- Typed (`#[derive(Row)]`) inserts -- use `Client` directly.
-- DDL, queries, schema introspection -- `ClickHouseQueryClient` over `Client`.
+The HTTP client is the loader's own. `build_client` in `src/clickhouse/client_http.rs` hands `clickhouse::Client` a hyper client through `Client::with_http_client`, carrying the pool timer that closes idle connections after 2 s, the connect timeout and HTTPS verified against the system trust store.

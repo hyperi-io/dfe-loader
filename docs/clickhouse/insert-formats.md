@@ -21,7 +21,7 @@ flowchart TB
     ROW["Buffered rows<br/>Map&lt;String,Value&gt; + raw _json"]
     F{"insert_format"}
     T{"protocol"}
-    RBH["insert_formatted_with<br/>FORMAT RowBinaryWithNamesAndTypes (HTTP)"]
+    RBH["insert_formatted_with<br/>FORMAT RowBinaryWithDefaults (HTTP)"]
     RBT["TcpClient::insert_native<br/>FORMAT Native blocks (TCP)"]
     JE["insert_formatted_with<br/>FORMAT JSONEachRow (HTTP)"]
     REJ["rejected at startup"]
@@ -39,7 +39,7 @@ flowchart TB
 
 | `insert_format` | `protocol = http` | `protocol = native` |
 |-----------------|--------------------|----------------------|
-| `row_binary` (default) | `FORMAT RowBinaryWithNamesAndTypes` via `insert_formatted_with` | the same row bytes as `FORMAT Native` blocks via `TcpClient::insert_native` |
+| `row_binary` (default) | `FORMAT RowBinaryWithDefaults` via `insert_formatted_with` | `FORMAT Native` blocks via `TcpClient::insert_native` |
 | `json_each_row` | `FORMAT JSONEachRow` via `insert_formatted_with` | rejected at `config-check` |
 
 The rejection is deliberate and surfaced early: JSONEachRow is an HTTP body
@@ -68,19 +68,14 @@ the throughput choice.
 
 ## How RowBinary is produced
 
-The dynamic encoder (`clickhouse_ext::encode`) turns one
-`Map<String, Value>` plus its reflected `ColumnDef` schema into row-wise
-`encode()` bytes, streamed into an
-`INSERT INTO db.table (cols) FORMAT RowBinaryWithNamesAndTypes` statement
-opened with `Client::insert_formatted_with(...).buffered()`, behind a header
-naming each column and the type it was encoded for. ClickHouse parses the rows
-one at a time, so the loader never depends on server-side block framing.
-
-The column subset is fixed from the first row of the batch: every
-column present in the row, every raw-passthrough column (e.g. `_json`), and
-every column without a server-side default. Columns that have a default and are
-not supplied are omitted, so ClickHouse fills them (`_uuid`,
-`_timestamp_load`).
+The dynamic encoder in `dfe-clickhouse`'s `dynamic` module turns one
+`Map<String, Value>` plus its reflected `ColumnDef` schema into RowBinary, sent
+in 1 MiB chunks as one `INSERT INTO db.table (cols) FORMAT
+RowBinaryWithDefaults` per batch. The INSERT names every column the server takes
+a value for. A row that leaves out a defaulted column flags it, and the server
+fills its default (`_uuid`, `_timestamp_load`), so rows of any shape share one
+INSERT. Over native a row that supplies a different set of defaulted columns
+starts a new INSERT.
 
 ## JSON columns on the wire
 
@@ -95,7 +90,7 @@ and [types.md](types.md) for per-type encoding.
 ## When the schema drifts
 
 An insert can fail because the cached schema no longer matches the table (an
-`ALTER ... ADD COLUMN`, a type change). `DynamicInsert` classifies the server
+`ALTER ... ADD COLUMN`, a type change). The crate classifies the server
 error: a drift signal (`TYPE_MISMATCH`, `NO_SUCH_COLUMN`, `CANNOT_PARSE`, code
 117, and friends) surfaces as `DynamicError::SchemaMismatch`, and the cache is
 invalidated so the next attempt re-fetches from `system.columns` and re-encodes.
@@ -104,7 +99,7 @@ A non-drift error (network, auth) is returned as-is. See
 
 The same codes come back for a row the server can never accept, so the server's code decides, never the words beside it: a code on the retry list holds the batch, and any other refusal against a table unchanged since the rows were encoded is the rows' own, so salvage dead-letters the bad row and the rest land. The list and the reason for each group are in [schema-cache.md](schema-cache.md#mismatch-recovery).
 
-A type change is caught before any row is read. RowBinary is positional, so bytes encoded for a column's old type can parse as other rows: ten `(id UInt64, v UInt8)` rows are 90 bytes, which an `(id UInt64, v UInt16)` table reads as nine whole rows of garbage, with no error. The header carries the type each column was encoded for, and with `input_format_with_types_use_header=1` (the default, and pinned on the insert with `input_format_with_names_use_header`) the server refuses a mismatch with code 117 ("Type of 'v' must be UInt16, not UInt8"). That refusal against a changed table takes the drift path above. The header costs one column count plus each name and type string once per INSERT, 235 bytes for a 10-column landing table.
+RowBinary is positional, so bytes encoded for a column's old type could parse as other rows. `insert_coercions::type_change_failures`, run on every protocol in the core tier, retypes a column under a cached schema and checks that every row that lands reads back as the value sent.
 
 ## Configuring it
 

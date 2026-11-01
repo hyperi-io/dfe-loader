@@ -36,6 +36,8 @@ mod header_keys;
 mod helm_contract;
 #[cfg(feature = "testcontainers")]
 mod hot_reload;
+#[cfg(feature = "testcontainers")]
+mod insert_coercions;
 mod inserter;
 #[cfg(feature = "testcontainers")]
 mod json_depth;

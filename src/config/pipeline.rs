@@ -979,12 +979,8 @@ pub enum NullHandling {
     Passthrough,
 }
 
-/// Type coercion configuration
-///
-/// Following the Go clickhouse-loader pattern:
-/// - Type mappings for custom types
-/// - Configurable null handling
-/// - Timezone handling for naive timestamps
+/// Type coercion configuration. No encoder reads it, so `Config::validate`
+/// refuses any field set away from its default.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct CoercionConfig {

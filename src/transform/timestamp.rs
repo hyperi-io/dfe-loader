@@ -147,7 +147,7 @@ impl TimestampValidator {
 
     /// Check bounds with a pre-cached current time (avoids syscall in hot path)
     #[inline]
-    fn check_bounds_with_now(&self, dt: DateTime<Utc>, now: DateTime<Utc>) -> TimestampResult {
+    pub fn check_bounds_with_now(&self, dt: DateTime<Utc>, now: DateTime<Utc>) -> TimestampResult {
         let diff_secs = (dt - now).num_seconds();
 
         // Check future bound

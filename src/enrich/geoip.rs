@@ -319,11 +319,16 @@ impl GeoIpEnricher {
 
     /// Cache insert with LRU eviction (write path)
     fn cache_put(&self, ip: String, result: GeoIpResult) {
+        // A capacity of 0 caches nothing.
+        if self.cache_capacity == 0 {
+            return;
+        }
         let mut cache = self.cache.write();
 
-        // LRU eviction: remove oldest 25% when at capacity
+        // LRU eviction: remove the oldest quarter at capacity, and at least
+        // one, or a capacity below 4 evicts nothing and grows without bound.
         if cache.len() >= self.cache_capacity {
-            self.evict_lru(&mut cache, self.cache_capacity / 4);
+            self.evict_lru(&mut cache, (self.cache_capacity / 4).max(1));
         }
 
         let order = self.access_counter.fetch_add(1, Ordering::Relaxed);
@@ -577,6 +582,19 @@ fn is_link_local_ipv6(addr: &Ipv6Addr) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `(capacity, entries held after 10 distinct puts)`: a capacity below 4
+    /// still evicts, so the cache stays within it, and 0 caches nothing.
+    #[test]
+    fn the_cache_holds_its_capacity_however_small() {
+        for (capacity, held) in [(0, 0), (1, 1), (2, 2), (3, 3), (8, 8)] {
+            let enricher = GeoIpEnricher::new().with_cache_capacity(capacity);
+            for i in 0..10 {
+                enricher.cache_put(format!("203.0.113.{i}"), GeoIpResult::default());
+            }
+            assert_eq!(enricher.cache_stats().size, held, "capacity {capacity}");
+        }
+    }
 
     #[test]
     fn test_private_ipv4() {

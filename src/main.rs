@@ -350,7 +350,8 @@ mod tests {
         app.load_config(None).expect("default config loads");
 
         // Both values differ from the library defaults the reader falls back to.
-        let gate = scalo::ScalingPressureConfig::from_cascade();
+        let gate =
+            scalo::ScalingPressureConfig::from_cascade().expect("the scaling section parses");
         assert!(
             !gate.enabled,
             "scaling.enabled must reach the engine KEDA reads"
