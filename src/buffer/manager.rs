@@ -198,8 +198,6 @@ struct TableBuffer {
     bytes: u64,
     /// Created timestamp
     created_at: Instant,
-    /// Target batch size
-    batch_size: usize,
 }
 
 impl TableBuffer {
@@ -211,7 +209,6 @@ impl TableBuffer {
             reserved: Vec::with_capacity(batch_size),
             bytes: 0,
             created_at: Instant::now(),
-            batch_size,
         }
     }
 
@@ -263,9 +260,6 @@ impl TableBuffer {
         let raw_payloads = std::mem::take(&mut self.raw_payloads);
         let reserved = std::mem::take(&mut self.reserved);
         self.bytes = 0;
-        self.rows = Vec::with_capacity(self.batch_size);
-        self.raw_payloads = Vec::with_capacity(self.batch_size);
-        self.reserved = Vec::with_capacity(self.batch_size);
         self.created_at = Instant::now();
         Some((rows, offsets, raw_payloads, reserved))
     }
@@ -438,8 +432,14 @@ impl BufferManager {
                 }
             }
         }
-
+        self.drop_empty();
         flush_batches
+    }
+
+    /// Drop the buffers a flush emptied. A table that sends again gets a new
+    /// one, so an idle table holds no row-sized allocation.
+    fn drop_empty(&mut self) {
+        self.buffers.retain(|_, buffer| !buffer.is_empty());
     }
 
     /// Flush all buffers (for shutdown)
@@ -472,6 +472,7 @@ impl BufferManager {
                 });
             }
         }
+        self.drop_empty();
         flush_batches
     }
 
@@ -597,6 +598,30 @@ mod tests {
 
         assert_eq!(manager.pending_rows(), 2);
         assert_eq!(manager.stats().table_count, 2);
+    }
+
+    /// A table flushed and then idle keeps no buffer, so tables seen once
+    /// hold no row-sized allocation and drop out of every buffer scan.
+    #[test]
+    fn a_flushed_table_keeps_no_buffer() {
+        let mut manager = BufferManager::new(&test_config());
+        for t in 0..100 {
+            for i in 0..5 {
+                let data = json!({"id": i}).as_object().unwrap().clone();
+                manager.push(&format!("db.t{t}"), data, None, None);
+            }
+        }
+        assert_eq!(manager.get_ready_for_flush().len(), 100);
+        assert_eq!(
+            manager.stats().table_count,
+            0,
+            "flushed tables keep their buffers"
+        );
+
+        let data = json!({"id": 1}).as_object().unwrap().clone();
+        manager.push("db.t0", data, None, None);
+        assert_eq!(manager.flush_all().len(), 1);
+        assert_eq!(manager.stats().table_count, 0);
     }
 
     #[test]
