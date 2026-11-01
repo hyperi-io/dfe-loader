@@ -528,7 +528,12 @@ macro_rules! test_name {
 
 /// Container name prefix: `HYPERI_TEST_CONTAINER_PREFIX`, else `dfe-loader-test`.
 pub fn containers_prefix() -> String {
-    containers::SUITE.prefix()
+    shared_service::Suite {
+        repo: "dfe-loader",
+        manifest_dir: env!("CARGO_MANIFEST_DIR"),
+        tmp_dir: option_env!("CARGO_TARGET_TMPDIR"),
+    }
+    .prefix()
 }
 
 /// Hold a `ClickHouse` for the rest of the test, or return when there is none.
