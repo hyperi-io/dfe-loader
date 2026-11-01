@@ -768,6 +768,8 @@ mod tests {
     #[test_case::test_case(BODY_252_PARTS, 252, ErrorCategory::Transient ; "too_many_parts")]
     #[test_case::test_case(BODY_252_PARTITIONS, 252, ErrorCategory::Data ; "too_many_partitions")]
     #[test_case::test_case(BODY_319, 319, ErrorCategory::Transient ; "unknown_status_of_insert")]
+    #[test_case::test_case("Code: 117", 117, ErrorCategory::Data ; "code_only_incorrect_data")]
+    #[test_case::test_case(" Code: 241 ", 241, ErrorCategory::Transient ; "code_only_memory_limit")]
     fn a_server_body_is_classified_by_its_code(body: &str, code: i32, expected: ErrorCategory) {
         let err = clickhouse::error::Error::BadResponse(body.to_string());
         assert_eq!(classify_json_insert_error(&err), expected, "JSONEachRow");
@@ -948,6 +950,10 @@ mod tests {
             )),
             ErrorCategory::Fatal
         );
+        // A bare number is a proxy or status body, not the server's code.
+        let bare = clickhouse::error::Error::BadResponse("117".to_string());
+        assert_ne!(classify_json_insert_error(&bare), ErrorCategory::Data);
+        assert_eq!(server_code(&error_text(&bare)), None);
         // A server code no release has used yet is still the server's verdict:
         // only the listed codes retry.
         assert_eq!(

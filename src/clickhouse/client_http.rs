@@ -289,15 +289,15 @@ pub fn build_client(config: &ClickHouseConfig) -> Result<ChClient> {
 }
 
 /// The native-protocol client: the same credentials, database and bounds as
-/// HTTP, every configured host in its failover list, and with TLS on, the
-/// server verified against the system trust store only, as HTTPS is.
+/// HTTP, every configured host in its failover list, and with TLS on, each
+/// host verified against its own name and the system trust store only, as
+/// HTTPS is.
 fn native_transport(config: &ClickHouseConfig, endpoint: &str) -> TcpClient {
     let mut client = if config.tls {
-        // The certificate is verified against the first host's name.
-        let server_name = endpoint.rsplit_once(':').map_or(endpoint, |(host, _)| host);
         let mut trust = TlsTrust::default();
         trust.webpki_roots = false;
-        TcpClient::new_tls(endpoint, server_name).with_tls_trust(trust)
+        // Its own host as the name makes the client verify each host against its own.
+        TcpClient::new_tls(endpoint, endpoint_host(endpoint)).with_tls_trust(trust)
     } else {
         TcpClient::new(endpoint)
     };
@@ -320,6 +320,14 @@ fn native_transport(config: &ClickHouseConfig, endpoint: &str) -> TcpClient {
         client = client.with_password(&config.password);
     }
     client
+}
+
+/// The host of a `host:port` endpoint, an IPv6 literal without its brackets.
+fn endpoint_host(endpoint: &str) -> &str {
+    let host = endpoint.rsplit_once(':').map_or(endpoint, |(host, _)| host);
+    host.strip_prefix('[')
+        .and_then(|h| h.strip_suffix(']'))
+        .unwrap_or(host)
 }
 
 /// Row type for system.columns queries.
@@ -1146,6 +1154,14 @@ mod tests {
             build_client(&config).expect("a native config builds"),
             ChClient::Native(_)
         ));
+    }
+
+    #[test_case::test_case("ch-1.example:9440", "ch-1.example" ; "name")]
+    #[test_case::test_case("10.0.0.5:9440", "10.0.0.5" ; "ipv4")]
+    #[test_case::test_case("[::1]:9440", "::1" ; "ipv6")]
+    #[test_case::test_case("localhost", "localhost" ; "no_port")]
+    fn the_endpoint_host_is_the_name_its_certificate_carries(endpoint: &str, host: &str) {
+        assert_eq!(endpoint_host(endpoint), host);
     }
 
     #[test]

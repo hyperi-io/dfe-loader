@@ -1416,9 +1416,13 @@ async fn a_drift_error_keeps_the_cached_schema_when_refresh_on_error_is_off() {
 /// in the JSON column the server parses: code 117 against an unchanged table
 /// is the row's own, so salvage isolates it and the rest land at once. The
 /// echoed row reads like a network fault, and that must not matter.
+#[test_case::test_case(Transport::Http ; "http")]
+#[test_case::test_case(Transport::Native ; "native")]
 #[tokio::test(flavor = "multi_thread")]
-async fn a_row_the_server_refuses_against_a_current_schema_is_salvaged_not_retried() {
-    let (_infra, client, ch) = spin_up(test_name!()).await;
+async fn a_row_the_server_refuses_against_a_current_schema_is_salvaged_not_retried(
+    transport: Transport,
+) {
+    let (_infra, client, ch) = spin_up_over(&format!("data_refusal_{transport}"), transport).await;
     let table = unique_table_name("tc_data_refusal");
     client
         .execute(&format!(

@@ -157,3 +157,32 @@ async fn tls_is_verified_against_the_system_trust_store_on_both_protocols() {
         }
     }
 }
+
+/// Native TLS fails over from a host that is down to one that is up, and
+/// verifies the second against its own name, not the first's address, which
+/// the certificate does not carry.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_tls_fails_over_to_a_second_host_verified_against_its_own_name() {
+    let shared = shared_clickhouse().await;
+    let ca_pem = shared_clickhouse_ca().await;
+    let named = tls_name(&shared.host).to_string();
+    let native_tls_port = shared.port(CLICKHOUSE_NATIVE_TLS_PORT);
+    let down = std::net::TcpListener::bind("127.0.0.1:0")
+        .and_then(|listener| listener.local_addr())
+        .expect("a free local port")
+        .port();
+
+    let dir = tempfile::tempdir().expect("CA bundle directory");
+    let ca_bundle = dir.path().join("private-ca.pem");
+    std::fs::write(&ca_bundle, &ca_pem).expect("write CA bundle");
+    trust(Some(&ca_bundle));
+
+    let mut failover = config(Transport::Native, "127.0.0.1", down, true);
+    failover.hosts.push(format!("{named}:{native_tls_port}"));
+    let landed = select_one(&failover).await;
+
+    assert!(
+        landed.is_ok(),
+        "native TLS did not land on the second host: {landed:?}"
+    );
+}

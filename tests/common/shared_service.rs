@@ -945,8 +945,15 @@ mod tests {
         let server = std::thread::spawn(move || {
             for stream in listener.incoming().take(2) {
                 let mut stream = stream.expect("accept");
-                let mut request = [0u8; 256];
-                let _ = stream.read(&mut request);
+                // Closing with request bytes unread sends a reset that loses the response.
+                let mut request = Vec::new();
+                let mut chunk = [0u8; 256];
+                while !request.ends_with(b"\r\n\r\n") {
+                    match stream.read(&mut chunk) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => request.extend_from_slice(&chunk[..n]),
+                    }
+                }
                 let _ = stream.write_all(b"HTTP/1.0 200 OK\r\n\r\nOk.");
             }
         });
