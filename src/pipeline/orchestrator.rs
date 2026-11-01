@@ -102,6 +102,10 @@ pub struct Orchestrator {
     /// Dead letters not yet offered to the DLQ. The next flush hands them over
     /// before it commits, so no offset is committed past one.
     dead_letters: Vec<DlqEntry>,
+    /// Offsets of dead letters the DLQ has confirmed written, committed with
+    /// the cycle's other offsets. A partition carrying only rejected records
+    /// has no batch to commit them with otherwise.
+    dlq_placed: Vec<KafkaOffset>,
     /// Received records whose Push answer waits on their rows.
     acks: AckLedger,
     /// Whether the transport answers each Push only once it is released, set
@@ -173,6 +177,7 @@ impl Orchestrator {
             batch_engine: None,
             sink_circuit_open: false,
             dead_letters: Vec::new(),
+            dlq_placed: Vec::new(),
             acks: AckLedger::default(),
             holds_answers: false,
             commits_at_receipt: false,
@@ -202,6 +207,7 @@ impl Orchestrator {
             batch_engine: None,
             sink_circuit_open: false,
             dead_letters: Vec::new(),
+            dlq_placed: Vec::new(),
             acks: AckLedger::default(),
             holds_answers: false,
             commits_at_receipt: false,
@@ -1548,6 +1554,7 @@ impl Orchestrator {
         // A Kafka consumer never re-reads a row it has read past, so every row
         // held for another attempt keeps the commit below it until it lands.
         withheld.extend(self.unsettled.offsets());
+        committable.append(&mut self.dlq_placed);
         // ONE commit for the cycle, bounded by the lowest withheld offset on
         // each partition. Doing it per batch buries a sibling table's withheld
         // offset, and `get_ready_for_flush` iterates an FxHashMap, so batch
@@ -1693,7 +1700,10 @@ impl Orchestrator {
             return;
         }
         match place_dead_letters(dlq, &dead_letters, expiry, &self.shutdown).await {
-            Placement::Written => self.count_placed(&dead_letters),
+            Placement::Written => {
+                self.count_placed(&dead_letters);
+                self.dlq_placed.extend(placed_offsets(&dead_letters));
+            }
             Placement::Closed => {
                 warn!(
                     rows = dead_letters.len(),
@@ -1710,6 +1720,14 @@ impl Orchestrator {
                 self.strand_dead_letters(dead_letters);
             }
         }
+    }
+
+    /// The placed dead letters' offsets a cycle with no batch may commit: each
+    /// partition's stays below the lowest offset still held anywhere, as the
+    /// flush cycle's commit does.
+    fn dlq_commit(&mut self, mut withheld: Vec<KafkaOffset>) -> Vec<KafkaOffset> {
+        withheld.extend(self.unsettled.offsets());
+        committable_offsets(std::mem::take(&mut self.dlq_placed), &withheld)
     }
 
     /// Queue dead letters for the next flush, tracking their bytes until then.
@@ -1810,6 +1828,10 @@ impl Orchestrator {
             self.settle_dead_letters(transport, dlq, dead_letters, dlq_deadline)
                 .await;
             self.unsettled.rearm();
+            if !self.commits_at_receipt {
+                let to_commit = self.dlq_commit(still_held);
+                commit_offsets(transport, &self.metrics, &to_commit).await;
+            }
         } else {
             self.flush_batches_transport(
                 inserter, transport, dlq, batches, still_held, buffers, pending,
@@ -2937,6 +2959,18 @@ fn pending_reason_label(reason: &super::pending_schema::ExpireReason) -> &'stati
     }
 }
 
+/// The Kafka offsets the dead letters came from, for those that carry one.
+fn placed_offsets(dead_letters: &[DlqEntry]) -> impl Iterator<Item = KafkaOffset> + '_ {
+    dead_letters.iter().filter_map(|entry| {
+        let source = entry.source.as_ref()?;
+        Some(KafkaOffset::new(
+            source.topic.as_deref()?,
+            source.partition?,
+            source.offset?,
+        ))
+    })
+}
+
 /// Whether the DLQ takes what it is handed.
 ///
 /// A DLQ the config disables counts a drop and returns `Ok` from `send`, so
@@ -3836,6 +3870,41 @@ mod tests {
             .iter()
             .filter_map(|row| rejected_entry("dfe.main", payloads, row))
             .collect()
+    }
+
+    /// A cycle with no batch, only rejected records, still commits the offsets
+    /// of those the DLQ confirmed, so the partition's backlog clears and a
+    /// restart does not replay them into the DLQ. An offset still held keeps
+    /// its partition's commit below it.
+    #[tokio::test]
+    async fn dead_letters_placed_with_no_batch_are_committed() {
+        let dir = dlq_dir("dlq-only");
+        let dlq = file_dlq(&dir);
+        let payloads: Vec<Arc<[u8]>> =
+            vec![Arc::from(&b"{\"n\":1}"[..]), Arc::from(&b"{\"n\":2}"[..])];
+        let dead_letters = rejected_entries(&payloads, &rejected_rows(2, "code 117"));
+        let mut orchestrator = Orchestrator::new(Config::default());
+        settle(&mut orchestrator, Some(&dlq), dead_letters, in_30s()).await;
+        assert_eq!(orchestrator.stats().messages_dlq, 2);
+
+        let committed = orchestrator.dlq_commit(Vec::new());
+        let offsets: Vec<(i32, i64)> = committed.iter().map(|o| (o.partition, o.offset)).collect();
+        assert_eq!(offsets, [(0, 10), (0, 11)], "the placed rows' offsets");
+        assert!(
+            orchestrator.dlq_commit(Vec::new()).is_empty(),
+            "committed once"
+        );
+
+        let more = rejected_entries(&payloads, &rejected_rows(2, "code 117"));
+        settle(&mut orchestrator, Some(&dlq), more, in_30s()).await;
+        let held = vec![KafkaOffset::new("dfe-events", 0, 11)];
+        let committed = orchestrator.dlq_commit(held);
+        assert!(
+            committed.iter().all(|o| o.offset < 11),
+            "a held offset bounds the commit: {committed:?}"
+        );
+        dlq.shutdown().await.expect("stop the DLQ");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
