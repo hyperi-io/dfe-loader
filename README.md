@@ -89,7 +89,7 @@ Full cascade and per-setting behaviour: [docs/configuration.md](docs/configurati
 
 | Topic | Doc |
 |-------|-----|
-| Layers and the `clickhouse_ext` boundary | [docs/architecture.md](docs/architecture.md) |
+| Layers and the dynamic insert | [docs/architecture.md](docs/architecture.md) |
 | Config cascade and behaviour | [docs/configuration.md](docs/configuration.md) |
 | Running, metrics, hot-reload, DLQ | [docs/operations.md](docs/operations.md) |
 | Insert formats, schema cache, types, TLS, DDL directives | [docs/clickhouse/](docs/clickhouse/) |
@@ -114,7 +114,7 @@ BUSL-1.1, licensor HYPERI PTY LIMITED. Each version converts to Apache 2.0 on th
 
 dfe-loader writes rows into ClickHouse -- the last hop of the DFE core data path and the only component that writes there.
 
-NOT a transform stage, NOT a schema manager. Its only outbound topic is the DLQ. dfe-engine creates the destination tables, and the loader holds records pending schema rather than issuing DDL. The dynamic insert layer is in `src/clickhouse_ext/`, not the `clickhouse` crate, which keeps insertion compile-time typed.
+NOT a transform stage, NOT a schema manager. Its only outbound topic is the DLQ. dfe-engine creates the destination tables, and the loader holds records pending schema rather than issuing DDL. The dynamic insert comes from `dfe-clickhouse`'s `dynamic` module, because the `clickhouse` crate keeps insertion compile-time typed.
 
 ### Where things live
 
@@ -124,7 +124,6 @@ NOT a transform stage, NOT a schema manager. Its only outbound topic is the DLQ.
 | `src/pipeline/` | Orchestrator and per-message processor -- the hot path |
 | `src/routing/`, `src/transform/`, `src/enrich/` | Routing, coercion and capture, enrichment |
 | `src/buffer/`, `src/clickhouse/` | Per-table buffers; query client, schema cache, inserter |
-| `src/clickhouse_ext/` | Dynamic insert: runtime type parser, RowBinary encoder |
 | `tests/` | `smoke.rs`, `integration/`, `e2e/` -- see `tests/TESTING.md` |
 
 ### Commands that prove a change

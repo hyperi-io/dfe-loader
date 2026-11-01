@@ -13,7 +13,7 @@
 This is the type catalogue the dynamic encoder works against. When dfe-loader
 reflects a table from `system.columns`, every column comes back as one of these
 types (possibly wrapped in `Nullable` or `LowCardinality`), and the encoder in
-`src/clickhouse_ext/` has to turn a `Value` into the right bytes for it. Use
+`dfe-clickhouse`'s `dynamic` module has to turn a `Value` into the right bytes for it. Use
 this page when you are designing a schema, or when you are extending the encoder
 to cover a type it does not yet handle.
 
@@ -289,14 +289,13 @@ dfe-loader inserts through the official `clickhouse` crate from crates.io. The
 crate keeps insertion typed -- compile-time `T: Row` schemas -- which is the
 right upstream default. The loader's rows are not typed at compile time: their
 columns come from `system.columns` at runtime, so the dynamic encoding layer
-lives in this repo at `src/clickhouse_ext/`, on top of the crate's public
-surface. See [clickhouse-ext.md](clickhouse-ext.md) for where the encoder calls into that surface.
+comes from `dfe-clickhouse`'s `dynamic` module, on top of the crate's public surface. See [clickhouse-ext.md](clickhouse-ext.md) for where the encoder calls into that surface.
 
 The loader writes in one of two formats, dispatched by `clickhouse.insert_format`:
 
 | Format | Path | Purpose | Default |
 |--------|------|---------|---------|
-| RowBinary | `clickhouse_ext::DynamicInsert` over `Client` | Schema-reflected typed binary encoding | Yes |
+| RowBinary | `dfe_clickhouse::dynamic::DynamicInsert` over `Client` | Schema-reflected typed binary encoding | Yes |
 | JSONEachRow | `Client::insert_formatted_with` (FORMAT JSONEachRow) | Fallback, server-side type coercion | No |
 
 `DynamicInsert` reflects the target schema from `system.columns`, encodes a
@@ -370,7 +369,7 @@ schema contains a JSON column -- no configuration needed. See
 
 ## Encoder implementation status
 
-**RowBinary (default):** encoded by `clickhouse_ext::DynamicInsert` from the reflected schema. It covers the integer, float, decimal, bool, string, date and time, UUID, IP, enum, `Array`, `Map`, JSON and geo types, inside `Nullable` and `LowCardinality`. `Decimal(P, S)` resolves to the concrete Decimal32/64/128/256 at encode time based on precision. A value bound for a type the encoder has no arm for (`Tuple`, `Variant`, `Dynamic`, `Nested`, ...) is refused with `UnsupportedType`, which holds the batch for retry rather than writing wrong bytes.
+**RowBinary (default):** encoded by `dfe_clickhouse::dynamic::DynamicInsert` from the reflected schema. It covers the integer, float, decimal, bool, string, date and time, UUID, IP, enum, `Array`, `Map`, JSON and geo types, inside `Nullable` and `LowCardinality`. `Decimal(P, S)` resolves to the concrete Decimal32/64/128/256 at encode time based on precision. A value bound for a type the encoder has no arm for (`Tuple`, `Variant`, `Dynamic`, `Nested`, ...) is refused with `UnsupportedType`, which holds the batch for retry rather than writing wrong bytes.
 
 **JSONEachRow (fallback):** the server parses each type itself. Before it does, the loader shapes the values it would refuse by the same rules as RowBinary: a JSON column's non-object, every geo_point form (sent as `[lon, lat]`), and a single value bound for an `Array`. Set `insert_format = "json_each_row"` to opt in (HTTP transport only -- see the config guard in [insert-formats.md](insert-formats.md)).
 

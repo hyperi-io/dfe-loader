@@ -82,6 +82,7 @@ fetch that failed is still discarded either way.
 
 ## Where it lives
 
-`src/clickhouse_ext/schema.rs` (`DynamicSchema`, `DynamicSchemaCache`,
-`fetch_dynamic_schema`). The cache is owned by the `Inserter` and handed to each
+`dfe_clickhouse::dynamic` (`DynamicSchema`, `DynamicSchemaCache`,
+`fetch_dynamic_schema`, `fetch_dynamic_schema_tcp`), read through the
+inserter's widening bound in `src/clickhouse/inserter.rs`. The cache is owned by the `Inserter` and handed to each
 `DynamicInsert`. See [clickhouse-ext.md](clickhouse-ext.md).

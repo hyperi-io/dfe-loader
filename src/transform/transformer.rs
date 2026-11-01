@@ -333,7 +333,7 @@ impl Transformer {
     /// Extract tags from the first matching field in `tags_fields`
     ///
     /// Returns the extracted value verbatim; shaping a non-object for the JSON
-    /// `_tags` column happens at the write, in `clickhouse_ext::encode`.
+    /// `_tags` column happens at the write, in `dfe_clickhouse::dynamic`'s encoder.
     /// Uses dot notation for nested field access.
     fn extract_tags(&self, obj: &Map<String, Value>) -> Option<Value> {
         for field in &self.tags_fields {

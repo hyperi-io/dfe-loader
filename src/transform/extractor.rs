@@ -440,7 +440,7 @@ impl HeaderExtractor {
 /// discriminant compare rather than the two `&str` compares a category costs.
 #[inline]
 fn is_datetime(col: &crate::clickhouse::types::ColumnInfo) -> bool {
-    use crate::clickhouse_ext::parsed_type::TypeTag;
+    use dfe_clickhouse::dynamic::TypeTag;
     matches!(col.parsed_type.tag, TypeTag::DateTime | TypeTag::DateTime64)
 }
 

@@ -114,8 +114,8 @@ the DDL clause that actually does the filling.
 The loader still omits the field from the insert, but by a different route: it
 reads `default_kind` for the column from `system.columns`, and any column
 whose kind is `DEFAULT`, `MATERIALIZED`, `ALIAS` or `EPHEMERAL` is marked
-`has_default` and can be left out of the row it sends (dfe-loader
-`src/clickhouse_ext/encode.rs`, `src/clickhouse_ext/insert.rs:351`). The
+`has_default` and can be left out of the row it sends (the dynamic insert in
+`dfe-clickhouse`'s `dynamic` module). The
 applier (dfe-engine's schema module) writes that DEFAULT/MATERIALIZED/ALIAS
 clause from the schema's own `default:` and `attribute:` fields -- not by
 reading the `@generated:` text -- so keep the two in agreement by hand.
@@ -1108,7 +1108,7 @@ The UI can filter available functions based on target column type. This enables
 
 #### Type categories
 
-Based on the ClickHouse type system in `src/clickhouse_ext/` (ParsedType):
+Based on the ClickHouse type system in `dfe-clickhouse`'s `dynamic` module (ParsedType):
 
 ```python
 class TypeCategory(str, Enum):
@@ -1787,9 +1787,9 @@ def get_filtered_functions(target_type: str, category: Optional[str] = None) -> 
 ### Rust type safety reference
 
 The dfe-loader Rust implementation parses column types with `ParsedType` in
-`src/clickhouse_ext/`. The Python API should mirror its category mapping.
+`dfe-clickhouse`'s `dynamic` module. The Python API should mirror its category mapping.
 
-**Type parsing (ParsedType, in `src/clickhouse_ext/`):**
+**Type parsing (ParsedType, in `dfe-clickhouse`'s `dynamic` module):**
 
 ```rust
 // ParsedType handles all ClickHouse type variations

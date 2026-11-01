@@ -180,10 +180,10 @@ Expect a ~3.5% binary-size increase from the static jemalloc link
 
 dfe-loader writes to ClickHouse through crates.io `clickhouse` over HTTP, or
 `dfe-clickhouse`'s `TcpClient` over the native protocol, with the dynamic
-RowBinary layer in `src/clickhouse_ext/`. The default path is RowBinary via
+RowBinary layer from `dfe-clickhouse`'s `dynamic` module. The default path is RowBinary via
 `DynamicInsert` (schema-reflected typed encoding -- ClickHouse skips JSON
 parsing), over HTTP through `Client::insert_formatted_with`
-(`FORMAT RowBinaryWithNamesAndTypes`), or as `FORMAT Native` blocks with
+(`FORMAT RowBinaryWithDefaults`), or as `FORMAT Native` blocks with
 `clickhouse.protocol: native`. No throughput comparison of the two has been
 measured. Set
 `insert_format = "json_each_row"` to fall back to `FORMAT JSONEachRow` over HTTP

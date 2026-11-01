@@ -633,11 +633,10 @@ fn supported_type_cases() -> Vec<TypeCase> {
     ]
 }
 
-/// Each supported column type lands through the `RowBinaryWithNamesAndTypes`
-/// header and reads back as sent. A type whose `system.columns` string the
-/// server did not accept back in the header would fail here with code 117.
+/// Each supported column type lands through the RowBinary insert and reads
+/// back as sent.
 #[tokio::test]
-async fn every_supported_column_type_lands_through_the_row_binary_header() {
+async fn every_supported_column_type_lands_through_the_row_binary_insert() {
     let target = Target::new(test_name!()).await;
     let reader = target.rs_client();
     let inserter = Inserter::new(

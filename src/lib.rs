@@ -15,7 +15,6 @@
 
 pub mod buffer;
 pub mod clickhouse;
-pub mod clickhouse_ext;
 pub mod column_meta;
 pub mod config;
 pub mod datetime;

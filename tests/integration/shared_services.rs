@@ -330,7 +330,7 @@ async fn clickhouse_main_cases() {
             continue;
         };
         ran.push(label);
-        if let Err(e) = clickhouse_case(&target, &db, label, transport, port, tls).await {
+        if let Err(e) = Box::pin(clickhouse_case(&target, &db, label, transport, port, tls)).await {
             failures.push(format!("{label}: {e}"));
         }
     }
@@ -412,6 +412,55 @@ async fn clickhouse_case(
     if (inserted, count) != (7, 7) {
         return Err(format!(
             "inserted {inserted}, counted {count}, want 7 and 7"
+        ));
+    }
+
+    let reader_port = target
+        .http
+        .ok_or("no HTTP port to read the cases back over")?;
+    let reader_host = target.host.clone();
+    let reader = clickhouse::Client::default()
+        .with_url(format!("http://{reader_host}:{reader_port}"))
+        .with_user(&target.user)
+        .with_password(&target.password);
+    let coercion = Inserter::new(
+        client.clone(),
+        build_client(&config).map_err(|e| format!("insert client: {e}"))?,
+        InserterConfig {
+            max_retries: 0,
+            base_retry_delay_ms: 10,
+            max_retry_delay_ms: 10,
+            ..InserterConfig::default()
+        },
+    )
+    .with_insert_format(InsertFormat::RowBinary);
+    let wrong = Box::pin(super::insert_coercions::coercion_failures(
+        &client,
+        &coercion,
+        &reader,
+        db,
+        target.table_engine(),
+        &target.on_cluster(),
+        label,
+    ))
+    .await;
+    let mut wrong = wrong;
+    wrong.extend(
+        Box::pin(super::insert_coercions::type_change_failures(
+            &client,
+            &coercion,
+            &reader,
+            db,
+            target.table_engine(),
+            label,
+        ))
+        .await,
+    );
+    if !wrong.is_empty() {
+        return Err(format!(
+            "{} coercion cases WRONG:\n{}",
+            wrong.len(),
+            wrong.join("\n")
         ));
     }
 
