@@ -3,6 +3,15 @@
 Rendered by CI and committed back at the end of a release -- do not edit by
 hand. Release notes also appear on the GitHub Releases page, one per tag.
 
+## [1.18.61](https://github.com/hyperi-io/dfe-loader/compare/v1.18.60...v1.18.61) (2026-11-01)
+
+### Bug Fixes
+
+* close three config startup holes ([#298](https://github.com/hyperi-io/dfe-loader/issues/298)) ([fe39ed9](https://github.com/hyperi-io/dfe-loader/commit/fe39ed9d4e409b70d6397ca7b3d22c7b33544551))
+* **insert:** replace copy with dfe-clickhouse's dynamic insert ([#303](https://github.com/hyperi-io/dfe-loader/issues/303)) ([9abe18d](https://github.com/hyperi-io/dfe-loader/commit/9abe18d23a59afaccf4e9dbed11e1cf739bfe50d))
+* manual remediation of LLM auto fixes -- loader on dfe-clickhouse, not the clickhouse-rs fork ([#302](https://github.com/hyperi-io/dfe-loader/issues/302)) ([b54cae3](https://github.com/hyperi-io/dfe-loader/commit/b54cae3c875cad83d4493d152ed92ca94b2ae724))
+* take libz-sys 1.1.31 for RUSTSEC-2026-0418 ([#297](https://github.com/hyperi-io/dfe-loader/issues/297)) ([98271b8](https://github.com/hyperi-io/dfe-loader/commit/98271b88740794ffe4f3793d7939067fbf1582c7))
+
 ## [1.18.60](https://github.com/hyperi-io/dfe-loader/compare/v1.18.59...v1.18.60) (2026-10-29)
 
 ### Bug Fixes
