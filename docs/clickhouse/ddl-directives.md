@@ -17,9 +17,11 @@ beside, in CSV) each column, and the data-prep stage reads the ones it acts on
 to decide whether a column is copied from the source payload, renamed, or
 computed by an enrichment function.
 
-Only six directives change loader behaviour: `@skip`, `@default`, `@source`,
-`@renamed`, `@computed`, `@coerce` (`DIRECTIVE_NAMES` in
-[`../../src/column_meta/mod.rs`](../../src/column_meta/mod.rs)). `@source`
+Five directives change loader behaviour: `@skip`, `@default`, `@source`,
+`@renamed` and `@computed` (`DIRECTIVE_NAMES` in
+[`../../src/column_meta/mod.rs`](../../src/column_meta/mod.rs)). `@coerce` is
+parsed but reaches no encoder, which applies fixed coercion rules, so the loader
+logs a warning for it and the config's `coerce:` is refused at startup. `@source`
 copies a field (and, like `@renamed`, feeds the loader's `renamed:` config
 field), `@renamed` moves one (zero-copy), and `@computed` runs a function
 chain. Every `@computed` function carries a CPU cost tier so you can keep the

@@ -2517,6 +2517,18 @@ async fn resolve_table(
         client.fetch_column_comments(&table),
     );
     let column_directives = directives_from(comments_res);
+    // DDL cannot be refused at startup the way the config's coerce directive is.
+    for (column, _) in column_directives
+        .iter()
+        .flatten()
+        .filter(|(_, directives)| directives.coerce.is_some())
+    {
+        warn!(
+            table = %table,
+            column = %column,
+            "The @coerce directive reaches no encoder -- the dynamic insert applies fixed coercion rules"
+        );
+    }
     // Keep the reason: the event loop can only fall back to the default table
     // safely if it can tell an absent table from an unreachable ClickHouse.
     let (schema, fault) = match schema_res {
