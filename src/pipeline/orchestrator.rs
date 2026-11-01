@@ -737,11 +737,13 @@ impl Orchestrator {
 
                     // Populate ColumnMetaCache DDL layer — must happen before field mapping
                     // and computed column caches, which read from it.
-                    if let Some(directives) = result.column_directives {
-                        col_meta_cache.apply_ddl(table, directives);
-                        // Computed columns read their CEL expressions from it.
-                        computed_column_cache.build_and_cache(table, &col_meta_cache);
-                    }
+                    apply_directives(
+                        &col_meta_cache,
+                        &mut computed_column_cache,
+                        table,
+                        result.column_directives,
+                        &result.schema,
+                    );
 
                     match result.schema {
                         SchemaResolution::Resolved(schema) => {
@@ -2457,6 +2459,30 @@ async fn resolve_table(
     (result, fault)
 }
 
+/// Apply a resolution's column directives to the directive and computed-column
+/// caches. A table that does not exist keeps no entry in either, so arbitrary
+/// `_source` values cannot grow them, and a read that failed changes nothing.
+fn apply_directives(
+    col_meta: &crate::column_meta::ColumnMetaCache,
+    computed: &mut crate::transform::computed::ComputedColumnCache,
+    table: &str,
+    directives: Option<rustc_hash::FxHashMap<String, crate::column_meta::ColumnDirectives>>,
+    schema: &SchemaResolution,
+) {
+    match (schema, directives) {
+        (SchemaResolution::TableNotFound, _) => {
+            col_meta.forget(table);
+            computed.forget(table);
+        }
+        (_, Some(directives)) => {
+            col_meta.apply_ddl(table, directives);
+            // Computed columns read their CEL expressions from it.
+            computed.build_and_cache(table, col_meta);
+        }
+        (_, None) => {}
+    }
+}
+
 /// Column directives from a column-comment read, or `None` when the read
 /// failed: an empty map would replace the table's working directives.
 fn directives_from<E>(
@@ -3880,6 +3906,49 @@ mod tests {
         );
         let _ = std::fs::remove_file(&service);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A table that does not exist leaves no directive or computed-column
+    /// entry behind, however many such names arrive.
+    #[test]
+    fn a_missing_table_keeps_no_directives() {
+        let col_meta = crate::column_meta::ColumnMetaCache::new(Default::default());
+        let mut computed = crate::transform::computed::ComputedColumnCache::new(Default::default());
+        for i in 0..100 {
+            apply_directives(
+                &col_meta,
+                &mut computed,
+                &format!("dfe.made_up_{i}"),
+                Some(rustc_hash::FxHashMap::default()),
+                &SchemaResolution::TableNotFound,
+            );
+        }
+        assert_eq!(col_meta.ddl_tables(), 0);
+        assert_eq!(computed.tables(), 0);
+
+        let mut comments = rustc_hash::FxHashMap::default();
+        comments.insert("ip".to_string(), "@renamed: src_ip".to_string());
+        apply_directives(
+            &col_meta,
+            &mut computed,
+            "dfe.real",
+            directives_from(Ok::<_, &str>(comments)),
+            &SchemaResolution::Unavailable,
+        );
+        assert_eq!(
+            col_meta.ddl_tables(),
+            1,
+            "a table that may exist keeps its read"
+        );
+        // The table turns out not to exist: its entries go.
+        apply_directives(
+            &col_meta,
+            &mut computed,
+            "dfe.real",
+            None,
+            &SchemaResolution::TableNotFound,
+        );
+        assert_eq!((col_meta.ddl_tables(), computed.tables()), (0, 0));
     }
 
     /// A column-comment read that failed changes nothing, where it used to

@@ -131,6 +131,17 @@ impl ComputedColumnCache {
         self.tables.get(table)
     }
 
+    /// Drop a table's compiled columns, for a table that does not exist.
+    pub fn forget(&mut self, table: &str) {
+        self.tables.remove(table);
+    }
+
+    /// Number of tables with compiled columns.
+    #[must_use]
+    pub fn tables(&self) -> usize {
+        self.tables.len()
+    }
+
     /// Mark a table for async column comment resolution (first time seen).
     pub fn mark_pending(&mut self, table: &str) {
         if !self.tables.contains_key(table) && !self.pending_tables.contains(&table.to_string()) {
