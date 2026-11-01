@@ -17,7 +17,7 @@ use std::hint::black_box;
 
 use dfe_loader::clickhouse::{ColumnInfo, ParsedType, TableSchema};
 use dfe_loader::column_meta::{ColumnDirectivesConfig, ColumnMetaCache, parse_directives};
-use dfe_loader::config::{MetadataConfig, RoutingConfig};
+use dfe_loader::config::{MetadataConfig, RoutingConfig, TimestampDqConfig};
 use dfe_loader::transform::HeaderExtractor;
 use rustc_hash::FxHashMap;
 
@@ -109,7 +109,11 @@ const PAYLOAD: &[u8] = br#"{
 }"#;
 
 fn bench_extract(c: &mut Criterion) {
-    let extractor = HeaderExtractor::new(&MetadataConfig::default(), &RoutingConfig::default());
+    let extractor = HeaderExtractor::new(
+        &MetadataConfig::default(),
+        &RoutingConfig::default(),
+        &TimestampDqConfig::default(),
+    );
 
     let mut group = c.benchmark_group("header_extract");
     group.throughput(Throughput::Elements(1));

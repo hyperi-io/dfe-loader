@@ -578,7 +578,7 @@ mod tests {
         // sanitised `timestamp` still appears for a meta column to read.
         assert_eq!(
             result.data["_timestamp"],
-            serde_json::json!("2024-12-24 10:00:00.000"),
+            serde_json::json!("2024-12-24T10:00:00.000Z"),
             "_timestamp must carry the event's own time, not the load time"
         );
         assert!(result.data.contains_key("timestamp")); // sanitized from @timestamp
@@ -955,7 +955,7 @@ mod tests {
 
     #[test]
     fn test_transform_received_and_collector_offsets_land_as_utc_text() {
-        // Left verbatim, a zoned value fails the whole JSONEachRow batch with code 27.
+        // An offset is moved to UTC and the zone kept.
         let transformer = Transformer::default();
         let raw = br#"{"event": "x",
             "timestamp_received": "2026-04-07T17:03:00.123+10:00",
@@ -964,11 +964,11 @@ mod tests {
         let result = transformer.transform_with_raw(value, None, None).unwrap();
         assert_eq!(
             result.data.get("_timestamp_received"),
-            Some(&Value::String("2026-04-07 07:03:00.123".into()))
+            Some(&Value::String("2026-04-07T07:03:00.123Z".into()))
         );
         assert_eq!(
             result.data.get("_timestamp_collector"),
-            Some(&Value::String("2026-04-07 07:03:00.123456".into()))
+            Some(&Value::String("2026-04-07T07:03:00.123456Z".into()))
         );
     }
 
@@ -990,14 +990,14 @@ mod tests {
         for (input, expected) in [
             (
                 "2026-04-07T17:03:00.123456+10:00",
-                "2026-04-07 07:03:00.123456",
+                "2026-04-07T07:03:00.123456Z",
             ),
             (
                 "2026-04-07T07:03:00.123456789Z",
-                "2026-04-07 07:03:00.123456789",
+                "2026-04-07T07:03:00.123456789Z",
             ),
-            ("2026-04-07T07:03:00.120Z", "2026-04-07 07:03:00.120"),
-            ("2026-04-07T07:03:00Z", "2026-04-07 07:03:00.000"),
+            ("2026-04-07T07:03:00.120Z", "2026-04-07T07:03:00.120Z"),
+            ("2026-04-07T07:03:00Z", "2026-04-07T07:03:00.000Z"),
         ] {
             let value = serde_json::json!({"event": "x", "timestamp": input});
             let result = transformer.transform_with_raw(value, None, None).unwrap();

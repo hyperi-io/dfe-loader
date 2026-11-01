@@ -4,14 +4,12 @@
 //! Date-time text from sources, read once and written per insert path.
 //!
 //! [`parse`] reads `YYYY-MM-DD[T| ]HH:MM:SS[.fraction][Z|±HH:MM]`. Text with no
-//! zone is read as UTC, and text that names one is moved to UTC. The `RowBinary`
-//! encoder writes the result as ticks, the `JSONEachRow` shaping step as epoch
-//! text ([`wire_text`]), and the extractor and transformer as zone-less UTC
-//! text ([`normalise_zoned`]).
-//!
-//! The shaping step sends epoch text because `ClickHouse` reads zone-less text
-//! in the column's timezone, else the server's, and epoch seconds name one
-//! instant whatever either is.
+//! zone is read as UTC, and text that names one is moved to UTC. The extractor
+//! and transformer write it as RFC 3339 UTC text ending in `Z`
+//! ([`normalise_zoned`]), which keeps the zone for the insert: the `RowBinary`
+//! encoder writes ticks, and the `JSONEachRow` shaping step epoch text, because
+//! `ClickHouse` reads zone-less text in the column's timezone, else the
+//! server's.
 
 use chrono::{DateTime, Utc};
 use serde_json::Value;
@@ -26,9 +24,6 @@ pub struct UtcInstant {
     /// Whether the text named its zone.
     pub zoned: bool,
 }
-
-/// The most fraction digits a `DateTime64` holds.
-const MAX_PRECISION: u8 = 9;
 
 /// Byte length of `YYYY-MM-DD HH:MM:SS`.
 const WHOLE_SECONDS_LEN: usize = 19;
@@ -128,52 +123,24 @@ pub fn parse(text: &str) -> Result<UtcInstant, &'static str> {
 }
 
 impl UtcInstant {
-    /// The instant in units of `10^-precision` seconds, which is what a
-    /// `DateTime64(precision)` stores. `None` past the range of `i64`.
-    #[must_use]
-    pub fn ticks(self, precision: u8) -> Option<i64> {
-        let precision = u32::from(precision.min(MAX_PRECISION));
-        self.secs
-            .checked_mul(10_i64.pow(precision))?
-            .checked_add(i64::from(self.nanos) / 10_i64.pow(9 - precision))
-    }
-
-    /// The instant as epoch seconds text with `precision` fraction digits.
-    #[must_use]
-    pub fn epoch_text(self, precision: u8) -> Option<String> {
-        let precision = precision.min(MAX_PRECISION);
-        let ticks = self.ticks(precision)?;
-        let scale = 10_u64.pow(u32::from(precision));
-        let sign = if ticks < 0 { "-" } else { "" };
-        let (whole, frac) = (ticks.unsigned_abs() / scale, ticks.unsigned_abs() % scale);
-        Some(if precision == 0 {
-            format!("{sign}{whole}")
-        } else {
-            format!(
-                "{sign}{whole}.{frac:0width$}",
-                width = usize::from(precision)
-            )
-        })
-    }
-
-    /// The instant as zone-less UTC text. `None` outside the dates chrono holds.
+    /// The instant as UTC text. `None` outside the dates chrono holds.
     #[must_use]
     pub fn utc_text(self) -> Option<String> {
         DateTime::<Utc>::from_timestamp(self.secs, self.nanos).map(|dt| utc_text(&dt))
     }
 }
 
-/// `YYYY-MM-DD HH:MM:SS.fff` in UTC with no zone suffix, widened to six or
-/// nine fraction digits where the instant carries them.
+/// `YYYY-MM-DDTHH:MM:SS.fffZ` in UTC, widened to six or nine fraction digits
+/// where the instant carries them.
 #[must_use]
 pub fn utc_text(dt: &DateTime<Utc>) -> String {
     let nanos = dt.timestamp_subsec_nanos();
     let format = if nanos.is_multiple_of(1_000_000) {
-        "%Y-%m-%d %H:%M:%S%.3f"
+        "%Y-%m-%dT%H:%M:%S%.3fZ"
     } else if nanos.is_multiple_of(1_000) {
-        "%Y-%m-%d %H:%M:%S%.6f"
+        "%Y-%m-%dT%H:%M:%S%.6fZ"
     } else {
-        "%Y-%m-%d %H:%M:%S%.9f"
+        "%Y-%m-%dT%H:%M:%S%.9fZ"
     };
     dt.format(format).to_string()
 }
@@ -187,8 +154,8 @@ pub fn may_name_zone(text: &str) -> bool {
             || b[b.len() - 6..].iter().any(|c| matches!(c, b'+' | b'-')))
 }
 
-/// Rewrite a string value that names its zone as zone-less UTC text, keeping
-/// every fraction digit, and leave every other value as it is.
+/// Rewrite a string value that names its zone as UTC text, keeping every
+/// fraction digit, and leave every other value as it is.
 pub fn normalise_zoned(value: &mut Value) {
     let Value::String(text) = value else {
         return;
@@ -202,62 +169,6 @@ pub fn normalise_zoned(value: &mut Value) {
         .and_then(UtcInstant::utc_text)
     {
         *text = utc;
-    }
-}
-
-/// How text bound for a `JSONEachRow` body must change.
-enum Rewrite {
-    /// The server reads it as it stands.
-    Keep,
-    /// It names its zone, which the default reader refuses with code 27.
-    Epoch(UtcInstant),
-    /// Zone-less, with fraction digits the column does not hold: cut it here.
-    Cut(usize),
-}
-
-fn rewrite(text: &str, precision: u8) -> Rewrite {
-    let b = text.as_bytes();
-    let fraction = match b.get(WHOLE_SECONDS_LEN) {
-        Some(b'.') => b[WHOLE_SECONDS_LEN + 1..]
-            .iter()
-            .take_while(|c| c.is_ascii_digit())
-            .count(),
-        _ => 0,
-    };
-    if !may_name_zone(text) && fraction <= usize::from(precision) {
-        return Rewrite::Keep;
-    }
-    match parse(text) {
-        Ok(instant) if instant.zoned => Rewrite::Epoch(instant),
-        Ok(_) if precision == 0 => Rewrite::Cut(WHOLE_SECONDS_LEN),
-        Ok(_) if fraction > usize::from(precision) => {
-            Rewrite::Cut(WHOLE_SECONDS_LEN + 1 + usize::from(precision))
-        }
-        Ok(_) | Err(_) => Rewrite::Keep,
-    }
-}
-
-/// The text a `JSONEachRow` body sends for a column holding `precision`
-/// fraction digits, or `None` when the server reads `text` as it stands.
-///
-/// A zoned value becomes epoch text. Zone-less text keeps its meaning and
-/// loses only the digits the column cannot hold, which a `DateTime` refuses.
-#[must_use]
-pub fn wire_text(text: &str, precision: u8) -> Option<String> {
-    match rewrite(text, precision) {
-        Rewrite::Keep => None,
-        Rewrite::Epoch(instant) => instant.epoch_text(precision),
-        Rewrite::Cut(len) => Some(text[..len].to_string()),
-    }
-}
-
-/// Whether [`wire_text`] would change `text`, without building the result.
-#[must_use]
-pub fn wire_text_differs(text: &str, precision: u8) -> bool {
-    match rewrite(text, precision) {
-        Rewrite::Keep => false,
-        Rewrite::Epoch(instant) => instant.ticks(precision).is_some(),
-        Rewrite::Cut(_) => true,
     }
 }
 
@@ -280,7 +191,7 @@ fn days_in_month(year: u32, month: u32) -> u32 {
 
 /// Days since 1970-01-01 for a civil date (Howard Hinnant's algorithm).
 #[must_use]
-pub fn civil_days_from_epoch(year: i32, month: u32, day: u32) -> i64 {
+fn civil_days_from_epoch(year: i32, month: u32, day: u32) -> i64 {
     let y = i64::from(if month <= 2 { year - 1 } else { year });
     let m = i64::from(if month <= 2 { month + 9 } else { month - 3 });
     let era = y.div_euclid(400);
@@ -383,37 +294,17 @@ mod tests {
     }
 
     #[test]
-    fn ticks_and_epoch_text_hold_the_column_precision() {
-        let i = instant("2026-04-07T07:03:00.123456789Z");
-        assert_eq!(i.ticks(0), Some(SECS));
-        assert_eq!(i.ticks(3), Some(SECS * 1_000 + 123));
-        assert_eq!(i.ticks(6), Some(SECS * 1_000_000 + 123_456));
-        assert_eq!(i.ticks(9), Some(SECS * 1_000_000_000 + 123_456_789));
-        assert_eq!(i.epoch_text(0).as_deref(), Some("1775545380"));
-        assert_eq!(i.epoch_text(3).as_deref(), Some("1775545380.123"));
-        assert_eq!(i.epoch_text(6).as_deref(), Some("1775545380.123456"));
-        assert_eq!(i.epoch_text(9).as_deref(), Some("1775545380.123456789"));
-    }
-
-    #[test]
-    fn epoch_text_before_1970_keeps_its_sign_on_the_whole_value() {
-        let i = instant("1969-12-31T23:59:58.750Z");
-        assert_eq!(i.ticks(3), Some(-1_250));
-        assert_eq!(i.epoch_text(3).as_deref(), Some("-1.250"));
-    }
-
-    #[test]
     fn utc_text_keeps_every_digit_the_instant_carries() {
         for (text, utc) in [
-            ("2026-04-07T17:03:00+10:00", "2026-04-07 07:03:00.000"),
-            ("2026-04-07T17:03:00.12+10:00", "2026-04-07 07:03:00.120"),
+            ("2026-04-07T17:03:00+10:00", "2026-04-07T07:03:00.000Z"),
+            ("2026-04-07T17:03:00.12+10:00", "2026-04-07T07:03:00.120Z"),
             (
                 "2026-04-07T17:03:00.1234+10:00",
-                "2026-04-07 07:03:00.123400",
+                "2026-04-07T07:03:00.123400Z",
             ),
             (
                 "2026-04-07T17:03:00.123456789+10:00",
-                "2026-04-07 07:03:00.123456789",
+                "2026-04-07T07:03:00.123456789Z",
             ),
         ] {
             assert_eq!(instant(text).utc_text().as_deref(), Some(utc), "{text}");
@@ -436,10 +327,10 @@ mod tests {
     fn normalise_zoned_rewrites_only_a_zoned_string() {
         let mut zoned = Value::from("2026-04-07T01:33:00.5-05:30");
         normalise_zoned(&mut zoned);
-        assert_eq!(zoned, Value::from("2026-04-07 07:03:00.500"));
+        assert_eq!(zoned, Value::from("2026-04-07T07:03:00.500Z"));
 
         for unchanged in [
-            Value::from("2026-04-07 07:03:00.123"),
+            Value::from("2026-04-07T07:03:00.123Z"),
             Value::from("not a time at all Z"),
             Value::from(1_775_545_380_123_i64),
             Value::Null,
@@ -447,35 +338,6 @@ mod tests {
             let mut value = unchanged.clone();
             normalise_zoned(&mut value);
             assert_eq!(value, unchanged);
-        }
-    }
-
-    #[test]
-    fn wire_text_and_its_change_check_agree() {
-        for (text, precision, wire) in [
-            ("2026-04-07T17:03:00.123+10:00", 3, Some("1775545380.123")),
-            ("2026-04-07T17:03:00.123+10:00", 0, Some("1775545380")),
-            ("2026-04-07 07:03:00.123", 0, Some("2026-04-07 07:03:00")),
-            (
-                "2026-04-07 07:03:00.123456",
-                3,
-                Some("2026-04-07 07:03:00.123"),
-            ),
-            ("2026-04-07 07:03:00.123", 3, None),
-            ("2026-04-07 07:03:00.123", 6, None),
-            ("2026-04-07T07:03:00", 3, None),
-            ("garbage that ends in Z", 3, None),
-        ] {
-            assert_eq!(
-                wire_text(text, precision).as_deref(),
-                wire,
-                "{text} at {precision}"
-            );
-            assert_eq!(
-                wire_text_differs(text, precision),
-                wire.is_some(),
-                "{text} at {precision}"
-            );
         }
     }
 }

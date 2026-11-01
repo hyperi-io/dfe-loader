@@ -465,7 +465,8 @@ mod tests {
                 &config.metadata,
                 &config.field_sanitization,
             );
-            let extractor = HeaderExtractor::new(&config.metadata, &config.routing);
+            let extractor =
+                HeaderExtractor::new(&config.metadata, &config.routing, &config.timestamp_dq);
             let enrichment = EnrichmentPipeline {
                 ip_fields: config.enrichment.ip_fields.clone(),
                 geoip: None,

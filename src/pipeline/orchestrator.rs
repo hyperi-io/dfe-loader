@@ -145,7 +145,11 @@ impl Stages {
                 &config.field_sanitization,
                 &config.routing,
             ),
-            extractor: HeaderExtractor::new(&config.metadata, &config.routing),
+            extractor: HeaderExtractor::new(
+                &config.metadata,
+                &config.routing,
+                &config.timestamp_dq,
+            ),
             default_table: format!(
                 "{}.{}",
                 config.routing.default_db, config.routing.default_table

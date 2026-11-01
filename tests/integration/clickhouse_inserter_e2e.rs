@@ -672,7 +672,9 @@ async fn test_jsoneachrow_ecs_tags_array_lands_in_the_json_tags_column() {
 #[tokio::test(flavor = "multi_thread")]
 async fn test_rowbinary_tags_source_comment_lands_in_the_json_tags_column() {
     use dfe_loader::column_meta::{ColumnDirectivesConfig, ColumnMetaCache, parse_directives};
-    use dfe_loader::config::{FieldMappingConfig, MetadataConfig, RoutingConfig};
+    use dfe_loader::config::{
+        FieldMappingConfig, MetadataConfig, RoutingConfig, TimestampDqConfig,
+    };
     use dfe_loader::transform::field_mapping::RuleOrigin;
     use dfe_loader::transform::{HeaderExtractor, MappingBuilder};
     use rustc_hash::FxHashMap;
@@ -739,7 +741,11 @@ async fn test_rowbinary_tags_source_comment_lands_in_the_json_tags_column() {
     let event = br#"{"timestamp":"2026-09-03 10:00:00.000","org_id":"acme","source":"filebeat","message":"Accepted publickey for derek","tags":["preserve_original_event","forwarded"]}"#;
 
     // Row 1: the json_primary extractor, which resolves @source itself.
-    let extractor = HeaderExtractor::new(&MetadataConfig::default(), &RoutingConfig::default());
+    let extractor = HeaderExtractor::new(
+        &MetadataConfig::default(),
+        &RoutingConfig::default(),
+        &TimestampDqConfig::default(),
+    );
     let extracted = extractor
         .extract(event, &qualified, &schema, &col_meta, None)
         .fields;
@@ -2199,7 +2205,7 @@ async fn create_per_source_table(client: &ClickHouseQueryClient, table: &str) {
 /// both transforms and the receiver emit.
 async fn common_header_survives(test: &str, format: InsertFormat) {
     use dfe_loader::column_meta::{ColumnDirectivesConfig, ColumnMetaCache, parse_directives};
-    use dfe_loader::config::{MetadataConfig, RoutingConfig};
+    use dfe_loader::config::{MetadataConfig, RoutingConfig, TimestampDqConfig};
     use dfe_loader::transform::HeaderExtractor;
     use rustc_hash::FxHashMap;
 
@@ -2232,7 +2238,11 @@ async fn common_header_survives(test: &str, format: InsertFormat) {
 
     // The topic the processor derives the source from, so the `| topic_name`
     // fallback on `_source` is exercised the way production calls it.
-    let extractor = HeaderExtractor::new(&MetadataConfig::default(), &RoutingConfig::default());
+    let extractor = HeaderExtractor::new(
+        &MetadataConfig::default(),
+        &RoutingConfig::default(),
+        &TimestampDqConfig::default(),
+    );
     let mut row = extractor
         .extract(
             payload,
