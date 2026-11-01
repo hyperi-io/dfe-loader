@@ -16,8 +16,8 @@ promotes schema columns, enriches, buffers per table, and inserts -- RowBinary
 by default so ClickHouse skips JSON parsing, with at-least-once Kafka delivery.
 
 This is the index. Read [architecture.md](architecture.md) for the 10,000-foot
-view, [clickhouse/](clickhouse/) for the insert layer (the part that changed in
-the hyperi-port migration), and [pipeline/](pipeline/) for the hot path.
+view, [clickhouse/](clickhouse/) for the insert layer, and
+[pipeline/](pipeline/) for the hot path.
 
 ---
 
@@ -28,7 +28,7 @@ the hyperi-port migration), and [pipeline/](pipeline/) for the hot path.
 | A Kafka/gRPC/Memory topic | JSON parse (sonic-rs, SIMD), zero-copy `Arc<[u8]>`, anything not JSON dead-lettered | A consumer, a parser, an input gate |
 | The routing fields (`table_fields`, `org_routes`) | Pre-flatten routing to `db.table`, dot-notation nested access, the default table on a miss | A router, a dispatch table |
 | A ClickHouse table | Schema reflected from `system.columns`, fields promoted to typed columns, the rest kept in `_json` | A schema mapping, an ORM, a migration |
-| `insert_format` (default RowBinary) | Dynamic `Map<String,Value>` -> RowBinary over the unified `Client` (HTTP or TCP); JSONEachRow fallback | A serialiser, a type encoder, a wire format |
+| `insert_format` (default RowBinary) | Dynamic `Map<String,Value>` -> RowBinary over the HTTP `Client`; JSONEachRow fallback | A serialiser, a type encoder, a wire format |
 | `capture_mode` (full/raw_only/json_only/extracted_only) | `_json` and `_raw` population per table, overridable per-table and per-DDL | Conditional capture plumbing |
 | Enrichment toggles (geoip/reputation/risk) | Flat enriched columns injected on the promoted row only | Lookup, caching, CIDR matching |
 | Nothing extra | Per-table buffering, batch salvage, held-batch retry, schema-cache recovery, one offset commit per flush cycle | The resilience layer |
@@ -78,10 +78,10 @@ flowchart TB
 
 | Area | Doc | Covers |
 |------|-----|--------|
-| System shape | [architecture.md](architecture.md) | Layers, the `clickhouse_ext` boundary, the fork dependency |
+| System shape | [architecture.md](architecture.md) | Layers, the `clickhouse_ext` boundary, the client crates |
 | Configuration | [configuration.md](configuration.md) | The cascade and the settings that change behaviour |
 | Operations | [operations.md](operations.md) | Running, config-check, metrics/top, hot-reload, DLQ |
-| Build features | [feature-flags.md](feature-flags.md) | Cargo features and the fork patch mechanism |
+| Build features | [feature-flags.md](feature-flags.md) | Cargo features and the ClickHouse client crates |
 | Insert layer | [clickhouse/](clickhouse/) | RowBinary vs JSONEachRow, `clickhouse_ext`, schema cache, type handling, TLS, DDL directives |
 | Hot path | [pipeline/](pipeline/) | Routing, extraction, enrichment, capture modes, buffering |
 | Transports | [transport/](transport/) | Kafka / gRPC / Memory, the common header |
@@ -90,10 +90,6 @@ flowchart TB
 
 ---
 
-## The fork dependency, in one line
+## The client dependency, in one line
 
-dfe-loader inserts through a HyperI fork of `clickhouse-rs` (the `hyperi-port/*`
-chain), pinned via `[patch.crates-io]` to an immutable tag. The dynamic
-RowBinary layer that the fork deliberately keeps out of scope -- runtime
-`Map<String,Value>` encoding -- lives in this repo at `src/clickhouse_ext/`. See
-[clickhouse/clickhouse-ext.md](clickhouse/clickhouse-ext.md).
+dfe-loader inserts through the official `clickhouse` crate from crates.io, with `dfe-clickhouse` reading the server's exception code out of a rejection. The dynamic RowBinary layer the crate keeps out of scope -- runtime `Map<String,Value>` encoding -- lives in this repo at `src/clickhouse_ext/`. See [clickhouse/clickhouse-ext.md](clickhouse/clickhouse-ext.md).

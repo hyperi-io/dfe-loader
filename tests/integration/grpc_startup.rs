@@ -167,6 +167,10 @@ async fn a_missing_rule_target_does_not_hold_the_listener() {
 async fn query_count(clickhouse: &str, sql: &str) -> u64 {
     let body = reqwest::Client::new()
         .get(format!("http://{clickhouse}/"))
+        .basic_auth(
+            "default",
+            Some(crate::common::containers::clickhouse_password()),
+        )
         .query(&[("query", sql)])
         .send()
         .await

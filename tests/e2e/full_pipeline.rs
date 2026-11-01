@@ -20,36 +20,19 @@ use dfe_loader::transform::Transformer;
 use scalo::metrics::MetricsManager;
 
 use crate::common::{
-    check_clickhouse_reachable, create_http_test_client, drop_http_test_table, load_dotenv,
-    unique_table_name,
+    create_http_test_client, drop_http_test_table, require_e2e_services, unique_table_name,
 };
 
-fn skip_if_no_clickhouse() -> bool {
-    load_dotenv();
-    if !crate::common::has_clickhouse() {
-        eprintln!("Skipping test: no ClickHouse available");
-        return true;
-    }
-    if !check_clickhouse_reachable() {
-        eprintln!("Skipping test: ClickHouse not reachable");
-        return true;
-    }
-    false
+/// The query client for the e2e ClickHouse, failing the test when there is none.
+async fn e2e_client() -> dfe_loader::clickhouse::ClickHouseQueryClient {
+    require_e2e_services(false).await;
+    create_http_test_client().expect("a query client for the e2e ClickHouse")
 }
 
 #[tokio::test]
 #[ignore = "requires infrastructure"]
 async fn test_full_pipeline_e2e() {
-    if skip_if_no_clickhouse() {
-        return;
-    }
-
-    let client = if let Some(c) = create_http_test_client() {
-        c
-    } else {
-        eprintln!("Could not create test client");
-        return;
-    };
+    let client = e2e_client().await;
 
     let oc = crate::common::on_cluster_clause();
     let table_name = unique_table_name("e2e_pipeline");
@@ -165,14 +148,7 @@ async fn test_full_pipeline_e2e() {
 #[tokio::test]
 #[ignore = "requires infrastructure"]
 async fn test_pipeline_multi_table_routing() {
-    if skip_if_no_clickhouse() {
-        return;
-    }
-
-    let client = match create_http_test_client() {
-        Some(c) => c,
-        None => return,
-    };
+    let client = e2e_client().await;
 
     let oc = crate::common::on_cluster_clause();
     let table1 = unique_table_name("e2e_auth");
@@ -299,14 +275,7 @@ async fn test_pipeline_multi_table_routing() {
 #[tokio::test]
 #[ignore = "requires infrastructure"]
 async fn test_pipeline_with_flattening() {
-    if skip_if_no_clickhouse() {
-        return;
-    }
-
-    let client = match create_http_test_client() {
-        Some(c) => c,
-        None => return,
-    };
+    let client = e2e_client().await;
 
     let oc = crate::common::on_cluster_clause();
     let table_name = unique_table_name("e2e_flat");
@@ -390,7 +359,6 @@ async fn test_pipeline_with_flattening() {
 }
 
 #[tokio::test]
-#[ignore = "requires infrastructure"]
 async fn test_pipeline_buffer_flush_thresholds() {
     let mut buffer_manager = BufferManager::new(&BufferConfig {
         flush_rows: 5,
@@ -418,7 +386,6 @@ async fn test_pipeline_buffer_flush_thresholds() {
 }
 
 #[tokio::test]
-#[ignore = "requires infrastructure"]
 async fn test_pipeline_metrics() {
     let manager = MetricsManager::new("loader_test_full");
     let metrics = Metrics::new(&manager);
@@ -440,7 +407,6 @@ async fn test_pipeline_metrics() {
 }
 
 #[tokio::test]
-#[ignore = "requires infrastructure"]
 async fn test_pipeline_dlq_routing() {
     let routing_config = RoutingConfig {
         table_fields: vec!["category".to_string()],

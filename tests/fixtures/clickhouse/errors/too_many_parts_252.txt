@@ -1,0 +1,1 @@
+Code: 252. DB::Exception: Too many parts (2 with average size of 519.00 B) in table 'default.j (487a5f99-ac66-4c00-826b-340d12bd5b1f)'. Merges are processing significantly slower than inserts. (TOO_MANY_PARTS) (version 26.3.42.3 (official build))

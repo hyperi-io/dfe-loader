@@ -1,0 +1,1 @@
+Code: 60. DB::Exception: Table default.events does not exist. Maybe you meant system.events?. (UNKNOWN_TABLE) (version 26.3.42.3 (official build))

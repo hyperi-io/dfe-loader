@@ -11,7 +11,7 @@
 
 //! Schema reflection for dynamic inserts.
 //!
-//! Fetches column definitions from `system.columns` over the new clickhouse-rs
+//! Fetches column definitions from `system.columns` over the `clickhouse`
 //! `Client` and caches them with a TTL. Each column's parsed type (carried on
 //! [`ColumnDef`]) drives the runtime RowBinary encoding in `crate::encode`.
 
@@ -19,11 +19,9 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
-use clickhouse::Client;
-
 use super::encode::ColumnDef;
 use super::error::DynamicError;
-use crate::clickhouse::client_http::ReadBound;
+use crate::clickhouse::client_http::{ChClient, ReadBound, TimesOut, escape_string};
 
 /// Resolved schema for a single table -- an ordered list of columns plus a
 /// name index for O(1) lookup during encoding.
@@ -115,6 +113,38 @@ struct SysColumn {
     default_kind: String,
 }
 
+/// The `system.columns` rows a native-protocol schema query returned.
+fn native_sys_columns(
+    blocks: &[dfe_clickhouse::native::DecodedBlock],
+) -> dfe_clickhouse::Result<Vec<SysColumn>> {
+    let mut rows = Vec::new();
+    for block in blocks {
+        let names = block.column_as::<String>("name")?;
+        let types = block.column_as::<String>("col_type")?;
+        let kinds = block.column_as::<String>("default_kind")?;
+        rows.extend(names.into_iter().zip(types).zip(kinds).map(
+            |((name, col_type), default_kind)| SysColumn {
+                name,
+                col_type,
+                default_kind,
+            },
+        ));
+    }
+    Ok(rows)
+}
+
+/// The [`DynamicError`] a failed schema read of `table` becomes.
+fn fetch_failure(table: &str, source: dfe_clickhouse::Error) -> DynamicError {
+    let table = table.to_string();
+    if source.is_timed_out() {
+        DynamicError::TimedOut { table }
+    } else if matches!(source, dfe_clickhouse::Error::Unsupported(_)) {
+        DynamicError::ClientUnsupported { table, source }
+    } else {
+        DynamicError::SchemaFetch { table, source }
+    }
+}
+
 /// Fetch a table's schema from `system.columns`.
 ///
 /// Uses a parameterised query (no string interpolation) and works over
@@ -124,36 +154,52 @@ struct SysColumn {
 /// # Errors
 ///
 /// Returns [`DynamicError::SchemaFetch`] if the query fails,
+/// [`DynamicError::ClientUnsupported`] if the client cannot read the reply,
 /// [`DynamicError::TimedOut`] if it runs past `bound`, or
 /// [`DynamicError::EmptySchema`] if the table has no columns (or does not
 /// exist).
 pub async fn fetch_dynamic_schema(
-    client: &Client,
+    client: &ChClient,
     database: &str,
     table: &str,
     bound: &ReadBound,
 ) -> Result<DynamicSchema, DynamicError> {
     let full_table = format!("{database}.{table}");
+    let failed = |source: dfe_clickhouse::Error| fetch_failure(&full_table, source);
 
-    let query = client
-        .query(
-            "SELECT name, type AS col_type, default_kind \
-             FROM system.columns \
-             WHERE database = ? AND table = ? \
-             ORDER BY position",
-        )
-        .bind(database)
-        .bind(table)
-        .fetch_all::<SysColumn>();
-    let rows = bound.run(query).await.map_err(|source| match source {
-        clickhouse::error::Error::TimedOut => DynamicError::TimedOut {
-            table: full_table.clone(),
-        },
-        source => DynamicError::SchemaFetch {
-            table: full_table.clone(),
-            source,
-        },
-    })?;
+    let rows: Vec<SysColumn> = match client {
+        ChClient::Http(client) => {
+            let query = client
+                .query(
+                    "SELECT name, type AS col_type, default_kind \
+                     FROM system.columns \
+                     WHERE database = ? AND table = ? \
+                     ORDER BY position",
+                )
+                .bind(database)
+                .bind(table)
+                .fetch_all::<SysColumn>();
+            bound
+                .run(query)
+                .await
+                .map_err(|e| failed(dfe_clickhouse::Error::from(e)))?
+        }
+        ChClient::Native(client) => {
+            let sql = format!(
+                "SELECT name, type AS col_type, default_kind \
+                 FROM system.columns \
+                 WHERE database = {} AND table = {} \
+                 ORDER BY position",
+                escape_string(database),
+                escape_string(table)
+            );
+            let blocks = bound
+                .run(client.query(&sql).fetch_blocks())
+                .await
+                .map_err(failed)?;
+            native_sys_columns(&blocks).map_err(failed)?
+        }
+    };
 
     if rows.is_empty() {
         return Err(DynamicError::EmptySchema { table: full_table });
@@ -252,6 +298,27 @@ mod tests {
 
     fn col(name: &str, type_str: &str, default_kind: &str) -> ColumnDef {
         ColumnDef::with_default_kind(name, type_str, default_kind)
+    }
+
+    #[test_case::test_case(
+        dfe_clickhouse::Error::Unsupported("column 'type': JSON typed paths".into()),
+        crate::clickhouse::error::ErrorCategory::Fatal ; "unsupported")]
+    #[test_case::test_case(
+        dfe_clickhouse::Error::TimedOut,
+        crate::clickhouse::error::ErrorCategory::Transient ; "timed_out")]
+    #[test_case::test_case(
+        dfe_clickhouse::Error::Custom("connection reset by peer".into()),
+        crate::clickhouse::error::ErrorCategory::Transient ; "fetch")]
+    fn a_failed_schema_read_is_classified_by_what_failed(
+        source: dfe_clickhouse::Error,
+        expected: crate::clickhouse::error::ErrorCategory,
+    ) {
+        let err = fetch_failure("db.t", source);
+        assert_eq!(
+            crate::clickhouse::error::classify_dynamic_error(&err),
+            expected,
+            "{err}"
+        );
     }
 
     #[test]

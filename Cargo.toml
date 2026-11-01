@@ -77,10 +77,12 @@ tikv-jemallocator = { version = ">=0.7.0, <0.8", optional = true }
 # GeoIP enrichment (mmap for long-running apps). scalo's geoip-download provisions the files.
 maxminddb = { version = ">=0.32.0, <0.33", features = ["mmap"] }
 
-# ClickHouse crate (HyperI fork with native TCP + unified client)
-# rustls-tls + rustls-tls-native-roots: HTTPS for clients built with Client::default()
-# native-transport + native-tls-rustls: native TCP with TLS
-clickhouse = { version = ">=0.15.0, <0.16", features = ["lz4", "time", "rustls-tls", "rustls-tls-native-roots", "tcp", "native-tls-rustls", "inserter"] }
+# The official ClickHouse HTTP client. rustls-tls + rustls-tls-native-roots:
+# HTTPS for clients built with Client::default().
+clickhouse = { version = ">=0.15.3, <0.16", features = ["lz4", "time", "rustls-tls", "rustls-tls-native-roots", "inserter"] }
+# `ext` reads the server's exception code out of an HTTP rejection; `tls`
+# (implies `tcp`) is the native-protocol client, rustls only.
+dfe-clickhouse = { version = ">=0.1.7, <0.2", default-features = false, features = ["ext", "tls"] }
 time = ">=0.3.55, <0.4"
 
 # The HTTP client handed to clickhouse::Client::with_http_client: connect timeout,
@@ -121,21 +123,16 @@ test-case = ">=3.4.0, <4"
 # Held on 0.12: 0.13 drops the rustls-tls-native-roots feature.
 reqwest = { version = ">=0.12, <0.13", default-features = false, features = ["blocking", "rustls-tls-native-roots"] }
 
-# Integration test containers
-testcontainers = ">=0.27.3, <0.28"
 # The Kafka broker image pin and the TLS / mTLS / SASL_SSL broker fixture the
 # Kafka tests share, so neither is copied here. The production dependency above
 # does not carry this feature.
 scalo = { version = "2.14.22", features = ["transport-kafka-test-support"] }
-testcontainers-modules = { version = ">=0.15.0, <0.16", features = ["kafka", "clickhouse"] }
-# The reqwest major testcontainers' HttpWaitStrategy::with_client takes; the lib's own reqwest stays on 0.12.
-testcontainers-reqwest = { package = "reqwest", version = ">=0.13.5, <0.14", default-features = false }
 
 # Kafka producer for e2e tests (test message injection)
 rdkafka = { version = ">=0.39.0, <0.40", features = ["dynamic-linking"] }
 
-# ClickHouse crate (HyperI fork) — integration tests need all features
-clickhouse = { version = ">=0.15.0, <0.16", features = ["lz4", "time", "rustls-tls", "rustls-tls-native-roots", "tcp", "native-tls-rustls", "inserter"] }
+# ClickHouse crate -- integration tests need all features
+clickhouse = { version = ">=0.15.3, <0.16", features = ["lz4", "time", "rustls-tls", "rustls-tls-native-roots", "inserter"] }
 time = ">=0.3.55, <0.4"
 
 # Private CA and server certificates for the TLS ClickHouse tests
@@ -306,20 +303,6 @@ duration_suboptimal_units = "allow"
 # readers. Stylistic.
 map_unwrap_or = "allow"
 
-# =============================================================================
-# clickhouse: the HyperI fork (hyperi-io/clickhouse-rs), pinned by rev
-# =============================================================================
-#
-# This patch is active: every `clickhouse` dependency above builds from the fork
-# at this rev, the tip of its hyperi-port/06d-tcp-tls-new branch. It stays for
-# GA because the manifest cannot resolve without it: the `tcp` and
-# `native-tls-rustls` features requested above, and the `Client::tcp` and
-# `with_tcp_addrs` calls in src/clickhouse/client_http.rs, exist only on the
-# fork, not in crates.io clickhouse 0.15.x. Retiring it is #133.
-[patch.crates-io]
-clickhouse = { git = "https://github.com/hyperi-io/clickhouse-rs.git", rev = "6f9acd9694acc9c596ff687c908aa215af100887" }
-# =============================================================================
-
 [features]
 default = []
 # Allocator (DFE policy 2026-04-17: jemalloc at every channel, no mimalloc)
@@ -327,7 +310,7 @@ jemalloc = ["dep:tikv-jemallocator", "dep:tikv-jemalloc-ctl"]
 # Transport backends
 transport-memory = ["scalo/transport-memory"]  # Memory transport for unit tests
 # Testing
-testcontainers = []  # Enable testcontainers for CI/CD (Docker required)
+testcontainers = []  # The tests that run real ClickHouse and Kafka containers (Docker required)
 # PGO workload driver (hyperi-ci Tier 2 — see scripts/pgo-workload.sh)
 # Pulls in rdkafka for the producer binary; main loader binary is unaffected.
 pgo-driver = ["dep:rdkafka"]

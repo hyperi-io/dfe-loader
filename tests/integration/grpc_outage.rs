@@ -315,6 +315,10 @@ async fn duplicated_ids(clickhouse: &str, table: &str) -> BTreeSet<u64> {
 async fn query_ids(clickhouse: &str, sql: &str) -> BTreeSet<u64> {
     let Ok(response) = reqwest::Client::new()
         .get(format!("http://{clickhouse}/"))
+        .basic_auth(
+            "default",
+            Some(crate::common::containers::clickhouse_password()),
+        )
         .query(&[("query", sql)])
         .send()
         .await
@@ -347,21 +351,7 @@ pub(super) async fn wait_landed(
 /// The `ClickHouse` container's HTTP address.
 pub(super) async fn clickhouse_address(infra: &TestInfrastructure) -> String {
     let container = infra.clickhouse.as_ref().expect("ClickHouse container");
-    let http_port = container
-        .get_host_port_ipv4(8123)
-        .await
-        .expect("HTTP port mapping");
-    // `localhost` can resolve to ::1 where loopback has no IPv6.
-    let host = match container
-        .get_host()
-        .await
-        .expect("container host")
-        .to_string()
-    {
-        h if h == "localhost" => "127.0.0.1".to_string(),
-        h => h,
-    };
-    format!("{host}:{http_port}")
+    format!("{}:{}", container.host(), container.port(8123))
 }
 
 /// A query client that talks to `ClickHouse` directly, never through a proxy.
@@ -371,7 +361,7 @@ pub(super) fn query_client(clickhouse: &str) -> ClickHouseQueryClient {
         transport: Transport::Http,
         database: "default".to_string(),
         username: "default".to_string(),
-        password: String::new(),
+        password: crate::common::containers::clickhouse_password(),
         tls: false,
         ..Default::default()
     })
@@ -396,6 +386,7 @@ pub(super) fn grpc_loader(listen_port: u16, clickhouse: String, table: &str) -> 
     // A small queue makes a paused loader refuse Push within a few records.
     config.grpc.recv_buffer_size = 64;
     config.clickhouse.hosts = vec![clickhouse];
+    config.clickhouse.password = crate::common::containers::clickhouse_password().into();
     config.clickhouse.database = "default".to_string();
     config.clickhouse.protocol = "http".to_string();
     config.routing.default_db = "default".to_string();

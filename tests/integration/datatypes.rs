@@ -60,21 +60,14 @@ impl Target {
 
         let infra = TestInfrastructure::new(test, true, false).await;
         let container = infra.clickhouse.as_ref().expect("ClickHouse container");
-        let host = container
-            .get_host()
-            .await
-            .expect("container host")
-            .to_string();
-        let port = container
-            .get_host_port_ipv4(8123)
-            .await
-            .expect("HTTP port mapping");
+        let host = container.host();
+        let port = container.port(8123);
         let client = ClickHouseQueryClient::new(&ClickHouseConfig {
             hosts: vec![format!("{host}:{port}")],
             transport: Transport::Http,
             database: "default".to_string(),
             username: "default".to_string(),
-            password: String::new(),
+            password: crate::common::containers::clickhouse_password(),
             tls: false,
             ..Default::default()
         })
@@ -89,7 +82,7 @@ impl Target {
             client: Arc::new(client),
             url: format!("http://{host}:{port}"),
             user: "default".to_string(),
-            password: String::new(),
+            password: crate::common::containers::clickhouse_password(),
             database: "default".to_string(),
             on_cluster: "",
             _infra: Some(infra),

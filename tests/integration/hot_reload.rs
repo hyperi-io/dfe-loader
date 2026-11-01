@@ -48,6 +48,10 @@ async fn row_count(clickhouse: &str, table: &str) -> u64 {
     let sql = format!("SELECT count() FROM default.{table} FORMAT TabSeparated");
     let Ok(response) = reqwest::Client::new()
         .get(format!("http://{clickhouse}/"))
+        .basic_auth(
+            "default",
+            Some(crate::common::containers::clickhouse_password()),
+        )
         .query(&[("query", sql.as_str())])
         .send()
         .await

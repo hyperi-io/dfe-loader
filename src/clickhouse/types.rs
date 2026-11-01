@@ -13,7 +13,7 @@
 //!
 //! `ParsedType` and `ParsedTypeExt` are re-exported from the loader's
 //! `clickhouse_ext` module (the HyperI dynamic-insert layer over the
-//! clickhouse-rs hyperi-port fork). `clickhouse_ext` owns the runtime type
+//! `clickhouse` crate). `clickhouse_ext` owns the runtime type
 //! parser; this module re-exports it plus the DFE-specific `ColumnInfo` /
 //! `TableSchema` types.
 

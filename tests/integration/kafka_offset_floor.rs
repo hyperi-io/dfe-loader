@@ -20,13 +20,13 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
+use crate::common::containers::KAFKA_PORT;
 use dfe_loader::clickhouse::InsertFormat;
 use dfe_loader::config::{Config, SharedConfig};
 use dfe_loader::pipeline::Orchestrator;
 use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::producer::{FutureProducer, FutureRecord};
 use rdkafka::{ClientConfig, Offset, TopicPartitionList};
-use testcontainers_modules::kafka::apache::KAFKA_PORT;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::watch;
@@ -237,11 +237,8 @@ async fn read_request_line(stream: &mut TcpStream, head: &mut Vec<u8>) -> Option
 /// The Kafka container's bootstrap address, once the broker serves consumers.
 pub(super) async fn kafka_bootstrap(infra: &TestInfrastructure) -> String {
     let container = infra.kafka.as_ref().expect("Kafka container");
-    let host = container.get_host().await.expect("container host");
-    let port = container
-        .get_host_port_ipv4(KAFKA_PORT)
-        .await
-        .expect("Kafka port mapping");
+    let host = container.host();
+    let port = container.port(KAFKA_PORT);
     let bootstrap = format!("{host}:{port}");
     wait_for_broker(&bootstrap).await;
     bootstrap
@@ -263,6 +260,7 @@ pub(super) fn kafka_loader(
     config.kafka.group = group.to_string();
     config.kafka.allow_insecure_transport = true;
     config.clickhouse.hosts = vec![clickhouse];
+    config.clickhouse.password = crate::common::containers::clickhouse_password().into();
     config.clickhouse.database = "default".to_string();
     config.clickhouse.protocol = "http".to_string();
     config.routing.default_db = "default".to_string();

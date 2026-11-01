@@ -1,0 +1,2 @@
+Code: 117. DB::Exception: JSON object should start with '{': (while reading the value of key _json): (at row 1)
+: While executing WaitForAsyncInsert. (INCORRECT_DATA) (version 26.3.42.3 (official build))

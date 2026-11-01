@@ -239,12 +239,13 @@ fn config_file(shared: &Shared, row: &Row, table: &str, topic: &str) -> String {
     format!(
         "transport: kafka\n\
          kafka:\n  brokers:\n    - \"{}\"\n  group: \"dfe-{table}\"\n  topics:\n    - \"{topic}\"\n{security}\
-         clickhouse:\n  hosts:\n    - \"{}\"\n  database: default\n  protocol: http\n\
+         clickhouse:\n  hosts:\n    - \"{}\"\n  database: default\n  protocol: http\n  password: \"{}\"\n\
          routing:\n  default_db: default\n  default_table: {table}\n  dlq:\n    enabled: false\n\
          buffer:\n  flush_rows: 10\n  flush_age_secs: 1\n\
          schema:\n  cache_ttl_secs: 3600\n  pre_warm_retry_secs: 10\n",
         address(shared, row.listener),
         shared.clickhouse,
+        crate::common::containers::clickhouse_password(),
     )
 }
 

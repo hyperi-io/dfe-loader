@@ -13,12 +13,8 @@
 dfe-loader has two knobs for how rows reach ClickHouse: `clickhouse.protocol`
 (how the bytes travel) and `clickhouse.insert_format` (how the rows are
 encoded). The default `http + row_binary` is the fast path; `json_each_row` is
-a deliberate fallback. `protocol: native` is rejected at startup -- the pinned
-client has no TCP row fetch, so the schema query behind every insert stalls
-([#115](https://github.com/hyperi-io/dfe-loader/issues/115)) -- and the native
-column below is the planned shape, not code: the native/TCP insert sink is not
-wired and waits on
-[clickhouse-rs#15](https://github.com/hyperi-io/clickhouse-rs/issues/15).
+a deliberate fallback. `protocol: native` runs the schema fetch, the queries and
+`row_binary` inserts over the native protocol through `dfe_clickhouse::TcpClient`.
 
 ```mermaid
 flowchart TB
@@ -26,9 +22,9 @@ flowchart TB
     F{"insert_format"}
     T{"protocol"}
     RBH["insert_formatted_with<br/>FORMAT RowBinaryWithNamesAndTypes (HTTP)"]
-    RBT["insert_native_with_columns<br/>with_columns_tcp (not wired, #15)"]
+    RBT["TcpClient::insert_native<br/>FORMAT Native blocks (TCP)"]
     JE["insert_formatted_with<br/>FORMAT JSONEachRow (HTTP)"]
-    REJ["config-check rejects<br/>at validate()"]
+    REJ["rejected at startup"]
     CH[("ClickHouse")]
 
     ROW --> F
@@ -43,15 +39,19 @@ flowchart TB
 
 | `insert_format` | `protocol = http` | `protocol = native` |
 |-----------------|--------------------|----------------------|
-| `row_binary` (default) | `FORMAT RowBinaryWithNamesAndTypes` via `insert_formatted_with` | rejected at startup; `with_columns_tcp` via `insert_native_with_columns` once clickhouse-rs#15 lands |
+| `row_binary` (default) | `FORMAT RowBinaryWithNamesAndTypes` via `insert_formatted_with` | the same row bytes as `FORMAT Native` blocks via `TcpClient::insert_native` |
 | `json_each_row` | `FORMAT JSONEachRow` via `insert_formatted_with` | rejected at `config-check` |
 
 The rejection is deliberate and surfaced early: JSONEachRow is an HTTP body
 format, and a native client has no HTTP insert endpoint for it. The guard lives
 in `ClickHouseConfig::validate()` and runs at orchestrator startup, so a bad
 combination fails the boot with a clear message rather than at first insert.
-`Config::validate()` rejects `protocol: native` on its own before that, so the
-whole native column fails the boot regardless of the format.
+
+A native block declares each column's type, so the server casts a value to a
+changed column type instead of refusing the batch the way the HTTP header check
+does (code 117). A column whose type `dfe_clickhouse` cannot declare in a block
+fails the insert and the batch is held. As of `dfe-clickhouse` 0.1.5 that
+includes a parameterised `JSON(max_dynamic_paths = N)` column.
 
 ## Why RowBinary is the default
 
@@ -69,22 +69,12 @@ the throughput choice.
 ## How RowBinary is produced
 
 The dynamic encoder (`clickhouse_ext::encode`) turns one
-`Map<String, Value>` plus its reflected `ColumnDef` schema into bytes. It has
-two emission modes off the same schema, and only the first is wired:
-
-- **HTTP** -- row-wise `encode()` bytes, streamed into an
-  `INSERT INTO db.table (cols) FORMAT RowBinaryWithNamesAndTypes` statement
-  opened with `Client::insert_formatted_with(...).buffered()`, behind a header
-  naming each column and the type it was encoded for. ClickHouse parses the
-  rows one at a time, so the loader never depends on server-side block framing.
-- **native/TCP** (not wired) -- per-column `Serialize`, for
-  `Client::insert_native_with_columns(table, &columns)` which dispatches to
-  `with_columns_tcp`. The native binary protocol frames its own columnar
-  blocks. See
-  [hyperi-io/clickhouse-rs#14](https://github.com/hyperi-io/clickhouse-rs/issues/14)
-  for the runtime-column TCP constructor and
-  [#15](https://github.com/hyperi-io/clickhouse-rs/issues/15) for the FORMAT
-  Native block-framing fix.
+`Map<String, Value>` plus its reflected `ColumnDef` schema into row-wise
+`encode()` bytes, streamed into an
+`INSERT INTO db.table (cols) FORMAT RowBinaryWithNamesAndTypes` statement
+opened with `Client::insert_formatted_with(...).buffered()`, behind a header
+naming each column and the type it was encoded for. ClickHouse parses the rows
+one at a time, so the loader never depends on server-side block framing.
 
 The column subset is fixed from the first row of the batch: every
 column present in the row, every raw-passthrough column (e.g. `_json`), and
@@ -120,7 +110,7 @@ A type change is caught before any row is read. RowBinary is positional, so byte
 
 | Setting | Values | Default |
 |---------|--------|---------|
-| `clickhouse.protocol` | `http` (`native` is rejected at startup) | `http` |
+| `clickhouse.protocol` | `http`, `native` | `http` |
 | `clickhouse.insert_format` | `rowbinary` (aliases `row_binary`, `binary`), `jsoneachrow` (aliases `json_each_row`, `json`) | `rowbinary` |
 
 The canonical spellings are the ones `docs/config-schema.json` carries, and the

@@ -1,0 +1,1 @@
+Code: 241. DB::Exception: Query memory limit exceeded: would use 13.68 MiB (attempt to allocate chunk of 7.50 MiB), maximum: 9.54 MiB. (MEMORY_LIMIT_EXCEEDED) (version 26.3.42.3 (official build))

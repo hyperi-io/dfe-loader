@@ -494,7 +494,7 @@ impl fmt::Display for ParsedType {
 
 /// DFE extension trait for `ParsedType` -- adds `coercer_category()` alias.
 ///
-/// The fork's `category()` and this `coercer_category()` return the same values.
+/// `category()` and this `coercer_category()` return the same values.
 pub trait ParsedTypeExt {
     /// Get the coercer category for this type (alias for `category()`).
     fn coercer_category(&self) -> &str;

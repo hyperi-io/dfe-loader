@@ -10,7 +10,7 @@
 
 # TLS and private CAs
 
-The loader reaches ClickHouse over HTTP (`clickhouse.protocol: http`; `native` is refused at startup). With TLS on it speaks HTTPS, usually on 8443, and verifies the server's certificate and host name against the container's system trust store.
+With TLS on the loader speaks HTTPS (`clickhouse.protocol: http`, usually 8443) or native TLS (`native`, usually 9440), and either verifies the server's certificate and host name against the container's system trust store. Native TLS trusts the system store only, not a compiled-in root bundle, so both protocols accept the same servers.
 
 ```mermaid
 flowchart LR

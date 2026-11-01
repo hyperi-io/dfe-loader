@@ -10,15 +10,15 @@
 
 pub mod containers;
 pub mod metrics;
+pub mod shared_service;
 pub mod test_logging;
 
 use std::env;
 use std::net::ToSocketAddrs;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use serde_json::{Value, json};
-
-use dfe_loader::config::{ClickHouseConfig, KafkaConfig, SaslConfig};
 
 // ============================================================================
 // Test Mode
@@ -73,9 +73,10 @@ pub struct ClickHouseTestConfig {
 impl ClickHouseTestConfig {
     /// Build from current test mode.
     ///
-    /// Remote mode names no default host: with `CLICKHOUSE_HOST` unset the host
-    /// is empty and `is_configured()` is false, so a test never reaches for a
-    /// ClickHouse it did not start, such as a dfe-docker stack on `localhost`.
+    /// The run's shared container once `acquire_clickhouse` has published it,
+    /// else dfe-docker under `TEST_MODE=docker`. Remote mode names no host, so
+    /// `is_configured()` is false and a test never reaches for a ClickHouse it
+    /// did not start, such as a dfe-docker stack on `localhost`.
     pub fn from_env() -> Self {
         load_dotenv();
         if let Some(endpoint) = container_endpoint() {
@@ -85,7 +86,7 @@ impl ClickHouseTestConfig {
                 native_port: endpoint.native_port,
                 tls: false,
                 user: "default".into(),
-                password: String::new(),
+                password: endpoint.password,
                 database: "default".into(),
                 cluster: None,
             };
@@ -101,31 +102,26 @@ impl ClickHouseTestConfig {
                 database: "default".into(),
                 cluster: None, // single node
             },
-            TestMode::Remote => Self::remote_from(|name| env::var(name).ok()),
+            TestMode::Remote => Self::unconfigured(),
         }
     }
 
-    /// The Remote-mode config read through `lookup` (the process environment in
-    /// tests, a table in the unit test).
-    pub fn remote_from(lookup: impl Fn(&str) -> Option<String>) -> Self {
-        let port =
-            |name: &str, default: u16| lookup(name).and_then(|v| v.parse().ok()).unwrap_or(default);
+    /// No ClickHouse named: `is_configured()` is false and nothing is probed.
+    pub fn unconfigured() -> Self {
         Self {
-            host: lookup("CLICKHOUSE_HOST").unwrap_or_default(),
-            http_port: port("CLICKHOUSE_HTTP_PORT", 8123),
-            native_port: port("CLICKHOUSE_NATIVE_PORT", 9000),
-            tls: lookup("CLICKHOUSE_TLS")
-                .unwrap_or_default()
-                .eq_ignore_ascii_case("true"),
-            user: lookup("CLICKHOUSE_USER").unwrap_or_else(|| "default".into()),
-            password: lookup("CLICKHOUSE_PASSWORD").unwrap_or_default(),
-            database: lookup("CLICKHOUSE_DATABASE").unwrap_or_else(|| "default".into()),
-            cluster: lookup("CLICKHOUSE_CLUSTER").filter(|s| !s.is_empty()),
+            host: String::new(),
+            http_port: 8123,
+            native_port: 9000,
+            tls: false,
+            user: "default".into(),
+            password: String::new(),
+            database: "default".into(),
+            cluster: None,
         }
     }
 
-    /// Whether a ClickHouse is named at all: `CLICKHOUSE_HOST`, `TEST_MODE=docker`
-    /// or a container this test started.
+    /// Whether a ClickHouse is named at all: `TEST_MODE=docker` or the run's
+    /// shared container.
     pub fn is_configured(&self) -> bool {
         !self.host.is_empty()
     }
@@ -152,17 +148,10 @@ impl ClickHouseTestConfig {
         self.is_configured() && clickhouse_http_ping_ok(&self.http_url())
     }
 
-    /// Probe whether the connected `ClickHouse`'s `default` database uses the
-    /// `Replicated` engine.
-    ///
-    /// Tests that create `ReplicatedMergeTree()` tables with no explicit
-    /// ZooKeeper path rely on the Replicated database engine to expand the
-    /// `{uuid}` macro and auto-fill that path. Against a single-node Atomic
-    /// `default` database the server rejects the DDL (error 36), so such tests
-    /// must skip. This is capability-based (queries `system.databases`) rather
-    /// than mode-based, so it also catches a single-node `ClickHouse` in `remote` mode.
-    pub fn has_replicated_default_db(&self) -> bool {
-        clickhouse_default_db_is_replicated(&self.http_url(), &self.user, &self.password)
+    /// Whether `database` on the connected `ClickHouse` uses the `Replicated`
+    /// engine, which `ReplicatedMergeTree()` with no Keeper path needs.
+    pub fn is_replicated(&self, database: &str) -> bool {
+        clickhouse_db_is_replicated(&self.http_url(), &self.user, &self.password, database)
     }
 
     pub fn http_addr(&self) -> String {
@@ -209,67 +198,33 @@ struct ContainerEndpoint {
     host: String,
     http_port: u16,
     native_port: u16,
+    password: String,
 }
 
 /// Published by `acquire_clickhouse` so every `ClickHouseTestConfig::from_env()`
-/// call in the test reads the container. One slot per process, which is one test
-/// under nextest.
-static CONTAINER_ENDPOINT: std::sync::Mutex<Option<ContainerEndpoint>> =
-    std::sync::Mutex::new(None);
+/// call in the test reads the run's shared container.
+static CONTAINER_ENDPOINT: OnceLock<ContainerEndpoint> = OnceLock::new();
 
 fn container_endpoint() -> Option<ContainerEndpoint> {
-    CONTAINER_ENDPOINT
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .clone()
+    CONTAINER_ENDPOINT.get().cloned()
 }
 
-/// Publish `endpoint`, or return false when a container is already published.
-fn publish_container_endpoint(endpoint: ContainerEndpoint) -> bool {
-    let mut slot = CONTAINER_ENDPOINT
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if slot.is_some() {
-        return false;
-    }
-    *slot = Some(endpoint);
-    true
-}
+/// A `ClickHouse` held for one test. The shared container outlives it: the
+/// run's watcher removes that once the run ends.
+pub struct ClickHouseLease;
 
-/// A `ClickHouse` held for one test. Dropping it unpublishes the endpoint and
-/// then stops the container, if the test started one.
-pub struct ClickHouseLease {
-    #[cfg(feature = "testcontainers")]
-    _infra: Option<containers::TestInfrastructure>,
-    published: bool,
-}
-
-impl Drop for ClickHouseLease {
-    fn drop(&mut self) {
-        if self.published {
-            *CONTAINER_ENDPOINT
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
-        }
-    }
-}
-
-/// The `ClickHouse` a test runs against: the one `CLICKHOUSE_HOST` (or
-/// `TEST_MODE=docker`) names, else a container the test starts itself.
+/// The `ClickHouse` a test runs against: dfe-docker under `TEST_MODE=docker`,
+/// else the run's shared container.
 ///
 /// `None` means skip, and the reason is printed. A named but unreachable
 /// ClickHouse fails in CI. Without the `testcontainers` feature there is no
-/// container to start, so an unnamed ClickHouse skips: the `testcontainers`
-/// feature set runs these tests.
-pub async fn acquire_clickhouse(test: &str) -> Option<ClickHouseLease> {
+/// container to start, so the test skips: the `testcontainers` feature set
+/// runs these tests.
+pub async fn acquire_clickhouse(_test: &str) -> Option<ClickHouseLease> {
     let ch = ClickHouseTestConfig::from_env();
     if ch.is_configured() {
         if ch.is_reachable() {
-            return Some(ClickHouseLease {
-                #[cfg(feature = "testcontainers")]
-                _infra: None,
-                published: false,
-            });
+            return Some(ClickHouseLease);
         }
         assert!(
             env::var_os("CI").is_none(),
@@ -283,52 +238,65 @@ pub async fn acquire_clickhouse(test: &str) -> Option<ClickHouseLease> {
         );
         return None;
     }
-    start_clickhouse_container(test).await
+    start_clickhouse_container().await
 }
 
 #[cfg(feature = "testcontainers")]
-async fn start_clickhouse_container(test: &str) -> Option<ClickHouseLease> {
-    let infra = containers::TestInfrastructure::new(test, true, false).await;
-    let container = infra.clickhouse.as_ref().expect("ClickHouse container");
-    let host = container
-        .get_host()
-        .await
-        .expect("container host")
-        .to_string();
-    let http_port = container
-        .get_host_port_ipv4(8123)
-        .await
-        .expect("HTTP port mapping");
-    let native_port = container
-        .get_host_port_ipv4(9000)
-        .await
-        .expect("native port mapping");
-    assert!(
-        publish_container_endpoint(ContainerEndpoint {
-            host,
-            http_port,
-            native_port,
-        }),
-        "a second ClickHouse container in one process: run the suite under cargo nextest"
-    );
-    let lease = ClickHouseLease {
-        _infra: Some(infra),
-        published: true,
-    };
-    let ch = ClickHouseTestConfig::from_env();
-    for _ in 0..50 {
-        if ch.is_reachable() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(200)).await;
-    }
-    Some(lease)
+async fn start_clickhouse_container() -> Option<ClickHouseLease> {
+    let container = containers::shared_clickhouse().await;
+    let _ = CONTAINER_ENDPOINT.set(ContainerEndpoint {
+        host: container.host.clone(),
+        http_port: container.port(containers::CLICKHOUSE_HTTP_PORT),
+        native_port: container.port(containers::CLICKHOUSE_NATIVE_PORT),
+        password: containers::clickhouse_password(),
+    });
+    Some(ClickHouseLease)
 }
 
 #[cfg(not(feature = "testcontainers"))]
-async fn start_clickhouse_container(_test: &str) -> Option<ClickHouseLease> {
-    eprintln!("Skipping: CLICKHOUSE_HOST is unset and containers need --features testcontainers");
+async fn start_clickhouse_container() -> Option<ClickHouseLease> {
+    eprintln!("Skipping: no ClickHouse named and containers need --features testcontainers");
     None
+}
+
+/// The run's shared Kafka bootstrap, published by `require_e2e_services`.
+static KAFKA_ENDPOINT: OnceLock<String> = OnceLock::new();
+
+/// Point `ClickHouseTestConfig` and `KafkaTestConfig` at the services an e2e
+/// test runs against: dfe-docker under `TEST_MODE=docker`, else the run's
+/// shared containers.
+///
+/// # Panics
+///
+/// Panics when a service is missing or does not answer. The e2e tests run in
+/// the full level, which owes them a run, so a missing service is a failure
+/// and never a skip.
+pub async fn require_e2e_services(need_kafka: bool) {
+    #[cfg(feature = "testcontainers")]
+    if TestMode::detect() == TestMode::Remote {
+        let _ = start_clickhouse_container().await;
+        if need_kafka {
+            let kafka = containers::shared_kafka().await;
+            let _ = KAFKA_ENDPOINT.set(kafka.addr(containers::KAFKA_PORT));
+        }
+    }
+    let ch = ClickHouseTestConfig::from_env();
+    assert!(
+        ch.is_reachable(),
+        "e2e tests need a ClickHouse and none answered at {:?} (TEST_MODE={}); \
+         the shared container needs --features testcontainers and Docker",
+        ch.http_addr(),
+        TestMode::detect()
+    );
+    if need_kafka {
+        let kf = KafkaTestConfig::from_env();
+        assert!(
+            kf.is_reachable(),
+            "e2e tests need a Kafka and none answered at {:?} (TEST_MODE={})",
+            kf.brokers,
+            TestMode::detect()
+        );
+    }
 }
 
 // ============================================================================
@@ -356,13 +324,14 @@ impl KafkaTestConfig {
                 sasl_user: None,
                 sasl_password: None,
             },
+            // The run's shared broker once `require_e2e_services` published it,
+            // else none: an empty broker list is never reachable.
             TestMode::Remote => Self {
-                brokers: env::var("KAFKA_BROKERS").unwrap_or_else(|_| "localhost:9092".into()),
-                security_protocol: env::var("KAFKA_SECURITY_PROTOCOL")
-                    .unwrap_or_else(|_| "SASL_PLAINTEXT".into()),
-                sasl_mechanism: env::var("KAFKA_SASL_MECHANISM").ok(),
-                sasl_user: env::var("KAFKA_SASL_USER").ok(),
-                sasl_password: env::var("KAFKA_SASL_PASSWORD").ok(),
+                brokers: KAFKA_ENDPOINT.get().cloned().unwrap_or_default(),
+                security_protocol: "PLAINTEXT".into(),
+                sasl_mechanism: None,
+                sasl_user: None,
+                sasl_password: None,
             },
         }
     }
@@ -481,59 +450,21 @@ pub fn require_docker_in_ci() {
 // Container naming and cleanup
 // =============================================================================
 //
-// Every container this suite starts carries a name that says which repo, which
-// suite and which backing service it is, so an operator looking at `docker ps`
-// can tell what left it behind. testcontainers' default is a random hex name,
-// which is untraceable the moment one survives.
+// Every container carries a name saying which repo, suite and service it is, and
+// labels saying which run and process own it, so an operator looking at
+// `docker ps` can tell what left it behind.
 //
-// Naming: `dfe-loader-test-integration-<test>-<service>-p<pid>`, because every
-// container here is owned by exactly ONE test. nextest runs each test in its own
-// process, so nothing is shared even when it looks like it should be -- the 15
-// tests calling `spin_up()` start 15 ClickHouse containers. That was already
-// true with testcontainers' random names; the only thing a single shared name
-// would add is a collision, where the first test wins and the other 14 fail with
-// "name is already in use". `container_name` still takes `None` for a container
-// started once for a whole binary, but no suite does that today.
+// `shared_service` starts them all. The run's shared containers are one per
+// service per run, removed by a watcher once the run ends. A container one test
+// owns alone is named here, `<prefix>-integration-<test>-<service>-p<pid>`, and
+// removed when the test drops it or its process exits. Each create first sweeps
+// this suite's containers whose owner has gone (`sweep_removes`).
 //
-// Cleanup is belt AND braces, because `Drop` alone is not enough:
-//
-//   - Normal completion and a panic both unwind, so `Drop` stops the container.
-//   - A SIGKILL, an abort, or Ctrl-C on the test run does NOT. `Drop` never
-//     runs and the container survives.
-//
-// testcontainers-rs 0.27 has no resource reaper (no Ryuk), so the second case
-// is the one that leaves crap behind. The process id in the name means a leaked
-// container cannot hold a name a later run asks for, and `reap_stale` removes the
-// containers whose owning process (the `owner-pid` label) has gone, so a leak
-// costs the next run nothing and self-heals.
-//
-// The label goes on as well, so a sweep can find these regardless of name:
+// A sweep finds them all by label:
 //   docker rm -f $(docker ps -aq --filter label=io.hyperi.test.suite=dfe-loader-integration)
 
 /// Label marking every container this suite starts, for bulk cleanup.
 pub const TEST_SUITE_LABEL: (&str, &str) = ("io.hyperi.test.suite", "dfe-loader-integration");
-
-/// Labels for a container this suite starts: what it is, and whose run owns it.
-///
-/// The name says what and why; these say WHO, which is what you need when
-/// several runs share a machine and one has left something behind. The pid is
-/// the owning test process -- `ps -p <pid>` answers "is that run still alive, or
-/// is this rubbish I can remove?".
-#[must_use]
-pub fn test_labels(service: &str) -> Vec<(String, String)> {
-    vec![
-        (
-            TEST_SUITE_LABEL.0.to_string(),
-            TEST_SUITE_LABEL.1.to_string(),
-        ),
-        ("io.hyperi.test.repo".to_string(), "dfe-loader".to_string()),
-        ("io.hyperi.test.service".to_string(), service.to_string()),
-        (
-            "io.hyperi.test.owner-pid".to_string(),
-            std::process::id().to_string(),
-        ),
-    ]
-}
 
 /// Container name for a backing service in this suite.
 ///
@@ -564,15 +495,10 @@ pub fn container_name(test: Option<&str>, service: &str) -> String {
             .collect::<String>()
     };
     let pid = std::process::id();
+    let prefix = containers_prefix();
     test.map_or_else(
-        || format!("dfe-loader-test-integration-{}-p{pid}", slug(service)),
-        |t| {
-            format!(
-                "dfe-loader-test-integration-{}-{}-p{pid}",
-                slug(t),
-                slug(service)
-            )
-        },
+        || format!("{prefix}-integration-{}-p{pid}", slug(service)),
+        |t| format!("{prefix}-integration-{}-{}-p{pid}", slug(t), slug(service)),
     )
 }
 
@@ -600,99 +526,13 @@ macro_rules! test_name {
     }};
 }
 
-/// Remove a DEAD container holding `name`, so a leak from a killed run cannot
-/// block this one.
-///
-/// Never touches a RUNNING container. Two concurrent runs of this suite on one
-/// machine share these names, and force-removing a live one would sabotage the
-/// other run -- a confusing mid-test failure in a process that did nothing
-/// wrong. Leaving it means the start below fails with "name is already in use",
-/// which says what actually happened.
-///
-/// Best-effort otherwise: no Docker, nothing to remove, or an already-gone
-/// container are all fine. A failure here must not fail the test -- the start
-/// that follows reports the real problem.
-pub fn reap_stale(name: &str) {
-    reap_dead_owners();
-    let running = std::process::Command::new("docker")
-        .args(["ps", "--quiet", "--filter", &format!("name=^{name}$")])
-        .output();
-    // Non-empty stdout means a container by this name is up. Leave it alone.
-    if let Ok(out) = &running
-        && !out.stdout.is_empty()
-    {
-        return;
+/// Container name prefix: `HYPERI_TEST_CONTAINER_PREFIX`, else `dfe-loader-test`.
+pub fn containers_prefix() -> String {
+    shared_service::Suite {
+        repo: "dfe-loader",
+        manifest_dir: env!("CARGO_MANIFEST_DIR"),
     }
-    let _ = std::process::Command::new("docker")
-        .args(["rm", "--force", "--volumes", name])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status();
-}
-
-/// Names from a `docker ps` listing of `"<name> <owner-pid>"` lines whose owner
-/// is no longer alive.
-pub fn dead_owner_names(listing: &str, alive: impl Fn(u32) -> bool) -> Vec<String> {
-    listing
-        .lines()
-        .filter_map(|line| {
-            let (name, pid) = line.split_once(' ')?;
-            let pid: u32 = pid.trim().parse().ok()?;
-            (!alive(pid)).then(|| name.to_string())
-        })
-        .collect()
-}
-
-/// Whether a process with this id exists (any owner), via `ps -p`.
-fn process_alive(pid: u32) -> bool {
-    std::process::Command::new("ps")
-        .args(["-p", &pid.to_string()])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success())
-}
-
-/// Remove the containers a killed run left behind: those carrying this suite's
-/// label whose owning process is gone. Run-unique names mean a stray no longer
-/// blocks a later run, so this only stops them piling up.
-fn reap_dead_owners() {
-    let Ok(out) = std::process::Command::new("docker")
-        .args([
-            "ps",
-            "--all",
-            "--filter",
-            &format!("label={}={}", TEST_SUITE_LABEL.0, TEST_SUITE_LABEL.1),
-            "--format",
-            "{{.Names}} {{.Label \"io.hyperi.test.owner-pid\"}}",
-        ])
-        .output()
-    else {
-        return;
-    };
-    for name in dead_owner_names(&String::from_utf8_lossy(&out.stdout), process_alive) {
-        let _ = std::process::Command::new("docker")
-            .args(["rm", "--force", "--volumes", &name])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
-    }
-}
-
-/// Skip test if no test environment is available (either mode)
-#[macro_export]
-macro_rules! skip_if_no_env {
-    () => {
-        let ch = $crate::common::ClickHouseTestConfig::from_env();
-        let kf = $crate::common::KafkaTestConfig::from_env();
-        if !ch.is_reachable() && !kf.is_reachable() {
-            eprintln!(
-                "Skipping: no test environment reachable (TEST_MODE={})",
-                $crate::common::TestMode::detect()
-            );
-            return;
-        }
-    };
+    .prefix()
 }
 
 /// Hold a `ClickHouse` for the rest of the test, or return when there is none.
@@ -709,58 +549,25 @@ macro_rules! require_clickhouse {
     };
 }
 
-/// Skip test if Kafka is not reachable in current mode
-#[macro_export]
-macro_rules! skip_if_no_kafka {
-    () => {
-        let kf = $crate::common::KafkaTestConfig::from_env();
-        if !kf.is_reachable() {
-            eprintln!(
-                "Skipping: Kafka not reachable at {} (TEST_MODE={})",
-                kf.brokers,
-                $crate::common::TestMode::detect()
-            );
-            return;
-        }
-    };
-}
+/// The `Replicated` database the shared ClickHouse carries, on its embedded
+/// Keeper, for tables made with `ReplicatedMergeTree()` and no Keeper path.
+pub const REPLICATED_DATABASE: &str = "dfe_replicated";
 
-/// Skip test in Docker mode — use for tests requiring Replicated DB or multi-node cluster.
+/// Fail the test unless the connected `ClickHouse` has [`REPLICATED_DATABASE`]
+/// on the `Replicated` engine. These tests run in the full level, which owes
+/// them a run, so a missing database is a failure and never a skip. Call after
+/// `require_clickhouse!`.
 #[macro_export]
-macro_rules! skip_if_docker {
-    () => {
-        if $crate::common::TestMode::detect() == $crate::common::TestMode::Docker {
-            eprintln!(
-                "Skipping: test requires replicated cluster (TEST_MODE=docker is single-node)"
-            );
-            return;
-        }
-    };
-}
-
-/// Skip test unless the connected `ClickHouse`'s `default` database is the
-/// `Replicated` engine.
-///
-/// Capability-based replacement for `skip_if_docker!` on tests that create
-/// `ReplicatedMergeTree()` tables with no ZooKeeper path: those need the
-/// `Replicated` database engine so the `{uuid}` macro expands. Unlike the
-/// mode-based `skip_if_docker!`, this also skips against a single-node
-/// `ClickHouse` such as the test container, where the DDL would otherwise fail
-/// with server error 36. Call after `require_clickhouse!`, which guarantees the
-/// probe target is reachable.
-#[macro_export]
-macro_rules! skip_if_not_replicated {
+macro_rules! require_replicated {
     () => {
         let ch = $crate::common::ClickHouseTestConfig::from_env();
-        if !ch.has_replicated_default_db() {
-            eprintln!(
-                "Skipping: test requires a Replicated-cluster ClickHouse at {} (TEST_MODE={}); \
-                 the default database is not the Replicated engine",
-                ch.http_addr(),
-                $crate::common::TestMode::detect()
-            );
-            return;
-        }
+        assert!(
+            ch.is_replicated($crate::common::REPLICATED_DATABASE),
+            "the ClickHouse at {} (TEST_MODE={}) has no Replicated database {}",
+            ch.http_addr(),
+            $crate::common::TestMode::detect(),
+            $crate::common::REPLICATED_DATABASE
+        );
     };
 }
 
@@ -776,12 +583,6 @@ macro_rules! skip_if_not_replicated {
 /// file reading as an absent service.
 pub fn load_dotenv() {
     let _ = dotenvy::from_path(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(".env"));
-}
-
-/// Check if external test environment is configured
-pub fn has_external_env() -> bool {
-    load_dotenv();
-    env::var("CLICKHOUSE_HOST").is_ok() && env::var("KAFKA_BROKERS").is_ok()
 }
 
 /// Check if `ClickHouse` is available
@@ -813,62 +614,6 @@ pub fn check_kafka_reachable() -> bool {
     KafkaTestConfig::from_env().is_reachable()
 }
 
-/// Get `ClickHouse` test configuration (backward compat — returns loader's `ClickHouseConfig`)
-pub fn get_clickhouse_config() -> ClickHouseConfig {
-    let ch = ClickHouseTestConfig::from_env();
-    ClickHouseConfig {
-        hosts: vec![ch.native_addr()],
-        database: ch.database,
-        username: ch.user,
-        password: scalo::config::sensitive::SensitiveString::from(ch.password),
-        protocol: "native".to_string(),
-        insert_format: dfe_loader::clickhouse::InsertFormat::default(),
-        tables: Vec::new(),
-        tls: None,
-        ..Default::default()
-    }
-}
-
-/// Get Kafka test configuration (backward compat — returns loader's `KafkaConfig`)
-pub fn get_kafka_config() -> KafkaConfig {
-    let kf = KafkaTestConfig::from_env();
-
-    let sasl = if kf.has_sasl() {
-        let mechanism = match kf.sasl_mechanism.as_deref().unwrap_or("") {
-            "PLAIN" => "plain",
-            "SCRAM-SHA-256" => "scram_sha_256",
-            "SCRAM-SHA-512" | "" => "scram_sha_512",
-            _ => "scram_sha_512",
-        };
-        Some(SaslConfig {
-            enabled: true,
-            mechanism: mechanism.to_string(),
-            username: kf.sasl_user.unwrap_or_default(),
-            password: scalo::config::sensitive::SensitiveString::from(
-                kf.sasl_password.unwrap_or_default(),
-            ),
-            ..Default::default()
-        })
-    } else {
-        None
-    };
-
-    KafkaConfig {
-        brokers: kf
-            .brokers
-            .split(',')
-            .map(std::string::ToString::to_string)
-            .collect(),
-        topics: vec!["test-events".to_string()],
-        group: env::var("KAFKA_GROUP").unwrap_or_else(|_| "integration-test-group".to_string()),
-        topic_regex: None,
-        client_id: "integration-test".to_string(),
-        sasl,
-        tls: None,
-        ..Default::default()
-    }
-}
-
 /// Helper to create HTTP `ClickHouse` client for tests
 pub fn create_http_test_client() -> Option<dfe_loader::clickhouse::ClickHouseQueryClient> {
     let ch = ClickHouseTestConfig::from_env();
@@ -888,7 +633,7 @@ pub fn create_http_test_client() -> Option<dfe_loader::clickhouse::ClickHouseQue
     dfe_loader::clickhouse::ClickHouseQueryClient::new(&ch_config).ok()
 }
 
-/// Create a clickhouse-rs fork `Client` for integration tests.
+/// Create an HTTP `clickhouse::Client` for integration tests.
 ///
 /// Used by `Inserter` tests that need `DynamicInsert` or `InsertFormatted`.
 /// Defaults to HTTP transport for test compatibility.
@@ -908,28 +653,6 @@ pub fn create_ch_test_client() -> Option<clickhouse::Client> {
             .with_password(&ch.password)
             .with_database(&ch.database),
     )
-}
-
-/// Create a native-TCP fork `Client` for integration tests (port 9000/9440).
-///
-/// Exercises the RowBinary-over-TCP insert path
-/// (`with_columns_tcp`, clickhouse-rs#14). TLS uses the host as the SNI name.
-pub fn create_ch_test_client_tcp() -> Option<clickhouse::Client> {
-    let ch = ClickHouseTestConfig::from_env();
-    if !ch.is_reachable() {
-        return None;
-    }
-    let addr = ch.native_addr();
-    let mut client = if ch.tls {
-        clickhouse::Client::tcp_tls(addr, ch.host.clone())
-    } else {
-        clickhouse::Client::tcp(addr)
-    };
-    client = client.with_user(&ch.user).with_database(&ch.database);
-    if !ch.password.is_empty() {
-        client = client.with_password(&ch.password);
-    }
-    Some(client)
 }
 
 /// Drop a test table — uses ON CLUSTER for remote cluster, plain for Docker.
@@ -1034,17 +757,18 @@ fn clickhouse_http_ping_ok(base_url: &str) -> bool {
     .unwrap_or(false)
 }
 
-/// Query `system.databases` over HTTP and report whether the `default` database
-/// uses the `Replicated` engine. Returns `false` on any error (unreachable,
-/// auth failure, non-Replicated engine).
+/// Query `system.databases` over HTTP and report whether `database` uses the
+/// `Replicated` engine. Returns `false` on any error (unreachable, auth
+/// failure, non-Replicated engine).
 ///
 /// Same thread-isolated `reqwest::blocking` pattern as `clickhouse_http_ping_ok`
 /// — the fresh `std::thread::spawn` keeps reqwest's internal runtime from
 /// panicking on drop inside the outer `#[tokio::test]` runtime.
-fn clickhouse_default_db_is_replicated(base_url: &str, user: &str, password: &str) -> bool {
+fn clickhouse_db_is_replicated(base_url: &str, user: &str, password: &str, database: &str) -> bool {
     let url = base_url.trim_end_matches('/').to_string();
     let user = user.to_string();
     let password = password.to_string();
+    let query = format!("SELECT engine FROM system.databases WHERE name = '{database}'");
     std::thread::spawn(move || -> Option<bool> {
         let client = reqwest::blocking::Client::builder()
             .timeout(Duration::from_secs(3))
@@ -1054,10 +778,7 @@ fn clickhouse_default_db_is_replicated(base_url: &str, user: &str, password: &st
             .get(&url)
             .header("X-ClickHouse-User", user)
             .header("X-ClickHouse-Key", password)
-            .query(&[(
-                "query",
-                "SELECT engine FROM system.databases WHERE name = 'default'",
-            )])
+            .query(&[("query", query)])
             .send()
             .ok()?;
         if !resp.status().is_success() {

@@ -27,10 +27,8 @@ where
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Transport {
-    /// Native TCP protocol (port 9000).
-    ///
-    /// Highest performance, supports all features including streaming inserts
-    /// and native compression. Recommended for production workloads.
+    /// Native TCP protocol (port 9000, 9440 with TLS), through
+    /// `dfe_clickhouse::TcpClient`. `RowBinary` inserts only.
     #[default]
     Native,
 
@@ -69,8 +67,8 @@ pub enum InsertFormat {
     /// Fetches schema from `system.columns`, encodes values to binary client-side.
     /// `ClickHouse` receives pre-columnarised data — zero server-side parsing.
     /// Total CPU (client + cluster) is significantly lower than `JSONEachRow`.
-    // No `native` alias: `protocol: native` is refused at boot, so the same
-    // word accepted on one key and rejected on the other contradicts itself.
+    // No `native` alias: `native` is a `protocol` value, and RowBinary rows go
+    // out over either protocol.
     #[default]
     #[serde(alias = "rowbinary", alias = "row_binary", alias = "binary")]
     RowBinary,
@@ -358,8 +356,8 @@ impl ClickHouseConfig {
         if self.transport == Transport::Native && self.insert_format == InsertFormat::JsonEachRow {
             return Err(
                 "insert_format 'json_each_row' requires protocol 'http' (JSONEachRow is \
-                 sent over HTTP). Set protocol = 'http': no insert format runs over \
-                 'native' until the native sink lands (clickhouse-rs#15)."
+                 sent over HTTP). Set protocol = 'http', or insert_format = 'rowbinary' \
+                 to stay on 'native'."
                     .to_string(),
             );
         }
@@ -515,7 +513,7 @@ mod tests {
         assert_eq!(rb, InsertFormat::RowBinary);
         let rb: InsertFormat = serde_json::from_str(r#""binary""#).unwrap();
         assert_eq!(rb, InsertFormat::RowBinary);
-        // `native` names a protocol the config rejects; it is not a format.
+        // `native` names a protocol, not a format.
         assert!(serde_json::from_str::<InsertFormat>(r#""native""#).is_err());
 
         let je: InsertFormat = serde_json::from_str(r#""jsoneachrow""#).unwrap();
@@ -688,9 +686,10 @@ mod tests {
         let err = config.validate().unwrap_err();
         assert!(err.contains("json_each_row"), "message: {err}");
         assert!(err.contains("protocol = 'http'"), "message: {err}");
-        // RowBinary does not run over native either, so the message must not
-        // offer it as the way out.
-        assert!(!err.contains("rowbinary"), "message: {err}");
-        assert!(err.contains("clickhouse-rs#15"), "message: {err}");
+        // RowBinary runs over native, so the message offers it as the way out.
+        assert!(
+            err.contains("insert_format = 'rowbinary'"),
+            "message: {err}"
+        );
     }
 }

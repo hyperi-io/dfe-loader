@@ -43,9 +43,9 @@ file drives the loader's own weights and is reported as a mismatch at startup.
 
 | Setting | Values | Effect |
 |---------|--------|--------|
-| `clickhouse.protocol` | `http` (default), `native` | HTTP (8123), HTTPS (8443). `native` is refused at startup: the pinned client has no TCP row fetch, and the native insert sink waits on clickhouse-rs#15 |
+| `clickhouse.protocol` | `http` (default), `native` | HTTP (8123), HTTPS (8443), or the native protocol (9000, 9440 with TLS) through `dfe_clickhouse::TcpClient` |
 | `clickhouse.insert_format` | `row_binary` (default), `json_each_row` | binary (server skips JSON parsing) vs self-describing JSON |
-| `clickhouse.hosts` | list | multi-host failover (native pool round-robins, skips a refusing endpoint) |
+| `clickhouse.hosts` | list | `native` fails over across every host, round-robin. `http` uses the first host only. With TLS, `native` verifies every host against the first one's name |
 | `clickhouse.database` | string, `dfe` (default) | database the connection targets -- DDL, schema reflection, and any table name that arrives without a `db.` prefix |
 
 `clickhouse.database` is the CONNECTION database and is separate from
@@ -58,11 +58,10 @@ path; `json_each_row` is the diagnostic fallback:
 
 | `insert_format` | `protocol = http` | `protocol = native` |
 |-----------------|-------------------|---------------------|
-| `row_binary` (default) | `insert_formatted_with` FORMAT RowBinaryWithNamesAndTypes | refused at startup |
+| `row_binary` (default) | `insert_formatted_with` FORMAT RowBinaryWithNamesAndTypes | `FORMAT Native` blocks over the native protocol |
 | `json_each_row` | `insert_formatted_with` FORMAT JSONEachRow | refused at startup |
 
-Both formats insert over HTTP -- see
-[clickhouse/insert-formats.md](clickhouse/insert-formats.md).
+See [clickhouse/insert-formats.md](clickhouse/insert-formats.md).
 
 ### Transport security (TLS, private CAs)
 
@@ -111,7 +110,7 @@ Precedence, highest wins: **DDL tag > per-table > global**.
 | Setting | Effect |
 |---------|--------|
 | `geoip`, `enrichment.reputation` / `risk_scoring` | inject enriched columns on the promoted row -- see [pipeline/enrichment.md](pipeline/enrichment.md) |
-| `buffer.flush_rows` / `flush_bytes` / `flush_age_secs` | per-table flush triggers |
+| `buffer.flush_rows` / `flush_bytes` / `flush_age_secs` | per-table flush triggers: 20000 rows, the rows' input bytes reaching 64 MiB, or 5 s since the last flush, whichever comes first |
 
 Insert retry, batch salvage and insert concurrency are not settings. Every build retries a transient insert failure up to 5 times with jittered backoff, binary-splits a batch with a data error down to the bad rows, and runs at most 8 inserts at once. A batch that still fails is held and retried as described in [operations.md](operations.md).
 

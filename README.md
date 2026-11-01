@@ -20,7 +20,7 @@ Loads Kafka and gRPC streams into ClickHouse, batching small writes into large i
 - Routing to `db.table` from fields in each record, so one loader can feed many tables.
 - Columns read from the live table's `system.columns`: matching fields become typed columns and the rest stays in `_json`, with no schema compiled in.
 - RowBinary inserts by default, so ClickHouse does no JSON parsing on the way in.
-- Per-table buffers flushed on row count or age.
+- Per-table buffers flushed on row count, byte size or age, whichever comes first.
 - At-least-once delivery by default: Kafka offsets commit once per flush, never past a row not yet in ClickHouse or the DLQ. `kafka.acknowledgements.enabled: false` commits at receipt instead, and a row only a DLQ could take is dropped and counted in `dfe_loader_rows_lost_total` when no DLQ is working.
 - A batch with a bad row is split until only the bad rows are dead-lettered, and a schema drift error refreshes the cached schema and retries.
 - Optional GeoIP, reputation and risk columns at load time.
@@ -55,7 +55,7 @@ dfe-loader reads records off Kafka or a direct gRPC listener, works out which Cl
 | Route | `db.table` from configured fields, resolved BEFORE flattening |
 | Promote | Schema read from `system.columns`, matching fields become typed columns, the rest stays in `_json` |
 | Enrich | Optional GeoIP, reputation and risk columns |
-| Buffer | Per-table, flushed on row count or age |
+| Buffer | Per-table, flushed on row count, byte size or age |
 | Insert | RowBinary by default, so ClickHouse skips JSON parsing. JSONEachRow is the fallback |
 | Commit | Kafka offsets commit once per flush cycle, never past a row not yet in ClickHouse or the DLQ -- at-least-once |
 
@@ -72,13 +72,13 @@ Environment overrides use the `DFE_LOADER` prefix in two forms, and the differen
 | Setting | Default | Note |
 |---------|---------|------|
 | `clickhouse.hosts` | `localhost:8123` | HTTP port family |
-| `clickhouse.protocol` | `http` | The only accepted value. `native` is refused at startup |
+| `clickhouse.protocol` | `http` | `native` (9000, 9440 with TLS) also works, for `rowbinary` inserts |
 | `clickhouse.database` | `dfe` | The connection database, separate from `routing.default_db` |
 | `clickhouse.insert_format` | `rowbinary` | `jsoneachrow` is the fallback |
 | `clickhouse.tls.enabled` | unset | The ONLY honoured TLS key. Mount a private CA into the container trust store rather than naming cert files |
 | `kafka.group` | `dfe-loader` | |
 | `routing.default_db` / `default_table` | `dfe` / `main` | Where a record lands when no routing field matches |
-| `buffer.flush_rows` / `flush_bytes` / `flush_age_secs` | `20000` / `1048576` / `5` | Per-table flush triggers, each greater than 0 |
+| `buffer.flush_rows` / `flush_bytes` / `flush_age_secs` | `20000` / `67108864` (64 MiB) / `5` | Per-table flush triggers, each greater than 0 |
 | `metrics.address` | `0.0.0.0:9090` | |
 
 Full cascade and per-setting behaviour: [docs/configuration.md](docs/configuration.md).
@@ -114,7 +114,7 @@ BUSL-1.1, licensor HYPERI PTY LIMITED. Each version converts to Apache 2.0 on th
 
 dfe-loader writes rows into ClickHouse -- the last hop of the DFE core data path and the only component that writes there.
 
-NOT a transform stage, NOT a schema manager. Its only outbound topic is the DLQ. dfe-engine creates the destination tables, and the loader holds records pending schema rather than issuing DDL. The dynamic insert layer is in `src/clickhouse_ext/`, not the patched `clickhouse-rs` fork, which keeps insertion compile-time typed.
+NOT a transform stage, NOT a schema manager. Its only outbound topic is the DLQ. dfe-engine creates the destination tables, and the loader holds records pending schema rather than issuing DDL. The dynamic insert layer is in `src/clickhouse_ext/`, not the `clickhouse` crate, which keeps insertion compile-time typed.
 
 ### Where things live
 
@@ -146,10 +146,10 @@ Green lies three ways: `skip_if_no_clickhouse!()` and `skip_if_no_kafka!()` retu
 | Bump scalo and leave `release.helm.library` behind | Move `release.helm.library` in `.hyperi-ci.yaml` to the same scalo version | The release assembles the chart from the emitted contract on that scalo-service version, and a scalo-service release ships the schema for only the contract version its scalo release writes |
 | Gate a test behind a cargo feature without adding it to `.hyperi-ci.yaml` | Add `default,<feature>` to the feature-set list | `default = []` (`Cargo.toml:304`), so it compiles out of every CI run and CI still reports green. `helm_contract.rs:64` asserts `transport-memory` and `testcontainers` stay listed |
 | Inject a nested config key as `DFE_LOADER_SECTION_FIELD` | `DFE_LOADER__SECTION__FIELD` | figment strips exactly `DFE_LOADER_`, so it arrived as `_kafka.sasl.username`, matched no field and was dropped silently. Pods ran with no SASL and an empty ClickHouse password (`tests/integration/config_reachability.rs`) |
-| Set `clickhouse.protocol: native` | `http`, on an 8123-family port | The pinned fork has no TCP row fetch, so schema queries stall silently and messages back up pending schema (#115). `validate()` rejects it by name |
+| Set `clickhouse.protocol: native` with `insert_format: json_each_row` | `rowbinary` over native, or `http` for JSONEachRow | JSONEachRow is an HTTP body format. `validate()` rejects the pair by name |
 | Name `clickhouse.tls.ca_cert_file`, `cert_file`, `key_file` or `skip_verify` | Set `tls.enabled`, mount the CA into the trust store | Only `enabled` reaches a client. The rest parsed and did nothing, so `validate()` now fails naming them |
 | Widen the `cel` range past scalo's | Keep it on `>=0.14.5, <0.15` | `cel::Program` crosses the scalo boundary. Wider resolves two semver-incompatible `cel` crates and `Program` stops being the same type (`Cargo.toml:46-51`) |
-| Pin the `clickhouse` fork by branch | Pin by `rev` or tag | The `hyperi-port/*` chain is force-pushed, so a branch pin rots with no warning (`Cargo.toml:289-300`) |
+| Take `clickhouse` from git or a `[patch]` | The crates.io release | `deny.toml` allows no git source, and `dfe-clickhouse` builds against the published `clickhouse` only |
 | Mechanically sync dfe-engine's loader validation to `Config::validate()` | Read both, keep the divergence | dfe-engine scopes the broker check to the Kafka transport and adds a `grpc.listen` check this side lacks. A blind sync rejects valid gRPC-only configs at author time |
 
 ### Where this sits

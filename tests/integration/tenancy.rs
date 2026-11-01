@@ -31,6 +31,10 @@ pub(super) async fn landed_orgs(clickhouse: &str, table: &str) -> BTreeMap<u64, 
     let sql = format!("SELECT id, _org_id FROM default.{table} FORMAT TabSeparated");
     let Ok(response) = reqwest::Client::new()
         .get(format!("http://{clickhouse}/"))
+        .basic_auth(
+            "default",
+            Some(crate::common::containers::clickhouse_password()),
+        )
         .query(&[("query", sql.as_str())])
         .send()
         .await

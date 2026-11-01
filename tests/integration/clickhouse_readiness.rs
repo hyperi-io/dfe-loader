@@ -40,8 +40,10 @@ use crate::common::containers::TestInfrastructure;
 use crate::common::unique_table_name;
 use crate::test_name;
 
-/// The user the probe logs in as.
-const USER: &str = "dfe_loader_probe";
+/// The user the probe logs in as, one per test process so tests sharing a server never meet.
+fn probe_user() -> String {
+    format!("dfe_loader_probe_{}", std::process::id())
+}
 
 /// The line the probe logs for each refusal.
 const REFUSED: &str = "ClickHouse refused the startup probe";
@@ -105,11 +107,17 @@ fn fresh_password() -> String {
 /// Create the probe user with `password`, granted only the loader's reads and writes.
 async fn create_user(admin: &ClickHouseQueryClient, password: &str) {
     admin
-        .execute(&format!("CREATE USER {USER} IDENTIFIED BY '{password}'"))
+        .execute(&format!(
+            "CREATE USER {} IDENTIFIED BY '{password}'",
+            probe_user()
+        ))
         .await
         .expect("create the probe user");
     admin
-        .execute(&format!("GRANT SELECT, INSERT ON default.* TO {USER}"))
+        .execute(&format!(
+            "GRANT SELECT, INSERT ON default.* TO {}",
+            probe_user()
+        ))
         .await
         .expect("grant the probe user");
 }
@@ -120,7 +128,7 @@ fn as_probe_user(clickhouse: &str, password: &str) -> ClickHouseConfig {
         hosts: vec![clickhouse.to_string()],
         transport: Transport::Http,
         database: "default".to_string(),
-        username: USER.to_string(),
+        username: probe_user(),
         password: password.to_string(),
         tls: false,
         ..Default::default()
@@ -153,7 +161,7 @@ fn probe_user_loader(
         clickhouse.to_string(),
         table,
     );
-    config.clickhouse.username = USER.to_string();
+    config.clickhouse.username = probe_user();
     config.clickhouse.password = SensitiveString::from(password.to_string());
     config
 }
@@ -325,7 +333,10 @@ async fn a_refused_probe_goes_ready_once_clickhouse_accepts_the_password() {
     let refused = comes_true(REFUSED_FOR, || logs.text().contains(REFUSED)).await;
     let ready_while_refused = state.is_ready();
     admin
-        .execute(&format!("ALTER USER {USER} IDENTIFIED BY '{new_password}'"))
+        .execute(&format!(
+            "ALTER USER {} IDENTIFIED BY '{new_password}'",
+            probe_user()
+        ))
         .await
         .expect("change the probe user's password");
     let recovered = tokio::time::timeout(READY_WITHIN, probe).await;
@@ -410,7 +421,10 @@ async fn a_wrong_password_takes_no_partitions_until_clickhouse_accepts_it() {
     let ready_while_refused = state.is_ready();
 
     admin
-        .execute(&format!("ALTER USER {USER} IDENTIFIED BY '{password}'"))
+        .execute(&format!(
+            "ALTER USER {} IDENTIFIED BY '{password}'",
+            probe_user()
+        ))
         .await
         .expect("change the probe user's password");
     let want: BTreeSet<u64> = (0..RECORDS).collect();
@@ -519,7 +533,7 @@ async fn the_binary_serves_its_probes_and_starts_no_pipeline_while_clickhouse_re
             .current_dir(dir.path())
             .env("DFE_LOADER_CLICKHOUSE_HOSTS", &clickhouse)
             .env("DFE_LOADER_CLICKHOUSE_DATABASE", "default")
-            .env("DFE_LOADER_CLICKHOUSE_USERNAME", USER)
+            .env("DFE_LOADER_CLICKHOUSE_USERNAME", probe_user())
             .env("DFE_LOADER_CLICKHOUSE_PASSWORD", fresh_password())
             .env(
                 "DFE_LOADER_KAFKA_BROKERS",

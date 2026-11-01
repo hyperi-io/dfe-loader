@@ -12,7 +12,7 @@
 //! Batch inserter for `ClickHouse` with format-aware dispatch.
 //!
 //! Handles batch inserts with retry logic using `Vec<Map<String, Value>>`.
-//! All inserts route through the clickhouse-rs fork's `Client`:
+//! All inserts route through the HTTP `clickhouse::Client`:
 //! - `RowBinary`: `DynamicInsert` — schema-reflected binary encoding (default)
 //! - `JsonEachRow`: `InsertFormatted` — NDJSON body via HTTP (fallback)
 //!
@@ -44,11 +44,11 @@ use tracing::{debug, error, info, trace, warn};
 
 use crate::Result;
 use crate::buffer::{FlushBatch, KafkaOffset};
-use crate::clickhouse::client_http::{ReadBound, escape_identifier, insert_sink};
+use crate::clickhouse::client_http::{ChClient, ReadBound, escape_identifier, insert_sink};
 use crate::clickhouse::config::{InsertFormat, Timeouts};
 use crate::clickhouse::error::{
-    ErrorCategory, classify_dynamic_error, classify_json_insert_error, is_schema_drift_error,
-    retries, server_code,
+    ErrorCategory, classify_dynamic_error, classify_json_insert_error, error_text,
+    is_schema_drift_error, retries, server_code,
 };
 use crate::clickhouse::{ClickHouseQueryClient, SchemaCache};
 use crate::clickhouse_ext::{ColumnDef, needs_shaping, shape_for_type, shaping_changes};
@@ -268,9 +268,8 @@ fn rejected_row_bytes(
 /// - **Fatal errors** (auth, schema): Fail immediately, no retry
 #[derive(Clone)]
 pub struct Inserter {
-    /// The fork client. Every insert, `RowBinary` and `JSONEachRow`, goes over
-    /// HTTP: `clickhouse.protocol: native` is refused at startup.
-    ch_client: clickhouse::Client,
+    /// `RowBinary` inserts go over either protocol, `JSONEachRow` over HTTP only.
+    ch_client: ChClient,
     /// Schema cache for the dynamic RowBinary path, shared across
     /// `DynamicInsert` instances and invalidated on schema-mismatch recovery.
     dynamic_schema_cache: Arc<crate::clickhouse_ext::DynamicSchemaCache>,
@@ -302,7 +301,7 @@ impl Inserter {
     /// on schema reads.
     pub fn new(
         http_client: Arc<ClickHouseQueryClient>,
-        ch_client: clickhouse::Client,
+        ch_client: impl Into<ChClient>,
         config: InserterConfig,
     ) -> Self {
         let semaphore = if config.max_concurrent_inserts > 0 {
@@ -313,7 +312,7 @@ impl Inserter {
 
         Self {
             read_bound: http_client.read_bound(),
-            ch_client,
+            ch_client: ch_client.into(),
             dynamic_schema_cache: crate::clickhouse_ext::DynamicSchemaCache::new(
                 Duration::from_secs(crate::config::SchemaConfig::default().cache_ttl_secs),
             ),
@@ -469,11 +468,19 @@ impl Inserter {
         calc_backoff(self.base_retry_delay_ms, attempt, self.max_retry_delay_ms)
     }
 
-    /// Get connection pool stats. Currently always `None`: the hyperi-port
-    /// TCP pool does not expose its status publicly yet (see
-    /// `client_http::PoolStats`).
+    /// Native-protocol connection pool stats, or `None` over HTTP, whose client
+    /// exposes no pool status.
     pub fn pool_stats(&self) -> Option<crate::clickhouse::PoolStats> {
-        None
+        let ChClient::Native(client) = &self.ch_client else {
+            return None;
+        };
+        let status = client.pool().status();
+        Some(crate::clickhouse::PoolStats {
+            max_size: status.max_size,
+            size: status.size,
+            available: status.available,
+            waiting: status.waiting,
+        })
     }
 
     /// Insert rows into a table with error-aware retry.
@@ -568,7 +575,11 @@ impl Inserter {
                     if matches!(e, crate::clickhouse_ext::DynamicError::TimedOut { .. }) {
                         return Err(crate::Error::ClickHouse(format!("RowBinary write: {e}")));
                     }
-                    // Schema mismatch — invalidate both fork and loader caches, then retry
+                    if classify_dynamic_error(&e) == ErrorCategory::Fatal {
+                        error!(table = %table, error = %e, "Fatal error, not retrying");
+                        return Err(crate::Error::ClickHouse(format!("RowBinary write: {e}")));
+                    }
+                    // Schema mismatch — invalidate both schema caches, then retry
                     if matches!(
                         e,
                         crate::clickhouse_ext::DynamicError::SchemaMismatch { .. }
@@ -658,6 +669,10 @@ impl Inserter {
                 Err(e) => e,
             };
             let message = format!("RowBinary insert: {e}");
+            if classify_dynamic_error(&e) == ErrorCategory::Fatal {
+                error!(table = %table, error = %e, "Fatal error, not retrying");
+                return Err(crate::Error::ClickHouse(message));
+            }
             // The server's code decides, never the rows a refusal echoes back.
             match server_code(&message) {
                 Some(code) if retries(code, &message) => {
@@ -716,10 +731,10 @@ impl Inserter {
         Err(last_error.unwrap_or_else(|| crate::Error::Buffer("Max retries exceeded".into())))
     }
 
-    /// `JSONEachRow` insert path — NDJSON via fork's `InsertFormatted`.
+    /// `JSONEachRow` insert path — NDJSON via the client's `InsertFormatted`.
     ///
-    /// Serialises `Map<String, Value>` rows as NDJSON and sends via the fork's
-    /// HTTP client. `raw_payloads` enables zero-copy `_json` splice.
+    /// Serialises `Map<String, Value>` rows as NDJSON and sends them over HTTP.
+    /// `raw_payloads` enables zero-copy `_json` splice.
     async fn insert_rows_json(
         &self,
         table: &str,
@@ -777,12 +792,16 @@ impl Inserter {
 
         let mut last_error = None;
         for attempt in 0..=self.max_retries {
-            // HTTP only, like the RowBinary path: `clickhouse.protocol: native`
-            // is refused at startup, and the native sink waits on clickhouse-rs#15.
-            let mut insert = insert_sink(&self.ch_client, sql.clone(), self.timeouts);
+            // HTTP only: config validation refuses `json_each_row` over native.
+            let ChClient::Http(client) = &self.ch_client else {
+                return Err(crate::Error::ClickHouse(
+                    "JSONEachRow insert: insert_format json_each_row needs protocol http".into(),
+                ));
+            };
+            let mut insert = insert_sink(client, sql.clone(), self.timeouts);
 
             // One INSERT carries one verdict, and which call surfaces it is an
-            // accident of buffering: the fork queues the body on a channel, so
+            // accident of buffering: the client queues the body on a channel, so
             // a server rejection reaches a small batch at end() and a large one
             // at send(), where the closed channel makes it return the response
             // error instead. Classifying only one of them is what let a
@@ -803,24 +822,25 @@ impl Inserter {
                 return Ok(rows.len());
             };
 
-            let message = format!("JSONEachRow insert: {e}");
+            let text = error_text(&e);
+            let message = format!("JSONEachRow insert: {text}");
             // Another attempt inside this cycle only keeps the event loop
             // blocked, so a timed-out insert goes back to be held.
             if matches!(e, clickhouse::error::Error::TimedOut) {
-                warn!(table = %table, error = %e, "Insert timed out, returning the batch to be held");
+                warn!(table = %table, error = %text, "Insert timed out, returning the batch to be held");
                 return Err(crate::Error::ClickHouse(message));
             }
             match classify_json_insert_error(&e) {
                 ErrorCategory::Data => {
                     debug!(
                         table = %table,
-                        error = %e,
+                        error = %text,
                         "Server rejected the payload, returning for salvage"
                     );
                     return Err(crate::Error::ClickHousePermanent(message));
                 }
                 ErrorCategory::Fatal => {
-                    error!(table = %table, error = %e, "Fatal error, not retrying");
+                    error!(table = %table, error = %text, "Fatal error, not retrying");
                     return Err(crate::Error::ClickHouse(message));
                 }
                 ErrorCategory::Transient | ErrorCategory::Unknown => {
@@ -831,7 +851,7 @@ impl Inserter {
                             table = %table,
                             attempt,
                             delay_ms = delay.as_millis(),
-                            error = %e,
+                            error = %text,
                             "Transient error, backing off"
                         );
                         sleep(delay).await;
@@ -840,7 +860,7 @@ impl Inserter {
                     error!(
                         table = %table,
                         attempts = self.max_retries + 1,
-                        error = %e,
+                        error = %text,
                         "Max retries exhausted for transient error"
                     );
                 }

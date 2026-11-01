@@ -22,8 +22,11 @@ use compact_str::CompactString;
 use serde_json::{Map, Value, json};
 
 use dfe_loader::buffer::FlushBatch;
+use dfe_loader::clickhouse::client_http::build_client;
 use dfe_loader::clickhouse::config::{ClickHouseConfig, InsertFormat, Transport};
-use dfe_loader::clickhouse::{ClickHouseQueryClient, Inserter, InserterConfig, SchemaCache};
+use dfe_loader::clickhouse::{
+    ChClient, ClickHouseQueryClient, Inserter, InserterConfig, SchemaCache,
+};
 
 use crate::common::containers::TestInfrastructure;
 use crate::common::unique_table_name;
@@ -55,15 +58,8 @@ async fn spin_up(
         .as_ref()
         .expect("ClickHouse container must be running");
 
-    let host = container
-        .get_host()
-        .await
-        .expect("container get_host")
-        .to_string();
-    let http_port = container
-        .get_host_port_ipv4(8123)
-        .await
-        .expect("HTTP port mapping");
+    let host = container.host();
+    let http_port = container.port(8123);
 
     // HTTP-based ClickHouseQueryClient (for DDL/queries).
     let cfg = ClickHouseConfig {
@@ -71,7 +67,7 @@ async fn spin_up(
         transport: Transport::Http,
         database: "default".to_string(),
         username: "default".to_string(),
-        password: String::new(),
+        password: crate::common::containers::clickhouse_password(),
         tls: false,
         ..Default::default()
     };
@@ -85,6 +81,7 @@ async fn spin_up(
     let unified = clickhouse::Client::default()
         .with_url(&url)
         .with_user("default")
+        .with_password(crate::common::containers::clickhouse_password())
         .with_database("default");
 
     // Wait briefly for the server to be fully responsive (the image reports
@@ -97,6 +94,42 @@ async fn spin_up(
     }
 
     (infra, query_client, unified)
+}
+
+/// [`spin_up`], with the query client and the insert client both speaking
+/// `transport`: HTTP on the mapped 8123, native on the mapped 9000.
+async fn spin_up_over(
+    test: &str,
+    transport: Transport,
+) -> (TestInfrastructure, Arc<ClickHouseQueryClient>, ChClient) {
+    let (infra, http_client, http) = spin_up(test).await;
+    if transport == Transport::Http {
+        return (infra, http_client, http.into());
+    }
+    let container = infra
+        .clickhouse
+        .as_ref()
+        .expect("ClickHouse container must be running");
+    let host = container.host();
+    let native_port = container.port(9000);
+    let cfg = ClickHouseConfig {
+        hosts: vec![format!("{host}:{native_port}")],
+        transport: Transport::Native,
+        database: "default".to_string(),
+        username: "default".to_string(),
+        password: crate::common::containers::clickhouse_password(),
+        tls: false,
+        ..Default::default()
+    };
+    let query_client = Arc::new(
+        ClickHouseQueryClient::new(&cfg).expect("ClickHouseQueryClient must build for native"),
+    );
+    query_client
+        .health_check()
+        .await
+        .expect("the native port answers once HTTP does");
+    let insert_client = build_client(&cfg).expect("native insert client");
+    (infra, query_client, insert_client)
 }
 
 /// Create a simple `(id, name, value)` MergeTree test table.
@@ -177,11 +210,24 @@ async fn test_inserter_basic_insert() {
 // Inserter: RowBinary path (DynamicInsert)
 // ============================================================================
 
+/// Schema fetch and insert, over each protocol: DDL, the count and the
+/// inserter's `system.columns` read all go through `transport`.
+#[test_case::test_case(Transport::Http ; "http")]
+#[test_case::test_case(Transport::Native ; "native")]
 #[tokio::test(flavor = "multi_thread")]
-async fn test_inserter_rowbinary_insert() {
-    let (_infra, client, ch) = spin_up(test_name!()).await;
+async fn test_inserter_rowbinary_insert(transport: Transport) {
+    let (_infra, client, ch) =
+        spin_up_over(&format!("rowbinary_insert_{transport}"), transport).await;
     let table = unique_table_name("tc_rowbin");
     create_simple_table(&client, &table).await;
+
+    let schema = client
+        .fetch_table_schema(&table)
+        .await
+        .expect("schema fetch");
+    let names: Vec<&str> = schema.columns.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(names, ["id", "name", "value"]);
+    assert_eq!(schema.columns[0].type_name, "UInt64");
 
     let inserter = Inserter::new(client.clone(), ch, InserterConfig::default())
         .with_insert_format(InsertFormat::RowBinary);
@@ -1089,6 +1135,48 @@ async fn test_inserter_retry_on_transient_error() {
     );
 }
 
+/// A table that does not exist is an operator fix: its schema reads as absent,
+/// and a `RowBinary` batch for it is held whole, never dead-lettered.
+#[test_case::test_case(Transport::Http ; "http")]
+#[test_case::test_case(Transport::Native ; "native")]
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unknown_table_is_held_not_dead_lettered(transport: Transport) {
+    let (_infra, client, ch) = spin_up_over(&format!("unknown_table_{transport}"), transport).await;
+    let table = unique_table_name("tc_unknown");
+
+    let absent = client.fetch_table_schema(&table).await;
+    assert!(
+        matches!(
+            absent,
+            Err(dfe_loader::clickhouse::ClickHouseError::TableNotFound(_))
+        ),
+        "an absent table must read as not found: {absent:?}"
+    );
+
+    let inserter = Inserter::new(client.clone(), ch, fast_fail_config())
+        .with_insert_format(InsertFormat::RowBinary);
+    let result = inserter
+        .insert_with_salvage(FlushBatch {
+            table: CompactString::from(table.as_str()),
+            rows: simple_rows(3),
+            offsets: Vec::new(),
+            raw_payloads: Vec::new(),
+            reserved: Vec::new(),
+        })
+        .await;
+    assert!(
+        !result.is_settled(),
+        "a batch for an absent table was settled: {:?}",
+        result.disposition
+    );
+    assert!(
+        result.failed.is_empty(),
+        "rows were dead-lettered: {:?}",
+        result.failed
+    );
+    assert_eq!(result.inserted, 0);
+}
+
 // ============================================================================
 // Inserter: concurrent inserts via semaphore
 // ============================================================================
@@ -1158,9 +1246,11 @@ async fn test_inserter_concurrent_inserts() {
 // Inserter: schema drift recovery — ALTER mid-batch invalidates cache
 // ============================================================================
 
+#[test_case::test_case(Transport::Http ; "http")]
+#[test_case::test_case(Transport::Native ; "native")]
 #[tokio::test(flavor = "multi_thread")]
-async fn test_inserter_schema_drift_recovery() {
-    let (_infra, client, ch) = spin_up(test_name!()).await;
+async fn test_inserter_schema_drift_recovery(transport: Transport) {
+    let (_infra, client, ch) = spin_up_over(&format!("schema_drift_{transport}"), transport).await;
     let table = unique_table_name("tc_drift");
 
     // Initial schema: id + name only.
@@ -1216,7 +1306,7 @@ async fn test_inserter_schema_drift_recovery() {
         "invalidate() must drop the cached entry"
     );
 
-    // Subsequent insert works — fork re-fetches schema on write.
+    // Subsequent insert works — DynamicInsert re-fetches schema on write.
     let rows2: Vec<Map<String, Value>> = (10..13u64)
         .map(|i| {
             json!({"id": i, "name": format!("after_{i}"), "extra": i as i64})
@@ -1326,9 +1416,13 @@ async fn a_drift_error_keeps_the_cached_schema_when_refresh_on_error_is_off() {
 /// in the JSON column the server parses: code 117 against an unchanged table
 /// is the row's own, so salvage isolates it and the rest land at once. The
 /// echoed row reads like a network fault, and that must not matter.
+#[test_case::test_case(Transport::Http ; "http")]
+#[test_case::test_case(Transport::Native ; "native")]
 #[tokio::test(flavor = "multi_thread")]
-async fn a_row_the_server_refuses_against_a_current_schema_is_salvaged_not_retried() {
-    let (_infra, client, ch) = spin_up(test_name!()).await;
+async fn a_row_the_server_refuses_against_a_current_schema_is_salvaged_not_retried(
+    transport: Transport,
+) {
+    let (_infra, client, ch) = spin_up_over(&format!("data_refusal_{transport}"), transport).await;
     let table = unique_table_name("tc_data_refusal");
     client
         .execute(&format!(
@@ -1385,6 +1479,52 @@ async fn a_row_the_server_refuses_against_a_current_schema_is_salvaged_not_retri
         started.elapsed() < Duration::from_secs(3),
         "the refusal was retried as drift: {:?}",
         started.elapsed()
+    );
+    let count = client.query_count(&table, None).await.expect("count");
+    assert_eq!(count, 4);
+}
+
+/// A row the table's CHECK constraint refuses (469, on no retry list) is the
+/// row's own on either protocol: salvage dead-letters it and the rest land.
+#[test_case::test_case(Transport::Http ; "http")]
+#[test_case::test_case(Transport::Native ; "native")]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_row_a_constraint_refuses_is_dead_lettered_alone(transport: Transport) {
+    let (_infra, client, ch) =
+        spin_up_over(&format!("constraint_refusal_{transport}"), transport).await;
+    let table = unique_table_name("tc_constraint");
+    client
+        .execute(&format!(
+            "CREATE TABLE {table} (id UInt64, name String, value Float64, \
+             CONSTRAINT not_two CHECK id != 2) ENGINE = MergeTree() ORDER BY id"
+        ))
+        .await
+        .expect("create table");
+    let inserter = Inserter::new(client.clone(), ch, InserterConfig::default())
+        .with_insert_format(InsertFormat::RowBinary);
+
+    let result = inserter
+        .insert_with_salvage(FlushBatch {
+            table: CompactString::from(table.as_str()),
+            rows: simple_rows(5),
+            offsets: Vec::new(),
+            raw_payloads: Vec::new(),
+            reserved: Vec::new(),
+        })
+        .await;
+
+    assert!(
+        result.is_settled(),
+        "a constraint refusal was held for retry: {:?}",
+        result.disposition
+    );
+    assert_eq!(result.inserted, 4, "the good rows did not land");
+    assert_eq!(result.failed.len(), 1, "failed: {:?}", result.failed);
+    assert_eq!(result.failed[0].row_index, 2);
+    assert!(
+        result.failed[0].reason.contains("server error code 469"),
+        "the reason does not carry the server's code: {}",
+        result.failed[0].reason
     );
     let count = client.query_count(&table, None).await.expect("count");
     assert_eq!(count, 4);
@@ -2059,17 +2199,18 @@ async fn common_header_survives(test: &str, format: InsertFormat) {
 
     let (_infra, client, ch) = spin_up(test).await;
     let reader = ch.clone();
-    let table = "filebeat-vector";
-    create_per_source_table(&client, table).await;
+    // Hyphenated like a source name, and one per test on the shared server.
+    let table = format!("filebeat-vector-{}", std::process::id());
+    create_per_source_table(&client, &table).await;
 
     // Read the schema and comments back out of ClickHouse, as the background
     // schema resolver does.
     let schema = client
-        .fetch_table_schema(table)
+        .fetch_table_schema(&table)
         .await
         .expect("fetch schema");
     let comments = client
-        .fetch_column_comments(table)
+        .fetch_column_comments(&table)
         .await
         .expect("fetch column comments");
     let qualified = format!("{}.{}", schema.database, schema.table);

@@ -201,31 +201,20 @@ async fn test_shared_schema_multiple_orgs() {
 #[tokio::test]
 async fn test_org_id_insert_to_clickhouse() {
     use crate::common::unique_table_name;
-    use crate::{require_clickhouse, skip_if_not_replicated};
+    use crate::{require_clickhouse, require_replicated};
 
     require_clickhouse!();
-    skip_if_not_replicated!();
+    require_replicated!();
 
-    let client = if let Some(c) = create_http_test_client() {
-        c
-    } else {
-        eprintln!("Skipping RLS integration test: no ClickHouse available");
-        return;
-    };
+    let client = create_http_test_client().expect("a client for the ClickHouse just acquired");
     let oc = crate::common::on_cluster_clause();
 
-    // The cluster has two relevant databases:
-    //   benchmark = Atomic engine (plain MergeTree, no replication, no auto-conversion)
-    //   default   = Replicated engine (auto-converts MergeTree to ReplicatedMergeTree)
-    //
-    // For query-back verification we need the `default` database so that writes on any node
-    // are replicated to all nodes. We omit ON CLUSTER — the Replicated DB propagates DDL itself.
+    // A Replicated database propagates its own DDL, so no ON CLUSTER.
     let table_name = unique_table_name("rls_test");
-    let full_name = format!("default.{table_name}");
+    let full_name = format!("{}.{table_name}", crate::common::REPLICATED_DATABASE);
 
     // Create table with _org_id field (Common Header v2 schema).
-    // No ON CLUSTER — the Replicated `default` DB propagates DDL automatically.
-    // ReplicatedMergeTree() with no args lets the Replicated DB auto-fill ZK paths.
+    // ReplicatedMergeTree() with no args lets the Replicated DB fill the Keeper paths.
     let create_ddl = format!(
         "CREATE TABLE {full_name} (
             _timestamp DateTime64(3),

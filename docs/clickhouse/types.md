@@ -19,8 +19,8 @@ to cover a type it does not yet handle.
 
 Nothing here is loader-invented: it is the ClickHouse type system as of the
 24.8+ line, annotated with how each type lands on the native wire. For how those
-bytes are actually shipped (HTTP RowBinary vs native/TCP), see
-[insert-formats.md](insert-formats.md). For where the encoder hands its bytes to the fork's insert calls, see
+bytes are actually shipped (HTTP RowBinary or native blocks), see
+[insert-formats.md](insert-formats.md). For where the encoder hands its bytes to the client's insert calls, see
 [clickhouse-ext.md](clickhouse-ext.md).
 
 Sources:
@@ -285,12 +285,11 @@ SELECT data.user, data.score FROM events;
 
 ## How dfe-loader writes these types
 
-dfe-loader inserts through a HyperI fork of `clickhouse-rs` (the `hyperi-port/*`
-chain), pinned via `[patch.crates-io]` to an immutable git tag (never a branch).
-The fork keeps insertion typed -- compile-time `T: Row` schemas -- which is the
+dfe-loader inserts through the official `clickhouse` crate from crates.io. The
+crate keeps insertion typed -- compile-time `T: Row` schemas -- which is the
 right upstream default. The loader's rows are not typed at compile time: their
 columns come from `system.columns` at runtime, so the dynamic encoding layer
-lives in this repo at `src/clickhouse_ext/`, on top of the fork's stable public
+lives in this repo at `src/clickhouse_ext/`, on top of the crate's public
 surface. See [clickhouse-ext.md](clickhouse-ext.md) for where the encoder calls into that surface.
 
 The loader writes in one of two formats, dispatched by `clickhouse.insert_format`:
@@ -304,23 +303,13 @@ The loader writes in one of two formats, dispatched by `clickhouse.insert_format
 `Map<String, Value>` against that schema column-by-column, and sets
 `input_format_binary_read_json_as_string=1` for JSON-typed columns. The loader
 never calls `clickhouse::Row` -- everything is dynamic. DDL and schema queries go
-through the same fork via `ClickHouseQueryClient`. The full transport x format
-matrix (HTTP vs native/TCP) is in [insert-formats.md](insert-formats.md).
+through the same client via `ClickHouseQueryClient`. The full transport x format
+matrix is in [insert-formats.md](insert-formats.md).
 
-### Type coverage beyond upstream
-
-| Type | Status |
-|------|--------|
-| All standard types | Upstream |
-| JSON (GA v25.3) | Fork |
-| Variant | Fork |
-| Dynamic | Fork |
-| Nested | Fork |
-| BFloat16 | Fork |
-| Time/Time64 | Fork |
-| AggregateFunction | Fork |
-| SimpleAggregateFunction | Fork |
-| Native TCP protocol | Fork (upstream removed in v0.12+) |
+Type support comes from the loader's own encoder, not the client crate. A column
+type the encoder does not cover (a `Variant` column, for one) fails the write
+with `DynamicError::UnsupportedType`, and the rows are held rather than
+dead-lettered.
 
 **Historical note:** clickhouse-arrow (a DFE fork) was trialled in early
 development and dropped -- RowBinary insert throughput matched Arrow within noise

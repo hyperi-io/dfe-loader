@@ -430,14 +430,16 @@ async fn test_buffer_accumulates_messages() {
 
         let offset = KafkaOffset::with_shared_topic(msg.topic.clone(), msg.partition, msg.offset);
 
-        buffer_manager.push(&route, result.data, Some(offset), None);
+        let raw: std::sync::Arc<[u8]> = std::sync::Arc::from(msg.payload.as_slice());
+        buffer_manager.push(&route, result.data, Some(offset), Some(raw));
     }
 
-    // Check buffer stats
+    // Check buffer stats: the bytes are the payloads the rows came from
     let stats = buffer_manager.stats();
     assert_eq!(stats.pending_rows, 5);
-    // pending_bytes is calculated separately via pending_bytes() method
-    assert!(buffer_manager.pending_bytes() > 0);
+    let payload_bytes: usize = messages.iter().map(|m| m.payload.len()).sum();
+    assert_eq!(stats.pending_bytes, payload_bytes);
+    assert_eq!(buffer_manager.pending_bytes(), payload_bytes);
 }
 
 #[tokio::test]

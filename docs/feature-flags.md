@@ -1,7 +1,7 @@
 <!--
   Project:      dfe-loader
   File:         docs/feature-flags.md
-  Purpose:      Cargo feature flags and the fork patch mechanism
+  Purpose:      Cargo feature flags and the ClickHouse client crates
   Language:     Markdown
 
   License:      BUSL-1.1
@@ -21,29 +21,19 @@ PGO build.
 |---------|---------|----------|---------|
 | `jemalloc` | off | `tikv-jemallocator`, `tikv-jemalloc-ctl` | jemalloc allocator (DFE policy: jemalloc at every channel, no mimalloc) |
 | `transport-memory` | off | `scalo/transport-memory` | in-process Memory transport for unit tests |
-| `testcontainers` | off | -- | enable Docker-backed integration tests (`TEST_MODE=docker`) |
+| `testcontainers` | off | -- | enable the integration tests that run against real ClickHouse and Kafka containers, see `tests/TESTING.md` |
 | `pgo-driver` | off | `rdkafka` | build the PGO workload producer binary; the main loader binary is unaffected |
 
 `default = []`. Production builds opt in to `jemalloc` explicitly; CI opts in to
 `testcontainers` for the docker test lane. See
 [deployment/](deployment/README.md) for the release build.
 
-## The ClickHouse fork is not a feature
+## The ClickHouse client is not a feature
 
-The loader does not feature-gate its ClickHouse transport. It always builds
-against the HyperI `clickhouse-rs` fork, swapped in by `[patch.crates-io]` in
-`Cargo.toml`:
-
-```toml
-[patch.crates-io]
-clickhouse = { git = "https://github.com/hyperi-io/clickhouse-rs.git", tag = "<consumer-pin-tag>" }
-```
-
-The pin is an immutable git tag, never a branch -- the `hyperi-port/*` chain is
-force-pushed on every cascade, so a branch pin floats and old lockfiles rot. The
-loader's `[dependencies]` entry for `clickhouse` is unchanged; the patch
-re-points it. The fork's own features (`tcp`, `inserter`, the rustls TLS
-features) are selected through that dependency. See
+The loader does not feature-gate its ClickHouse client. It always builds the
+official `clickhouse` crate from crates.io, with the `lz4`, `time`, `inserter`
+and rustls TLS features, plus `dfe-clickhouse` with only its `ext` feature for
+the server-exception parser. Neither is patched or taken from git. See
 [clickhouse/clickhouse-ext.md](clickhouse/clickhouse-ext.md).
 
 ## scalo features
