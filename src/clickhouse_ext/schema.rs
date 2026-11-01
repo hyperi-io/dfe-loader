@@ -133,6 +133,18 @@ fn native_sys_columns(
     Ok(rows)
 }
 
+/// The [`DynamicError`] a failed schema read of `table` becomes.
+fn fetch_failure(table: &str, source: dfe_clickhouse::Error) -> DynamicError {
+    let table = table.to_string();
+    if source.is_timed_out() {
+        DynamicError::TimedOut { table }
+    } else if matches!(source, dfe_clickhouse::Error::Unsupported(_)) {
+        DynamicError::ClientUnsupported { table, source }
+    } else {
+        DynamicError::SchemaFetch { table, source }
+    }
+}
+
 /// Fetch a table's schema from `system.columns`.
 ///
 /// Uses a parameterised query (no string interpolation) and works over
@@ -142,6 +154,7 @@ fn native_sys_columns(
 /// # Errors
 ///
 /// Returns [`DynamicError::SchemaFetch`] if the query fails,
+/// [`DynamicError::ClientUnsupported`] if the client cannot read the reply,
 /// [`DynamicError::TimedOut`] if it runs past `bound`, or
 /// [`DynamicError::EmptySchema`] if the table has no columns (or does not
 /// exist).
@@ -152,18 +165,7 @@ pub async fn fetch_dynamic_schema(
     bound: &ReadBound,
 ) -> Result<DynamicSchema, DynamicError> {
     let full_table = format!("{database}.{table}");
-    let failed = |source: dfe_clickhouse::Error| {
-        if source.is_timed_out() {
-            DynamicError::TimedOut {
-                table: full_table.clone(),
-            }
-        } else {
-            DynamicError::SchemaFetch {
-                table: full_table.clone(),
-                source,
-            }
-        }
-    };
+    let failed = |source: dfe_clickhouse::Error| fetch_failure(&full_table, source);
 
     let rows: Vec<SysColumn> = match client {
         ChClient::Http(client) => {
@@ -296,6 +298,27 @@ mod tests {
 
     fn col(name: &str, type_str: &str, default_kind: &str) -> ColumnDef {
         ColumnDef::with_default_kind(name, type_str, default_kind)
+    }
+
+    #[test_case::test_case(
+        dfe_clickhouse::Error::Unsupported("column 'type': JSON typed paths".into()),
+        crate::clickhouse::error::ErrorCategory::Fatal ; "unsupported")]
+    #[test_case::test_case(
+        dfe_clickhouse::Error::TimedOut,
+        crate::clickhouse::error::ErrorCategory::Transient ; "timed_out")]
+    #[test_case::test_case(
+        dfe_clickhouse::Error::Custom("connection reset by peer".into()),
+        crate::clickhouse::error::ErrorCategory::Transient ; "fetch")]
+    fn a_failed_schema_read_is_classified_by_what_failed(
+        source: dfe_clickhouse::Error,
+        expected: crate::clickhouse::error::ErrorCategory,
+    ) {
+        let err = fetch_failure("db.t", source);
+        assert_eq!(
+            crate::clickhouse::error::classify_dynamic_error(&err),
+            expected,
+            "{err}"
+        );
     }
 
     #[test]

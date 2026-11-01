@@ -27,6 +27,12 @@ pub enum DynamicError {
         table: String,
         source: dfe_clickhouse::Error,
     },
+    /// The client cannot read or print a column the server sent, which the
+    /// same query repeats exactly.
+    ClientUnsupported {
+        table: String,
+        source: dfe_clickhouse::Error,
+    },
     /// Table has no columns (or does not exist).
     EmptySchema { table: String },
     /// A schema fetch or insert ran past its client-side bound.
@@ -49,6 +55,13 @@ impl fmt::Display for DynamicError {
                 write!(
                     f,
                     "failed to fetch schema for '{table}': {}",
+                    crate::clickhouse::error::native_error_text(source)
+                )
+            }
+            Self::ClientUnsupported { table, source } => {
+                write!(
+                    f,
+                    "the client cannot represent a column for '{table}': {}",
                     crate::clickhouse::error::native_error_text(source)
                 )
             }

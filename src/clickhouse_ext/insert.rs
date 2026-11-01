@@ -341,8 +341,9 @@ impl DynamicInsert {
     ///
     /// # Errors
     ///
-    /// Returns [`DynamicError`] if the server rejects the insert, or
-    /// [`DynamicError::TimedOut`] if its answer does not arrive within the bound.
+    /// Returns [`DynamicError`] if the server rejects the insert,
+    /// [`DynamicError::TimedOut`] if its answer does not arrive within the bound,
+    /// or [`DynamicError::ClientUnsupported`] if the client cannot read its reply.
     pub async fn end(mut self) -> Result<u64, DynamicError> {
         let outcome = match self.sink.take() {
             None => Ok(()),
@@ -365,14 +366,17 @@ impl DynamicInsert {
                     }
                     ChClient::Http(_) => unreachable!("a native sink is opened on a native client"),
                 };
-                sent.unwrap_or(Err(dfe_clickhouse::Error::TimedOut))
-                    .map_err(|e| {
-                        if matches!(e, dfe_clickhouse::Error::TimedOut) {
-                            None
-                        } else {
-                            Some(native_error_text(&e))
-                        }
-                    })
+                match sent.unwrap_or(Err(dfe_clickhouse::Error::TimedOut)) {
+                    Ok(()) => Ok(()),
+                    Err(dfe_clickhouse::Error::TimedOut) => Err(None),
+                    Err(source @ dfe_clickhouse::Error::Unsupported(_)) => {
+                        return Err(DynamicError::ClientUnsupported {
+                            table: self.full_table(),
+                            source,
+                        });
+                    }
+                    Err(e) => Err(Some(native_error_text(&e))),
+                }
             }
         };
         match outcome {

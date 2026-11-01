@@ -153,11 +153,15 @@ pub fn is_max_dynamic_paths_error(err: &str) -> bool {
 ///   new `Variant` or nested `Tuple` column is a loader gap, not bad data.
 /// - `EmptySchema` -- the table has no columns yet, i.e. it is mid-creation.
 /// - `SchemaMismatch` -- the cached schema is stale; a re-fetch fixes it.
+///
+/// `ClientUnsupported` is fatal: the client cannot represent what the server
+/// sent, so every retry of that request fails the same way.
 #[must_use]
 pub fn classify_dynamic_error(err: &crate::clickhouse_ext::DynamicError) -> ErrorCategory {
     use crate::clickhouse_ext::DynamicError;
 
     match err {
+        DynamicError::ClientUnsupported { .. } => ErrorCategory::Fatal,
         DynamicError::EncodingError { message, .. } => {
             if classify_from_message(message) == ErrorCategory::Transient {
                 ErrorCategory::Transient
@@ -606,6 +610,17 @@ mod tests {
             type_str: "Variant(String, UInt64)".to_string(),
         };
         assert_eq!(classify_dynamic_error(&err), ErrorCategory::Transient);
+    }
+
+    #[test]
+    fn a_column_the_client_cannot_represent_is_fatal_whatever_its_wording() {
+        let err = DynamicError::ClientUnsupported {
+            table: "dfe.filebeat".to_string(),
+            source: dfe_clickhouse::Error::Unsupported(
+                "column 'connection_timeout': JSON typed paths".to_string(),
+            ),
+        };
+        assert_eq!(classify_dynamic_error(&err), ErrorCategory::Fatal);
     }
 
     #[test]

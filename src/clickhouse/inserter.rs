@@ -575,6 +575,10 @@ impl Inserter {
                     if matches!(e, crate::clickhouse_ext::DynamicError::TimedOut { .. }) {
                         return Err(crate::Error::ClickHouse(format!("RowBinary write: {e}")));
                     }
+                    if classify_dynamic_error(&e) == ErrorCategory::Fatal {
+                        error!(table = %table, error = %e, "Fatal error, not retrying");
+                        return Err(crate::Error::ClickHouse(format!("RowBinary write: {e}")));
+                    }
                     // Schema mismatch — invalidate both schema caches, then retry
                     if matches!(
                         e,
@@ -665,6 +669,10 @@ impl Inserter {
                 Err(e) => e,
             };
             let message = format!("RowBinary insert: {e}");
+            if classify_dynamic_error(&e) == ErrorCategory::Fatal {
+                error!(table = %table, error = %e, "Fatal error, not retrying");
+                return Err(crate::Error::ClickHouse(message));
+            }
             // The server's code decides, never the rows a refusal echoes back.
             match server_code(&message) {
                 Some(code) if retries(code, &message) => {
