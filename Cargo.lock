@@ -1172,9 +1172,9 @@ dependencies = [
 
 [[package]]
 name = "dfe-clickhouse"
-version = "0.1.6"
+version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1e0cb06760858a2259767a05751d9bfa3e8f7579f062a7ecb57b5d620bc8391e"
+checksum = "06bb75f481438543c0ed400e8ba3d4b6ebec994be8d356287cd046d7c9835327"
 dependencies = [
  "backon",
  "bytes",

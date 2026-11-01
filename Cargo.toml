@@ -82,7 +82,7 @@ maxminddb = { version = ">=0.32.0, <0.33", features = ["mmap"] }
 clickhouse = { version = ">=0.15.3, <0.16", features = ["lz4", "time", "rustls-tls", "rustls-tls-native-roots", "inserter"] }
 # `ext` reads the server's exception code out of an HTTP rejection; `tls`
 # (implies `tcp`) is the native-protocol client, rustls only.
-dfe-clickhouse = { version = ">=0.1.6, <0.2", default-features = false, features = ["ext", "tls"] }
+dfe-clickhouse = { version = ">=0.1.7, <0.2", default-features = false, features = ["ext", "tls"] }
 time = ">=0.3.55, <0.4"
 
 # The HTTP client handed to clickhouse::Client::with_http_client: connect timeout,
