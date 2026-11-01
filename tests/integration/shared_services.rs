@@ -31,7 +31,7 @@ use crate::common::containers::{
     CLICKHOUSE_HTTP_PORT, CLICKHOUSE_HTTPS_PORT, CLICKHOUSE_NATIVE_PORT,
     CLICKHOUSE_NATIVE_TLS_PORT, SUITE, shared_clickhouse, shared_clickhouse_ca, shared_kafka,
 };
-use crate::common::shared_service::{self, lookup, pets_allowed, record};
+use crate::common::shared_service::{self, lookup, pets_allowed};
 
 /// Run databases and topics older than this are a killed run's, and swept.
 const STALE_AFTER: Duration = Duration::from_secs(6 * 3600);
@@ -116,7 +116,7 @@ fn clickhouse_pet() -> Option<ClickHouseTarget> {
     if answers {
         return Some(target);
     }
-    record(&format!(
+    SUITE.record(&format!(
         "ClickHouse pet at {} did not answer /ping, using the shared container",
         target.host
     ));
@@ -273,7 +273,7 @@ async fn sweep_databases(admin: &ClickHouseQueryClient, target: &ClickHouseTarge
                 target.on_cluster()
             ))
             .await;
-        record(&format!("swept stale run database {db}: {dropped:?}"));
+        SUITE.record(&format!("swept stale run database {db}: {dropped:?}"));
     }
 }
 
@@ -287,7 +287,7 @@ async fn clickhouse_main_cases() {
         return;
     }
     let target = clickhouse_target().await;
-    record(&format!(
+    SUITE.record(&format!(
         "ClickHouse rung: {} at {}",
         target.rung, target.host
     ));
@@ -323,7 +323,7 @@ async fn clickhouse_main_cases() {
     let mut ran = Vec::new();
     for (label, transport, port, tls) in cases {
         let Some(port) = port else {
-            record(&format!(
+            SUITE.record(&format!(
                 "ClickHouse case {label}: not offered by the {} rung",
                 target.rung
             ));
@@ -558,7 +558,7 @@ fn kafka_pet() -> Option<KafkaTarget> {
     let security_protocol = key("SECURITY_PROTOCOL").unwrap_or_else(|| "PLAINTEXT".into());
     let ca_file = key("CA_FILE");
     if security_protocol.contains("SSL") && ca_file.is_none() {
-        record("Kafka pet needs TLS and no CA file is set, using the shared container");
+        SUITE.record("Kafka pet needs TLS and no CA file is set, using the shared container");
         return None;
     }
     let sasl = key("SASL_MECHANISM").map(|m| {
@@ -578,7 +578,7 @@ fn kafka_pet() -> Option<KafkaTarget> {
         .and_then(|mut a| a.next())
         .is_some_and(|a| std::net::TcpStream::connect_timeout(&a, Duration::from_secs(3)).is_ok());
     if !reachable {
-        record(&format!(
+        SUITE.record(&format!(
             "Kafka pet at {first} did not answer, using the shared container"
         ));
         return None;
@@ -627,7 +627,7 @@ async fn sweep_topics(admin: &AdminClient<DefaultClientContext>, target: &KafkaT
     }
     let names: Vec<&str> = stale.iter().map(String::as_str).collect();
     let deleted = admin.delete_topics(&names, &AdminOptions::new()).await;
-    record(&format!(
+    SUITE.record(&format!(
         "swept stale run topics {stale:?}: {:?}",
         deleted.map(|r| r.len())
     ));
@@ -643,7 +643,7 @@ async fn kafka_main_cases() {
         return;
     }
     let target = kafka_target().await;
-    record(&format!(
+    SUITE.record(&format!(
         "Kafka rung: {} at {}",
         target.rung, target.bootstrap
     ));
@@ -767,9 +767,9 @@ async fn receive(adapter: &TransportAdapter, want: usize) -> Vec<dfe_loader::kaf
 
 /// Print what this run's shared containers did, shown by nextest for this test.
 fn print_run_log() {
-    let log = std::fs::read_to_string(shared_service::log_path()).unwrap_or_default();
+    let log = std::fs::read_to_string(SUITE.log_path()).unwrap_or_default();
     eprintln!(
         "shared-service run log {}:\n{log}",
-        shared_service::log_path().display()
+        SUITE.log_path().display()
     );
 }

@@ -295,7 +295,12 @@ async fn the_watcher_removes_the_container_once_its_owner_exits() {
         .arg("600")
         .spawn()
         .expect("start a stand-in owner");
-    crate::common::shared_service::spawn_watcher(owner.id(), Some(&name), None);
+    crate::common::shared_service::spawn_watcher(
+        &crate::common::containers::SUITE,
+        owner.id(),
+        Some(&name),
+        None,
+    );
 
     // Long enough for a watcher that ignored its owner to have acted.
     tokio::time::sleep(std::time::Duration::from_secs(3)).await;

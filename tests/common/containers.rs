@@ -29,6 +29,7 @@ mod testcontainers_impl {
     pub const SUITE: Suite = Suite {
         repo: "dfe-loader",
         manifest_dir: env!("CARGO_MANIFEST_DIR"),
+        tmp_dir: option_env!("CARGO_TARGET_TMPDIR"),
     };
 
     /// ClickHouse to test against -- the server dfe-infra `versions.yaml`

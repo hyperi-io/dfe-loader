@@ -28,20 +28,13 @@ use std::time::Duration;
 use rdkafka::ClientConfig;
 use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
 use rdkafka::producer::{FutureProducer, FutureRecord};
-use scalo::deployment::test_support::shared_service::Suite;
 use scalo::transport::kafka::test_support::{SCRAM_USER, TlsBroker, scram_password};
 
 use super::grpc_outage::{clickhouse_address, free_port, query_client, wait_landed};
+use crate::common::containers::SUITE;
 use crate::common::containers::TestInfrastructure;
 use crate::common::{has_docker, require_docker_in_ci, unique_table_name};
 use crate::test_name;
-
-/// The suite scalo's TLS broker names, labels and logs its container under.
-const SUITE: Suite = Suite {
-    repo: "dfe-loader",
-    manifest_dir: env!("CARGO_MANIFEST_DIR"),
-    tmp_dir: option_env!("CARGO_TARGET_TMPDIR"),
-};
 
 /// Records produced for each loader.
 const RECORDS: u64 = 20;

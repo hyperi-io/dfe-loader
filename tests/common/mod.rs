@@ -10,7 +10,7 @@
 
 pub mod containers;
 pub mod metrics;
-pub mod shared_service;
+pub use scalo::deployment::test_support::shared_service;
 pub mod test_logging;
 
 use std::env;
@@ -528,11 +528,7 @@ macro_rules! test_name {
 
 /// Container name prefix: `HYPERI_TEST_CONTAINER_PREFIX`, else `dfe-loader-test`.
 pub fn containers_prefix() -> String {
-    shared_service::Suite {
-        repo: "dfe-loader",
-        manifest_dir: env!("CARGO_MANIFEST_DIR"),
-    }
-    .prefix()
+    containers::SUITE.prefix()
 }
 
 /// Hold a `ClickHouse` for the rest of the test, or return when there is none.
