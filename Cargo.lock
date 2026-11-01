@@ -1172,9 +1172,9 @@ dependencies = [
 
 [[package]]
 name = "dfe-clickhouse"
-version = "0.1.7"
+version = "0.1.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "06bb75f481438543c0ed400e8ba3d4b6ebec994be8d356287cd046d7c9835327"
+checksum = "1941a6740ae6c797a85cb28d3c779bccedd2b82764702ad2d95d047b4c1c8275"
 dependencies = [
  "backon",
  "bytes",
@@ -3423,7 +3423,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "03da047801ff44bb6a4d407d4860c05fd70bb81714e6b2f3812603d5b145b042"
 dependencies = [
  "heck",
- "itertools 0.14.0",
+ "itertools 0.13.0",
  "log",
  "multimap",
  "petgraph",
@@ -3444,7 +3444,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b570b25f7617e43d59005d0990ccb79e950a423952cea19671b7a876da390adf"
 dependencies = [
  "anyhow",
- "itertools 0.14.0",
+ "itertools 0.13.0",
  "proc-macro2",
  "quote",
  "syn 2.0.119",
@@ -4277,9 +4277,9 @@ dependencies = [
 
 [[package]]
 name = "scalo"
-version = "2.14.22"
+version = "2.14.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dea871e3663df6c7e3501460dad6fa4db5ff87cdf58dd13f3940b4cd39d124e1"
+checksum = "2427c709e6c0b213b7424ba349f1cbe230b93af3e37b38f481c5d3fa27fa289a"
 dependencies = [
  "aes-gcm",
  "backon",
@@ -4436,7 +4436,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a253edfdea34032da21af84e16fcc94f4c7a6ba237f9f3bc2dbf43cea8535c44"
 dependencies = [
  "annotate-snippets",
- "base64 0.23.1",
+ "base64 0.22.1",
  "encoding_rs_io",
  "granit-parser",
  "nohash-hasher",

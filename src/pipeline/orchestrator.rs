@@ -992,11 +992,10 @@ impl Orchestrator {
                             // skip full parse for messages that will be filtered/DLQ'd.
                             // Messages that pass pre-route are processed by MessageProcessor.
                             let pre_route_filtered = if let Some(ref engine) = self.batch_engine
-                                && let Some(ref field) = engine.config().routing_field
+                                && engine.config().routing_field.is_some()
                             {
                                 use scalo::worker::engine::pre_route::{
-                                    PreRouteOutcome, apply_filters, extract_routing_field,
-                                    filters_from_config,
+                                    PreRouteOutcome, apply_filters, filters_from_config,
                                 };
                                 let filters = filters_from_config(&engine.config().pre_route_filters);
                                 let mut pass_indices: Vec<usize> = Vec::with_capacity(batch.len());
@@ -1004,8 +1003,8 @@ impl Orchestrator {
                                 let mut dlq_entries: Vec<(usize, String)> = Vec::new();
 
                                 for (idx, msg) in batch.iter().enumerate() {
-                                    let extraction = extract_routing_field(&msg.payload, field);
-                                    let outcome = apply_filters(&extraction, &filters);
+                                    // Each filter reads the field it names.
+                                    let outcome = apply_filters(&msg.payload, &filters);
                                     match outcome {
                                         PreRouteOutcome::Continue => pass_indices.push(idx),
                                         PreRouteOutcome::Filtered => {
@@ -2853,13 +2852,12 @@ fn pending_reason_label(reason: &super::pending_schema::ExpireReason) -> &'stati
     }
 }
 
-/// Whether the DLQ will actually keep what it is handed.
+/// Whether the DLQ takes what it is handed.
 ///
-/// `Dlq::spawn` returns `Ok(Dlq::disabled())` when the config asks for a DLQ
-/// but no backend builds -- a read-only rootfs on a gRPC-transport pod reaches
-/// that by config alone. A disabled `Dlq` counts a drop and returns `Ok` from
-/// `send`, so `is_some()` answers "was one asked for", never "will it keep
-/// anything". Only the latter may gate an offset commit.
+/// A DLQ the config disables counts a drop and returns `Ok` from `send`, so
+/// `is_some()` answers "was one asked for", never "will it keep anything".
+/// One enabled with no backend started reports enabled and refuses every
+/// confirmed write, which holds the rows at their source.
 fn dlq_accepts(dlq: Option<&Arc<Dlq>>) -> bool {
     dlq.is_some_and(|d| d.is_enabled())
 }
@@ -3874,12 +3872,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_degraded_dlq_is_not_a_working_one() {
-        // scalo's Dlq::spawn returns Ok(disabled) when the config enables a DLQ
-        // but no backend builds -- a read-only rootfs on a gRPC-transport pod
-        // gets here by config alone. A disabled Dlq counts a drop and returns
-        // Ok from send(), so reading is_some() commits the offsets for rows it
-        // just threw away.
+    async fn a_dlq_with_no_backend_holds_its_rows_rather_than_taking_them() {
+        // The config enables a DLQ but no backend starts -- a read-only rootfs
+        // on a gRPC-transport pod gets here by config alone. scalo's Dlq then
+        // reports enabled and refuses every confirmed write, so the row is
+        // held at its source: not counted as placed, not dropped.
         let config = scalo::dlq::DlqConfig {
             enabled: true,
             mode: scalo::dlq::DlqMode::Cascade,
@@ -3897,27 +3894,23 @@ mod tests {
             Dlq::spawn(&config, "loader", None, CancellationToken::new())
                 .expect("spawn returns Ok"),
         );
-
         assert!(
-            !degraded.is_enabled(),
-            "no backend built, so nothing is kept"
-        );
-        assert!(
-            !dlq_accepts(Some(&degraded)),
-            "is_some() is true here — only is_enabled() may gate a commit"
+            degraded.write_confirmed(Vec::new()).await.is_err(),
+            "a DLQ with no backend refuses a confirmed write"
         );
 
         let payloads: Vec<Arc<[u8]>> = vec![Arc::from(&b"{\"n\":1}"[..])];
         let dead_letters = rejected_entries(&payloads, &rejected_rows(1, "code 117"));
         let mut orchestrator = Orchestrator::new(Config::default());
-        settle(&mut orchestrator, Some(&degraded), dead_letters, in_30s()).await;
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(300);
+        settle(&mut orchestrator, Some(&degraded), dead_letters, deadline).await;
 
         assert_eq!(
             orchestrator.stats().messages_dlq,
             0,
             "a DLQ that keeps nothing was counted as taking the row"
         );
-        assert_eq!(degraded.dropped(), 0, "nothing was handed to it to drop");
+        assert_eq!(degraded.dropped(), 0, "the row was dropped, not held");
     }
 
     #[tokio::test]

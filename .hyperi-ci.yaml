@@ -64,6 +64,9 @@ build:
   strategies:
     - native
   rust:
+    # librdkafka, OpenSSL and the rest link statically from hyperi-ci's
+    # prefix, so the image installs no C library packages.
+    static_libs: true
     glibc_max: "2.41"
     optimize:
       pgo:

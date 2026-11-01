@@ -841,6 +841,9 @@ impl Config {
             },
             ..DeploymentContract::default()
         }
+        // The default DLQ cascade writes files, so the chart mounts its
+        // directory writable on the read-only root filesystem.
+        .with_dlq(&Config::default().routing.dlq.to_scalo_config())
     }
 
     /// The Secrets the chart mounts as env vars.

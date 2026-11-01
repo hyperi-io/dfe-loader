@@ -34,7 +34,7 @@ tokio-util = { version = ">=0.7.20, <0.8", features = ["rt"] }
 # Shared library with transport abstraction. The floor moves with
 # `release.helm.library` in .hyperi-ci.yaml: the library renders only the
 # contract version its scalo release writes.
-scalo = { version = "2.14.22", features = ["config-schema", "transport-kafka", "transport-grpc", "dlq-kafka", "config", "config-reload", "deployment", "version-check", "scaling", "cli-service", "top", "logger", "metrics", "service-metrics", "expression", "memory", "worker-batch", "governor", "secrets", "sink-stack", "geoip-download"] }
+scalo = { version = ">=2.14.24, <3", features = ["config-schema", "transport-kafka", "transport-grpc", "dlq-kafka", "config", "config-reload", "deployment", "version-check", "scaling", "cli-service", "top", "logger", "metrics", "service-metrics", "expression", "memory", "worker-batch", "governor", "secrets", "sink-stack", "geoip-download"] }
 
 # Steps scalo's jittered retry schedule (sink_stack backoff). Range MUST track
 # scalo's: BackoffBuilder only applies to the ExponentialBuilder scalo returns.
@@ -126,7 +126,7 @@ reqwest = { version = ">=0.12, <0.13", default-features = false, features = ["bl
 # The Kafka broker image pin and the TLS / mTLS / SASL_SSL broker fixture the
 # Kafka tests share, so neither is copied here. The production dependency above
 # does not carry this feature.
-scalo = { version = "2.14.22", features = ["transport-kafka-test-support"] }
+scalo = { version = ">=2.14.24, <3", features = ["transport-kafka-test-support"] }
 
 # Kafka producer for e2e tests (test message injection)
 rdkafka = { version = ">=0.39.0, <0.40", features = ["dynamic-linking"] }

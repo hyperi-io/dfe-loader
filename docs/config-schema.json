@@ -1188,7 +1188,7 @@
       "description": "Pre-route filter applied to each message before routing decisions.\n\nFilters are evaluated in order. The first filter that matches determines\nthe message's [`super::types::PreRouteResult`].",
       "oneOf": [
         {
-          "description": "Route to DLQ if a required field is absent.",
+          "description": "Drop the record, committed with its block, if a required field is absent.",
           "type": "object",
           "properties": {
             "type": {

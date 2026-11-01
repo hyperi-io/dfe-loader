@@ -1096,7 +1096,7 @@ $defs:
       Filters are evaluated in order. The first filter that matches determines
       the message's [`super::types::PreRouteResult`].
     oneOf:
-    - description: Route to DLQ if a required field is absent.
+    - description: Drop the record, committed with its block, if a required field is absent.
       type: object
       properties:
         type:
