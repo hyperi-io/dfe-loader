@@ -422,33 +422,29 @@ impl Orchestrator {
         //
         // Capacity 256: enough to buffer a burst of new tables without backpressure on hot path.
         const SCHEMA_RESOLVE_CAPACITY: usize = 256;
-        let (resolve_tx, mut resolve_rx) = mpsc::channel::<String>(SCHEMA_RESOLVE_CAPACITY);
+        let (resolve_tx, resolve_rx) = mpsc::channel::<String>(SCHEMA_RESOLVE_CAPACITY);
         let (schema_result_tx, mut schema_result_rx) =
             mpsc::channel::<TableResolutionResult>(SCHEMA_RESOLVE_CAPACITY);
         {
             let resolver_client = Arc::clone(&http_client);
             let result_tx = schema_result_tx.clone();
             let shutdown_resolver = self.shutdown.clone();
-            tokio::spawn(async move {
-                loop {
-                    tokio::select! {
-                        biased;
-                        () = shutdown_resolver.cancelled() => break,
-                        Some(table) = resolve_rx.recv() => {
-                            let client = Arc::clone(&resolver_client);
-                            let tx = result_tx.clone();
-                            // Each table resolved concurrently — never blocks the resolver loop.
-                            tokio::spawn(async move {
-                                let (result, fault) = resolve_table(&client, table).await;
-                                if let Some(e) = fault {
-                                    debug!(table = %result.table, error = %e, "Schema fetch failed, will retry");
-                                }
-                                let _ = tx.send(result).await;
-                            });
+            tokio::spawn(run_resolver(
+                move |table| {
+                    let client = Arc::clone(&resolver_client);
+                    async move {
+                        let (result, fault) = resolve_table(&client, table).await;
+                        if let Some(e) = fault {
+                            debug!(table = %result.table, error = %e, "Schema fetch failed, will retry");
                         }
+                        result
                     }
-                }
-            });
+                },
+                resolve_rx,
+                result_tx,
+                shutdown_resolver,
+                MAX_CONCURRENT_RESOLUTIONS,
+            ));
         }
 
         // Background refresh — expiring tables go back through the resolver, so a
@@ -2431,6 +2427,58 @@ where
     }
 }
 
+/// Schema resolutions run at once. Each is three `system.columns` and comment
+/// queries, so a burst of new tables against a slow ClickHouse would otherwise
+/// pile up queries and memory without limit.
+const MAX_CONCURRENT_RESOLUTIONS: usize = 8;
+
+/// Resolve each table `requests` names, at most `limit` at a time, sending
+/// each result on `results`. A table already being resolved is not resolved
+/// twice: the result on its way answers the repeat request too.
+async fn run_resolver<F, Fut>(
+    resolve: F,
+    mut requests: mpsc::Receiver<String>,
+    results: mpsc::Sender<TableResolutionResult>,
+    shutdown: CancellationToken,
+    limit: usize,
+) where
+    F: Fn(String) -> Fut + Send + Sync + 'static,
+    Fut: std::future::Future<Output = TableResolutionResult> + Send + 'static,
+{
+    let permits = Arc::new(tokio::sync::Semaphore::new(limit));
+    let in_flight: Arc<parking_lot::Mutex<FxHashSet<String>>> = Arc::default();
+    loop {
+        let table = tokio::select! {
+            biased;
+            () = shutdown.cancelled() => break,
+            table = requests.recv() => match table {
+                Some(table) => table,
+                None => break,
+            },
+        };
+        if !in_flight.lock().insert(table.clone()) {
+            continue;
+        }
+        let permit = tokio::select! {
+            biased;
+            () = shutdown.cancelled() => break,
+            permit = Arc::clone(&permits).acquire_owned() => match permit {
+                Ok(permit) => permit,
+                Err(_) => break,
+            },
+        };
+        let work = resolve(table.clone());
+        let results = results.clone();
+        let in_flight = Arc::clone(&in_flight);
+        tokio::spawn(async move {
+            let result = work.await;
+            in_flight.lock().remove(&table);
+            drop(permit);
+            let _ = results.send(result).await;
+        });
+    }
+}
+
 /// Fetch `table`'s schema, table COMMENT and column directives, with the fetch
 /// error behind an `Unavailable` answer so the caller can name it.
 async fn resolve_table(
@@ -3906,6 +3954,68 @@ mod tests {
         );
         let _ = std::fs::remove_file(&service);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A burst of resolution requests runs at most `limit` at a time, and a
+    /// table already being resolved is not queried again.
+    #[tokio::test]
+    async fn the_resolver_bounds_its_work_and_skips_a_table_in_flight() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let running = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let (req_tx, req_rx) = mpsc::channel(256);
+        let (res_tx, mut res_rx) = mpsc::channel(256);
+        let shutdown = CancellationToken::new();
+        let (r, p, c) = (Arc::clone(&running), Arc::clone(&peak), Arc::clone(&calls));
+        let resolver = tokio::spawn(run_resolver(
+            move |table| {
+                let (running, peak, calls) = (Arc::clone(&r), Arc::clone(&p), Arc::clone(&c));
+                async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    let now = running.fetch_add(1, Ordering::SeqCst) + 1;
+                    peak.fetch_max(now, Ordering::SeqCst);
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    running.fetch_sub(1, Ordering::SeqCst);
+                    TableResolutionResult {
+                        table,
+                        comment: None,
+                        schema: SchemaResolution::Unavailable,
+                        column_directives: None,
+                    }
+                }
+            },
+            req_rx,
+            res_tx,
+            shutdown.clone(),
+            3,
+        ));
+        // 20 distinct tables, the first asked for twice while it runs.
+        req_tx.send("dfe.t0".to_string()).await.unwrap();
+        for i in 0..20 {
+            req_tx.send(format!("dfe.t{i}")).await.unwrap();
+        }
+        let mut answered = 0;
+        while answered < 20 {
+            tokio::time::timeout(Duration::from_secs(5), res_rx.recv())
+                .await
+                .expect("every table is answered")
+                .expect("the resolver is running");
+            answered += 1;
+        }
+        assert!(
+            peak.load(Ordering::SeqCst) <= 3,
+            "peak {}",
+            peak.load(Ordering::SeqCst)
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            20,
+            "the repeat in flight was queried again"
+        );
+        shutdown.cancel();
+        resolver.await.unwrap();
     }
 
     /// A table that does not exist leaves no directive or computed-column
