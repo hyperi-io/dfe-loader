@@ -13,7 +13,7 @@ pub mod remap_loader;
 pub mod timestamp;
 pub mod transformer;
 
-pub use computed::{ComputedColumnCache, parse_computed_directive};
+pub use computed::{ComputedColumnCache, TableComputedColumns, parse_computed_directive};
 pub use extractor::{HeaderExtraction, HeaderExtractor};
 pub use field_mapping::{
     FieldMappingRule, MappingAction, RuleOrigin, TableFieldMapping, parse_renamed_directive,

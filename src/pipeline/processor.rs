@@ -25,7 +25,8 @@ use crate::payload::{LeadingBytes, opens_json_document};
 use crate::routing::{RouteResult, Router, TableChoice};
 use crate::transform::extractor::NO_COLUMN_MATCHED;
 use crate::transform::{
-    ComputedColumnCache, FieldMappingCache, HeaderExtractor, TableFieldMapping, Transformer,
+    ComputedColumnCache, FieldMappingCache, HeaderExtractor, TableComputedColumns,
+    TableFieldMapping, Transformer,
 };
 
 use super::capture::CaptureOverrides;
@@ -291,12 +292,18 @@ impl MessageProcessor<'_> {
             // of its own, so the topic's source is derived once for the message
             // and every column holding the marker resolves to it (#187).
             let topic_source = self.router.derive_source_from_topic(&msg.topic);
-            // The field mapping and enrichment read fields no column may hold.
+            // The field mapping, computed columns and enrichment read fields
+            // no column may hold.
             let mapping_inputs = self
                 .field_mapping_cache
                 .and_then(|cache| cache.get(&table))
                 .into_iter()
                 .flat_map(TableFieldMapping::source_fields);
+            let computed_inputs = self
+                .computed_column_cache
+                .get(&table)
+                .into_iter()
+                .flat_map(TableComputedColumns::inputs);
             let ip_fields: &[String] = if self.enrichment.is_active() {
                 &self.enrichment.ip_fields
             } else {
@@ -308,7 +315,9 @@ impl MessageProcessor<'_> {
                 &schema,
                 self.col_meta_cache,
                 Some(topic_source.as_str()),
-                mapping_inputs.chain(ip_fields.iter().map(String::as_str)),
+                mapping_inputs
+                    .chain(computed_inputs)
+                    .chain(ip_fields.iter().map(String::as_str)),
             );
 
             // A header pass that promoted nothing would land a row of type
@@ -2693,6 +2702,52 @@ mod tests {
         assert!(
             processed.raw_payload.is_some(),
             "_json is spliced from the payload"
+        );
+    }
+
+    /// A computed column reads its CEL inputs even when no column is named
+    /// after them, and the inputs do not reach the row.
+    #[test]
+    fn json_primary_computes_from_a_field_no_column_holds() {
+        let mut computed = ComputedColumnsConfig::default();
+        computed.columns.insert(
+            "risk_band".to_string(),
+            r#"risk_score > 80 ? "high" : "low""#.to_string(),
+        );
+        let mut harness = TestHarness::new();
+        harness.computed_column_cache = ComputedColumnCache::new(computed);
+        let payload = br#"{"event_category":"net","action":"allow","risk_score":95}"#;
+        let table = match harness
+            .processor_json_primary()
+            .process(&harness.make_msg(payload))
+        {
+            Err(crate::Error::SchemaPending { table }) => table,
+            Ok(_) => panic!("expected SchemaPending before the schema is cached, got Ok"),
+            Err(e) => panic!("expected SchemaPending, got {e:?}"),
+        };
+        harness
+            .computed_column_cache
+            .build_and_cache(&table, &harness.col_meta_cache);
+
+        let processed = json_primary_against(
+            &harness,
+            payload,
+            &[("action", "String"), ("risk_band", "String")],
+        )
+        .unwrap_or_else(|e| panic!("processed: {e:?}"));
+        assert_eq!(
+            processed
+                .data
+                .get("risk_band")
+                .and_then(serde_json::Value::as_str),
+            Some("high"),
+            "{:?}",
+            processed.data
+        );
+        assert!(
+            !processed.data.contains_key("risk_score"),
+            "{:?}",
+            processed.data
         );
     }
 }
