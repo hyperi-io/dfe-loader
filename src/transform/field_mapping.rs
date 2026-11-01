@@ -84,6 +84,13 @@ impl TableFieldMapping {
         self.rules.is_empty()
     }
 
+    /// Every field a rule reads, in rule order.
+    pub fn source_fields(&self) -> impl Iterator<Item = &str> {
+        self.rules
+            .iter()
+            .flat_map(|rule| rule.source_fields.iter().map(String::as_str))
+    }
+
     /// Number of active rules.
     pub fn len(&self) -> usize {
         self.rules.len()

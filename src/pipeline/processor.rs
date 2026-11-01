@@ -18,11 +18,15 @@ use tracing::{debug, error, trace, warn};
 
 use crate::buffer::KafkaOffset;
 use crate::clickhouse::SharedSchemaCache;
+use crate::clickhouse::TableSchema;
 use crate::column_meta::ColumnMetaCache;
 use crate::config::{CaptureMode, Config};
 use crate::payload::{LeadingBytes, opens_json_document};
 use crate::routing::{RouteResult, Router, TableChoice};
-use crate::transform::{ComputedColumnCache, FieldMappingCache, HeaderExtractor, Transformer};
+use crate::transform::extractor::NO_COLUMN_MATCHED;
+use crate::transform::{
+    ComputedColumnCache, FieldMappingCache, HeaderExtractor, TableFieldMapping, Transformer,
+};
 
 use super::capture::CaptureOverrides;
 use super::enrichment::EnrichmentPipeline;
@@ -125,6 +129,17 @@ fn captures_payload_as_raw(
         CaptureMode::RawOnly => true,
         CaptureMode::Full => capture_raw && !has_raw_field && !opens_json_document(payload),
         CaptureMode::JsonOnly | CaptureMode::ExtractedOnly => false,
+    }
+}
+
+/// Whether the capture alone fills a row of this table: `_json` under the
+/// modes that splice the payload into it, the raw column under `raw_only`.
+fn capture_fills_row(schema: &TableSchema, mode: CaptureMode, raw_output: &str) -> bool {
+    let has = |name: &str| schema.columns.iter().any(|col| col.name == name);
+    match mode {
+        CaptureMode::Full | CaptureMode::JsonOnly => has("_json"),
+        CaptureMode::RawOnly => has(raw_output),
+        CaptureMode::ExtractedOnly => false,
     }
 }
 
@@ -257,33 +272,49 @@ impl MessageProcessor<'_> {
         // Resolve capture mode for this table (DDL > per-table config > global).
         let capture_mode = self.capture_overrides.derive_config(&table).mode;
 
-        let (mut data, raw_payload) = if let Some(schema) = extractor_schema {
+        let (mut data, raw_payload, stage_inputs) = if let Some(schema) = extractor_schema {
             // The `topic_name` fallback labels a record that carries no _source
             // of its own, so the topic's source is derived once for the message
             // and every column holding the marker resolves to it (#187).
             let topic_source = self.router.derive_source_from_topic(&msg.topic);
-            let promoted = self.extractor.extract(
-                &msg.payload,
+            // The field mapping and enrichment read fields no column may hold.
+            let mapping_inputs = self
+                .field_mapping_cache
+                .and_then(|cache| cache.get(&table))
+                .into_iter()
+                .flat_map(TableFieldMapping::source_fields);
+            let ip_fields: &[String] = if self.enrichment.is_active() {
+                &self.enrichment.ip_fields
+            } else {
+                &[]
+            };
+            let promoted = self.extractor.extract_value(
+                value,
                 &table,
                 &schema,
                 self.col_meta_cache,
                 Some(topic_source.as_str()),
+                mapping_inputs.chain(ip_fields.iter().map(String::as_str)),
             );
 
             // A header pass that promoted nothing would land a row of type
-            // defaults — no _source, no _tags, _timestamp at epoch zero (#144).
-            // Every rejection is logged and counted here, the one site that sees
-            // them all; the extractor supplies the reason (#145).
+            // defaults — no _source, no _tags, _timestamp at epoch zero (#144),
+            // unless the capture alone fills the row. Every rejection is logged
+            // and counted here, the one site that sees them all; the extractor
+            // supplies the reason (#145).
+            let raw_output = self.config.metadata.raw_output.as_str();
             if let Some(reason) = promoted.empty_reason
                 && !schema.columns.is_empty()
+                && !(reason == NO_COLUMN_MATCHED
+                    && capture_fills_row(&schema, capture_mode, raw_output))
             {
                 log_header_pass_skipped(&table, reason);
                 return Err(crate::Error::Transform(format!(
                     "header pass promoted no columns for {table}"
                 )));
             }
+            let stage_inputs = promoted.stage_inputs;
             let mut promoted = promoted.fields;
-            let raw_output = self.config.metadata.raw_output.as_str();
 
             // raw_payload carries Kafka bytes for the zero-copy _json splice, so
             // every mode that populates _json passes it.
@@ -303,7 +334,7 @@ impl MessageProcessor<'_> {
                     None
                 }
             };
-            (promoted, raw)
+            (promoted, raw, stage_inputs)
         } else {
             // Legacy flatten path
             let common_header = self.config.metadata.enabled;
@@ -363,7 +394,7 @@ impl MessageProcessor<'_> {
                 }
             }
 
-            (d, None)
+            (d, None, Vec::new())
         };
 
         let capture_full_raw = captures_payload_as_raw(
@@ -403,6 +434,11 @@ impl MessageProcessor<'_> {
                     "Message enriched"
                 );
             }
+        }
+
+        // The fields read only for those stages hold no column.
+        for field in &stage_inputs {
+            data.remove(field);
         }
 
         // Build offset for commit tracking
@@ -2540,5 +2576,106 @@ mod tests {
         );
 
         harness.schema_cache.shutdown();
+    }
+
+    /// Cache a schema of `columns` (name, type) for the table `payload` routes
+    /// to, then process it on the json_primary path.
+    fn json_primary_against(
+        harness: &TestHarness,
+        payload: &[u8],
+        columns: &[(&str, &str)],
+    ) -> crate::Result<super::ProcessedMessage> {
+        use crate::clickhouse::{ColumnInfo, ParsedType, TableSchema};
+
+        let msg = harness.make_msg(payload);
+        let table = match harness.processor_json_primary().process(&msg) {
+            Err(crate::Error::SchemaPending { table }) => table,
+            Ok(_) => panic!("expected SchemaPending before the schema is cached, got Ok"),
+            Err(e) => panic!("expected SchemaPending, got {e:?}"),
+        };
+        let (db, tbl) = table.split_once('.').expect("db.table");
+        harness.schema_cache.insert(
+            table.clone(),
+            TableSchema {
+                database: db.to_string(),
+                table: tbl.to_string(),
+                columns: columns
+                    .iter()
+                    .enumerate()
+                    .map(|(i, (name, ty))| ColumnInfo {
+                        name: (*name).to_string(),
+                        type_name: (*ty).to_string(),
+                        parsed_type: ParsedType::parse(ty),
+                        position: i as u64 + 1,
+                        default_kind: String::new(),
+                        default_expression: String::new(),
+                        comment: String::new(),
+                        is_in_primary_key: false,
+                        is_in_sorting_key: false,
+                    })
+                    .collect(),
+                comment: String::new(),
+            },
+        );
+        harness.processor_json_primary().process(&msg)
+    }
+
+    /// Enrichment reads its IP field even when no column is named after it,
+    /// and the field does not reach the row.
+    #[test]
+    fn json_primary_enriches_from_a_field_no_column_holds() {
+        use crate::enrich::reputation::{ReputationEnricher, ThreatSource, ThreatType};
+        use std::net::IpAddr;
+
+        let enricher = ReputationEnricher::new();
+        let addr: IpAddr = "192.0.2.77".parse().expect("valid IP");
+        enricher.add_ip(addr, ThreatType::Tor, ThreatSource::TorProject);
+        let mut harness = TestHarness::new();
+        harness.enrichment = EnrichmentPipeline {
+            ip_fields: vec!["src_ip".to_string()],
+            geoip: None,
+            reputation: Some(enricher),
+            risk: None,
+        };
+
+        let processed = json_primary_against(
+            &harness,
+            br#"{"event_category":"net","action":"allow","src_ip":"192.0.2.77"}"#,
+            &[("action", "String"), ("rep_is_tor", "Bool")],
+        )
+        .unwrap_or_else(|e| panic!("processed: {e:?}"));
+        assert_eq!(
+            processed
+                .data
+                .get("rep_is_tor")
+                .and_then(serde_json::Value::as_bool),
+            Some(true),
+            "{:?}",
+            processed.data
+        );
+        assert!(
+            !processed.data.contains_key("src_ip"),
+            "{:?}",
+            processed.data
+        );
+    }
+
+    /// A table of only `_json` and server-filled columns takes a record whose
+    /// fields match no column, because the capture fills the row.
+    #[test]
+    fn json_primary_accepts_a_json_only_table() {
+        let harness = TestHarness::new();
+        let processed = match json_primary_against(
+            &harness,
+            br#"{"event_category":"audit","a":1}"#,
+            &[("_uuid", "UUID"), ("_json", "JSON")],
+        ) {
+            Ok(processed) => processed,
+            Err(e) => panic!("the capture fills the row: {e:?}"),
+        };
+        assert!(
+            processed.raw_payload.is_some(),
+            "_json is spliced from the payload"
+        );
     }
 }

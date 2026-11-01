@@ -59,15 +59,31 @@ use crate::column_meta::{ColumnMetaCache, TOPIC_NAME_MARKER};
 use crate::config::{MetadataConfig, RoutingConfig, TimestampDqConfig};
 use crate::transform::timestamp::{TimestampResult, TimestampValidator};
 
+/// The reason a payload that parsed promoted nothing.
+pub const NO_COLUMN_MATCHED: &str = "no schema column matched the payload";
+
 /// The outcome of one header pass.
 ///
-/// `empty_reason` is `Some` exactly when `fields` is empty, so the caller that
-/// rejects the message logs why without re-deriving it.
+/// `empty_reason` is `Some` exactly when no column was promoted, so the caller
+/// that rejects the message logs why without re-deriving it.
 pub struct HeaderExtraction {
-    /// Promoted columns, keyed by destination column name.
+    /// Promoted columns, keyed by destination column name, then the stage inputs.
     pub fields: Map<String, Value>,
     /// Why nothing was promoted.
     pub empty_reason: Option<&'static str>,
+    /// The fields taken only for a later stage, which no column holds. The
+    /// caller removes them once those stages have run.
+    pub stage_inputs: Vec<String>,
+}
+
+impl HeaderExtraction {
+    fn empty(reason: &'static str) -> Self {
+        Self {
+            fields: Map::new(),
+            empty_reason: Some(reason),
+            stage_inputs: Vec::new(),
+        }
+    }
 }
 
 /// The source paths one column reads, in the order the extractor tries them.
@@ -393,36 +409,50 @@ impl HeaderExtractor {
         col_meta: &ColumnMetaCache,
         topic_source: Option<&str>,
     ) -> HeaderExtraction {
+        match sonic_rs::from_slice::<Value>(raw) {
+            Ok(value) => self.extract_value(
+                value,
+                table,
+                schema,
+                col_meta,
+                topic_source,
+                std::iter::empty(),
+            ),
+            Err(e) => {
+                debug!(table = %table, error = %e, "Payload parse failed, skipping extraction");
+                HeaderExtraction::empty("payload did not parse")
+            }
+        }
+    }
+
+    /// [`extract`](Self::extract) over a payload already parsed, which it
+    /// takes apart rather than copies.
+    ///
+    /// `stage_inputs` names fields a later stage reads (a field mapping's
+    /// sources, the enrichment IP fields). One no column took is carried in
+    /// the fields under its own name, and listed in `stage_inputs`.
+    pub fn extract_value<'s>(
+        &self,
+        value: Value,
+        table: &str,
+        schema: &TableSchema,
+        col_meta: &ColumnMetaCache,
+        topic_source: Option<&str>,
+        stage_inputs: impl IntoIterator<Item = &'s str>,
+    ) -> HeaderExtraction {
         // Ingest time is stamped to the millisecond.
         let now = Utc::now().trunc_subsecs(3);
         let mut map = Map::with_capacity(schema.columns.len());
         let plan = self.plan_for(table, schema, col_meta);
         let contended = &plan.contended;
 
-        // Parse once — all schema column lookups are O(1) hash operations on this map.
-        // Misses are free here; with get_from_slice each miss still scans the full document.
-        // Take ownership of the parsed map so we can move Values out (zero-clone).
-        // Each take_path call removes the value from `parsed` and moves it into
-        // the output map -- no Value::clone() on the hot path, except for the
-        // source fields `plan.contended` names, which more than one column reads.
-        // A payload the header pass cannot read used to return an empty map at
-        // debug level, and the row landed with every column at its type default.
-        // Name the reason and let the caller reject it (#144).
-        let mut parsed = match sonic_rs::from_slice::<Value>(raw) {
-            Ok(Value::Object(map)) => map,
-            Ok(_) => {
-                return HeaderExtraction {
-                    fields: map,
-                    empty_reason: Some("payload is not a JSON object"),
-                };
-            }
-            Err(e) => {
-                debug!(table = %table, error = %e, "Payload parse failed, skipping extraction");
-                return HeaderExtraction {
-                    fields: map,
-                    empty_reason: Some("payload did not parse"),
-                };
-            }
+        // Every column lookup is a hash operation on this map. Each take_path
+        // call moves the value out of `parsed` into the output map, with no
+        // Value::clone() except for the source fields `plan.contended` names,
+        // which more than one column reads. A payload that is not an object
+        // names the reason, and the caller rejects it (#144).
+        let Value::Object(mut parsed) = value else {
+            return HeaderExtraction::empty("payload is not a JSON object");
         };
 
         for col in &schema.columns {
@@ -506,14 +536,19 @@ impl HeaderExtractor {
         }
 
         debug!(table = %table, fields = map.len(), "Extracted promoted fields");
-        // A valid object whose fields match no column promotes nothing too, and
-        // used to reach the caller indistinguishable from a full pass.
-        let empty_reason = map
-            .is_empty()
-            .then_some("no schema column matched the payload");
+        // A valid object whose fields match no column promotes nothing too.
+        let empty_reason = map.is_empty().then_some(NO_COLUMN_MATCHED);
+        let mut taken = Vec::new();
+        let unshared = FxHashSet::default();
+        for path in stage_inputs {
+            if !map.contains_key(path) && take_path(&mut parsed, path, path, &mut map, &unshared) {
+                taken.push(path.to_string());
+            }
+        }
         HeaderExtraction {
             fields: map,
             empty_reason,
+            stage_inputs: taken,
         }
     }
 }
