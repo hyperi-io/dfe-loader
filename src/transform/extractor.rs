@@ -74,6 +74,9 @@ pub struct HeaderExtraction {
     /// The fields taken only for a later stage, which no column holds. The
     /// caller removes them once those stages have run.
     pub stage_inputs: Vec<String>,
+    /// The payload's top-level fields that land nowhere: no column took them
+    /// and the table has no `_json` column. DFE's own `_` fields are left out.
+    pub unstored: Vec<String>,
 }
 
 impl HeaderExtraction {
@@ -82,6 +85,7 @@ impl HeaderExtraction {
             fields: Map::new(),
             empty_reason: Some(reason),
             stage_inputs: Vec::new(),
+            unstored: Vec::new(),
         }
     }
 }
@@ -147,6 +151,8 @@ struct TablePlan {
     ddl_version: u64,
     /// Source paths more than one column of this table reads.
     contended: FxHashSet<Box<str>>,
+    /// Whether the table has a `_json` column to keep the whole payload in.
+    stores_payload: bool,
 }
 
 impl TablePlan {
@@ -383,6 +389,7 @@ impl HeaderExtractor {
             columns: schema.columns.iter().map(|col| col.name.clone()).collect(),
             ddl_version,
             contended,
+            stores_payload: schema.columns.iter().any(|col| col.name == "_json"),
         }
     }
 
@@ -545,12 +552,32 @@ impl HeaderExtractor {
                 taken.push(path.to_string());
             }
         }
+        let unstored = if plan.stores_payload || parsed.is_empty() {
+            Vec::new()
+        } else {
+            unstored_fields(&parsed, contended)
+        };
         HeaderExtraction {
             fields: map,
             empty_reason,
             stage_inputs: taken,
+            unstored,
         }
     }
+}
+
+/// The fields left in `parsed` that hold data no column took: not a DFE `_`
+/// field, not a path a column copied, and not an object a column emptied.
+fn unstored_fields(parsed: &Map<String, Value>, contended: &FxHashSet<Box<str>>) -> Vec<String> {
+    parsed
+        .iter()
+        .filter(|(key, value)| {
+            !key.starts_with('_')
+                && !contended.contains(key.as_str())
+                && !matches!(value, Value::Object(object) if object.is_empty())
+        })
+        .map(|(key, _)| key.clone())
+        .collect()
 }
 
 /// Whether `ClickHouse` computes the column and refuses a supplied value.
@@ -2577,5 +2604,22 @@ mod tests {
         let sydney = ParsedType::parse("DateTime64(3, 'Australia/Sydney')");
         dfe_clickhouse::dynamic::shape_for_type(&mut value, &sydney);
         assert_eq!(value, Value::String("1788760433.385".into()));
+    }
+
+    /// A table with no `_json` column names the fields that land nowhere, so
+    /// the caller can count them. DFE's own `_` fields and a table that keeps
+    /// the whole payload report none.
+    #[test]
+    fn fields_no_column_holds_are_named_when_nothing_keeps_the_payload() {
+        let raw =
+            br#"{"MetricName": "m", "ScopeName": "s", "_otel_metric_type": "sum", "Resource": {}}"#;
+        let extractor = default_extractor();
+        let schema = make_schema(&["MetricName"]);
+        let got = extractor.extract(raw, "dfe.events", &schema, &empty_col_meta(), None);
+        assert_eq!(got.unstored, ["ScopeName"]);
+
+        let schema = make_schema(&["MetricName", "_json"]);
+        let got = extractor.extract(raw, "dfe.events", &schema, &empty_col_meta(), None);
+        assert!(got.unstored.is_empty(), "{:?}", got.unstored);
     }
 }

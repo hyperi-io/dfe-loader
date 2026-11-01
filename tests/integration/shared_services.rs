@@ -446,6 +446,18 @@ async fn clickhouse_case(
     .await;
     let mut wrong = wrong;
     wrong.extend(
+        Box::pin(super::insert_coercions::metric_shape_failures(
+            &client,
+            &coercion,
+            &reader,
+            db,
+            target.table_engine(),
+            &target.on_cluster(),
+            label,
+        ))
+        .await,
+    );
+    wrong.extend(
         Box::pin(super::insert_coercions::type_change_failures(
             &client,
             &coercion,

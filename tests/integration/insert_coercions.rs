@@ -325,3 +325,125 @@ async fn type_change_case(
         Err(format!("a retyped column read other values: {got:?}"))
     }
 }
+
+/// The receiver's HyperDX-shaped metric records, read through the header pass
+/// and the `Inserter` into HyperDX's exponential-histogram table: the
+/// exemplar arrays and both bucket sides must land as sent, and a field the
+/// table has no column for is reported rather than lost unseen.
+pub(super) async fn metric_shape_failures(
+    admin: &ClickHouseQueryClient,
+    inserter: &Inserter,
+    reader: &clickhouse::Client,
+    db: &str,
+    engine: &str,
+    on_cluster: &str,
+    label: &str,
+) -> Vec<String> {
+    use dfe_loader::column_meta::{ColumnDirectivesConfig, ColumnMetaCache};
+    use dfe_loader::config::{MetadataConfig, RoutingConfig, TimestampDqConfig};
+    use dfe_loader::transform::HeaderExtractor;
+
+    let table = format!("{db}.exphist_{label}");
+    // HyperDX's own DDL, codecs and indexes left out.
+    let ddl = format!(
+        "CREATE TABLE {table} (\
+         `ResourceAttributes` Map(LowCardinality(String), String), \
+         `ServiceName` LowCardinality(String), \
+         `MetricName` LowCardinality(String), \
+         `Attributes` Map(LowCardinality(String), String), \
+         `TimeUnix` DateTime, \
+         `Count` UInt64, `Sum` Float64, `Scale` Int32, `ZeroCount` UInt64, \
+         `PositiveOffset` Int32, `PositiveBucketCounts` Array(UInt64), \
+         `NegativeOffset` Int32, `NegativeBucketCounts` Array(UInt64), \
+         `Exemplars.FilteredAttributes` Array(Map(LowCardinality(String), String)), \
+         `Exemplars.TimeUnix` Array(DateTime), \
+         `Exemplars.Value` Array(Float64), \
+         `Exemplars.SpanId` Array(String), \
+         `Exemplars.TraceId` Array(String), \
+         `Min` Float64, `Max` Float64\
+         ) ENGINE = {engine} ORDER BY (MetricName, TimeUnix)"
+    );
+    let record = json!({
+        "TimeUnix": "2026-02-19 00:00:00.000",
+        "MetricName": "rpc.latency",
+        "Count": 6,
+        "Sum": 3.5,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Scale": 3,
+        "ZeroCount": 1,
+        "PositiveOffset": -2,
+        "PositiveBucketCounts": [1, 0, 2],
+        "NegativeOffset": 4,
+        "NegativeBucketCounts": [2],
+        "Attributes": {"route": "/api"},
+        "ResourceAttributes": {"service.name": "checkout"},
+        "Exemplars.FilteredAttributes": [{"route": "/api"}],
+        "Exemplars.TimeUnix": ["2026-02-19 00:00:00.500000000"],
+        "Exemplars.Value": [0.95],
+        "Exemplars.SpanId": ["def4560000000001"],
+        "Exemplars.TraceId": ["abababababababababababababababab"],
+        "ScopeName": "otel.sdk",
+        "_otel_metric_type": "exponential_histogram",
+    });
+    let want = "-2:[1,0,2]|4:[2]|[{'route':'/api'}]|['2026-02-19 00:00:00']|[0.95]|\
+                ['def4560000000001']|['abababababababababababababababab']";
+    let read = "concat(toString(PositiveOffset), ':', toString(PositiveBucketCounts), '|', \
+                toString(NegativeOffset), ':', toString(NegativeBucketCounts), '|', \
+                toString(`Exemplars.FilteredAttributes`), '|', toString(`Exemplars.TimeUnix`), '|', \
+                toString(`Exemplars.Value`), '|', toString(`Exemplars.SpanId`), '|', \
+                toString(`Exemplars.TraceId`))";
+
+    let steps = async {
+        admin
+            .execute(&ddl)
+            .await
+            .map_err(|e| format!("create: {e}"))?;
+        let schema = admin
+            .fetch_table_schema(&table)
+            .await
+            .map_err(|e| format!("schema: {e}"))?;
+        let extractor = HeaderExtractor::new(
+            &MetadataConfig::default(),
+            &RoutingConfig::default(),
+            &TimestampDqConfig::default(),
+        );
+        let payload = serde_json::to_vec(&record).map_err(|e| e.to_string())?;
+        let col_meta = ColumnMetaCache::new(ColumnDirectivesConfig::default());
+        let extracted = extractor.extract(&payload, &table, &schema, &col_meta, None);
+        // The table has no ScopeName column and no _json to keep it in.
+        if extracted.unstored != ["ScopeName"] {
+            return Err(format!(
+                "unstored fields reported as {:?}",
+                extracted.unstored
+            ));
+        }
+        Box::pin(inserter.insert_rows(&table, &[extracted.fields], &[]))
+            .await
+            .map_err(|e| format!("insert: {e}"))?;
+        if !on_cluster.is_empty() {
+            let _ = admin
+                .execute(&format!("SYSTEM SYNC REPLICA{on_cluster} {table}"))
+                .await;
+        }
+        let got: Vec<String> = reader
+            .query(&format!("SELECT {read} AS s FROM {table}"))
+            .fetch_all::<Text>()
+            .await
+            .map_err(|e| format!("read back: {e}"))?
+            .into_iter()
+            .map(|t| t.s)
+            .collect();
+        if got == [want] {
+            Ok(())
+        } else {
+            Err(format!(
+                "the metric record landed as {got:?}, want [{want:?}]"
+            ))
+        }
+    };
+    match steps.await {
+        Ok(()) => Vec::new(),
+        Err(e) => vec![format!("metric shape: {e}")],
+    }
+}

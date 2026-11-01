@@ -766,6 +766,8 @@ logs an ERROR naming the table and the reason, at most once a minute, and counts
 labels: it comes from a payload field with no allowlist, so labelling it would
 let untrusted input grow the label set without bound.
 
+A table with a `_json` column keeps the whole payload, so a field no column holds is still stored. A table without one, such as HyperDX's own tables, keeps only its columns. Each top-level field that lands nowhere counts `dfe_loader_fields_unstored_total`, and a WARN names the table and the fields at most once a minute. DFE's own `_` fields are not counted.
+
 ## Configuration reference
 
 ### Loader config

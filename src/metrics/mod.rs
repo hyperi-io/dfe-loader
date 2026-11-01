@@ -159,6 +159,10 @@ impl Metrics {
             "dfe_loader_routing_field_absent_total",
             "Records on a source topic that named no table and fell back to the default",
         );
+        let _ = manager.counter(
+            "dfe_loader_fields_unstored_total",
+            "Payload fields that matched no column, in a table with no _json column to keep them",
+        );
 
         Self {
             dfe,
@@ -824,6 +828,7 @@ mod tests {
             "dfe_loader_schema_prewarm_failed_tables",
             "dfe_loader_header_pass_skipped_total",
             "dfe_loader_routing_field_absent_total",
+            "dfe_loader_fields_unstored_total",
             "dfe_loader_batched_array_messages_total",
             "dfe_loader_batched_array_records_total",
             "dfe_loader_batched_ndjson_messages_total",

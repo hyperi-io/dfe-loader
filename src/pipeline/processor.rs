@@ -74,6 +74,20 @@ fn log_header_pass_skipped(table: &str, reason: &str) {
     }
 }
 
+/// Report payload fields that land nowhere, at most once a minute, so a source
+/// field a table has no column for is not lost unseen.
+fn log_fields_unstored(table: &str, fields: &[String]) {
+    metrics::counter!("dfe_loader_fields_unstored_total").increment(fields.len() as u64);
+    static UNSTORED_TS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    if scalo::logger::log_debounced(&UNSTORED_TS, 60_000) {
+        warn!(
+            table = %table,
+            fields = ?fields,
+            "Payload fields match no column and the table has no _json column, so they are not stored (max 1 per 60s)"
+        );
+    }
+}
+
 /// One topic's state for the routing-field warning.
 #[derive(Default)]
 struct RoutingFieldWarn {
@@ -312,6 +326,9 @@ impl MessageProcessor<'_> {
                 return Err(crate::Error::Transform(format!(
                     "header pass promoted no columns for {table}"
                 )));
+            }
+            if !promoted.unstored.is_empty() {
+                log_fields_unstored(&table, &promoted.unstored);
             }
             let stage_inputs = promoted.stage_inputs;
             let mut promoted = promoted.fields;
