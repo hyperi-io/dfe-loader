@@ -20,7 +20,7 @@ Loads Kafka and gRPC streams into ClickHouse, batching small writes into large i
 - Routing to `db.table` from fields in each record, so one loader can feed many tables.
 - Columns read from the live table's `system.columns`: matching fields become typed columns and the rest stays in `_json`, with no schema compiled in.
 - RowBinary inserts by default, so ClickHouse does no JSON parsing on the way in.
-- Per-table buffers flushed on row count or age.
+- Per-table buffers flushed on row count, byte size or age, whichever comes first.
 - At-least-once delivery by default: Kafka offsets commit once per flush, never past a row not yet in ClickHouse or the DLQ. `kafka.acknowledgements.enabled: false` commits at receipt instead, and a row only a DLQ could take is dropped and counted in `dfe_loader_rows_lost_total` when no DLQ is working.
 - A batch with a bad row is split until only the bad rows are dead-lettered, and a schema drift error refreshes the cached schema and retries.
 - Optional GeoIP, reputation and risk columns at load time.
@@ -55,7 +55,7 @@ dfe-loader reads records off Kafka or a direct gRPC listener, works out which Cl
 | Route | `db.table` from configured fields, resolved BEFORE flattening |
 | Promote | Schema read from `system.columns`, matching fields become typed columns, the rest stays in `_json` |
 | Enrich | Optional GeoIP, reputation and risk columns |
-| Buffer | Per-table, flushed on row count or age |
+| Buffer | Per-table, flushed on row count, byte size or age |
 | Insert | RowBinary by default, so ClickHouse skips JSON parsing. JSONEachRow is the fallback |
 | Commit | Kafka offsets commit once per flush cycle, never past a row not yet in ClickHouse or the DLQ -- at-least-once |
 
