@@ -43,6 +43,7 @@ pub enum ThreatType {
     Phishing,    // Phishing source
     Bruteforce,  // Brute force attacker
     Exploit,     // Exploit attempts
+    Blocklist,   // On an operator-supplied blocklist
 }
 
 impl ThreatType {
@@ -62,6 +63,7 @@ impl ThreatType {
             ThreatType::Phishing => "phishing",
             ThreatType::Bruteforce => "bruteforce",
             ThreatType::Exploit => "exploit",
+            ThreatType::Blocklist => "blocklist",
         }
     }
 }
@@ -596,7 +598,8 @@ impl ReputationEnricher {
             ThreatType::Malware
             | ThreatType::Phishing
             | ThreatType::Bruteforce
-            | ThreatType::Exploit => {
+            | ThreatType::Exploit
+            | ThreatType::Blocklist => {
                 result.is_malicious = true;
             }
             ThreatType::None => {}

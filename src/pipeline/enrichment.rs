@@ -58,7 +58,12 @@ impl EnrichmentPipeline {
             for path in &config.enrichment.reputation.blocklist_files {
                 match std::fs::read_to_string(path) {
                     Ok(content) => {
-                        enricher.load_plain_list(&content, ThreatType::None, ThreatSource::Custom);
+                        // An operator's blocklist names IPs to treat as malicious.
+                        enricher.load_plain_list(
+                            &content,
+                            ThreatType::Blocklist,
+                            ThreatSource::Custom,
+                        );
                         loaded += 1;
                         debug!(path = %path, "Loaded reputation blocklist");
                     }
@@ -1169,6 +1174,17 @@ mod tests {
         // Blocklist loaded successfully → reputation is active
         assert!(pipeline.reputation.is_some());
         assert!(pipeline.is_active());
+
+        // A listed IP is flagged, and one off the list is not.
+        let mut listed = serde_json::Map::new();
+        listed.insert("source_ip".into(), json!("203.0.113.5"));
+        pipeline.enrich(&mut listed);
+        assert_eq!(listed["rep_is_malicious"], json!(true), "{listed:?}");
+        assert_eq!(listed["rep_threat_type"], json!("blocklist"));
+        let mut clean = serde_json::Map::new();
+        clean.insert("source_ip".into(), json!("198.18.0.1"));
+        pipeline.enrich(&mut clean);
+        assert_ne!(clean.get("rep_is_malicious"), Some(&json!(true)));
     }
 
     #[tokio::test]
