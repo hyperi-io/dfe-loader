@@ -80,7 +80,12 @@ impl CaptureOverrides {
         if let Some(config) = self.configs.get(table) {
             return config.clone();
         }
+        self.configured(table)
+    }
 
+    /// The table's policy from config alone: steps 2 to 4 of
+    /// [`Self::derive_config`].
+    fn configured(&self, table: &str) -> TableCaptureConfig {
         // Per-table config map (new style)
         if let Some(&mode) = self.table_modes.get(table) {
             return TableCaptureConfig { mode };
@@ -125,16 +130,14 @@ impl CaptureOverrides {
         std::mem::take(&mut self.pending_tables)
     }
 
-    /// Update capture config from DDL table comment tags.
+    /// Update capture config from DDL table comment tags, read successfully.
     ///
     /// `@capture_mode: <mode>` takes precedence over legacy tags.
     /// Legacy `@no_capture_json` / `@no_capture_raw` tags are supported
-    /// for backward compatibility but superseded by `@capture_mode`.
+    /// for backward compatibility but superseded by `@capture_mode`. A
+    /// comment with no capture tag, empty included, drops the table's
+    /// override, so the configured policy applies again.
     pub fn update_from_comment(&mut self, table: &str, comment: &str) {
-        if comment.is_empty() {
-            return;
-        }
-
         let tags = TableTags::from_comment(comment);
 
         // New-style: @capture_mode tag wins over everything
@@ -167,10 +170,15 @@ impl CaptureOverrides {
                 (true, true) => CaptureMode::ExtractedOnly,
                 (true, false) => CaptureMode::RawOnly,
                 (false, true) => self.global_mode,
-                (false, false) => return, // Neither set, no override
+                (false, false) => unreachable!("one of the two is set"),
             };
             self.configs
                 .insert(table.to_string(), TableCaptureConfig { mode });
+        } else {
+            // Cached rather than removed: an absent entry is what marks a
+            // table for resolution, and the next message would queue it again.
+            let configured = self.configured(table);
+            self.configs.insert(table.to_string(), configured);
         }
     }
 }
@@ -391,6 +399,32 @@ mod tests {
             overrides.derive_config("dfe.events").mode,
             CaptureMode::Full
         );
+    }
+
+    /// A capture tag taken off the table's DDL takes its override with it,
+    /// whether the comment is now empty or carries other tags.
+    #[test]
+    fn removing_the_capture_tag_restores_the_configured_policy() {
+        for later in ["", "@retention: 30d"] {
+            let metadata_config = MetadataConfig::default();
+            let mut overrides = CaptureOverrides::new(&metadata_config);
+            overrides.update_from_comment("dfe.events", "@capture_mode: extracted_only");
+            assert_eq!(
+                overrides.derive_config("dfe.events").mode,
+                CaptureMode::ExtractedOnly
+            );
+            overrides.update_from_comment("dfe.events", later);
+            assert_eq!(
+                overrides.derive_config("dfe.events").mode,
+                CaptureMode::Full,
+                "after {later:?}"
+            );
+            overrides.mark_pending("dfe.events");
+            assert!(
+                overrides.take_pending().is_empty(),
+                "a resolved table is not queued to resolve again"
+            );
+        }
     }
 
     #[test]

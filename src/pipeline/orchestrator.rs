@@ -728,18 +728,20 @@ impl Orchestrator {
                 Some(result) = schema_result_rx.recv() => {
                     let table = &result.table;
 
-                    // Apply DDL capture tags (only if comment is non-empty)
-                    if !result.comment.is_empty() {
-                        capture_overrides.update_from_comment(table, &result.comment);
+                    // A comment or directives read that failed keeps what the
+                    // table had, so a transient failure erases nothing.
+                    if let Some(comment) = &result.comment {
+                        capture_overrides.update_from_comment(table, comment);
                         debug!(table = %table, "Applied DDL capture tags from background resolver");
                     }
 
                     // Populate ColumnMetaCache DDL layer — must happen before field mapping
                     // and computed column caches, which read from it.
-                    col_meta_cache.apply_ddl(table, result.column_directives);
-
-                    // Apply computed columns (uses ColumnMetaCache for CEL expressions)
-                    computed_column_cache.build_and_cache(table, &col_meta_cache);
+                    if let Some(directives) = result.column_directives {
+                        col_meta_cache.apply_ddl(table, directives);
+                        // Computed columns read their CEL expressions from it.
+                        computed_column_cache.build_and_cache(table, &col_meta_cache);
+                    }
 
                     match result.schema {
                         SchemaResolution::Resolved(schema) => {
@@ -2438,11 +2440,7 @@ async fn resolve_table(
         client.fetch_table_schema(&table),
         client.fetch_column_comments(&table),
     );
-    let column_directives = comments_res
-        .unwrap_or_default()
-        .into_iter()
-        .map(|(col, comment)| (col, parse_directives(&comment)))
-        .collect();
+    let column_directives = directives_from(comments_res);
     // Keep the reason: the event loop can only fall back to the default table
     // safely if it can tell an absent table from an unreachable ClickHouse.
     let (schema, fault) = match schema_res {
@@ -2452,11 +2450,24 @@ async fn resolve_table(
     };
     let result = TableResolutionResult {
         table,
-        comment: comment_res.unwrap_or_default(),
+        comment: comment_res.ok(),
         schema,
         column_directives,
     };
     (result, fault)
+}
+
+/// Column directives from a column-comment read, or `None` when the read
+/// failed: an empty map would replace the table's working directives.
+fn directives_from<E>(
+    comments: std::result::Result<rustc_hash::FxHashMap<String, String>, E>,
+) -> Option<rustc_hash::FxHashMap<String, crate::column_meta::ColumnDirectives>> {
+    comments.ok().map(|comments| {
+        comments
+            .into_iter()
+            .map(|(col, comment)| (col, parse_directives(&comment)))
+            .collect()
+    })
 }
 
 /// Resolve the tables the config names, retrying a failed fetch within
@@ -3869,6 +3880,25 @@ mod tests {
         );
         let _ = std::fs::remove_file(&service);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A column-comment read that failed changes nothing, where it used to
+    /// arrive as an empty set that erased the table's renames, defaults and
+    /// computed columns until the next refresh.
+    #[test]
+    fn a_failed_comment_read_keeps_the_directives_the_table_had() {
+        let failed: std::result::Result<rustc_hash::FxHashMap<String, String>, &str> =
+            Err("connection reset");
+        assert!(directives_from(failed).is_none());
+
+        let mut comments = rustc_hash::FxHashMap::default();
+        comments.insert("ip".to_string(), "@renamed: src_ip".to_string());
+        let read = directives_from(Ok::<_, &str>(comments)).expect("a read that answered");
+        assert!(read.contains_key("ip"));
+        assert!(
+            directives_from(Ok::<_, &str>(rustc_hash::FxHashMap::default()))
+                .is_some_and(|d| d.is_empty())
+        );
     }
 
     #[tokio::test]

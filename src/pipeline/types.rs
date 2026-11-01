@@ -246,13 +246,16 @@ pub enum SchemaResolution {
 pub struct TableResolutionResult {
     /// Destination table (db.table).
     pub table: String,
-    /// Table-level COMMENT string (for DDL capture tags).
-    pub comment: String,
+    /// Table-level COMMENT string (for DDL capture tags), `None` when the read
+    /// failed, so the table keeps the tags it had.
+    pub comment: Option<String>,
     /// Schema from `system.columns` (for field mapping + `SharedSchemaCache`),
     /// or why it could not be fetched.
     pub schema: SchemaResolution,
-    /// Parsed per-column directives (skip/default/renamed/computed/coerce).
-    pub column_directives: rustc_hash::FxHashMap<String, crate::column_meta::ColumnDirectives>,
+    /// Parsed per-column directives (skip/default/renamed/computed/coerce),
+    /// `None` when the read failed, so the table keeps the directives it had.
+    pub column_directives:
+        Option<rustc_hash::FxHashMap<String, crate::column_meta::ColumnDirectives>>,
 }
 
 #[cfg(test)]
