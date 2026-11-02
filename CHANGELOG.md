@@ -3,6 +3,13 @@
 Rendered by CI and committed back at the end of a release -- do not edit by
 hand. Release notes also appear on the GitHub Releases page, one per tag.
 
+## [1.18.62](https://github.com/hyperi-io/dfe-loader/compare/v1.18.61...v1.18.62) (2026-11-02)
+
+### Bug Fixes
+
+* **clickhouse:** outage gauge and restart tests ([#305](https://github.com/hyperi-io/dfe-loader/issues/305)) ([5ac7587](https://github.com/hyperi-io/dfe-loader/commit/5ac7587cd5e03dc333f11d5cb795c18c90578eac))
+* **tests:** drop the snapshot comparison that raced its writer ([#306](https://github.com/hyperi-io/dfe-loader/issues/306)) ([75afc1b](https://github.com/hyperi-io/dfe-loader/commit/75afc1bce1ddaea56bf100d2c9e6eeed7cc82049))
+
 ## [1.18.61](https://github.com/hyperi-io/dfe-loader/compare/v1.18.60...v1.18.61) (2026-11-01)
 
 ### Bug Fixes
