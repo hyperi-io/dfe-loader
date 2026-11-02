@@ -1249,93 +1249,15 @@ async fn test_inserter_concurrent_inserts() {
 }
 
 // ============================================================================
-// Inserter: schema drift recovery — ALTER mid-batch invalidates cache
+// Inserter: schema drift recovery -- a column dropped under both caches
 // ============================================================================
-
-#[test_case::test_case(Transport::Http ; "http")]
-#[test_case::test_case(Transport::Native ; "native")]
-#[tokio::test(flavor = "multi_thread")]
-async fn test_inserter_schema_drift_recovery(transport: Transport) {
-    let (_infra, client, ch) = spin_up_over(&format!("schema_drift_{transport}"), transport).await;
-    let table = unique_table_name("tc_drift");
-
-    // Initial schema: id + name only.
-    let ddl = format!(
-        "CREATE TABLE {table} (
-            id UInt64,
-            name String
-        ) ENGINE = MergeTree() ORDER BY tuple()"
-    );
-    client.execute(&ddl).await.expect("create table");
-
-    let schema_cache = Arc::new(SchemaCache::new(300));
-    let inserter = Inserter::new(client.clone(), ch, fast_fail_config())
-        .with_insert_format(InsertFormat::RowBinary)
-        .with_schema_cache(schema_cache.clone());
-
-    // First insert — caches original schema.
-    let rows1: Vec<Map<String, Value>> = (0..3u64)
-        .map(|i| {
-            json!({"id": i, "name": format!("before_{i}")})
-                .as_object()
-                .unwrap()
-                .clone()
-        })
-        .collect();
-    inserter
-        .insert_rows(&table, &rows1, &[])
-        .await
-        .expect("first insert");
-
-    // Prime the cache directly (simulates any prior fetch) so we can
-    // observe invalidation.
-    let fetched = client
-        .fetch_table_schema(&table)
-        .await
-        .expect("fetch schema");
-    schema_cache.insert(table.clone(), fetched);
-    assert!(
-        schema_cache.get(&table).is_some(),
-        "cache should have the schema"
-    );
-
-    // Alter the table — add a required column. This will cause rows without
-    // `extra` to fail type coercion against the new schema.
-    let alter = format!("ALTER TABLE {table} ADD COLUMN extra Int64 DEFAULT 0");
-    client.execute(&alter).await.expect("alter");
-
-    // Cache is now stale. Invalidate explicitly to simulate the drift path
-    // (the schema_cache API exposes this as a public test surface).
-    schema_cache.invalidate(&table);
-    assert!(
-        schema_cache.get(&table).is_none(),
-        "invalidate() must drop the cached entry"
-    );
-
-    // Subsequent insert works — DynamicInsert re-fetches schema on write.
-    let rows2: Vec<Map<String, Value>> = (10..13u64)
-        .map(|i| {
-            json!({"id": i, "name": format!("after_{i}"), "extra": i as i64})
-                .as_object()
-                .unwrap()
-                .clone()
-        })
-        .collect();
-    inserter
-        .insert_rows(&table, &rows2, &[])
-        .await
-        .expect("post-alter insert");
-
-    let count = client.query_count(&table, None).await.expect("count");
-    assert_eq!(count, 6, "3 rows before + 3 rows after ALTER");
-}
 
 /// Land a batch so both schema caches hold `table`, then drop `name` from the
 /// table underneath them. The next `RowBinary` insert names a column the table
 /// no longer has, which the server rejects as schema drift.
 async fn stale_schema_after_a_dropped_column(
     client: &Arc<ClickHouseQueryClient>,
-    ch: clickhouse::Client,
+    ch: ChClient,
     table: &str,
     refresh_on_error: bool,
 ) -> (Inserter, Arc<SchemaCache>) {
@@ -1364,14 +1286,24 @@ async fn stale_schema_after_a_dropped_column(
     (inserter, schema_cache)
 }
 
+/// The insert after the drop is refused, and the inserter itself drops both
+/// cached schemas and lands the batch against the table as it is now, far
+/// inside the 300 s TTL either cache would otherwise serve the old one for.
+#[test_case::test_case(Transport::Http ; "http")]
+#[test_case::test_case(Transport::Native ; "native")]
 #[tokio::test(flavor = "multi_thread")]
-async fn a_drift_error_re_reads_the_schema_and_lands_when_refresh_on_error_is_on() {
-    let (_infra, client, ch) = spin_up(test_name!()).await;
-    let table = unique_table_name("tc_refresh_on");
+async fn test_inserter_schema_drift_recovery(transport: Transport) {
+    let (_infra, client, ch) = spin_up_over(&format!("schema_drift_{transport}"), transport).await;
+    let table = unique_table_name("tc_drift");
     let (inserter, schema_cache) =
         stale_schema_after_a_dropped_column(&client, ch, &table, true).await;
+    assert!(
+        schema_cache
+            .get(&table)
+            .is_some_and(|s| s.columns.iter().any(|c| c.name == "name")),
+        "the loader's cache holds the schema from before the drop"
+    );
 
-    // Far inside the encoder cache's 300 s TTL, so only a re-read can land it.
     let landed = tokio::time::timeout(
         Duration::from_secs(30),
         inserter.insert_rows(&table, &simple_rows(2), &[]),
@@ -1399,7 +1331,7 @@ async fn a_drift_error_keeps_the_cached_schema_when_refresh_on_error_is_off() {
     let (_infra, client, ch) = spin_up(test_name!()).await;
     let table = unique_table_name("tc_refresh_off");
     let (inserter, schema_cache) =
-        stale_schema_after_a_dropped_column(&client, ch, &table, false).await;
+        stale_schema_after_a_dropped_column(&client, ch.into(), &table, false).await;
 
     let landed = inserter.insert_rows(&table, &simple_rows(2), &[]).await;
 

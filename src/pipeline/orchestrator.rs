@@ -1416,6 +1416,10 @@ impl Orchestrator {
         // circuit-open scaling gate (sink dead == whole cycle failed).
         let mut cycle_ok = 0usize;
         let mut cycle_err = 0usize;
+        // Whether ClickHouse answered any insert this cycle, and whether any
+        // went unanswered: one answer is enough to read it as reachable.
+        let mut answered = false;
+        let mut unanswered = false;
 
         // Offsets are sorted into two piles across the WHOLE cycle and resolved
         // once at the end. Nothing commits inside the loop.
@@ -1449,6 +1453,11 @@ impl Orchestrator {
             // Kafka or the sender waiting on its answer.
             if self.holds_answers || result.unsettled.is_none() {
                 self.memory_guard.release(batch_bytes);
+            }
+            if result.reached_server() {
+                answered = true;
+            } else {
+                unanswered = true;
             }
 
             if result.inserted > 0 {
@@ -1573,6 +1582,9 @@ impl Orchestrator {
         // Refresh the ClickHouse rows-per-second gauge once per flush cycle.
         if let Some(ref m) = self.metrics {
             m.update_clickhouse_rows_per_sec();
+            if answered || unanswered {
+                m.set_clickhouse_connected(answered);
+            }
         }
 
         // Drive the ClickHouse sink circuit-open gate on the unified

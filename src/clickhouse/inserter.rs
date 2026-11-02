@@ -161,6 +161,8 @@ pub struct InsertResult {
     pub disposition: BatchDisposition,
     /// The batch itself on a `Retry`, for a transport with nothing to re-deliver.
     pub unsettled: Option<FlushBatch>,
+    /// Whether `ClickHouse` itself answered any attempt for this batch.
+    answered: bool,
 }
 
 impl InsertResult {
@@ -170,6 +172,7 @@ impl InsertResult {
             failed: Vec::new(),
             disposition: BatchDisposition::Settled,
             unsettled: None,
+            answered: count > 0,
         }
     }
 
@@ -179,6 +182,7 @@ impl InsertResult {
             failed,
             disposition: BatchDisposition::Settled,
             unsettled: None,
+            answered: inserted > 0,
         }
     }
 
@@ -189,6 +193,7 @@ impl InsertResult {
             failed: Vec::new(),
             disposition: BatchDisposition::Retry(reason.into()),
             unsettled: None,
+            answered: inserted > 0,
         }
     }
 
@@ -206,6 +211,40 @@ impl InsertResult {
     pub fn is_settled(&self) -> bool {
         self.disposition == BatchDisposition::Settled
     }
+
+    /// Record that `ClickHouse` answered an attempt for this batch.
+    #[must_use]
+    pub fn with_server_answer(mut self, answered: bool) -> Self {
+        self.answered |= answered;
+        self
+    }
+
+    /// Whether `ClickHouse` answered: a row landed, or an attempt failed with
+    /// the server's own error code. A refused, reset or timed-out connection
+    /// and a row the encoder refused before sending are no answer.
+    #[must_use]
+    pub fn reached_server(&self) -> bool {
+        self.answered
+    }
+}
+
+/// How a `RowBinary` row this loader could not encode is reported.
+const LOCAL_ENCODE: &str = "RowBinary encode: ";
+
+/// How a `JSONEachRow` row this loader could not serialise is reported.
+const LOCAL_SERIALISE: &str = "JSON serialisation error: ";
+
+/// Whether `err` is the server's own refusal, carrying its error code, rather
+/// than a fault on the connection or one the loader raised before sending.
+fn answered_by_server(err: &crate::Error) -> bool {
+    match err {
+        crate::Error::ClickHouse(message) | crate::Error::ClickHousePermanent(message) => {
+            !message.starts_with(LOCAL_ENCODE)
+                && !message.starts_with(LOCAL_SERIALISE)
+                && server_code(message).is_some()
+        }
+        _ => false,
+    }
 }
 
 /// Running state of a binary-split salvage.
@@ -216,6 +255,8 @@ struct Salvage {
     failed: Vec<FailedRow>,
     /// Set by the first row that failed for a reason that can still clear.
     retry_reason: Option<String>,
+    /// Whether `ClickHouse` answered any attempt.
+    answered: bool,
 }
 
 /// Split a slice held parallel to the rows, tolerating a short or empty one.
@@ -609,9 +650,9 @@ impl Inserter {
             // withheld and the rows come back.
             _ => DynamicVerdict::Return(match classify_dynamic_error(e) {
                 ErrorCategory::Data => {
-                    crate::Error::ClickHousePermanent(format!("RowBinary encode: {e}"))
+                    crate::Error::ClickHousePermanent(format!("{LOCAL_ENCODE}{e}"))
                 }
-                _ => crate::Error::ClickHouse(format!("RowBinary encode: {e}")),
+                _ => crate::Error::ClickHouse(format!("{LOCAL_ENCODE}{e}")),
             }),
         }
     }
@@ -817,7 +858,7 @@ impl Inserter {
                 Some(raw) if !raw.is_empty() => write_row_with_json(&mut body, row, raw)?,
                 _ => {
                     sonic_rs::to_writer(&mut body, row).map_err(|e| {
-                        crate::Error::ClickHousePermanent(format!("JSON serialisation error: {e}"))
+                        crate::Error::ClickHousePermanent(format!("{LOCAL_SERIALISE}{e}"))
                     })?;
                     body.push(b'\n');
                 }
@@ -929,7 +970,7 @@ impl Inserter {
 
         // Pass raw_payloads for zero-copy _json splice (json_primary path);
         // salvage sub-batches keep their slice of it.
-        match self.insert_rows(&table, &rows, &raw_payloads).await {
+        let first_answered = match self.insert_rows(&table, &rows, &raw_payloads).await {
             Ok(count) => {
                 return InsertResult::success(count);
             }
@@ -939,6 +980,7 @@ impl Inserter {
                 // anything else issues 2N inserts against a sink that is
                 // already struggling, for rows that were never at fault.
                 let is_data_error = is_salvageable(&e);
+                let answered = answered_by_server(&e);
 
                 // max_dynamic_paths guidance: metric always, log debounced.
                 {
@@ -976,13 +1018,15 @@ impl Inserter {
                         error = %e,
                         "Insert failed, returning the batch for retry"
                     );
-                    return InsertResult::retry(0, e.to_string()).returning(FlushBatch {
-                        table,
-                        rows,
-                        offsets,
-                        raw_payloads,
-                        reserved,
-                    });
+                    return InsertResult::retry(0, e.to_string())
+                        .with_server_answer(answered)
+                        .returning(FlushBatch {
+                            table,
+                            rows,
+                            offsets,
+                            raw_payloads,
+                            reserved,
+                        });
                 }
 
                 if !self.enable_salvage || num_rows <= 1 {
@@ -995,7 +1039,7 @@ impl Inserter {
                             row_json: rejected_row_bytes(raw_payloads.get(i), rows.get(i)),
                         })
                         .collect();
-                    return InsertResult::with_failures(0, failed);
+                    return InsertResult::with_failures(0, failed).with_server_answer(answered);
                 }
 
                 info!(
@@ -1004,11 +1048,15 @@ impl Inserter {
                     error = %e,
                     "Data error, starting batch salvage to isolate bad rows"
                 );
+                answered
             }
-        }
+        };
 
         // Binary-split salvage (only for data errors)
-        let mut salvage = Salvage::default();
+        let mut salvage = Salvage {
+            answered: first_answered,
+            ..Salvage::default()
+        };
 
         self.salvage_batch(&table, &rows, &offsets, &raw_payloads, 0, 0, &mut salvage)
             .await;
@@ -1026,14 +1074,17 @@ impl Inserter {
         match salvage.retry_reason {
             // The whole batch goes back, so rows salvage already landed arrive
             // twice on a retry: duplicates, never loss.
-            Some(reason) => InsertResult::retry(salvage.inserted, reason).returning(FlushBatch {
-                table,
-                rows,
-                offsets,
-                raw_payloads,
-                reserved,
-            }),
-            None => InsertResult::with_failures(salvage.inserted, salvage.failed),
+            Some(reason) => InsertResult::retry(salvage.inserted, reason)
+                .with_server_answer(salvage.answered)
+                .returning(FlushBatch {
+                    table,
+                    rows,
+                    offsets,
+                    raw_payloads,
+                    reserved,
+                }),
+            None => InsertResult::with_failures(salvage.inserted, salvage.failed)
+                .with_server_answer(salvage.answered),
         }
     }
 
@@ -1083,6 +1134,7 @@ impl Inserter {
                         out.inserted += 1;
                     }
                     Err(e) => {
+                        out.answered |= answered_by_server(&e);
                         if is_salvageable(&e) {
                             out.failed.push(FailedRow {
                                 row_index: start_index,
@@ -1114,6 +1166,7 @@ impl Inserter {
                         return;
                     }
                     Err(e) if !is_salvageable(&e) => {
+                        out.answered |= answered_by_server(&e);
                         debug!(
                             table = %table,
                             depth = depth,
@@ -1124,7 +1177,7 @@ impl Inserter {
                         out.retry_reason.get_or_insert_with(|| e.to_string());
                         return;
                     }
-                    Err(_) => {}
+                    Err(e) => out.answered |= answered_by_server(&e),
                 }
             }
             // Split and recurse
@@ -1249,9 +1302,8 @@ fn write_row_with_json(body: &mut Vec<u8>, row: &Map<String, Value>, raw: &[u8])
         body.extend_from_slice(raw);
         body.push(b'}');
     } else {
-        sonic_rs::to_writer(&mut *body, row).map_err(|e| {
-            crate::Error::ClickHousePermanent(format!("JSON serialisation error: {e}"))
-        })?;
+        sonic_rs::to_writer(&mut *body, row)
+            .map_err(|e| crate::Error::ClickHousePermanent(format!("{LOCAL_SERIALISE}{e}")))?;
         let last = body.len() - 1;
         debug_assert_eq!(body[last], b'}', "sonic_rs must produce a closing brace");
         body[last] = b',';
@@ -1317,6 +1369,66 @@ mod tests {
         assert_eq!(
             result.disposition,
             BatchDisposition::Retry("connection reset by peer".to_string())
+        );
+    }
+
+    #[test_case::test_case(
+        crate::Error::ClickHouse("RowBinary insert: server error code 252: Too many parts".into()), true
+        ; "server_code_on_the_retry_list"
+    )]
+    #[test_case::test_case(
+        crate::Error::ClickHousePermanent("JSONEachRow insert: Code: 469. DB::Exception: Constraint".into()), true
+        ; "server_refusal_of_the_rows"
+    )]
+    #[test_case::test_case(
+        crate::Error::ClickHouse("RowBinary insert: transport: error trying to connect: Connection refused".into()), false
+        ; "connection_refused"
+    )]
+    #[test_case::test_case(crate::Error::ClickHouse("JSONEachRow insert: timeout".into()), false ; "timed_out")]
+    #[test_case::test_case(
+        crate::Error::ClickHousePermanent(format!("{LOCAL_ENCODE}column kind: enum value is not one of the column's members")), false
+        ; "encoder_refused_the_row"
+    )]
+    #[test_case::test_case(
+        crate::Error::ClickHousePermanent(format!("{LOCAL_ENCODE}column note: cannot encode \"Code: 117\"")), false
+        ; "encoder_message_echoing_a_code"
+    )]
+    #[test_case::test_case(
+        crate::Error::ClickHousePermanent(format!("{LOCAL_SERIALISE}key must be a string")), false
+        ; "serialiser_refused_the_row"
+    )]
+    #[test_case::test_case(crate::Error::Buffer("Max retries exceeded".into()), false ; "not_a_clickhouse_error")]
+    fn only_the_servers_own_code_reads_as_an_answer(err: crate::Error, answered: bool) {
+        assert_eq!(answered_by_server(&err), answered, "{err}");
+    }
+
+    #[test_case::test_case(InsertResult::success(3), true ; "rows_landed")]
+    #[test_case::test_case(InsertResult::success(0), false ; "nothing_to_send")]
+    #[test_case::test_case(InsertResult::with_failures(2, Vec::new()), true ; "salvage_landed_some")]
+    #[test_case::test_case(
+        InsertResult::with_failures(0, Vec::new()), false
+        ; "rows_refused_before_sending"
+    )]
+    #[test_case::test_case(
+        InsertResult::with_failures(0, Vec::new()).with_server_answer(true), true
+        ; "rows_refused_by_the_server"
+    )]
+    #[test_case::test_case(InsertResult::retry(0, "connection reset by peer"), false ; "connection_reset")]
+    #[test_case::test_case(
+        InsertResult::retry(0, "connection reset by peer").with_server_answer(true), true
+        ; "salvage_saw_an_answer_before_the_reset"
+    )]
+    #[test_case::test_case(
+        InsertResult::retry(0, "server error code 252").with_server_answer(false), false
+        ; "a_reason_alone_is_no_evidence"
+    )]
+    fn only_an_answer_from_the_server_reads_as_reached(result: InsertResult, reached: bool) {
+        assert_eq!(
+            result.reached_server(),
+            reached,
+            "{:?} with {} inserted",
+            result.disposition,
+            result.inserted
         );
     }
 

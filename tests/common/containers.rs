@@ -516,6 +516,67 @@ mod testcontainers_impl {
         crate::common::require_docker_in_ci();
         start_alone(test, move || kafka_spec(Some(host_port))).await
     }
+
+    /// A ClickHouse `test` owns alone, for a test that stops and starts the
+    /// server. HTTP is published on `http_port`, because Docker hands a stopped
+    /// container a new ephemeral port when it starts again.
+    pub async fn start_clickhouse_on(test: &str, http_port: u16) -> OwnedContainer {
+        crate::common::test_logging::init();
+        crate::common::require_docker_in_ci();
+        let owned = start_alone(test, move || ServiceSpec {
+            ports: Vec::new(),
+            pinned_ports: vec![(CLICKHOUSE_HTTP_PORT, http_port)],
+            ..clickhouse_spec()
+        })
+        .await;
+        remember_password(&owned.container).await;
+        owned
+    }
+
+    /// Stop `container` the way an orchestrator stops a pod: SIGTERM, then
+    /// SIGKILL once the grace period runs out.
+    pub async fn stop_container(container: &SharedContainer) {
+        let name = container.name.clone();
+        let out = tokio::task::spawn_blocking(move || shared_service::docker(&["stop", &name]))
+            .await
+            .expect("docker stop task");
+        assert!(
+            out.status.success(),
+            "docker stop {}: {}",
+            container.name,
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// Start the stopped ClickHouse `container` again and wait until it answers
+    /// `/ping` on its HTTP port.
+    pub async fn restart_clickhouse(container: &SharedContainer) {
+        let (name, host) = (container.name.clone(), container.host.clone());
+        let port = container.port(CLICKHOUSE_HTTP_PORT);
+        tokio::task::spawn_blocking(move || {
+            let out = shared_service::docker(&["start", &name]);
+            assert!(
+                out.status.success(),
+                "docker start {name}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            let deadline = std::time::Instant::now() + STARTUP_TIMEOUT;
+            loop {
+                if shared_service::http_get(&host, port, "/ping")
+                    .is_some_and(|(status, body)| status == 200 && body.trim() == "Ok.")
+                {
+                    return;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "{name} did not answer /ping on {host}:{port} within {STARTUP_TIMEOUT:?} of a start"
+                );
+                std::thread::sleep(Duration::from_millis(200));
+            }
+        })
+        .await
+        .expect("docker start task");
+    }
 }
 
 /// Placeholder module when testcontainers feature is disabled
@@ -541,6 +602,6 @@ pub use testcontainers_impl::TestInfrastructure;
 pub use testcontainers_impl::{
     CLICKHOUSE_DIGEST, CLICKHOUSE_HTTP_PORT, CLICKHOUSE_HTTPS_PORT, CLICKHOUSE_NATIVE_PORT,
     CLICKHOUSE_NATIVE_TLS_PORT, CLICKHOUSE_TAG, CLICKHOUSE_USER, KAFKA_PORT, SUITE, Service,
-    clickhouse_password, private_ca, shared_clickhouse, shared_clickhouse_ca, shared_kafka,
-    start_kafka_on, tls_name,
+    clickhouse_password, private_ca, restart_clickhouse, shared_clickhouse, shared_clickhouse_ca,
+    shared_kafka, start_clickhouse_on, start_kafka_on, stop_container, tls_name,
 };

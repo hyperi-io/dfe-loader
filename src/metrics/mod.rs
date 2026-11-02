@@ -127,6 +127,11 @@ pub struct Metrics {
     /// Rows `ClickHouse` took: the landed-rows counter dashboards read.
     pub rows_inserted: Counter,
 
+    /// 1 once `ClickHouse` answered the latest probe or insert, 0 once one
+    /// went unanswered. Readiness ignores it, so an outage keeps the pod in
+    /// its Service.
+    pub clickhouse_connected: Gauge,
+
     // Legacy loader_* metrics (dual-emit — remove after dashboard migration)
     pub messages_received: Counter,
     pub messages_processed: Counter,
@@ -178,6 +183,10 @@ impl Metrics {
 
             rows_inserted: manager
                 .counter("rows_inserted_total", "Total rows inserted to ClickHouse"),
+            clickhouse_connected: manager.gauge(
+                "clickhouse_connected",
+                "1 once ClickHouse answered the latest probe or insert, 0 once one went unanswered",
+            ),
 
             // Legacy metrics (dual-emit)
             messages_received: manager.counter(
@@ -390,6 +399,12 @@ impl Metrics {
         self.ch_insert_errors.increment(1);
     }
 
+    /// Record whether `ClickHouse` answered the latest probe or insert.
+    pub fn set_clickhouse_connected(&self, connected: bool) {
+        self.clickhouse_connected
+            .set(if connected { 1.0 } else { 0.0 });
+    }
+
     /// Set the in-flight concurrent insert count (inserter queue/concurrency depth).
     pub fn set_inserter_inflight(&self, inflight: u64) {
         self.ch_inserter_inflight.set(inflight as f64);
@@ -571,8 +586,6 @@ impl Metrics {
 pub struct ServerState {
     pub metrics: Metrics,
     pub ready: std::sync::atomic::AtomicBool,
-    pub kafka_connected: std::sync::atomic::AtomicBool,
-    pub clickhouse_connected: std::sync::atomic::AtomicBool,
     pub scaling: Arc<ScalingPressure>,
 }
 
@@ -581,8 +594,6 @@ impl ServerState {
         Self {
             metrics,
             ready: std::sync::atomic::AtomicBool::new(false),
-            kafka_connected: std::sync::atomic::AtomicBool::new(false),
-            clickhouse_connected: std::sync::atomic::AtomicBool::new(false),
             scaling,
         }
     }
@@ -630,18 +641,9 @@ impl ServerState {
             return Ok(false);
         };
         tracing::info!(attempts, "ClickHouse accepted the startup probe, ready");
+        self.metrics.set_clickhouse_connected(true);
         self.set_ready(true);
         Ok(true)
-    }
-
-    pub fn set_kafka_connected(&self, connected: bool) {
-        self.kafka_connected
-            .store(connected, std::sync::atomic::Ordering::Release);
-    }
-
-    pub fn set_clickhouse_connected(&self, connected: bool) {
-        self.clickhouse_connected
-            .store(connected, std::sync::atomic::Ordering::Release);
     }
 
     pub fn is_ready(&self) -> bool {
@@ -833,6 +835,7 @@ mod tests {
             "dfe_loader_batched_array_records_total",
             "dfe_loader_batched_ndjson_messages_total",
             "dfe_loader_batched_ndjson_records_total",
+            "clickhouse_connected",
         ] {
             assert!(
                 names.iter().any(|n| n == expected),
@@ -938,77 +941,6 @@ mod tests {
             "a config with no hosts did not fail to build a client"
         );
         assert!(!state.is_ready(), "a config with no hosts went ready");
-    }
-
-    #[test]
-    fn server_state_kafka_connection_lifecycle() {
-        let state = ServerState::new(test_metrics(), test_scaling());
-        // Starts disconnected
-        assert!(
-            !state
-                .kafka_connected
-                .load(std::sync::atomic::Ordering::Acquire)
-        );
-        // Connect
-        state.set_kafka_connected(true);
-        assert!(
-            state
-                .kafka_connected
-                .load(std::sync::atomic::Ordering::Acquire)
-        );
-        // Disconnect
-        state.set_kafka_connected(false);
-        assert!(
-            !state
-                .kafka_connected
-                .load(std::sync::atomic::Ordering::Acquire)
-        );
-    }
-
-    #[test]
-    fn server_state_clickhouse_connection_lifecycle() {
-        let state = ServerState::new(test_metrics(), test_scaling());
-        assert!(
-            !state
-                .clickhouse_connected
-                .load(std::sync::atomic::Ordering::Acquire)
-        );
-        state.set_clickhouse_connected(true);
-        assert!(
-            state
-                .clickhouse_connected
-                .load(std::sync::atomic::Ordering::Acquire)
-        );
-        state.set_clickhouse_connected(false);
-        assert!(
-            !state
-                .clickhouse_connected
-                .load(std::sync::atomic::Ordering::Acquire)
-        );
-    }
-
-    #[test]
-    fn server_state_independent_flags() {
-        // Setting one flag must not affect others
-        let state = ServerState::new(test_metrics(), test_scaling());
-        state.set_ready(true);
-        state.set_kafka_connected(false);
-        state.set_clickhouse_connected(false);
-        assert!(state.is_ready());
-        assert!(
-            !state
-                .kafka_connected
-                .load(std::sync::atomic::Ordering::Acquire)
-        );
-
-        state.set_kafka_connected(true);
-        state.set_ready(false);
-        assert!(!state.is_ready());
-        assert!(
-            state
-                .kafka_connected
-                .load(std::sync::atomic::Ordering::Acquire)
-        );
     }
 
     // ---- Metrics record methods (exercise all paths, no panics) ----

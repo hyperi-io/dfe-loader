@@ -48,7 +48,7 @@ Docker is whatever the environment names: `DOCKER_HOST`, else the current docker
 
 In CI the runner's daemon is used and a missing daemon fails the run.
 
-Tests on the shared instances keep to their own names: unique tables (`unique_table_name`), a probe user per process, and topics and consumer groups named for the test. A test that needs a whole server or broker to itself uses `TestInfrastructure::exclusive`, which starts a container only it holds, removed when the test drops it or its process exits: topic auto-discovery, the hygiene check of per-test names, and the broker started after the loader (`start_kafka_on`).
+Tests on the shared instances keep to their own names: unique tables (`unique_table_name`), a probe user per process, and topics and consumer groups named for the test. A test that needs a whole server or broker to itself uses `TestInfrastructure::exclusive`, which starts a container only it holds, removed when the test drops it or its process exits: topic auto-discovery, the hygiene check of per-test names, the broker started after the loader (`start_kafka_on`) and the ClickHouse restarts (`start_clickhouse_on`, whose pinned HTTP port survives a restart).
 
 ## Pets for local core runs
 
