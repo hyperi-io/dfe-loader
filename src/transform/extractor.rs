@@ -2553,36 +2553,52 @@ mod tests {
         assert!(!dropped.contains_key("_tags"), "{dropped:?}");
     }
 
-    /// `metadata.raw_source_fields` fills the raw column, after a raw field of
-    /// the record's own.
+    /// The raw column takes the record's own raw field, then the fields
+    /// `metadata.raw_source_fields` names, of which the default names none.
     #[test]
     fn the_raw_column_reads_the_configured_source_fields() {
         let schema = make_schema(&["_raw"]);
-        let extractor = default_extractor();
-        let map = extractor
-            .extract(
+        let promoting = MetadataConfig {
+            raw_source_fields: vec!["logoriginal".to_string()],
+            ..MetadataConfig::default()
+        };
+        let dq = TimestampDqConfig::default();
+        let cases: [(&MetadataConfig, &[u8], Option<&str>); 6] = [
+            (
+                &MetadataConfig::default(),
                 br#"{"logoriginal": "<134>sshd: ok"}"#,
-                "dfe.events",
-                &schema,
-                &empty_col_meta(),
                 None,
-            )
-            .fields;
-        assert_eq!(
-            map.get("_raw"),
-            Some(&Value::String("<134>sshd: ok".into()))
-        );
-
-        let map = extractor
-            .extract(
+            ),
+            (
+                &MetadataConfig::default(),
                 br#"{"_raw": "own", "logoriginal": "other"}"#,
-                "dfe.events",
-                &schema,
-                &empty_col_meta(),
-                None,
-            )
-            .fields;
-        assert_eq!(map.get("_raw"), Some(&Value::String("own".into())));
+                Some("own"),
+            ),
+            (&MetadataConfig::default(), br#"{"event": "login"}"#, None),
+            (
+                &promoting,
+                br#"{"logoriginal": "<134>sshd: ok"}"#,
+                Some("<134>sshd: ok"),
+            ),
+            (
+                &promoting,
+                br#"{"_raw": "own", "logoriginal": "other"}"#,
+                Some("own"),
+            ),
+            (&promoting, br#"{"event": "login"}"#, None),
+        ];
+        for (metadata, raw, want) in cases {
+            let map = extractor_with(metadata, &dq)
+                .extract(raw, "dfe.events", &schema, &empty_col_meta(), None)
+                .fields;
+            assert_eq!(
+                map.get("_raw").and_then(Value::as_str),
+                want,
+                "{} with raw_source_fields {:?}",
+                String::from_utf8_lossy(raw),
+                metadata.raw_source_fields
+            );
+        }
     }
 
     /// A zoned time keeps its zone through extraction, so the `JSONEachRow`

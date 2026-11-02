@@ -698,7 +698,9 @@ pub struct MetadataConfig {
     /// Enable _raw field injection from source (zero-copy rename)
     #[serde(default = "default_true")]
     pub capture_raw: bool,
-    /// Source fields to try for rename (first match wins). Default: ["logoriginal"]
+    /// Fields renamed to `_raw` when the record has no `_raw` of its own, first
+    /// match wins. Default: none, because `_json` already stores the field's
+    /// text.
     pub raw_source_fields: Vec<String>,
     /// Output field name for raw log line
     pub raw_output: String,
@@ -751,7 +753,7 @@ impl Default for MetadataConfig {
 
             // _raw capture defaults (deprecated — use capture_mode)
             capture_raw: true,
-            raw_source_fields: vec!["logoriginal".to_string()],
+            raw_source_fields: Vec::new(),
             raw_output: "_raw".to_string(),
 
             // _source capture defaults

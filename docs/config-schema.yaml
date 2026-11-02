@@ -253,8 +253,7 @@ properties:
       capture_json: true
       json_output: _json
       capture_raw: true
-      raw_source_fields:
-      - logoriginal
+      raw_source_fields: []
       raw_output: _raw
       capture_source: true
       source_fields:
@@ -1415,12 +1414,14 @@ $defs:
         type: boolean
         default: true
       raw_source_fields:
-        description: "Source fields to try for rename (first match wins). Default: [\"logoriginal\"]"
+        description: |-
+          Fields renamed to `_raw` when the record has no `_raw` of its own, first
+          match wins. Default: none, because `_json` already stores the field's
+          text.
         type: array
         items:
           type: string
-        default:
-        - logoriginal
+        default: []
       raw_output:
         description: Output field name for raw log line
         type: string

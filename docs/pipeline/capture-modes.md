@@ -27,7 +27,7 @@ as a native ClickHouse JSON value (path-based queries). `_raw` is the original
 bytes as received (the tailed log line, DB row, or raw syslog). A table can keep
 one, both, or neither.
 
-Under `full`, `_raw` is filled only when the source provides raw data: a raw line the receiver captured, or a field an `@renamed` directive (or `metadata.raw_source_fields`) names. A JSON record with no such field is kept once, in `_json`, and `_raw` stays NULL.
+Under `full`, a JSON record fills `_raw` only from a `_raw` field of its own, kept as sent, such as a line the receiver captured. Any other JSON record is kept once, in `_json`, and `_raw` stays NULL. A text field such as `logoriginal` is not copied into `_raw` by default, because `_json` already stores its text. To promote one for a source that needs it, name it in `metadata.raw_source_fields` (first match wins) or in an `@renamed` directive on the `_raw` column.
 
 ## Precedence
 

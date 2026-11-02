@@ -56,6 +56,8 @@ mod kafka_transport_e2e;
 mod memory_balance;
 mod offset;
 mod property;
+#[cfg(feature = "testcontainers")]
+mod raw_capture_e2e;
 mod resilience;
 mod rls;
 mod schema;

@@ -2156,7 +2156,9 @@ mod tests {
     fn capture_mode_full_does_not_clobber_renamed_raw() {
         // A logoriginal field is @renamed → _raw by the transformer; the raw
         // payload capture must not overwrite it.
-        let harness = TestHarness::with_config(config_with_capture_mode(CaptureMode::Full));
+        let mut config = config_with_capture_mode(CaptureMode::Full);
+        config.metadata.raw_source_fields = vec!["logoriginal".to_string()];
+        let harness = TestHarness::with_config(config);
         let proc = harness.processor();
         let payload = serde_json::to_vec(&json!({
             "event_category": "security",

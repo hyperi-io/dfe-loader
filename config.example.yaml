@@ -285,10 +285,11 @@ metadata:
   source_output: "_source"
 
   # _raw source fields (only used in `full` capture_mode).
-  # First-match field rename to _raw. In raw_only mode, the entire Kafka payload
-  # is used instead and these fields are ignored.
-  raw_source_fields:
-    - logoriginal
+  # First-match field rename to _raw, for a record with no _raw of its own. None by
+  # default, because _json already stores the field's text. Name one (e.g.
+  # logoriginal) only for a source that needs it. In raw_only mode, the entire
+  # Kafka payload is used instead and these fields are ignored.
+  raw_source_fields: []
   raw_output: "_raw"
 
 # Type coercion settings
