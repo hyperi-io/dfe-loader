@@ -89,16 +89,3 @@ loader_insert_latency_seconds_count 10
         real_regressions
     );
 }
-
-#[test]
-#[ignore = "manual perf comparison — run with --ignored --nocapture"]
-fn test_load_and_compare_snapshots() {
-    let baseline = MetricsSnapshot::load(".tmp/metrics_baseline.json")
-        .expect("Failed to load baseline - run example_metrics_snapshot_workflow first");
-
-    let current = MetricsSnapshot::load(".tmp/metrics_current.json")
-        .expect("Failed to load current - run example_metrics_snapshot_workflow first");
-
-    let comparison = current.compare(&baseline);
-    comparison.print_report();
-}
