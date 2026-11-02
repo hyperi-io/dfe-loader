@@ -104,8 +104,10 @@ const PENDING_PUSHED: u64 = 2_500;
 const PENDING_SENDERS: usize = 5;
 
 /// Ports a test binds on the host: below the kernel's ephemeral range, where an
-/// outgoing connection could take a port between the pick and the bind.
-const TEST_PORTS: std::ops::Range<u16> = 9_000..10_240;
+/// outgoing connection could take a port between the pick and the bind, and
+/// above `ClickHouse`'s native ports 9000 and 9440, which the loader refuses on
+/// the http transport, so a proxy handed one stops the loader at startup.
+const TEST_PORTS: std::ops::Range<u16> = 10_000..11_240;
 
 /// One marker socket per port this process has handed out, held until it exits.
 static HANDED_OUT: Mutex<Vec<std::net::TcpListener>> = Mutex::new(Vec::new());
@@ -132,7 +134,7 @@ pub(super) fn free_port() -> u16 {
             HANDED_OUT.lock().expect("port marker list").push(marker);
             true
         })
-        .expect("a free loopback port below 10240")
+        .expect("a free loopback port in TEST_PORTS")
 }
 
 /// Two picks made before either port is bound differ, as they must for two test
@@ -140,6 +142,19 @@ pub(super) fn free_port() -> u16 {
 #[test]
 fn a_port_is_handed_out_once() {
     assert_ne!(free_port(), free_port());
+}
+
+/// The loader accepts every port the tests can hand a proxy as an http host.
+#[test]
+fn every_test_port_is_a_valid_http_host() {
+    for port in TEST_PORTS {
+        let config = ClickHouseConfig {
+            hosts: vec![format!("127.0.0.1:{port}")],
+            transport: Transport::Http,
+            ..Default::default()
+        };
+        assert!(config.validate().is_ok(), "{port}: {:?}", config.validate());
+    }
 }
 
 /// A loopback TCP proxy that can refuse and cut every connection on demand.
