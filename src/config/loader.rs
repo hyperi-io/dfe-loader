@@ -842,23 +842,28 @@ impl Config {
             depends_on: vec!["kafka".into(), "clickhouse".into()],
             // THIS crate's KedaConfig, not KedaContract::default() (scalo's own).
             keda: Some(Self::keda_contract()),
-            native_deps: NativeDepsContract::for_scalo_features(
-                &[
-                    "transport-kafka",
-                    "transport-grpc",
-                    "dlq-kafka",
-                    "config",
-                    "config-reload",
-                    "deployment",
-                    "version-check",
-                    "scaling",
-                    "cli",
-                    "top",
-                    "logger",
-                    "expression",
-                ],
-                &base_image,
-            ),
+            native_deps: {
+                let mut deps = NativeDepsContract::for_scalo_features(
+                    &[
+                        "transport-kafka",
+                        "transport-grpc",
+                        "dlq-kafka",
+                        "config",
+                        "config-reload",
+                        "deployment",
+                        "version-check",
+                        "scaling",
+                        "cli",
+                        "top",
+                        "logger",
+                        "expression",
+                    ],
+                    &base_image,
+                );
+                // The wait-for-engine init container probes /readyz with curl from this image.
+                deps.apt_packages.push("curl".into());
+                deps
+            },
             image_profile: ImageProfile::Production,
             // scalo writes no vendor, licence or copyright of its own, so the
             // labels and the generated Dockerfile header carry exactly these.
