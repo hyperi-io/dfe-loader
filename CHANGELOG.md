@@ -3,6 +3,13 @@
 Rendered by CI and committed back at the end of a release -- do not edit by
 hand. Release notes also appear on the GitHub Releases page, one per tag.
 
+## [1.18.64](https://github.com/hyperi-io/dfe-loader/compare/v1.18.63...v1.18.64) (2026-11-02)
+
+### Bug Fixes
+
+* **raw:** keep logoriginal out of _raw by default ([878199f](https://github.com/hyperi-io/dfe-loader/commit/878199fd488b76627b1f48ac5d94f07fdada9ddb)), closes [#303](https://github.com/hyperi-io/dfe-loader/issues/303)
+* **tests:** keep test ports clear of ClickHouse native ports ([cec9f68](https://github.com/hyperi-io/dfe-loader/commit/cec9f6838bdc209447c7644b4dbf9f2142aa9024))
+
 ## [1.18.63](https://github.com/hyperi-io/dfe-loader/compare/v1.18.62...v1.18.63) (2026-11-02)
 
 ### Bug Fixes
