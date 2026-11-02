@@ -128,6 +128,10 @@ reqwest = { version = ">=0.12, <0.13", default-features = false, features = ["bl
 # does not carry this feature.
 scalo = { version = ">=2.14.25, <3", features = ["transport-kafka-test-support"] }
 
+# The status code a raw Push is refused with, through scalo's generated gRPC
+# client. Same range as the copy scalo resolves, so cargo unifies to one.
+tonic = { version = ">=0.14.8, <0.15", default-features = false }
+
 # Kafka producer for e2e tests (test message injection)
 rdkafka = { version = ">=0.39.0, <0.40", features = ["dynamic-linking"] }
 

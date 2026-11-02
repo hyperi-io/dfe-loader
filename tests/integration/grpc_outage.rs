@@ -26,9 +26,13 @@ use std::time::Duration;
 use dfe_loader::clickhouse::config::{ClickHouseConfig, Transport};
 use dfe_loader::clickhouse::{ClickHouseQueryClient, InsertFormat};
 use dfe_loader::config::Config;
-use dfe_loader::metrics::Metrics;
+use dfe_loader::metrics::{Metrics, ServerState};
 use dfe_loader::pipeline::Orchestrator;
+use scalo::ScalingPressure;
 use scalo::metrics::MetricsManager;
+use scalo::scaling::ScalingPressureConfig;
+use scalo::transport::grpc::proto::transport_client::TransportClient;
+use scalo::transport::grpc::proto::{Format, PushRequest};
 use scalo::transport::grpc::{GrpcConfig, GrpcTransport};
 use scalo::transport::{SendResult, TransportSender};
 use tokio::net::{TcpListener, TcpStream};
@@ -36,7 +40,9 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use crate::common::containers::TestInfrastructure;
+use crate::common::containers::{
+    TestInfrastructure, restart_clickhouse, start_clickhouse_on, stop_container,
+};
 use crate::common::unique_table_name;
 use crate::test_name;
 
@@ -448,8 +454,8 @@ pub(super) async fn wait_for_loader(client: &GrpcTransport, clickhouse: &str, ta
     assert!(first.is_subset(&landed), "the first record never landed");
 }
 
-/// The value of the counter `name` in `manager`'s Prometheus output, summed
-/// over label sets matching `labels`, or 0 when it has never been counted.
+/// The value of the counter or gauge `name` in `manager`'s Prometheus output,
+/// summed over label sets matching `labels`, or 0 when it has never been set.
 pub(super) fn counter_value(manager: &MetricsManager, name: &str, labels: &str) -> f64 {
     manager
         .render()
@@ -704,6 +710,189 @@ async fn no_accepted_record_is_lost_to_a_clickhouse_outage() {
         "the listener answered {} of {DURING} records OK while ClickHouse was down and told \
          senders to retry {refused} times",
         during.len()
+    );
+}
+
+/// The readiness state a loader marks ready once `ClickHouse` accepts it: what
+/// `/readyz` answers from.
+pub(super) fn readiness_state(metrics: Metrics) -> Arc<ServerState> {
+    let scaling = ScalingPressure::new(ScalingPressureConfig::default(), Vec::new());
+    Arc::new(ServerState::new(metrics, Arc::new(scaling)))
+}
+
+/// Run `orchestrator` through the production start, which marks `state` ready
+/// once `ClickHouse` accepts the loader.
+pub(super) fn start_ready(
+    mut orchestrator: Orchestrator,
+    state: &Arc<ServerState>,
+) -> (CancellationToken, JoinHandle<()>) {
+    let shutdown = orchestrator.shutdown_token();
+    let state = Arc::clone(state);
+    let loader = tokio::spawn(async move {
+        if let Err(error) = orchestrator.run_once_clickhouse_accepts(&state).await {
+            tracing::error!(%error, "the loader stopped with an error");
+        }
+    });
+    (shutdown, loader)
+}
+
+/// Sample `state` until the returned token is cancelled, counting the samples
+/// that read not ready.
+pub(super) fn watch_readiness(state: &Arc<ServerState>) -> (CancellationToken, JoinHandle<u64>) {
+    let stop = CancellationToken::new();
+    let (state, until) = (Arc::clone(state), stop.clone());
+    let watcher = tokio::spawn(async move {
+        let mut unready = 0_u64;
+        while !until.is_cancelled() {
+            unready += u64::from(!state.is_ready());
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        unready
+    });
+    (stop, watcher)
+}
+
+/// Wait until the metric `name` reads `want`, or `budget` runs out, and return
+/// the last value read.
+pub(super) async fn wait_metric(
+    manager: &MetricsManager,
+    name: &str,
+    want: f64,
+    budget: Duration,
+) -> f64 {
+    let deadline = tokio::time::Instant::now() + budget;
+    loop {
+        let value = counter_value(manager, name, "");
+        if (value - want).abs() < f64::EPSILON || tokio::time::Instant::now() >= deadline {
+            return value;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+/// The gRPC code a raw Push of `body` is answered with, `None` for OK.
+async fn raw_push_code(listen_port: u16, body: &str) -> Option<tonic::Code> {
+    let mut raw = TransportClient::connect(format!("http://127.0.0.1:{listen_port}"))
+        .await
+        .expect("raw gRPC client");
+    raw.push(PushRequest {
+        payload: bytes::Bytes::from(body.to_string()),
+        format: Format::Auto.into(),
+        metadata: std::collections::HashMap::new(),
+    })
+    .await
+    .err()
+    .map(|status| status.code())
+}
+
+/// How long the restart tests keep `ClickHouse` stopped.
+pub(super) const STOPPED: Duration = Duration::from_secs(15);
+
+/// `ClickHouse` stopped and started again under a running loader. A Push
+/// whose rows cannot insert is answered `UNAVAILABLE`, the gauge reads the
+/// outage, `/readyz` stays ready, and the same loader lands every record it
+/// answered OK once the server is back.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_clickhouse_restart_loses_no_accepted_record_and_leaves_the_loader_ready() {
+    let http_port = free_port();
+    let server = start_clickhouse_on(test_name!(), http_port).await;
+    let clickhouse = format!("{}:{http_port}", server.container.host);
+    let direct = query_client(&clickhouse);
+    let table = unique_table_name("grpc_restart");
+    create_id_table(&direct, &table, "").await;
+
+    let manager = MetricsManager::new("loader_it");
+    let metrics = Metrics::new(&manager);
+    let state = readiness_state(metrics.clone());
+    let listen_port = free_port();
+    let orchestrator = Orchestrator::with_metrics(
+        grpc_loader(listen_port, clickhouse.clone(), &table),
+        metrics,
+    );
+    let guard = Arc::clone(orchestrator.memory_guard());
+    let (shutdown, loader) = start_ready(orchestrator, &state);
+    let client = client_for(listen_port).await;
+    wait_for_loader(&client, &clickhouse, &table).await;
+    let up_before = wait_metric(&manager, "clickhouse_connected", 1.0, LANDING_BUDGET).await;
+    let errors_before = counter_value(&manager, "clickhouse_insert_errors_total", "");
+    let (stop_watching, readiness) = watch_readiness(&state);
+
+    stop_container(&server.container).await;
+    let outage_end = tokio::time::Instant::now() + STOPPED;
+    let refusal = raw_push_code(listen_port, &id_payload(BEFORE)).await;
+    let down = wait_metric(&manager, "clickhouse_connected", 0.0, STOPPED).await;
+    let (during, refused) =
+        push_ids(&client, BEFORE + 1..BEFORE + DURING, outage_end, id_payload).await;
+    let errors_during = counter_value(&manager, "clickhouse_insert_errors_total", "");
+    let reserved_during = guard.reserved_bytes();
+    tokio::time::sleep_until(outage_end).await;
+
+    restart_clickhouse(&server.container).await;
+    let settle = tokio::time::Instant::now() + LANDING_BUDGET;
+    let (after, _) = push_ids(
+        &client,
+        BEFORE + DURING..BEFORE + DURING + AFTER,
+        settle,
+        id_payload,
+    )
+    .await;
+    let up_after = wait_metric(&manager, "clickhouse_connected", 1.0, LANDING_BUDGET).await;
+    let accepted: BTreeSet<u64> = std::iter::once(0)
+        .chain(during.iter().copied())
+        .chain(after.iter().copied())
+        .collect();
+    let landed = wait_landed(&clickhouse, &table, &accepted, LANDING_BUDGET).await;
+    stop_watching.cancel();
+    let unready_samples = readiness.await.expect("readiness watcher");
+    let still_running = !loader.is_finished();
+
+    shutdown.cancel();
+    let _ = tokio::time::timeout(Duration::from_secs(30), loader).await;
+    drop(server);
+
+    assert_eq!(
+        refusal,
+        Some(tonic::Code::Unavailable),
+        "a Push whose rows could not reach ClickHouse was answered {refusal:?}: scalo's held \
+         Push answers UNAVAILABLE, which the sender reads as Backpressured"
+    );
+    assert!(
+        refused > 0 && during.is_empty(),
+        "with ClickHouse stopped the listener answered {} Pushes OK and told senders to retry \
+         {refused} times",
+        during.len()
+    );
+    assert!(
+        (up_before - 1.0).abs() < f64::EPSILON
+            && down.abs() < f64::EPSILON
+            && (up_after - 1.0).abs() < f64::EPSILON,
+        "clickhouse_connected read {up_before} up, {down} stopped and {up_after} restarted"
+    );
+    assert!(
+        errors_during > errors_before,
+        "clickhouse_insert_errors_total stayed at {errors_before} while ClickHouse was stopped"
+    );
+    assert!(
+        reserved_during <= guard.limit_bytes(),
+        "the memory guard held {reserved_during} bytes against a {} byte limit",
+        guard.limit_bytes()
+    );
+    assert_eq!(
+        unready_samples, 0,
+        "readiness read not ready {unready_samples} times while ClickHouse was stopped"
+    );
+    assert!(still_running, "the loader stopped during the outage");
+    assert_eq!(
+        after.len() as u64,
+        AFTER,
+        "the same loader refused records after ClickHouse restarted"
+    );
+    let lost: Vec<u64> = accepted.difference(&landed).copied().collect();
+    assert!(
+        lost.is_empty(),
+        "{} of {} accepted records never landed: {lost:?}",
+        lost.len(),
+        accepted.len()
     );
 }
 
@@ -1347,6 +1536,200 @@ async fn a_row_clickhouse_refuses_for_its_data_is_dead_lettered_and_the_rest_lan
     assert!(
         reason.contains("117"),
         "the dead letter does not carry the server's refusal: {reason}"
+    );
+}
+
+/// One `(id, name)` row read back as text, whatever the column's type.
+async fn names_by_id(clickhouse: &str, table: &str) -> std::collections::BTreeMap<u64, String> {
+    let Ok(response) = reqwest::Client::new()
+        .get(format!("http://{clickhouse}/"))
+        .basic_auth(
+            "default",
+            Some(crate::common::containers::clickhouse_password()),
+        )
+        .query(&[(
+            "query",
+            format!("SELECT id, toString(name) FROM default.{table} FORMAT TabSeparated"),
+        )])
+        .send()
+        .await
+    else {
+        return std::collections::BTreeMap::new();
+    };
+    let body = response.text().await.unwrap_or_default();
+    body.lines()
+        .filter_map(|line| {
+            let (id, name) = line.split_once('\t')?;
+            Some((id.parse().ok()?, name.to_string()))
+        })
+        .collect()
+}
+
+/// Push each `(id, record)` once its predecessor is answered, retrying until
+/// the listener answers OK or `until` passes. Returns the ids answered OK, and
+/// those answered OK while their row was in neither `ClickHouse` nor the DLQ.
+async fn push_checking_placement(
+    client: &GrpcTransport,
+    clickhouse: &str,
+    table: &str,
+    dlq: &Path,
+    records: &[(u64, String)],
+    until: tokio::time::Instant,
+) -> (BTreeSet<u64>, Vec<u64>) {
+    let mut accepted = BTreeSet::new();
+    let mut early = Vec::new();
+    for (id, record) in records {
+        let (ok, _) = push_until_accepted(client, bytes::Bytes::from(record.clone()), until).await;
+        if !ok {
+            continue;
+        }
+        accepted.insert(*id);
+        let placed =
+            landed_ids(clickhouse, table).await.contains(id) || dead_lettered_ids(dlq).contains(id);
+        if !placed {
+            early.push(*id);
+        }
+    }
+    (accepted, early)
+}
+
+/// A table changed under the loader's cached schema, first by a dropped column
+/// and then by being recreated with `name` as a number. Each change is caught
+/// from the server's refusal of the first insert after it, with no manual
+/// cache invalidation: rows that fit the new table land as sent, rows that
+/// cannot go to the DLQ, and no Push is answered OK before its row is in one
+/// or the other.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_table_changed_under_the_cached_schema_is_caught_and_nothing_is_acked_early() {
+    let infra = TestInfrastructure::new(test_name!(), true, false).await;
+    let clickhouse = clickhouse_address(&infra).await;
+    let direct = query_client(&clickhouse);
+    let table = unique_table_name("grpc_schema_change");
+    direct
+        .execute(&format!(
+            "CREATE TABLE default.{table} (id UInt64, name String, extra String) \
+             ENGINE = MergeTree() ORDER BY id"
+        ))
+        .await
+        .expect("create table");
+
+    let dlq_dir = tempfile::tempdir().expect("DLQ spool directory");
+    let listen_port = free_port();
+    let mut config = grpc_loader(listen_port, clickhouse.clone(), &table);
+    with_file_dlq(&mut config, dlq_dir.path());
+    let (shutdown, loader, client) = start_loader(config, listen_port).await;
+    let until = tokio::time::Instant::now() + LANDING_BUDGET;
+    let full = |id: u64| {
+        (
+            id,
+            format!(r#"{{"id":{id},"name":"n{id}","extra":"e{id}"}}"#),
+        )
+    };
+
+    // Both schema caches hold the three-column table from here.
+    let (cached, _) = push_checking_placement(
+        &client,
+        &clickhouse,
+        &table,
+        dlq_dir.path(),
+        &(1..=3).map(full).collect::<Vec<_>>(),
+        until,
+    )
+    .await;
+
+    direct
+        .execute(&format!("ALTER TABLE default.{table} DROP COLUMN extra"))
+        .await
+        .expect("drop column");
+    let (after_drop, early_drop) = push_checking_placement(
+        &client,
+        &clickhouse,
+        &table,
+        dlq_dir.path(),
+        &(10..=13).map(full).collect::<Vec<_>>(),
+        until,
+    )
+    .await;
+    let names_after_drop = names_by_id(&clickhouse, &table).await;
+
+    direct
+        .execute(&format!("DROP TABLE default.{table} SYNC"))
+        .await
+        .expect("drop table");
+    direct
+        .execute(&format!(
+            "CREATE TABLE default.{table} (id UInt64, name UInt32) ENGINE = MergeTree() ORDER BY id"
+        ))
+        .await
+        .expect("recreate table");
+    // A number goes first: its String encoding is shorter than a UInt32, so the
+    // server refuses the first insert against the old schema. A word cannot fit
+    // the new column, including one whose encoding is as long as a UInt32.
+    let numeric: Vec<(u64, String)> = (20..=22)
+        .map(|id| (id, format!(r#"{{"id":{id},"name":{id}}}"#)))
+        .collect();
+    let wordy: Vec<(u64, String)> = [(30, "seven"), (31, "abc"), (32, "a long word")]
+        .into_iter()
+        .map(|(id, name)| (id, format!(r#"{{"id":{id},"name":"{name}"}}"#)))
+        .collect();
+    let records: Vec<(u64, String)> = numeric.iter().chain(&wordy).cloned().collect();
+    let (after_recreate, early_recreate) = push_checking_placement(
+        &client,
+        &clickhouse,
+        &table,
+        dlq_dir.path(),
+        &records,
+        until,
+    )
+    .await;
+    let names_after_recreate = names_by_id(&clickhouse, &table).await;
+    let dead_lettered = dead_lettered_ids(dlq_dir.path());
+
+    shutdown.cancel();
+    let _ = tokio::time::timeout(Duration::from_secs(30), loader).await;
+    let _ = direct
+        .execute(&format!("DROP TABLE IF EXISTS default.{table}"))
+        .await;
+
+    assert_eq!(cached.len(), 3, "the rows that warm the cache were refused");
+    assert!(
+        early_drop.is_empty() && early_recreate.is_empty(),
+        "Pushes answered OK before their row was in ClickHouse or the DLQ: after the drop \
+         {early_drop:?}, after the recreate {early_recreate:?}"
+    );
+    let landed_after_drop: Vec<(u64, String)> = (10..=13)
+        .filter_map(|id| Some((id, names_after_drop.get(&id)?.clone())))
+        .collect();
+    assert_eq!(
+        (after_drop.len(), landed_after_drop),
+        (
+            4,
+            (10..=13)
+                .map(|id| (id, format!("n{id}")))
+                .collect::<Vec<_>>()
+        ),
+        "rows sent after the column drop did not land as sent"
+    );
+    let numeric_landed: Vec<(u64, String)> = (20..=22)
+        .filter_map(|id| Some((id, names_after_recreate.get(&id)?.clone())))
+        .collect();
+    assert_eq!(
+        numeric_landed,
+        (20..=22).map(|id| (id, id.to_string())).collect::<Vec<_>>(),
+        "numbers sent after the recreate did not land as sent"
+    );
+    let stored_words: Vec<(u64, String)> = (30..=32)
+        .filter_map(|id| Some((id, names_after_recreate.get(&id)?.clone())))
+        .collect();
+    assert!(
+        stored_words.is_empty(),
+        "words the numeric column cannot hold were stored as {stored_words:?}"
+    );
+    let wordy_ids: BTreeSet<u64> = wordy.iter().map(|(id, _)| *id).collect();
+    assert!(
+        wordy_ids.is_subset(&dead_lettered) && wordy_ids.is_subset(&after_recreate),
+        "the rows the new table cannot hold were not answered once dead-lettered: accepted \
+         {after_recreate:?}, dead-lettered {dead_lettered:?}"
     );
 }
 
