@@ -1013,6 +1013,103 @@ async fn a_push_whose_rows_never_insert_is_answered_unavailable_and_not_counted_
     );
 }
 
+/// A row the encoder refuses against a cached schema is no answer from
+/// `ClickHouse`. Flushed in one cycle with a batch whose connection fails, it
+/// must not hold `clickhouse_connected` at 1 through the outage.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_row_refused_before_sending_does_not_mask_an_outage() {
+    let infra = TestInfrastructure::new(test_name!(), true, false).await;
+    let clickhouse = clickhouse_address(&infra).await;
+    let direct = query_client(&clickhouse);
+    let proxy = OutageProxy::start(clickhouse.clone()).await;
+
+    let landing = unique_table_name("grpc_masked_landing");
+    let enum_table = unique_table_name("grpc_masked_enum");
+    create_id_table(&direct, &landing, "").await;
+    direct
+        .execute(&format!(
+            "CREATE TABLE default.{enum_table} (id UInt64, kind Enum8('a' = 1, 'b' = 2)) \
+             ENGINE = MergeTree() ORDER BY id"
+        ))
+        .await
+        .expect("create table");
+
+    let manager = MetricsManager::new("loader_it");
+    let metrics = Metrics::new(&manager);
+    let listen_port = free_port();
+    let orchestrator =
+        Orchestrator::with_metrics(grpc_loader(listen_port, proxy.address(), &landing), metrics);
+    let (shutdown, loader, client) = start(orchestrator, listen_port).await;
+    wait_for_loader(&client, &clickhouse, &landing).await;
+
+    // Both schemas are cached from here, so neither insert below reads one.
+    let warm = format!(r#"{{"_source":"{enum_table}","id":1,"kind":"a"}}"#);
+    let until = tokio::time::Instant::now() + LANDING_BUDGET;
+    let (warmed, _) = push_until_accepted(&client, bytes::Bytes::from(warm), until).await;
+    let enum_landed = wait_landed(
+        &clickhouse,
+        &enum_table,
+        &BTreeSet::from([1]),
+        LANDING_BUDGET,
+    )
+    .await;
+    let up = wait_metric(&manager, "clickhouse_connected", 1.0, LANDING_BUDGET).await;
+    let errors_before = counter_value(&manager, "clickhouse_insert_errors_total", "");
+    let dropped_before = counter_value(
+        &manager,
+        "dead_letters_dropped_total",
+        r#"reason="dead_letter""#,
+    );
+
+    // One Push, so both rows flush in one cycle: 7 names no member of the
+    // enum, and the landing row's insert cannot connect.
+    proxy.down();
+    let body = format!(r#"[{{"_source":"{enum_table}","id":2,"kind":7}},{{"id":3}}]"#);
+    let answer = client.send("", bytes::Bytes::from(body)).await;
+    let dropped_after = counter_value(
+        &manager,
+        "dead_letters_dropped_total",
+        r#"reason="dead_letter""#,
+    );
+    let errors_after = counter_value(&manager, "clickhouse_insert_errors_total", "");
+    // Set at the end of the cycle, just after the Push is answered.
+    let connected = wait_metric(
+        &manager,
+        "clickhouse_connected",
+        0.0,
+        Duration::from_secs(10),
+    )
+    .await;
+
+    proxy.up();
+    shutdown.cancel();
+    let _ = tokio::time::timeout(Duration::from_secs(30), loader).await;
+    for table in [&landing, &enum_table] {
+        let _ = direct
+            .execute(&format!("DROP TABLE IF EXISTS default.{table}"))
+            .await;
+    }
+
+    assert!(
+        warmed && enum_landed.contains(&1) && (up - 1.0).abs() < f64::EPSILON,
+        "the warm-up did not land with ClickHouse up: accepted {warmed}, landed {enum_landed:?}, \
+         clickhouse_connected {up}"
+    );
+    assert!(
+        matches!(answer, SendResult::Backpressured),
+        "a Push whose landing row could not insert was answered {answer:?}"
+    );
+    assert!(
+        dropped_after > dropped_before && errors_after > errors_before,
+        "the cycle did not refuse the enum row locally ({dropped_before} -> {dropped_after} \
+         dropped) and fail the landing insert ({errors_before} -> {errors_after} errors)"
+    );
+    assert!(
+        connected.abs() < f64::EPSILON,
+        "clickhouse_connected read {connected} after a cycle where only the encoder answered"
+    );
+}
+
 /// A row `ClickHouse` rejects for good, with no DLQ to take it, is answered as
 /// a drop: a retry would fail the same way at every hop.
 #[tokio::test]
