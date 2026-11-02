@@ -3,6 +3,13 @@
 Rendered by CI and committed back at the end of a release -- do not edit by
 hand. Release notes also appear on the GitHub Releases page, one per tag.
 
+## [1.18.63](https://github.com/hyperi-io/dfe-loader/compare/v1.18.62...v1.18.63) (2026-11-02)
+
+### Bug Fixes
+
+* **deps:** update pulldown-cmark to 0.13.6 ([80e4437](https://github.com/hyperi-io/dfe-loader/commit/80e44379e7969ec3d6b52b264ee45c6f4d821ade))
+* **image:** restore curl for wait-for-engine ([661a33e](https://github.com/hyperi-io/dfe-loader/commit/661a33e06936f80cd3cb461372cccf0faac453c3))
+
 ## [1.18.62](https://github.com/hyperi-io/dfe-loader/compare/v1.18.61...v1.18.62) (2026-11-02)
 
 ### Bug Fixes
