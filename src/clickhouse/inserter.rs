@@ -206,6 +206,16 @@ impl InsertResult {
     pub fn is_settled(&self) -> bool {
         self.disposition == BatchDisposition::Settled
     }
+
+    /// Whether `ClickHouse` answered: any row landed, or the failure carries a
+    /// server error code. A refused, reset or timed-out connection carries none.
+    #[must_use]
+    pub fn reached_server(&self) -> bool {
+        match &self.disposition {
+            BatchDisposition::Settled => true,
+            BatchDisposition::Retry(reason) => self.inserted > 0 || server_code(reason).is_some(),
+        }
+    }
 }
 
 /// Running state of a binary-split salvage.
@@ -1317,6 +1327,33 @@ mod tests {
         assert_eq!(
             result.disposition,
             BatchDisposition::Retry("connection reset by peer".to_string())
+        );
+    }
+
+    #[test_case::test_case(InsertResult::success(3), true ; "rows_landed")]
+    #[test_case::test_case(InsertResult::with_failures(0, Vec::new()), true ; "rows_refused_for_good")]
+    #[test_case::test_case(
+        InsertResult::retry(0, "RowBinary insert: server error code 252: Too many parts"), true
+        ; "server_code_on_the_retry_list"
+    )]
+    #[test_case::test_case(
+        InsertResult::retry(0, "JSONEachRow insert: Code: 60. DB::Exception: Unknown table"), true
+        ; "http_exception_body"
+    )]
+    #[test_case::test_case(InsertResult::retry(2, "connection reset by peer"), true ; "salvage_landed_some")]
+    #[test_case::test_case(
+        InsertResult::retry(0, "RowBinary insert: transport: error trying to connect: Connection refused"), false
+        ; "connection_refused"
+    )]
+    #[test_case::test_case(InsertResult::retry(0, "JSONEachRow insert: timeout"), false ; "timed_out")]
+    #[test_case::test_case(InsertResult::retry(0, ""), false ; "no_reason")]
+    fn only_an_answer_from_the_server_reads_as_reached(result: InsertResult, reached: bool) {
+        assert_eq!(
+            result.reached_server(),
+            reached,
+            "{:?} with {} inserted",
+            result.disposition,
+            result.inserted
         );
     }
 

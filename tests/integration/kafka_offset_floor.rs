@@ -20,13 +20,19 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
-use crate::common::containers::KAFKA_PORT;
+use crate::common::containers::{
+    KAFKA_PORT, restart_clickhouse, start_clickhouse_on, stop_container,
+};
 use dfe_loader::clickhouse::InsertFormat;
 use dfe_loader::config::{Config, SharedConfig};
+use dfe_loader::metrics::Metrics;
 use dfe_loader::pipeline::Orchestrator;
 use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::producer::{FutureProducer, FutureRecord};
 use rdkafka::{ClientConfig, Offset, TopicPartitionList};
+use scalo::memory::UsageSource;
+use scalo::metrics::MetricsManager;
+use scalo::{MemoryGuard, MemoryGuardConfig, SelfRegulationConfig};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::watch;
@@ -34,8 +40,9 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use super::grpc_outage::{
-    SIGXFSZ, clickhouse_address, dead_lettered_ids, file_size_soft_limit, query_client,
-    set_file_size_soft_limit, too_deep_record, wait_dead_lettered, wait_landed, with_file_dlq,
+    SIGXFSZ, STOPPED, clickhouse_address, counter_value, dead_lettered_ids, file_size_soft_limit,
+    free_port, query_client, readiness_state, set_file_size_soft_limit, start_ready,
+    too_deep_record, wait_dead_lettered, wait_landed, wait_metric, watch_readiness, with_file_dlq,
 };
 use super::kafka_transport_e2e::{ensure_topic, make_producer, wait_for_broker};
 use crate::common::containers::TestInfrastructure;
@@ -1018,5 +1025,189 @@ async fn a_rejected_row_the_dlq_refuses_holds_the_commit_below_it() {
     assert!(
         after >= Some(last + 1),
         "the watermark never moved past the rejected row once the DLQ took it: {after:?}"
+    );
+}
+
+/// Records produced while `ClickHouse` is stopped: several times what the
+/// restart test's memory guard holds before intake pauses.
+const PRODUCED_WHILE_STOPPED: u64 = 3_000;
+
+/// The memory guard limit in the restart test, reached by about a third of
+/// [`PRODUCED_WHILE_STOPPED`].
+const GUARD_LIMIT: u64 = 256 * 1024;
+
+/// How long the received count has to hold still to read as paused.
+const QUIET: Duration = Duration::from_secs(3);
+
+/// A record of about 230 bytes for the default table.
+fn padded_record(id: u64) -> String {
+    format!(r#"{{"id":{id},"pad":"{}"}}"#, "x".repeat(200))
+}
+
+/// Records the loader has received, once that count has held still for
+/// [`QUIET`], or the last count read when `budget` runs out first.
+async fn received_once_still(manager: &MetricsManager, budget: Duration) -> f64 {
+    let deadline = tokio::time::Instant::now() + budget;
+    let mut last = counter_value(manager, "messages_received_total", "");
+    let mut since = tokio::time::Instant::now();
+    loop {
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        let now = counter_value(manager, "messages_received_total", "");
+        if (now - last).abs() > f64::EPSILON {
+            (last, since) = (now, tokio::time::Instant::now());
+        } else if since.elapsed() >= QUIET {
+            return now;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return now;
+        }
+    }
+}
+
+/// Sample `guard` until the returned token is cancelled, keeping the most it
+/// held.
+fn watch_reserved(guard: &Arc<MemoryGuard>) -> (CancellationToken, JoinHandle<u64>) {
+    let stop = CancellationToken::new();
+    let (guard, until) = (Arc::clone(guard), stop.clone());
+    let watcher = tokio::spawn(async move {
+        let mut most = 0_u64;
+        while !until.is_cancelled() {
+            most = most.max(guard.reserved_bytes());
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        most
+    });
+    (stop, watcher)
+}
+
+/// `ClickHouse` stopped and started again under a Kafka loader. The commit
+/// stays below the first record that could not land, the governor pauses the
+/// consumer before the guard's reservations pass its limit, the gauge reads
+/// the outage, `/readyz` stays ready, and once the server is back the same
+/// loader lands every record and commits past them.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_clickhouse_restart_holds_the_commit_and_pauses_intake_without_a_restart() {
+    let http_port = free_port();
+    let server = start_clickhouse_on(test_name!(), http_port).await;
+    let clickhouse = format!("{}:{http_port}", server.container.host);
+    let infra = TestInfrastructure::new(test_name!(), false, true).await;
+    let bootstrap = kafka_bootstrap(&infra).await;
+    let direct = query_client(&clickhouse);
+
+    let landing = unique_table_name("kafka_restart");
+    direct
+        .execute(&format!(
+            "CREATE TABLE default.{landing} (id UInt64) ENGINE = MergeTree() ORDER BY id"
+        ))
+        .await
+        .expect("create table");
+    let topic = format!("restart-{landing}");
+    let group = format!("dfe-{landing}");
+    ensure_topic(&bootstrap, &topic).await;
+
+    // Pressure is read from what the loader reserves, so nothing else on the
+    // host moves it. A zero max hold keeps the pause until pressure falls,
+    // rather than admitting a batch every 30 s.
+    let guard = Arc::new(MemoryGuard::with_usage_source(
+        MemoryGuardConfig {
+            limit_bytes: GUARD_LIMIT,
+            ..Default::default()
+        },
+        UsageSource::Reservations,
+    ));
+    let governor = SelfRegulationConfig {
+        max_hold_secs: 0,
+        ..Default::default()
+    }
+    .build(Arc::clone(&guard))
+    .expect("self-regulation is on by default");
+    let manager = MetricsManager::new("loader_it");
+    let metrics = Metrics::new(&manager);
+    let state = readiness_state(metrics.clone());
+    let config = kafka_loader(&bootstrap, &topic, &group, clickhouse.clone(), &landing);
+    let orchestrator = Orchestrator::with_metrics(config, metrics)
+        .with_memory_guard(Arc::clone(&guard))
+        .with_governor(Some(governor));
+    let (shutdown, loader) = start_ready(orchestrator, &state);
+    let producer = make_producer(&bootstrap);
+    wait_for_loader(&producer, &topic, &clickhouse, &landing).await;
+    let up_before = wait_metric(&manager, "clickhouse_connected", 1.0, BUDGET).await;
+    let errors_before = counter_value(&manager, "clickhouse_insert_errors_total", "");
+    let (stop_watching, readiness) = watch_readiness(&state);
+    let (stop_sampling, reserved) = watch_reserved(&guard);
+
+    stop_container(&server.container).await;
+    let first_held = produce(&producer, &topic, &padded_record(1)).await;
+    let mut last = first_held;
+    for id in 2..=PRODUCED_WHILE_STOPPED {
+        last = produce(&producer, &topic, &padded_record(id)).await;
+    }
+    let down = wait_metric(&manager, "clickhouse_connected", 0.0, STOPPED).await;
+    // The record wait_for_loader landed counts as received too.
+    let produced = PRODUCED_WHILE_STOPPED as f64 + 1.0;
+    let paused_at = received_once_still(&manager, BUDGET).await;
+    let while_stopped = highest_committed_over_watch(&bootstrap, &group, &topic).await;
+    let after_watch = counter_value(&manager, "messages_received_total", "");
+    let errors_during = counter_value(&manager, "clickhouse_insert_errors_total", "");
+
+    restart_clickhouse(&server.container).await;
+    let every_id: BTreeSet<u64> = (0..=PRODUCED_WHILE_STOPPED).collect();
+    let landed = wait_landed(&clickhouse, &landing, &every_id, BUDGET).await;
+    let up_after = wait_metric(&manager, "clickhouse_connected", 1.0, BUDGET).await;
+    let after = wait_committed(&bootstrap, &group, &topic, last + 1).await;
+    let received_after = counter_value(&manager, "messages_received_total", "");
+    stop_sampling.cancel();
+    let most_reserved = reserved.await.expect("reservation sampler");
+    stop_watching.cancel();
+    let unready_samples = readiness.await.expect("readiness watcher");
+    let still_running = !loader.is_finished();
+
+    shutdown.cancel();
+    let _ = tokio::time::timeout(Duration::from_secs(30), loader).await;
+    drop(server);
+
+    assert!(
+        while_stopped.is_some_and(|next| next <= first_held),
+        "the group committed {while_stopped:?} while the record at offset {first_held} could \
+         not reach ClickHouse: a crash then would have lost it"
+    );
+    assert!(
+        paused_at < produced && (after_watch - paused_at).abs() < f64::EPSILON,
+        "intake read {paused_at} of {produced} records, then {after_watch} after the watch: the \
+         consumer did not hold its position while the held rows filled the guard"
+    );
+    assert!(
+        most_reserved <= GUARD_LIMIT,
+        "the memory guard held {most_reserved} bytes against its {GUARD_LIMIT} byte limit"
+    );
+    assert!(
+        errors_during > errors_before,
+        "clickhouse_insert_errors_total stayed at {errors_before} while ClickHouse was stopped"
+    );
+    assert!(
+        (up_before - 1.0).abs() < f64::EPSILON
+            && down.abs() < f64::EPSILON
+            && (up_after - 1.0).abs() < f64::EPSILON,
+        "clickhouse_connected read {up_before} up, {down} stopped and {up_after} restarted"
+    );
+    assert_eq!(
+        unready_samples, 0,
+        "readiness read not ready {unready_samples} times while ClickHouse was stopped"
+    );
+    assert!(still_running, "the loader stopped during the outage");
+    let lost: Vec<u64> = every_id.difference(&landed).copied().collect();
+    assert!(
+        lost.is_empty(),
+        "{} of {} produced records never landed: {lost:?}",
+        lost.len(),
+        every_id.len()
+    );
+    assert!(
+        (received_after - produced).abs() < f64::EPSILON,
+        "the loader received {received_after} of {produced} records once ClickHouse was back"
+    );
+    assert!(
+        after >= Some(last + 1),
+        "the watermark never moved past the held records once they landed: {after:?}"
     );
 }
