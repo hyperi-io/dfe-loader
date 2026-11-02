@@ -1066,7 +1066,7 @@ mod tests {
         assert_eq!(config.json_output, "_json");
         assert!(config.capture_raw);
         assert_eq!(config.raw_output, "_raw");
-        assert_eq!(config.raw_source_fields, vec!["logoriginal"]);
+        assert_eq!(config.raw_source_fields, [] as [std::string::String; 0]);
         assert_eq!(config.disable_json_tables, [] as [std::string::String; 0]);
         assert_eq!(config.disable_raw_tables, [] as [std::string::String; 0]);
     }

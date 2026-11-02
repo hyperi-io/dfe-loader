@@ -294,7 +294,7 @@ impl Transformer {
             // Step 5: _json is injected by the buffer manager from raw Kafka bytes.
             // Not injected here — the orchestrator passes raw_payload to BufferManager.push().
 
-            // Step 5b: @renamed: first(metadata.raw_source_fields, default logoriginal) -> _raw
+            // Step 5b: @renamed: first(metadata.raw_source_fields) -> _raw, none by default
             // Zero-copy rename via data.remove() — ownership transfer, no clone.
             // Silent no-op if destination already present (upstream may populate _raw directly).
             if self.capture_raw && !data.contains_key(&self.raw_output) {
@@ -532,7 +532,7 @@ impl Default for Transformer {
             json_output: "_json".to_string(),
 
             capture_raw: true,
-            raw_source_fields: vec!["logoriginal".to_string()],
+            raw_source_fields: Vec::new(),
             raw_output: "_raw".to_string(),
 
             capture_source: true,
@@ -766,7 +766,10 @@ mod tests {
 
     #[test]
     fn test_transformer_captures_raw_from_logoriginal() {
-        let transformer = Transformer::default();
+        let transformer = Transformer {
+            raw_source_fields: vec!["logoriginal".to_string()],
+            ..Default::default()
+        };
         let raw = br#"{"event": "login", "logoriginal": "raw syslog line here"}"#;
         let value: Value = serde_json::from_slice(raw).unwrap();
 
@@ -798,23 +801,23 @@ mod tests {
     }
 
     #[test]
-    fn test_transformer_raw_is_rename_not_copy() {
+    fn test_transformer_default_renames_nothing_into_raw() {
         let transformer = Transformer::default();
-        // logoriginal is the default source field
         let raw = br#"{"event": "test", "logoriginal": "the log line"}"#;
         let value: Value = serde_json::from_slice(raw).unwrap();
 
         let result = transformer.transform_with_raw(value, None, None).unwrap();
 
-        // logoriginal is in raw_source_fields — should be renamed to _raw
-        assert_eq!(result.data["_raw"], "the log line");
-        // Source field gone (ownership transferred)
-        assert!(!result.data.contains_key("logoriginal"));
+        assert!(!result.data.contains_key("_raw"), "{:?}", result.data);
+        assert_eq!(result.data["logoriginal"], "the log line");
     }
 
     #[test]
     fn test_transformer_raw_silent_noop_if_present() {
-        let transformer = Transformer::default();
+        let transformer = Transformer {
+            raw_source_fields: vec!["logoriginal".to_string()],
+            ..Default::default()
+        };
         // Data already has _raw populated by upstream — rename should be skipped
         let raw = br#"{"event": "test", "logoriginal": "source value", "_raw": "upstream value"}"#;
         let value: Value = serde_json::from_slice(raw).unwrap();
@@ -831,6 +834,7 @@ mod tests {
     fn test_transformer_raw_disabled() {
         let transformer = Transformer {
             capture_raw: false,
+            raw_source_fields: vec!["logoriginal".to_string()],
             ..Default::default()
         };
 
