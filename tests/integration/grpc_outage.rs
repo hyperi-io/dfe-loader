@@ -1594,9 +1594,10 @@ async fn push_checking_placement(
 }
 
 /// A table changed under the loader's cached schema, first by a dropped column
-/// and then by being recreated with `name` as a number. Each change is caught
-/// from the server's refusal of the first insert after it, with no manual
-/// cache invalidation: rows that fit the new table land as sent, rows that
+/// and then by being recreated with `name` as a number, with a word sent
+/// first. Each change is caught from the server's refusal of the first insert
+/// after it, with no manual cache invalidation: rows that fit the new table
+/// land as sent, nothing is stored as a value nobody sent, rows that
 /// cannot go to the DLQ, and no Push is answered OK before its row is in one
 /// or the other.
 #[tokio::test(flavor = "multi_thread")]
@@ -1662,17 +1663,17 @@ async fn a_table_changed_under_the_cached_schema_is_caught_and_nothing_is_acked_
         ))
         .await
         .expect("recreate table");
-    // A number goes first: its String encoding is shorter than a UInt32, so the
-    // server refuses the first insert against the old schema. A word cannot fit
-    // the new column, including one whose encoding is as long as a UInt32.
+    // A word goes first, encoded against the old String column. "abc" encodes
+    // to exactly the four bytes of a UInt32, so only a type check on the insert
+    // keeps it from being stored as a number.
     let numeric: Vec<(u64, String)> = (20..=22)
         .map(|id| (id, format!(r#"{{"id":{id},"name":{id}}}"#)))
         .collect();
-    let wordy: Vec<(u64, String)> = [(30, "seven"), (31, "abc"), (32, "a long word")]
+    let wordy: Vec<(u64, String)> = [(31, "abc"), (30, "seven"), (32, "a long word")]
         .into_iter()
         .map(|(id, name)| (id, format!(r#"{{"id":{id},"name":"{name}"}}"#)))
         .collect();
-    let records: Vec<(u64, String)> = numeric.iter().chain(&wordy).cloned().collect();
+    let records: Vec<(u64, String)> = wordy.iter().chain(&numeric).cloned().collect();
     let (after_recreate, early_recreate) = push_checking_placement(
         &client,
         &clickhouse,
@@ -1718,12 +1719,11 @@ async fn a_table_changed_under_the_cached_schema_is_caught_and_nothing_is_acked_
         (20..=22).map(|id| (id, id.to_string())).collect::<Vec<_>>(),
         "numbers sent after the recreate did not land as sent"
     );
-    let stored_words: Vec<(u64, String)> = (30..=32)
-        .filter_map(|id| Some((id, names_after_recreate.get(&id)?.clone())))
-        .collect();
-    assert!(
-        stored_words.is_empty(),
-        "words the numeric column cannot hold were stored as {stored_words:?}"
+    let only_numbers: std::collections::BTreeMap<u64, String> =
+        (20..=22).map(|id| (id, id.to_string())).collect();
+    assert_eq!(
+        names_after_recreate, only_numbers,
+        "the recreated table holds rows nobody sent as numbers"
     );
     let wordy_ids: BTreeSet<u64> = wordy.iter().map(|(id, _)| *id).collect();
     assert!(

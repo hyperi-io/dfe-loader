@@ -1172,9 +1172,9 @@ dependencies = [
 
 [[package]]
 name = "dfe-clickhouse"
-version = "0.1.9"
+version = "0.1.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1a602c8c4a6cefdc95ecef465c371806fe384aa1cc451c85606176aeb9b9ca5f"
+checksum = "f45c9c5d373c402f8f39a805b3c859b7dfc0add77b5e61cdfd53c383b822ab4c"
 dependencies = [
  "backon",
  "bytes",
@@ -1240,6 +1240,7 @@ dependencies = [
  "tokio",
  "tokio-test",
  "tokio-util",
+ "tonic",
  "tracing",
  "tracing-subscriber",
  "uuid",
