@@ -104,6 +104,7 @@ Precedence, highest wins: **DDL tag > per-table > global**.
 | `routing.default_db` / `default_table` | fallbacks when no field matches |
 | `routing.org_id_field` / `default_org_id` | where the `_org_id` tenant is read from, and the tenant a record with none lands in (`default`) |
 | `routing.org_routes` | per-org database routing, keyed on the tenant |
+| `routing.external_topics` | topics an external pipeline writes directly. A record there keeps its `_org_id` and `_source` only when they are the source's own or on the topic's allow-list ([routing](pipeline/routing.md#external-pipeline-topics)) |
 
 ### Enrichment, resilience
 

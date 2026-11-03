@@ -165,6 +165,14 @@ impl Metrics {
             "Records on a source topic that named no table and fell back to the default",
         );
         let _ = manager.counter(
+            crate::pipeline::processor::EXTERNAL_ORG_ID_REPLACED_TOTAL,
+            "Records on an external-pipeline topic whose _org_id was replaced with the source's own, by topic",
+        );
+        let _ = manager.counter(
+            crate::pipeline::processor::EXTERNAL_SOURCE_REPLACED_TOTAL,
+            "Records on an external-pipeline topic whose _source was replaced with the source's own, by topic",
+        );
+        let _ = manager.counter(
             "dfe_loader_fields_unstored_total",
             "Payload fields that matched no column, in a table with no _json column to keep them",
         );
@@ -831,6 +839,8 @@ mod tests {
             "dfe_loader_header_pass_skipped_total",
             "dfe_loader_routing_field_absent_total",
             "dfe_loader_fields_unstored_total",
+            "loader_external_org_id_replaced_total",
+            "loader_external_source_replaced_total",
             "dfe_loader_batched_array_messages_total",
             "dfe_loader_batched_array_records_total",
             "dfe_loader_batched_ndjson_messages_total",

@@ -138,6 +138,18 @@ routing:
   #   - org_id: contoso
   #     database: contoso_dfe      # Custom database name (overrides org_id)
 
+  # Topics an external pipeline (a customer's own Vector, Fluentd or Logstash) writes
+  # straight to, with no dfe-receiver in front. A record on a listed topic keeps its
+  # _org_id and _source only when they are the source's own or on the allow-list,
+  # and gets the source's own otherwise. Nothing is rejected.
+  external_topics: []
+  # external_topics:
+  #   - topic: cisco-ios_land
+  #     org_id: acme               # The source's own tenant
+  #     allowed_org_ids: []        # Empty = only org_id
+  #     source: cisco-ios          # The source's own name
+  #     allowed_sources: []        # Empty = only source
+
   # Optional: map extracted _source values to destination table names
   source_to_table:
     auth: auth_events

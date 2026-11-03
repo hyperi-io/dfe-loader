@@ -21,7 +21,7 @@ use std::borrow::Cow;
 use rustc_hash::FxHashMap;
 use serde_json::Value;
 
-use crate::config::{MetadataConfig, RoutingConfig};
+use crate::config::{ExternalTopic, MetadataConfig, RoutingConfig};
 use crate::payload::parse::{
     extract_field_json, extract_field_json_cow, extract_nested_field_json,
     extract_nested_field_json_cow,
@@ -47,6 +47,28 @@ pub enum TableChoice {
     /// Neither a routing field nor the topic named a table, so `default_table`
     /// was used.
     DefaultFallback,
+}
+
+/// The header field every record's source is read from first.
+const SOURCE_FIELD: &str = "_source";
+
+/// The tenant field when `org_id_field` is not configured.
+const DEFAULT_ORG_ID_FIELD: &str = "_org_id";
+
+/// What the tenant policy replaced in one record.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TenantReplaced {
+    /// The record's `_org_id` was absent or outside the topic's allow-list.
+    pub org_id: bool,
+    /// The record's `_source` was absent or outside the topic's allow-list.
+    pub source: bool,
+}
+
+impl TenantReplaced {
+    /// Whether the policy changed anything.
+    pub fn any(self) -> bool {
+        self.org_id || self.source
+    }
 }
 
 /// Routes messages to db.table based on event data fields
@@ -84,6 +106,12 @@ pub struct Router {
     source_fields: Vec<String>,
     /// Topic suffixes to strip when deriving _source from Kafka topic
     topic_suffixes: Vec<String>,
+    /// Tenant policy by topic, for the topics an external pipeline writes.
+    external: FxHashMap<String, ExternalTopic>,
+    /// Every field that can name a record's source: `_source`, the metadata
+    /// `source_fields` and the `table_fields`, so the policy leaves none of them
+    /// to steer the record.
+    source_paths: Vec<String>,
 }
 
 /// Whether a routing value is absent in all but name: null or empty text.
@@ -117,6 +145,13 @@ impl Router {
             .map(|r| (r.org_id.clone(), r.effective_database().to_string()))
             .collect();
 
+        let mut source_paths: Vec<String> = vec![SOURCE_FIELD.to_string()];
+        for path in metadata.source_fields.iter().chain(&config.table_fields) {
+            if !source_paths.contains(path) {
+                source_paths.push(path.clone());
+            }
+        }
+
         Self {
             table_fields: config.table_fields.clone(),
             default_db: config.default_db.clone(),
@@ -128,7 +163,49 @@ impl Router {
             dlq_enabled: config.dlq.enabled,
             source_fields: metadata.source_fields.clone(),
             topic_suffixes: config.topic_suffixes.clone(),
+            external: config
+                .external_topics
+                .iter()
+                .map(|policy| (policy.topic.clone(), policy.clone()))
+                .collect(),
+            source_paths,
         }
+    }
+
+    /// Hold a record read from an external-pipeline topic to its source's own
+    /// tenant and source.
+    ///
+    /// On a topic listed under `external_topics`, a `_org_id` or `_source` that
+    /// is absent or outside the topic's allow-list is replaced with the
+    /// source's own value. The record is never rejected. Any other topic is
+    /// untouched.
+    #[inline]
+    pub fn enforce_external_tenant(&self, topic: &str, value: &mut Value) -> TenantReplaced {
+        let Some(policy) = self.external.get(topic) else {
+            return TenantReplaced::default();
+        };
+
+        let org_field = self.org_id_field.as_deref().unwrap_or(DEFAULT_ORG_ID_FIELD);
+        let mut replaced = TenantReplaced::default();
+
+        if needs_replacing(self.get_nested_field(value, org_field), true, |org| {
+            org == policy.org_id || policy.allowed_org_ids.iter().any(|a| a == org)
+        }) {
+            set_path(value, org_field, &policy.org_id);
+            replaced.org_id = true;
+        }
+
+        for path in &self.source_paths {
+            let required = path == SOURCE_FIELD;
+            if needs_replacing(self.get_nested_field(value, path), required, |source| {
+                source == policy.source || policy.allowed_sources.iter().any(|a| a == source)
+            }) {
+                set_path(value, path, &policy.source);
+                replaced.source = true;
+            }
+        }
+
+        replaced
     }
 
     /// Extract the database name from the payload.
@@ -480,6 +557,41 @@ impl Router {
     /// The tenant a record that carries none lands in.
     pub fn default_org_id(&self) -> &str {
         &self.default_org_id
+    }
+}
+
+/// Whether a tenant-policy field must be rewritten.
+///
+/// Text `allows` stays. A blank or absent value is rewritten only when the field
+/// is `required` (the header field itself, which must end up set), and any
+/// other value is rewritten.
+#[inline]
+fn needs_replacing(current: Option<&Value>, required: bool, allows: impl Fn(&str) -> bool) -> bool {
+    match current {
+        Some(Value::String(text)) if allows(text) => false,
+        Some(value) if is_blank(value) => required,
+        None => required,
+        Some(_) => true,
+    }
+}
+
+/// Set the text at a dot-notation `path`, creating or replacing the objects on
+/// the way down so a nested tenant field can be written.
+fn set_path(root: &mut Value, path: &str, text: &str) {
+    let mut node = root;
+    let mut parts = path.split('.').peekable();
+    while let Some(part) = parts.next() {
+        if !node.is_object() {
+            *node = Value::Object(serde_json::Map::new());
+        }
+        let Some(map) = node.as_object_mut() else {
+            return;
+        };
+        if parts.peek().is_none() {
+            map.insert(part.to_string(), Value::String(text.to_string()));
+            return;
+        }
+        node = map.entry(part).or_insert(Value::Null);
     }
 }
 

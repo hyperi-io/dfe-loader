@@ -193,6 +193,7 @@
         "org_id_field": "_org_id",
         "default_org_id": "default",
         "org_routes": [],
+        "external_topics": [],
         "source_to_table": {},
         "topic_suffixes": [
           "_land",
@@ -1292,6 +1293,14 @@
           },
           "default": []
         },
+        "external_topics": {
+          "description": "Topics an external pipeline writes directly, each with the tenant policy\nthat keeps its records in their own `_org_id` and `_source`. A topic not\nlisted here is trusted as it arrives.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ExternalTopic"
+          },
+          "default": []
+        },
         "source_to_table": {
           "description": "Source value to table name mapping\nMaps extracted source values to destination table names",
           "type": "object",
@@ -1345,6 +1354,45 @@
       },
       "required": [
         "org_id"
+      ]
+    },
+    "ExternalTopic": {
+      "description": "Tenant policy for a topic an external pipeline writes straight to.\n\nNo dfe-receiver stands in front of such a topic, so the loader itself keeps\na record from claiming another tenant or table. A record's `_org_id` and\n`_source` stay only when they are the source's own value or on the matching\nallow-list, and are replaced with the source's own otherwise.",
+      "type": "object",
+      "properties": {
+        "topic": {
+          "description": "The Kafka topic the policy covers, for example `cisco-ios_land`.",
+          "type": "string"
+        },
+        "org_id": {
+          "description": "The source's own tenant: the `_org_id` a record gets when it carries none\nor one outside the allow-list.",
+          "type": "string"
+        },
+        "allowed_org_ids": {
+          "description": "Further tenants a record on this topic may carry. Empty allows only `org_id`.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "source": {
+          "description": "The source's own name: the `_source` a record gets when it carries none\nor one outside the allow-list.",
+          "type": "string"
+        },
+        "allowed_sources": {
+          "description": "Further sources a record on this topic may carry. Empty allows only `source`.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        }
+      },
+      "required": [
+        "topic",
+        "org_id",
+        "source"
       ]
     },
     "DlqConfig": {

@@ -22,7 +22,7 @@ use crate::clickhouse::TableSchema;
 use crate::column_meta::ColumnMetaCache;
 use crate::config::{CaptureMode, Config};
 use crate::payload::{LeadingBytes, opens_json_document};
-use crate::routing::{RouteResult, Router, TableChoice};
+use crate::routing::{RouteResult, Router, TableChoice, TenantReplaced};
 use crate::transform::extractor::NO_COLUMN_MATCHED;
 use crate::transform::{
     ComputedColumnCache, FieldMappingCache, HeaderExtractor, TableComputedColumns,
@@ -32,6 +32,12 @@ use crate::transform::{
 use super::capture::CaptureOverrides;
 use super::enrichment::EnrichmentPipeline;
 use super::types::ProcessedMessage;
+
+/// Records on an external-pipeline topic whose `_org_id` was replaced, by `topic`.
+pub(crate) const EXTERNAL_ORG_ID_REPLACED_TOTAL: &str = "loader_external_org_id_replaced_total";
+
+/// Records on an external-pipeline topic whose `_source` was replaced, by `topic`.
+pub(crate) const EXTERNAL_SOURCE_REPLACED_TOTAL: &str = "loader_external_source_replaced_total";
 
 /// Immutable processing context for parallel message processing.
 ///
@@ -72,6 +78,21 @@ fn log_header_pass_skipped(table: &str, reason: &str) {
             reason = reason,
             "Header pass promoted no columns, rejecting the message (max 1 per 60s)"
         );
+    }
+}
+
+/// Count the tenant fields the external-topic policy replaced on `topic`.
+///
+/// `topic` is a label because only a topic listed under
+/// `routing.external_topics` reaches here, so the label set is the config's.
+fn count_external_replaced(topic: &str, replaced: TenantReplaced) {
+    if replaced.org_id {
+        metrics::counter!(EXTERNAL_ORG_ID_REPLACED_TOTAL, "topic" => topic.to_string())
+            .increment(1);
+    }
+    if replaced.source {
+        metrics::counter!(EXTERNAL_SOURCE_REPLACED_TOTAL, "topic" => topic.to_string())
+            .increment(1);
     }
 }
 
@@ -176,7 +197,7 @@ impl MessageProcessor<'_> {
     ///
     /// Steps:
     /// 1. Refuse a payload that does not open a JSON object or array
-    /// 2. Parse (sonic-rs)
+    /// 2. Parse (sonic-rs), then hold an external topic's record to its own tenant
     /// 3. Route to table
     /// 4. Extract/transform (json_primary or legacy_flatten path)
     /// 5. Apply capture config (pure derivation, no cache mutation)
@@ -200,7 +221,7 @@ impl MessageProcessor<'_> {
         }
 
         // Step 2: Parse payload to JSON Value
-        let value: Value = sonic_rs::from_slice(&msg.payload).map_err(|e| {
+        let mut value: Value = sonic_rs::from_slice(&msg.payload).map_err(|e| {
             scalo::logger::security::input_validation_failure(
                 "json_parse",
                 "invalid JSON payload",
@@ -229,6 +250,14 @@ impl MessageProcessor<'_> {
             return Err(crate::Error::Json(
                 "payload is a JSON array, not a record object".into(),
             ));
+        }
+
+        // An external pipeline writes this topic with no receiver in front, so
+        // the record is held to its source's own tenant and source before
+        // anything reads them to route or fill a column.
+        let replaced = self.router.enforce_external_tenant(&msg.topic, &mut value);
+        if replaced.any() {
+            count_external_replaced(&msg.topic, replaced);
         }
 
         // Step 3: Route to table (db.table), falling back to the source the
@@ -2613,9 +2642,19 @@ mod tests {
         payload: &[u8],
         columns: &[(&str, &str)],
     ) -> crate::Result<super::ProcessedMessage> {
+        json_primary_on_topic(harness, "test-events", payload, columns)
+    }
+
+    /// [`json_primary_against`] for a message on `topic`.
+    fn json_primary_on_topic(
+        harness: &TestHarness,
+        topic: &str,
+        payload: &[u8],
+        columns: &[(&str, &str)],
+    ) -> crate::Result<super::ProcessedMessage> {
         use crate::clickhouse::{ColumnInfo, ParsedType, TableSchema};
 
-        let msg = harness.make_msg(payload);
+        let msg = harness.make_msg_on(topic, payload);
         let table = match harness.processor_json_primary().process(&msg) {
             Err(crate::Error::SchemaPending { table }) => table,
             Ok(_) => panic!("expected SchemaPending before the schema is cached, got Ok"),
@@ -2751,5 +2790,177 @@ mod tests {
             "{:?}",
             processed.data
         );
+    }
+
+    // ========================================================================
+    // Tenant policy on external-pipeline topics
+    // ========================================================================
+
+    const EXTERNAL_TOPIC: &str = "ext_land";
+    const ORG_REPLACED: &str = "loader_external_org_id_replaced_total";
+    const SOURCE_REPLACED: &str = "loader_external_source_replaced_total";
+
+    /// `ext_land` belongs to source `ext` of tenant `acme`, which may also carry
+    /// tenant `partner` and source `ext-extra`.
+    fn config_with_external_topic() -> Config {
+        let mut config = Config::default();
+        config.routing.external_topics = vec![crate::config::ExternalTopic {
+            topic: EXTERNAL_TOPIC.to_string(),
+            org_id: "acme".to_string(),
+            allowed_org_ids: vec!["partner".to_string()],
+            source: "ext".to_string(),
+            allowed_sources: vec!["ext-extra".to_string()],
+        }];
+        config
+    }
+
+    /// What one record came out as, and how often each field was replaced.
+    struct Policed {
+        table: String,
+        org_id: Option<String>,
+        source: Option<String>,
+        org_replaced: u64,
+        source_replaced: u64,
+        topic_label_org: u64,
+    }
+
+    fn police(harness: &TestHarness, topic: &str, payload: &str) -> Policed {
+        let recorder = crate::metrics::counting::CountingRecorder::default();
+        let msg = harness.make_msg_on(topic, payload.as_bytes());
+        let processed = metrics::with_local_recorder(&recorder, || {
+            harness
+                .processor()
+                .process(&msg)
+                .unwrap_or_else(|e| panic!("a tenant mismatch must never reject: {e:?}"))
+        });
+        let text = |field: &str| {
+            processed
+                .data
+                .get(field)
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        };
+        Policed {
+            table: processed.table.clone(),
+            org_id: text("_org_id"),
+            source: text("_source"),
+            org_replaced: recorder.total(ORG_REPLACED),
+            source_replaced: recorder.total(SOURCE_REPLACED),
+            topic_label_org: recorder.labelled(ORG_REPLACED, "topic", topic),
+        }
+    }
+
+    #[test]
+    fn an_external_topic_keeps_only_an_allowed_org_id() {
+        let harness = TestHarness::with_config(config_with_external_topic());
+        // (payload, the tenant the row carries, replacements counted)
+        let cases = [
+            (r#"{"_source":"ext"}"#, "acme", 1),
+            (r#"{"_source":"ext","_org_id":null}"#, "acme", 1),
+            (r#"{"_source":"ext","_org_id":""}"#, "acme", 1),
+            (r#"{"_source":"ext","_org_id":7}"#, "acme", 1),
+            (r#"{"_source":"ext","_org_id":"victim"}"#, "acme", 1),
+            (r#"{"_source":"ext","_org_id":"partner"}"#, "partner", 0),
+            (r#"{"_source":"ext","_org_id":"acme"}"#, "acme", 0),
+        ];
+        for (payload, want, replaced) in cases {
+            let row = police(&harness, EXTERNAL_TOPIC, payload);
+            assert_eq!(row.org_id.as_deref(), Some(want), "{payload}");
+            assert_eq!(row.org_replaced, replaced, "{payload}");
+            assert_eq!(
+                row.topic_label_org, replaced,
+                "counted per topic: {payload}"
+            );
+            assert_eq!(row.source_replaced, 0, "{payload}");
+        }
+    }
+
+    #[test]
+    fn an_external_topic_keeps_only_an_allowed_source() {
+        let harness = TestHarness::with_config(config_with_external_topic());
+        // (payload, the source and table the row lands in, replacements counted)
+        let cases = [
+            (r#"{"x":1}"#, "ext", 1),
+            (r#"{"_source":null}"#, "ext", 1),
+            (r#"{"_source":""}"#, "ext", 1),
+            (r#"{"_source":"someone-elses-table"}"#, "ext", 1),
+            (r#"{"_source":"ext-extra"}"#, "ext-extra", 0),
+            (r#"{"_source":"ext"}"#, "ext", 0),
+        ];
+        for (payload, want, replaced) in cases {
+            let row = police(&harness, EXTERNAL_TOPIC, payload);
+            assert_eq!(row.source.as_deref(), Some(want), "{payload}");
+            assert_eq!(row.table, format!("dfe.{want}"), "{payload}");
+            assert_eq!(row.source_replaced, replaced, "{payload}");
+            assert_eq!(
+                row.org_replaced, 1,
+                "no org named, so the source's own: {payload}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_topic_not_listed_is_trusted_as_it_arrives() {
+        let harness = TestHarness::with_config(config_with_external_topic());
+        let row = police(
+            &harness,
+            "other_land",
+            r#"{"_org_id":"victim","_source":"someone-elses-table"}"#,
+        );
+        assert_eq!(row.org_id.as_deref(), Some("victim"));
+        assert_eq!(row.source.as_deref(), Some("someone-elses-table"));
+        assert_eq!(row.table, "dfe.someone-elses-table");
+        assert_eq!((row.org_replaced, row.source_replaced), (0, 0));
+    }
+
+    #[test]
+    fn the_org_replacement_follows_a_nested_org_id_field() {
+        let mut config = config_with_external_topic();
+        config.routing.org_id_field = Some("tags.event.org_id".to_string());
+        let harness = TestHarness::with_config(config);
+        let row = police(
+            &harness,
+            EXTERNAL_TOPIC,
+            r#"{"_source":"ext","tags":{"event":{"org_id":"victim"}}}"#,
+        );
+        assert_eq!(row.org_id.as_deref(), Some("acme"));
+        assert_eq!(row.org_replaced, 1);
+    }
+
+    #[test]
+    fn the_source_replacement_covers_every_field_that_can_name_the_source() {
+        let mut config = config_with_external_topic();
+        config.metadata.source_fields = vec!["source_name".to_string()];
+        config.routing.table_fields = vec!["route".to_string(), "source_name".to_string()];
+        let harness = TestHarness::with_config(config);
+        let row = police(
+            &harness,
+            EXTERNAL_TOPIC,
+            r#"{"route":"someone-elses-table","source_name":"also-theirs"}"#,
+        );
+        assert_eq!(row.table, "dfe.ext", "{}", row.table);
+        assert_eq!(row.source.as_deref(), Some("ext"));
+        assert_eq!(row.source_replaced, 1, "one record, one count");
+    }
+
+    #[test]
+    fn the_json_primary_path_gets_the_replaced_tenant_and_source() {
+        let harness = TestHarness::with_config(config_with_external_topic());
+        let processed = json_primary_on_topic(
+            &harness,
+            EXTERNAL_TOPIC,
+            br#"{"_org_id":"victim","_source":"someone-elses-table","id":1}"#,
+            &[("_org_id", "String"), ("_source", "Nullable(String)")],
+        )
+        .unwrap_or_else(|e| panic!("processed: {e:?}"));
+        assert_eq!(processed.table, "dfe.ext");
+        let text = |field: &str| {
+            processed
+                .data
+                .get(field)
+                .and_then(serde_json::Value::as_str)
+        };
+        assert_eq!(text("_org_id"), Some("acme"), "{:?}", processed.data);
+        assert_eq!(text("_source"), Some("ext"), "{:?}", processed.data);
     }
 }

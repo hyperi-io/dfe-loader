@@ -45,6 +45,7 @@ flowchart TB
 | `routing.org_id_field` | field the tenant is read from -- default `_org_id`, the common-header field the first hop stamps |
 | `routing.default_org_id` | tenant for a record that carries none -- default `default`, the deployment's default org |
 | `routing.org_routes` | orgs that get a database of their own, keyed on the tenant: `[{org_id: acme, database: acme_dfe}]` |
+| `routing.external_topics` | topics an external pipeline writes straight to, each with the tenant policy below |
 
 ## How a field is resolved
 
@@ -53,6 +54,31 @@ flowchart TB
 ## The tenant
 
 The `_org_id` column takes the record's `org_id_field` value and nothing else: no column directive and no sender field such as `org_id` can set it. An absent, null or empty value lands in `default_org_id`, so every row belongs to an org. The database is `default_db` unless `org_routes` lists that tenant.
+
+## External pipeline topics
+
+An external pipeline is a customer's own Vector, Fluentd or Logstash writing a source's Kafka topics directly. No dfe-receiver sits in front, so nothing has stripped a forged `_org_id` or `_source`, and the loader would write the record into whatever tenant and table it names. List the topic under `routing.external_topics` and the loader holds each record to the source's own values:
+
+```yaml
+routing:
+  external_topics:
+    - topic: cisco-ios_land
+      org_id: acme                # the source's own tenant
+      allowed_org_ids: []         # empty = only org_id
+      source: cisco-ios           # the source's own name
+      allowed_sources: []         # empty = only source
+```
+
+On a listed topic:
+
+- `_org_id` absent, null, empty or outside `[org_id] + allowed_org_ids` is set to `org_id`.
+- `_source` absent, null, empty or outside `[source] + allowed_sources` is set to `source`.
+- A value inside the list is kept.
+- Nothing is rejected or dead-lettered. The record lands, in the source's own tenant and table.
+
+Each replacement increments `loader_external_org_id_replaced_total{topic}` or `loader_external_source_replaced_total{topic}`, so a pipeline that keeps sending the wrong value shows up as a rate. A topic not listed behaves as before.
+
+The tenant is replaced at `org_id_field`. The source is replaced in `_source` and in every field `metadata.source_fields` and `table_fields` name, so changing those lists does not open a way round the policy. The `_json` and `_raw` captures hold the payload as the sender wrote it, forged values included. The columns carry the replaced ones.
 
 ## A routing edit applies without a restart
 
