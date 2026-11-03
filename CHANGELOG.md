@@ -3,6 +3,12 @@
 Rendered by CI and committed back at the end of a release -- do not edit by
 hand. Release notes also appear on the GitHub Releases page, one per tag.
 
+## [1.18.65](https://github.com/hyperi-io/dfe-loader/compare/v1.18.64...v1.18.65) (2026-11-03)
+
+### Bug Fixes
+
+* **loader:** restrict external topic routing to allowed tenants ([#311](https://github.com/hyperi-io/dfe-loader/issues/311)) ([47c5e39](https://github.com/hyperi-io/dfe-loader/commit/47c5e39bfd6b98eb9e747c22b9adfed81c75b23d))
+
 ## [1.18.64](https://github.com/hyperi-io/dfe-loader/compare/v1.18.63...v1.18.64) (2026-11-02)
 
 ### Bug Fixes
