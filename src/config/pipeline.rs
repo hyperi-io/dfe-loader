@@ -66,6 +66,34 @@ impl OrgRoute {
     }
 }
 
+/// Tenant policy for a topic an external pipeline writes straight to.
+///
+/// No dfe-receiver stands in front of such a topic, so the loader itself keeps
+/// a record from claiming another tenant or table. A record's `_org_id` and
+/// `_source` stay only when they are the source's own value or on the matching
+/// allow-list, and are replaced with the source's own otherwise.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ExternalTopic {
+    /// The Kafka topic the policy covers, for example `cisco-ios_land`.
+    pub topic: String,
+
+    /// The source's own tenant: the `_org_id` a record gets when it carries none
+    /// or one outside the allow-list.
+    pub org_id: String,
+
+    /// Further tenants a record on this topic may carry. Empty allows only `org_id`.
+    #[serde(default)]
+    pub allowed_org_ids: Vec<String>,
+
+    /// The source's own name: the `_source` a record gets when it carries none
+    /// or one outside the allow-list.
+    pub source: String,
+
+    /// Further sources a record on this topic may carry. Empty allows only `source`.
+    #[serde(default)]
+    pub allowed_sources: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct RoutingConfig {
@@ -95,6 +123,12 @@ pub struct RoutingConfig {
     #[serde(default)]
     pub org_routes: Vec<OrgRoute>,
 
+    /// Topics an external pipeline writes directly, each with the tenant policy
+    /// that keeps its records in their own `_org_id` and `_source`. A topic not
+    /// listed here is trusted as it arrives.
+    #[serde(default)]
+    pub external_topics: Vec<ExternalTopic>,
+
     /// Source value to table name mapping
     /// Maps extracted source values to destination table names
     pub source_to_table: HashMap<String, String>,
@@ -121,6 +155,7 @@ impl Default for RoutingConfig {
             default_org_id: DEFAULT_ORG_ID.to_string(),
             // No per-org routing by default (shared schema)
             org_routes: vec![],
+            external_topics: vec![],
             source_to_table: HashMap::new(),
             topic_suffixes: vec!["_land".to_string(), "_load".to_string()],
             dlq: DlqConfig::default(),

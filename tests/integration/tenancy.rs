@@ -130,3 +130,103 @@ async fn an_unstamped_record_lands_in_the_default_org_and_table() {
         "the tenant is _org_id, else the default org, never the sender's org_id"
     );
 }
+
+/// `id` -> (`_org_id`, `_source`) for every row `default.{table}` holds.
+async fn landed_tenants(clickhouse: &str, table: &str) -> BTreeMap<u64, (String, String)> {
+    let sql = format!("SELECT id, _org_id, _source FROM default.{table} FORMAT TabSeparated");
+    let Ok(response) = reqwest::Client::new()
+        .get(format!("http://{clickhouse}/"))
+        .basic_auth(
+            "default",
+            Some(crate::common::containers::clickhouse_password()),
+        )
+        .query(&[("query", sql.as_str())])
+        .send()
+        .await
+    else {
+        return BTreeMap::new();
+    };
+    let body = response.text().await.unwrap_or_default();
+    body.lines()
+        .filter_map(|line| {
+            let mut cells = line.split('\t');
+            let id = cells.next()?.parse().ok()?;
+            Some((id, (cells.next()?.to_string(), cells.next()?.to_string())))
+        })
+        .collect()
+}
+
+/// A topic an external pipeline writes straight to keeps each record in its
+/// source's own tenant and table, and nothing is dead-lettered for it.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_external_topic_replaces_a_foreign_tenant_and_source() {
+    let infra = TestInfrastructure::new(test_name!(), true, true).await;
+    let clickhouse = clickhouse_address(&infra).await;
+    let bootstrap = kafka_bootstrap(&infra).await;
+    let direct = query_client(&clickhouse);
+
+    let landing = unique_table_name("tenancy_external");
+    create_header_table(&direct, &landing).await;
+    let topic = format!("tenancy-{landing}");
+    let group = format!("dfe-{landing}");
+    ensure_topic(&bootstrap, &topic).await;
+
+    let dlq_dir = tempfile::tempdir().expect("DLQ spool directory");
+    let mut config = kafka_loader(&bootstrap, &topic, &group, clickhouse.clone(), &landing);
+    with_file_dlq(&mut config, dlq_dir.path());
+    config.routing.external_topics = vec![dfe_loader::config::ExternalTopic {
+        topic: topic.clone(),
+        org_id: "acme-ext".to_string(),
+        allowed_org_ids: vec!["partner".to_string()],
+        source: landing.clone(),
+        allowed_sources: vec![],
+    }];
+    let (shutdown, loader) = start_loader(config);
+    let producer = make_producer(&bootstrap);
+
+    // (id, payload, the tenant the row must carry)
+    let records = [
+        (1, r#"{"id":1}"#.to_string(), "acme-ext"),
+        (
+            2,
+            r#"{"id":2,"_org_id":"victim","_source":"some_other_table"}"#.to_string(),
+            "acme-ext",
+        ),
+        (3, r#"{"id":3,"_org_id":"partner"}"#.to_string(), "partner"),
+        (
+            4,
+            format!(r#"{{"id":4,"_org_id":"acme-ext","_source":"{landing}"}}"#),
+            "acme-ext",
+        ),
+    ];
+    for (_, payload, _) in &records {
+        produce(&producer, &topic, payload).await;
+    }
+    let want: BTreeSet<u64> = records.iter().map(|(id, _, _)| *id).collect();
+    let landed = wait_landed(&clickhouse, &landing, &want, BUDGET).await;
+    let tenants = landed_tenants(&clickhouse, &landing).await;
+    let dead_lettered = dead_lettered_ids(dlq_dir.path());
+
+    shutdown.cancel();
+    let _ = tokio::time::timeout(Duration::from_secs(30), loader).await;
+    let _ = direct
+        .execute(&format!("DROP TABLE IF EXISTS default.{landing}"))
+        .await;
+
+    assert_eq!(
+        landed, want,
+        "every record lands in the source's own table, a foreign _source included"
+    );
+    assert!(
+        dead_lettered.is_disjoint(&want),
+        "a tenant mismatch must never reach the DLQ: {dead_lettered:?}"
+    );
+    let expected: BTreeMap<u64, (String, String)> = records
+        .iter()
+        .map(|(id, _, org)| (*id, ((*org).to_string(), landing.clone())))
+        .collect();
+    assert_eq!(
+        tenants, expected,
+        "a foreign tenant or source is replaced, an allowed one kept"
+    );
+}

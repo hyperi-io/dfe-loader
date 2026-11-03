@@ -701,6 +701,8 @@ impl Config {
             ));
         }
 
+        self.validate_external_topics()?;
+
         // Memory validation
         if self.memory.pressure_threshold < 0.0 || self.memory.pressure_threshold > 1.0 {
             return Err(crate::Error::Config(
@@ -726,6 +728,44 @@ impl Config {
             }
         }
 
+        Ok(())
+    }
+
+    /// Refuse an external-topic policy that names no topic, tenant or source, or
+    /// lists a topic twice: an empty value would let the replacement write a
+    /// record into no tenant, and a repeat would leave two policies for one topic.
+    fn validate_external_topics(&self) -> Result<()> {
+        let mut seen = std::collections::HashSet::new();
+        for (i, policy) in self.routing.external_topics.iter().enumerate() {
+            let at = format!("routing.external_topics[{i}]");
+            for (field, value) in [
+                ("topic", &policy.topic),
+                ("org_id", &policy.org_id),
+                ("source", &policy.source),
+            ] {
+                if value.is_empty() {
+                    return Err(crate::Error::Config(format!(
+                        "{at}.{field} must not be empty"
+                    )));
+                }
+            }
+            for (field, list) in [
+                ("allowed_org_ids", &policy.allowed_org_ids),
+                ("allowed_sources", &policy.allowed_sources),
+            ] {
+                if list.iter().any(String::is_empty) {
+                    return Err(crate::Error::Config(format!(
+                        "{at}.{field} must not hold an empty value"
+                    )));
+                }
+            }
+            if !seen.insert(policy.topic.as_str()) {
+                return Err(crate::Error::Config(format!(
+                    "{at}.topic '{}' is listed twice",
+                    policy.topic
+                )));
+            }
+        }
         Ok(())
     }
 
@@ -1752,6 +1792,62 @@ kafka:
         config.routing.default_org_id = String::new();
         let err = config.validate().unwrap_err().to_string();
         assert!(err.contains("routing.default_org_id"), "{err}");
+    }
+
+    #[test]
+    fn external_topic_policies_are_validated() {
+        use crate::config::ExternalTopic;
+
+        fn policy() -> ExternalTopic {
+            ExternalTopic {
+                topic: "ext_land".into(),
+                org_id: "acme".into(),
+                allowed_org_ids: vec![],
+                source: "ext".into(),
+                allowed_sources: vec![],
+            }
+        }
+        type Break = fn(&mut Vec<ExternalTopic>);
+        let cases: [(&str, Break, Option<&str>); 8] = [
+            ("a complete policy", |_| {}, None),
+            ("no topic", |p| p[0].topic.clear(), Some("[0].topic")),
+            ("no org", |p| p[0].org_id.clear(), Some("[0].org_id")),
+            ("no source", |p| p[0].source.clear(), Some("[0].source")),
+            (
+                "an empty allowed org",
+                |p| p[0].allowed_org_ids.push(String::new()),
+                Some("allowed_org_ids"),
+            ),
+            (
+                "an empty allowed source",
+                |p| p[0].allowed_sources.push(String::new()),
+                Some("allowed_sources"),
+            ),
+            (
+                "a topic listed twice",
+                |p| p.push(policy()),
+                Some("listed twice"),
+            ),
+            (
+                "two distinct topics",
+                |p| {
+                    let mut second = policy();
+                    second.topic = "other_land".into();
+                    p.push(second);
+                },
+                None,
+            ),
+        ];
+        for (name, tweak, want) in cases {
+            let mut config = Config::default();
+            config.routing.external_topics = vec![policy()];
+            tweak(&mut config.routing.external_topics);
+            match (config.validate(), want) {
+                (Ok(()), None) => {}
+                (Err(e), Some(text)) => assert!(e.to_string().contains(text), "{name}: {e}"),
+                (other, _) => panic!("{name}: unexpected {other:?}"),
+            }
+        }
     }
 
     #[test]
