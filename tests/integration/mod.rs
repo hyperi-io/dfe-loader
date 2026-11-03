@@ -51,6 +51,8 @@ mod kafka_rebalance;
 #[cfg(feature = "testcontainers")]
 mod kafka_tls_startup;
 #[cfg(feature = "testcontainers")]
+mod kafka_topic_lifecycle;
+#[cfg(feature = "testcontainers")]
 mod kafka_transport_e2e;
 #[cfg(feature = "testcontainers")]
 mod memory_balance;

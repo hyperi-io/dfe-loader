@@ -638,7 +638,7 @@ async fn test_kafka_invalid_brokers() {
 // ============================================================================
 
 /// Block until every topic in `want` is in the broker's metadata.
-async fn wait_for_topics(bootstrap: &str, want: &[&str]) {
+pub(super) async fn wait_for_topics(bootstrap: &str, want: &[&str]) {
     let consumer: BaseConsumer = ClientConfig::new()
         .set("bootstrap.servers", bootstrap)
         .create()
@@ -766,4 +766,20 @@ async fn test_kafka_transport_convert_config_auto_discover() {
         vec![r"events_.*".to_string()],
         "topic_regex should map to topic_include"
     );
+}
+
+/// Delete `topic`.
+pub(super) async fn delete_topic(bootstrap: &str, topic: &str) {
+    let admin: AdminClient<_> = ClientConfig::new()
+        .set("bootstrap.servers", bootstrap)
+        .create()
+        .expect("admin client");
+    admin
+        .delete_topics(&[topic], &AdminOptions::new())
+        .await
+        .expect("delete request")
+        .into_iter()
+        .for_each(|r| {
+            r.unwrap_or_else(|(t, e)| panic!("delete {t}: {e}"));
+        });
 }
