@@ -74,8 +74,12 @@ jobs:
       bump: ${{ inputs.bump || 'auto' }}
       skip-optimize: ${{ inputs.skip-optimize || '' }}
       release-unoptimized: ${{ inputs.release-unoptimized || '' }}
-      optimize-tier: ${{ inputs.optimize-tier || '' }}
+      optimize-tier: release
       test-tier: ${{ inputs.test-tier || 'core' }}
+      runner-mode: free
+      branch-build: "true"
+      build-timeout-minutes: 360
+      test-timeout-minutes: 360
     # Least privilege: pass only the secrets rust-ci.yml consumes, never `inherit`.
     secrets:
       CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

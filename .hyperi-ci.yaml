@@ -86,7 +86,7 @@ release:
     contract: emit
     library: "2.14.20"
   container:
-    enabled: true
+    enabled: false
     dockerfile: Dockerfile
     platforms:
       - linux/amd64
