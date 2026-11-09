@@ -148,12 +148,3 @@ the full payload is kept. Under `full` a JSON record is stored once, in `_json`:
   invalidate and re-fetch, then retry.
 - **One commit per flush cycle** -- offsets commit once per cycle, and on each partition stop below the lowest offset not placed yet. A failed batch or a dead letter the DLQ refused is held and retried with jittered backoff, and holds its partition's commit until it lands. A dead letter no DLQ backend can ever hold is dropped and counted instead (`pipeline_dead_letters_dropped_total{reason}`). A held batch whose table ClickHouse has since reported absent is retried against the default table.
 - **Partition leases** -- rows of a partition a rebalance has moved away are discarded before any write, since the partition's next owner reads them again from the committed offset (`transport_revoke_discarded_total{stage="buffer"}`). See [operations.md](operations.md#rebalances).
-
-## Source of truth
-
-| Data | Source |
-|------|--------|
-| Version | `git describe --tags` / `VERSION` |
-| Tasks | GitHub Issues / `TODO.md` |
-| History | `git log` |
-| Static context | `CLAUDE.md` |
