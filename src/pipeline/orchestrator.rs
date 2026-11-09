@@ -1550,7 +1550,7 @@ impl Orchestrator {
                         table = %table,
                         inserted = result.inserted,
                         rejected = result.failed.len(),
-                        "Rows permanently rejected -- routing them to the DLQ"
+                        "Rows permanently rejected, routing them to the DLQ."
                     );
                     let unplaceable =
                         queue_rejected(&table, &payloads, &result.failed, &mut dead_letters);
@@ -3045,11 +3045,14 @@ fn attach_row_offsets(failed: &mut [FailedRow], offsets: &[KafkaOffset]) {
 /// no bytes to hand over.
 fn rejected_entry(table: &str, payloads: &[Arc<[u8]>], row: &FailedRow) -> Option<DlqEntry> {
     let payload = rejected_payload(payloads, row)?;
-    let entry = DlqEntry::new(
-        "loader",
-        format!("clickhouse_permanent_reject table={table}: {}", row.reason),
-        payload,
-    );
+    let reason = match &row.value {
+        Some(value) => format!(
+            "clickhouse_permanent_reject table={table}: {} {value}",
+            row.reason
+        ),
+        None => format!("clickhouse_permanent_reject table={table}: {}", row.reason),
+    };
+    let entry = DlqEntry::new("loader", reason, payload).with_destination(table);
     Some(match &row.offset {
         Some(offset) => entry.with_source(scalo::dlq::DlqSource::kafka(
             &*offset.topic,
@@ -3824,6 +3827,7 @@ mod tests {
                 }),
                 reason: reason.to_string(),
                 row_json: None,
+                value: None,
             })
             .collect()
     }
@@ -4298,10 +4302,16 @@ mod tests {
             }),
             reason: "RowBinary encode: unsupported value".to_string(),
             row_json: None,
+            value: Some("[\"b\"]".to_string()),
         }];
 
         let dead_letters = rejected_entries(&payloads, &failed);
         assert_eq!(dead_letters.len(), 1);
+        assert_eq!(
+            dead_letters[0].reason,
+            "clickhouse_permanent_reject table=dfe.main: RowBinary encode: unsupported value [\"b\"]"
+        );
+        assert_eq!(dead_letters[0].destination.as_deref(), Some("dfe.main"));
         let source = dead_letters[0]
             .source
             .as_ref()
@@ -4337,6 +4347,7 @@ mod tests {
             offset: Some(offset("dfe-events", 0, 10)),
             reason: "code 117".to_string(),
             row_json: Some(br#"{"_raw":"{\"user\":\"kaz\"}"}"#.to_vec()),
+            value: None,
         }];
 
         assert_eq!(
@@ -4368,6 +4379,7 @@ mod tests {
             offset: None,
             reason: "code 117".to_string(),
             row_json: Some(row_bytes.clone()),
+            value: None,
         };
         let empty: Vec<Arc<[u8]>> = vec![Arc::from(&[][..])];
         assert_eq!(rejected_payload(&empty, &failed), Some(row_bytes));
@@ -4385,6 +4397,7 @@ mod tests {
             offset: None,
             reason: "code 117".to_string(),
             row_json: None,
+            value: None,
         };
         assert_eq!(rejected_payload(&empty, &nothing), None);
         assert!(rejected_entries(&empty, &[nothing]).is_empty());
@@ -4769,6 +4782,7 @@ mod tests {
                 offset: None,
                 reason: "code 469".to_string(),
                 row_json: None,
+                value: None,
             })
             .collect();
         failed.push(FailedRow {
@@ -4776,6 +4790,7 @@ mod tests {
             offset: Some(offset("other", 2, 5)),
             reason: "code 469".to_string(),
             row_json: None,
+            value: None,
         });
         let batch: Vec<KafkaOffset> = (40..44).map(|off| offset("dfe-events", 0, off)).collect();
 
@@ -4807,6 +4822,7 @@ mod tests {
                 offset: None,
                 reason: "code 117".to_string(),
                 row_json: None,
+                value: None,
             })
             .collect();
         attach_row_offsets(&mut failed, &batch);
