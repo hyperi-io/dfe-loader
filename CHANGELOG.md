@@ -3,6 +3,13 @@
 Rendered by CI and committed back at the end of a release -- do not edit by
 hand. Release notes also appear on the GitHub Releases page, one per tag.
 
+## [1.18.67](https://github.com/hyperi-io/dfe-loader/compare/v1.18.66...v1.18.67) (2026-11-09)
+
+### Bug Fixes
+
+* **deps:** update rust-dependencies ([#315](https://github.com/hyperi-io/dfe-loader/issues/315)) ([51deaab](https://github.com/hyperi-io/dfe-loader/commit/51deaabdf749642b5327d3714a9c92f1a5752d1e))
+* **scalo:** rebuild on scalo 2.14.27 ([3b90b48](https://github.com/hyperi-io/dfe-loader/commit/3b90b4875880cbf5bed301ba864778dbc8f86593))
+
 ## [1.18.66](https://github.com/hyperi-io/dfe-loader/compare/v1.18.65...v1.18.66) (2026-11-03)
 
 ### Bug Fixes
