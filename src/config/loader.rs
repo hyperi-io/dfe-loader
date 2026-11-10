@@ -51,6 +51,7 @@ pub use super::pipeline::*;
 /// - `computed_columns.*` -- computed column cache built at startup
 /// - `column_directives.*` -- column directive cache built at startup
 /// - `routing.dlq` -- DLQ backends opened at startup
+/// - `dlq_load.*` -- DLQ topics subscribed at startup
 /// - `field_mapping.*` -- mapping rules built at startup
 /// - `enrichment.*` -- enrichment pipeline built at startup
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
@@ -86,6 +87,8 @@ pub struct Config {
     /// Batch processing engine config (SIMD parse, pre-route, parallelism). **Restart required.**
     #[serde(default)]
     pub batch_processing: BatchProcessingConfig,
+    /// Kafka DLQ topics loaded into a table of their own. **Restart required.**
+    pub dlq_load: DlqLoadConfig,
 
     // --- Hot-reloaded (takes effect on next batch) ---
     /// Table and tenant routing. **Hot-reloaded**, `routing.dlq` aside.
@@ -140,6 +143,7 @@ impl Default for Config {
             hot_reload: HotReloadConfig::default(),
             scaling: ScalingConfig::default(),
             batch_processing: BatchProcessingConfig::default(),
+            dlq_load: DlqLoadConfig::default(),
             routing: RoutingConfig::default(),
             buffer: BufferConfig::default(),
             memory: MemoryConfig::default(),
@@ -703,6 +707,19 @@ impl Config {
 
         self.validate_external_topics()?;
 
+        // An empty name would subscribe to no topic, or route a dead letter to no table.
+        if self.dlq_load.topics.iter().any(String::is_empty) {
+            return Err(crate::Error::Config(
+                "dlq_load.topics must not hold an empty value".into(),
+            ));
+        }
+        if !self.dlq_load.topics.is_empty() && self.dlq_load.table.is_empty() {
+            return Err(crate::Error::Config(
+                "dlq_load.table must not be empty while dlq_load.topics names a topic".into(),
+            ));
+        }
+        self.refuse_dead_letter_default(&self.dlq_load)?;
+
         // Memory validation
         if self.memory.pressure_threshold < 0.0 || self.memory.pressure_threshold > 1.0 {
             return Err(crate::Error::Config(
@@ -728,6 +745,25 @@ impl Config {
             }
         }
 
+        Ok(())
+    }
+
+    /// Refuse a default table that is `dlq_load`'s table while it loads: every
+    /// record falling back to the default would land among the dead letters.
+    ///
+    /// A reload checks against the `dlq_load` the process started with, which
+    /// changes only on restart.
+    ///
+    /// # Errors
+    ///
+    /// A config error naming both keys.
+    pub fn refuse_dead_letter_default(&self, dlq_load: &DlqLoadConfig) -> Result<()> {
+        if !dlq_load.topics.is_empty() && self.routing.default_table == dlq_load.table {
+            return Err(crate::Error::Config(format!(
+                "routing.default_table must not equal dlq_load.table ({}), which holds dead letters only",
+                dlq_load.table
+            )));
+        }
         Ok(())
     }
 
@@ -1847,6 +1883,72 @@ kafka:
                 (Err(e), Some(text)) => assert!(e.to_string().contains(text), "{name}: {e}"),
                 (other, _) => panic!("{name}: unexpected {other:?}"),
             }
+        }
+    }
+
+    #[test]
+    fn dlq_load_names_every_topic_and_a_table_while_it_loads() {
+        type Break = fn(&mut Config);
+        let cases: [(&str, Break, Option<&str>); 7] = [
+            ("the shipped default", |_| {}, None),
+            (
+                "an empty topic",
+                |c| c.dlq_load.topics.push(String::new()),
+                Some("dlq_load.topics"),
+            ),
+            (
+                "no table",
+                |c| c.dlq_load.table.clear(),
+                Some("dlq_load.table"),
+            ),
+            ("nothing to load", |c| c.dlq_load.topics.clear(), None),
+            (
+                "nothing to load and no table",
+                |c| {
+                    c.dlq_load.topics.clear();
+                    c.dlq_load.table.clear();
+                },
+                None,
+            ),
+            (
+                "the default table is the dlq table",
+                |c| c.routing.default_table = "dlq".into(),
+                Some("routing.default_table"),
+            ),
+            (
+                "the default table is the dlq table, with nothing to load",
+                |c| {
+                    c.routing.default_table = "dlq".into();
+                    c.dlq_load.topics.clear();
+                },
+                None,
+            ),
+        ];
+        for (name, tweak, want) in cases {
+            let mut config = Config::default();
+            tweak(&mut config);
+            match (config.validate(), want) {
+                (Ok(()), None) => {}
+                (Err(e), Some(text)) => assert!(e.to_string().contains(text), "{name}: {e}"),
+                (other, _) => panic!("{name}: unexpected {other:?}"),
+            }
+        }
+        let shipped = DlqLoadConfig::default();
+        assert_eq!(shipped.table, "dlq");
+        assert!(shipped.loads("dfe_loader_dlq") && !shipped.loads("main_land"));
+        // (table, loaded into while topics are named, with none named)
+        for (table, named, none) in [
+            ("dfe.dlq", true, false),
+            ("acme.dlq", true, false),
+            ("dfe.dlq_extra", false, false),
+            ("dlq", false, false),
+        ] {
+            let off = DlqLoadConfig {
+                topics: vec![],
+                ..DlqLoadConfig::default()
+            };
+            assert_eq!(shipped.loads_into(table), named, "{table}");
+            assert_eq!(off.loads_into(table), none, "{table} with no topics");
         }
     }
 

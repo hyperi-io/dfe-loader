@@ -23,6 +23,7 @@ use rustc_hash::FxHashMap;
 
 use crate::buffer::{KafkaOffset, Purged};
 use crate::clickhouse::SchemaCache;
+use crate::config::DlqLoadConfig;
 use crate::kafka::KafkaMessage;
 
 /// Per-buffer configuration.
@@ -101,6 +102,9 @@ pub(crate) struct PendingSchemaBuffer {
     /// `expire()` call (added in a later task).
     evicted: VecDeque<(KafkaMessage, ExpireReason)>,
     config: PendingSchemaConfig,
+    /// The table dead letters load into, whose messages wait for it even once
+    /// it is absent.
+    dlq_load: Option<DlqLoadConfig>,
 }
 
 impl PendingSchemaBuffer {
@@ -111,7 +115,16 @@ impl PendingSchemaBuffer {
             total_count: 0,
             evicted: VecDeque::new(),
             config,
+            dlq_load: None,
         }
+    }
+
+    /// Keep messages for the table `dlq_load` loads into waiting when that
+    /// table is absent. Only dead letters route there, and none falls back.
+    #[must_use]
+    pub fn with_dlq_load(mut self, dlq_load: &DlqLoadConfig) -> Self {
+        self.dlq_load = Some(dlq_load.clone());
+        self
     }
 
     pub fn len(&self) -> usize {
@@ -218,18 +231,20 @@ impl PendingSchemaBuffer {
     ///
     /// An absent table's messages are released so the processor can re-route
     /// them to the default table; holding them would only age them out to DLQ.
-    /// Clears the per-table request timestamp so a later miss for the same
-    /// table triggers a fresh resolution request.
+    /// The dead letters' table is the exception: nothing there re-routes, so
+    /// they stay for it or the age cap. Clears the per-table request timestamp
+    /// so a later miss for the same table triggers a fresh resolution request.
     pub fn take_ready(
         &mut self,
         schema_cache: &SchemaCache,
         absent: &super::types::AbsentTables,
     ) -> Vec<KafkaMessage> {
         let mut out = Vec::new();
+        let waits = |t: &str| self.dlq_load.as_ref().is_some_and(|d| d.loads_into(t));
         let ready_tables: Vec<String> = self
             .per_table
             .keys()
-            .filter(|t| schema_cache.get(t).is_some() || absent.contains(t))
+            .filter(|t| schema_cache.get(t).is_some() || (absent.contains(t) && !waits(t)))
             .cloned()
             .collect();
         for table in ready_tables {
@@ -487,6 +502,40 @@ mod tests {
             "a table ClickHouse never answered for stays buffered"
         );
         assert_eq!(buf.len_per_table("dfe.unreachable"), 1);
+    }
+
+    #[test]
+    fn a_dead_letter_waits_for_its_absent_table() {
+        let mut buf =
+            PendingSchemaBuffer::new(small_cfg()).with_dlq_load(&DlqLoadConfig::default());
+        buf.enqueue("dfe.dlq".into(), make_msg(b"pinned")).unwrap();
+        buf.enqueue("dfe.gone".into(), make_msg(b"routed")).unwrap();
+
+        let cache = SchemaCache::new(300);
+        let mut absent = no_absent_tables();
+        absent.insert("dfe.dlq", Instant::now());
+        absent.insert("dfe.gone", Instant::now());
+
+        // An absent table releases its records to fall back, the dead letters' table never.
+        let released = buf.take_ready(&cache, &absent);
+        assert_eq!(released.len(), 1);
+        assert_eq!(released[0].payload, b"routed");
+        assert_eq!(buf.len_per_table("dfe.dlq"), 1);
+        assert!(
+            !buf.tables_needing_rerequest(
+                Instant::now() + Duration::from_secs(3),
+                Duration::from_secs(2)
+            )
+            .is_empty(),
+            "the table the dead letter waits for is still asked about"
+        );
+
+        // Once the table exists the dead letter goes to it.
+        cache.insert("dfe.dlq".into(), dummy_schema("dfe.dlq"));
+        let released = buf.take_ready(&cache, &absent);
+        assert_eq!(released.len(), 1);
+        assert_eq!(released[0].payload, b"pinned");
+        assert_eq!(buf.len(), 0);
     }
 
     #[test]

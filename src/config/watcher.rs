@@ -38,8 +38,8 @@ use std::time::Duration;
 use scalo::config::reloader::{ConfigReloader, ReloaderConfig};
 use tokio::task::JoinHandle;
 
-use super::Config;
 use super::shared::SharedConfig;
+use super::{Config, DlqLoadConfig};
 use crate::Result;
 
 /// Configuration for the watcher
@@ -87,6 +87,7 @@ impl ConfigWatcher {
         }
 
         let config_path_str = config.config_path.to_string_lossy().to_string();
+        let live_dlq_load = shared_config.read().dlq_load.clone();
 
         let reloader_config = ReloaderConfig {
             config_path: Some(config.config_path),
@@ -103,8 +104,8 @@ impl ConfigWatcher {
                 Config::load(Some(&config_path_str))
                     .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
             },
-            |cfg| {
-                validate_config(cfg)
+            move |cfg| {
+                validate_config(cfg, &live_dlq_load)
                     .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
             },
         );
@@ -136,9 +137,11 @@ impl ConfigWatcher {
 ///
 /// Delegates to [`Config::validate`]: a reload judged by its own rule set
 /// refuses a config startup accepted, and the loader then runs on the stale
-/// one with only a log line to say so.
-fn validate_config(config: &Config) -> Result<()> {
-    config.validate()
+/// one with only a log line to say so. `live` is the `dlq_load` the process
+/// started with, which a reload does not change.
+fn validate_config(config: &Config, live: &DlqLoadConfig) -> Result<()> {
+    config.validate()?;
+    config.refuse_dead_letter_default(live)
 }
 
 #[cfg(test)]
@@ -186,31 +189,69 @@ buffer:
         assert!(result.is_err());
     }
 
+    /// Validate `config` as a reload does, in a process started on the shipped
+    /// `dlq_load`.
+    fn reload(config: &Config) -> Result<()> {
+        validate_config(config, &DlqLoadConfig::default())
+    }
+
+    #[test]
+    fn a_reload_never_makes_the_dlq_table_the_default() {
+        // (default table, dlq_load.table in the reloaded file, loading at
+        //  startup, refused)
+        let cases = [
+            ("main", "dlq", true, false),
+            ("dlq", "dlq", true, true),
+            // dlq_load changes on restart, so the process still loads into dlq.
+            ("dlq", "dead", true, true),
+            ("main", "main", true, true),
+            ("dlq", "dead", false, false),
+        ];
+        for (default_table, file_table, loading, refused) in cases {
+            let mut config = Config::default();
+            config.routing.default_table = default_table.into();
+            config.dlq_load.table = file_table.into();
+            let mut live = DlqLoadConfig::default();
+            if !loading {
+                live.topics.clear();
+            }
+            let label = format!("default {default_table}, file {file_table}, loading {loading}");
+            match (validate_config(&config, &live), refused) {
+                (Ok(()), false) => {}
+                (Err(e), true) => assert!(
+                    e.to_string().contains("routing.default_table"),
+                    "{label}: {e}"
+                ),
+                (other, _) => panic!("{label}: unexpected {other:?}"),
+            }
+        }
+    }
+
     #[test]
     fn test_validate_config_valid() {
         let config = Config::default();
-        assert!(validate_config(&config).is_ok());
+        assert!(reload(&config).is_ok());
     }
 
     #[test]
     fn test_validate_config_empty_brokers() {
         let mut config = Config::default();
         config.kafka.brokers = vec![];
-        assert!(validate_config(&config).is_err());
+        assert!(reload(&config).is_err());
     }
 
     #[test]
     fn test_validate_config_empty_clickhouse_hosts() {
         let mut config = Config::default();
         config.clickhouse.hosts = vec![];
-        assert!(validate_config(&config).is_err());
+        assert!(reload(&config).is_err());
     }
 
     #[test]
     fn test_validate_config_zero_flush_rows() {
         let mut config = Config::default();
         config.buffer.flush_rows = 0;
-        assert!(validate_config(&config).is_err());
+        assert!(reload(&config).is_err());
     }
 
     /// A brokerless profile gives the loader no broker address, and a reload
@@ -223,6 +264,6 @@ buffer:
         config.kafka.brokers = vec![];
         config.grpc.listen = Some("0.0.0.0:6000".to_string());
         assert!(config.is_direct());
-        validate_config(&config).expect("a reload on the direct transport reaches no broker");
+        reload(&config).expect("a reload on the direct transport reaches no broker");
     }
 }

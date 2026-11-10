@@ -106,6 +106,25 @@ Precedence, highest wins: **DDL tag > per-table > global**.
 | `routing.org_routes` | per-org database routing, keyed on the tenant |
 | `routing.external_topics` | topics an external pipeline writes directly. A record there keeps its `_org_id` and `_source` only when they are the source's own or on the topic's allow-list ([routing](pipeline/routing.md#external-pipeline-topics)) |
 
+### Loading dead letters
+
+| Setting | Default | Effect |
+|---------|---------|--------|
+| `dlq_load.topics` | `dfe_receiver_dlq`, `dfe_loader_dlq`, `dfe_archiver_dlq`, `dfe_fetcher_dlq`, `dfe_transform_dlq` | Kafka DLQ topics the loader subscribes to as well as its data topics. An empty list loads none |
+| `dlq_load.table` | `dlq` | the table every record from those topics lands in, whatever it names |
+
+A dead letter carries the `_source` of the record it wraps, so routing it by its fields would send it back to the table that refused it. Each `dlq_load` topic routes to `dlq_load.table` instead, in the database `routing` picks for its tenant. The dlq table's `_json` column reads the entry's own `_json` key (`@source: _json`), so the original record lands there rather than the whole entry.
+
+A dead letter never falls back to the default table. When `dlq_load.table` does not exist, in the default database or a tenant's own, dead letters wait in the pending-schema buffer with their offsets uncommitted, and a batch of them whose insert failed is held for its table. Each retires at `schema.pending_max_age_secs`: a buffered one like any record whose table never resolved, and a held batch counted from when it was first held.
+
+`dlq_load.table` holds dead letters alone. A record from any other topic whose routing names it, through `table_fields`, `source_to_table` or its topic, lands in the default table, as one naming an unknown table does. So `routing.default_table` cannot be `dlq_load.table` while `dlq_load.topics` names a topic. Startup refuses it, and so does a reload, checked against the `dlq_load` the process started with.
+
+A record from a `dlq_load` topic that fails again, or retires that way, is dropped, never dead-lettered. It is counted in `pipeline_dead_letters_dropped_total{reason="dlq_load"}` and `dfe_loader_rows_lost_total`. Its offset commits, and the entry stays on the DLQ topic until retention.
+
+Under auto-discovery each topic is included by name. An exclude that matches one, such as scalo's `_dlq$` or the loader's own `routing.dlq.topic`, is narrowed to let exactly those names through, so no other `*_dlq` topic is subscribed. An explicit `kafka.topics` list gains each `dlq_load` topic it lacks.
+
+The gRPC transport reads no Kafka topic, so a gRPC loader loads no dead letters and keeps its file DLQ.
+
 ### Enrichment, resilience
 
 | Setting | Effect |
@@ -124,7 +143,7 @@ Config hot-reloads on change: `hot_reload.enabled` is on unless set false, and t
 - **Restart-required:** `clickhouse.protocol`, ClickHouse URL/hosts,
   `clickhouse.insert_format`, `clickhouse.tls.enabled`, the
   `clickhouse.*_timeout_ms` bounds, Kafka connection -- all of these are baked
-  into the `Client` at build time. Also `routing.dlq`, `field_mapping` and `enrichment`, which are built once at startup.
+  into the `Client` at build time. Also `routing.dlq`, `dlq_load`, `field_mapping` and `enrichment`, which are built once at startup.
 - **Safe to reload:** buffer thresholds, `metadata` (capture modes included), `timestamp_dq`, `field_sanitization`, and `routing` other than `routing.dlq`.
 
 On Kubernetes the deployment contract lists `routing` in `hot_paths`, so the chart leaves it out of the pod's config checksum. A `routing` edit reaches the running pods through the refreshed ConfigMap, and an edit anywhere else still rolls them.

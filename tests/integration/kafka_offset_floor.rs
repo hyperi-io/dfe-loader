@@ -251,7 +251,7 @@ pub(super) async fn kafka_bootstrap(infra: &TestInfrastructure) -> String {
     bootstrap
 }
 
-/// A Kafka-transport loader reading `topic` as `group` and writing to
+/// A Kafka-transport loader reading `topic` alone as `group` and writing to
 /// `default.{table}` through `clickhouse`.
 pub(super) fn kafka_loader(
     bootstrap: &str,
@@ -264,6 +264,8 @@ pub(super) fn kafka_loader(
     config.transport = "kafka".to_string();
     config.kafka.brokers = vec![bootstrap.to_string()];
     config.kafka.topics = vec![topic.to_string()];
+    // The test broker holds no DLQ topic to load.
+    config.dlq_load.topics.clear();
     config.kafka.group = group.to_string();
     config.kafka.allow_insecure_transport = true;
     config.clickhouse.hosts = vec![clickhouse];

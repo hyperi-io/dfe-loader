@@ -50,6 +50,125 @@ fn start_error(context: &str, e: TransportError) -> crate::Error {
     }
 }
 
+/// The topic exclude `pattern` with every topic `loaded` names taken out of
+/// what it excludes, or `None` once it excludes nothing else.
+///
+/// scalo applies an exclude ahead of every include, and the regex crate has no
+/// lookahead. So an exact, prefix or suffix literal is rewritten to the same
+/// set less those names, and any other pattern that matches one stays whole,
+/// leaving that topic unsubscribed.
+fn exclude_except(pattern: &str, loaded: &[String]) -> Option<String> {
+    let Ok(exclude) = regex::Regex::new(pattern) else {
+        return Some(pattern.to_string());
+    };
+    let hits: Vec<&str> = loaded
+        .iter()
+        .map(String::as_str)
+        .filter(|topic| exclude.is_match(topic))
+        .collect();
+    if hits.is_empty() {
+        return Some(pattern.to_string());
+    }
+    let (anchored_start, rest) = match pattern.strip_prefix('^') {
+        Some(rest) => (true, rest),
+        None => (false, pattern),
+    };
+    let (anchored_end, text) = match rest.strip_suffix('$').and_then(regex_literal) {
+        Some(text) => (true, Some(text)),
+        None => (false, regex_literal(rest)),
+    };
+    match (anchored_start, anchored_end, text) {
+        (true, true, Some(_)) => None,
+        (true, false, Some(prefix)) => {
+            let rests: Vec<&str> = hits
+                .iter()
+                .filter_map(|topic| topic.strip_prefix(prefix.as_str()))
+                .collect();
+            Some(format!(
+                "(?s)^{}{}$",
+                regex::escape(&prefix),
+                none_of(&rests)
+            ))
+        }
+        (false, true, Some(suffix)) => {
+            let rests: Vec<&str> = hits
+                .iter()
+                .filter_map(|topic| topic.strip_suffix(suffix.as_str()))
+                .collect();
+            Some(format!(
+                "(?s)^{}{}$",
+                none_of(&rests),
+                regex::escape(&suffix)
+            ))
+        }
+        _ => {
+            tracing::warn!(
+                pattern,
+                topics = ?hits,
+                "A topic exclude matches dlq_load topics and is not a literal, so they stay unsubscribed"
+            );
+            Some(pattern.to_string())
+        }
+    }
+}
+
+/// The literal text `escaped` matches, when it is exactly `regex::escape` of one.
+fn regex_literal(escaped: &str) -> Option<String> {
+    let mut text = String::with_capacity(escaped.len());
+    let mut chars = escaped.chars();
+    while let Some(c) = chars.next() {
+        text.push(if c == '\\' { chars.next()? } else { c });
+    }
+    (regex::escape(&text) == escaped).then_some(text)
+}
+
+/// A trie of the words [`none_of`] leaves out.
+#[derive(Default)]
+struct WordTrie {
+    word: bool,
+    next: std::collections::BTreeMap<char, WordTrie>,
+}
+
+/// A regex group matching every whole string but `words`.
+///
+/// A string is none of them when it leaves the trie by a character no word has
+/// next, runs on past a word's end, or stops where no word does.
+fn none_of(words: &[&str]) -> String {
+    let mut root = WordTrie::default();
+    for word in words {
+        let mut node = &mut root;
+        for c in word.chars() {
+            node = node.next.entry(c).or_default();
+        }
+        node.word = true;
+    }
+    let mut alternatives = Vec::new();
+    none_of_below(&root, &mut String::new(), &mut alternatives);
+    // The empty string is the one stop with no text to write.
+    let empty = if root.word { "" } else { "?" };
+    format!("(?:{}){empty}", alternatives.join("|"))
+}
+
+/// Push the alternatives for every string that diverges at or below `node`.
+fn none_of_below(node: &WordTrie, path: &mut String, alternatives: &mut Vec<String>) {
+    let at = regex::escape(path);
+    if !node.word && !path.is_empty() {
+        alternatives.push(at.clone());
+    }
+    if node.next.is_empty() {
+        alternatives.push(format!("{at}.+"));
+    } else {
+        // `\u{..}` escapes, which a class reads as the character whatever it is.
+        let next: String = node.next.keys().flat_map(|c| c.escape_unicode()).collect();
+        alternatives.push(format!("{at}[^{next}].*"));
+    }
+    for (c, child) in &node.next {
+        path.push(*c);
+        none_of_below(child, path, alternatives);
+        path.pop();
+    }
+}
+
 /// A received block: the passing messages plus any inbound-filter DLQ entries.
 ///
 /// The DLQ entries are surfaced (never silently dropped) so the orchestrator
@@ -88,7 +207,8 @@ impl TransportAdapter {
     ///
     /// scalo's `KafkaTransport::new()` handles auto-discovery when
     /// `config.topics` is empty -- no app-side resolver needed. `dlq` names the
-    /// topics auto-discovery must never subscribe to (see [`Self::convert_config`]).
+    /// topics auto-discovery must never subscribe to, and `dlq_load` the DLQ
+    /// topics it always does (see [`Self::convert_config`]).
     ///
     /// When `governor` is `Some`, the self-regulation inbound brake is attached
     /// to the Kafka receiver: under memory pressure the consumer's ASSIGNED
@@ -100,9 +220,10 @@ impl TransportAdapter {
     pub async fn new(
         config: &KafkaConfig,
         dlq: &DlqConfig,
+        dlq_load: &[String],
         governor: Option<&SelfRegulationGovernor>,
     ) -> Result<Self> {
-        let transport_config = Self::convert_config(config, dlq);
+        let transport_config = Self::convert_config(config, dlq, dlq_load);
 
         let transport = KafkaTransport::receiver(&transport_config)
             .await
@@ -125,7 +246,23 @@ impl TransportAdapter {
     /// auto-discovers. The include is `topic_regex` when set, else
     /// `*_land` / `*_load`. The loader's own DLQ topics are appended to
     /// scalo's default excludes (`^__`, `_dlq$`), never replacing them.
-    pub fn convert_config(config: &KafkaConfig, dlq: &DlqConfig) -> TransportKafkaConfig {
+    ///
+    /// Each `dlq_load` topic is subscribed too: appended to an explicit list,
+    /// or included by name under discovery, with every exclude narrowed to let
+    /// those names through and nothing else (see `exclude_except`).
+    pub fn convert_config(
+        config: &KafkaConfig,
+        dlq: &DlqConfig,
+        dlq_load: &[String],
+    ) -> TransportKafkaConfig {
+        let mut topics = config.topics.clone();
+        if !topics.is_empty() {
+            for topic in dlq_load {
+                if !topics.contains(topic) {
+                    topics.push(topic.clone());
+                }
+            }
+        }
         let mut transport_config = TransportKafkaConfig {
             // loader is consume-only (Kafka -> ClickHouse), so it builds through
             // `KafkaTransport::receiver`, which builds no producer and refuses an
@@ -134,8 +271,8 @@ impl TransportAdapter {
             brokers: config.brokers.clone(),
             group: config.group.clone(),
             client_id: config.client_id.clone(),
-            topics: config.topics.clone(),
-            auto_discover: config.topics.is_empty(),
+            auto_discover: topics.is_empty(),
+            topics,
             // scalo (>=2.8) rejects an unencrypted transport under a production
             // profile at construction unless this is explicitly set. Secure by
             // default; operators opt in for mesh-encrypted in-cluster traffic.
@@ -154,6 +291,15 @@ impl TransportAdapter {
         transport_config
             .topic_exclude
             .extend(dlq.topic_exclude_patterns());
+        transport_config.topic_include.extend(
+            dlq_load
+                .iter()
+                .map(|topic| format!("^{}$", regex::escape(topic))),
+        );
+        transport_config.topic_exclude = std::mem::take(&mut transport_config.topic_exclude)
+            .iter()
+            .filter_map(|pattern| exclude_except(pattern, dlq_load))
+            .collect();
 
         // SASL configuration
         if let Some(ref sasl) = config.sasl
@@ -709,8 +855,13 @@ impl TransportBackend {
             let adapter = GrpcTransportAdapter::new(&config.grpc, governor, memory_guard).await?;
             Ok(Self::Grpc(adapter))
         } else {
-            let adapter =
-                TransportAdapter::new(&config.kafka, &config.routing.dlq, governor).await?;
+            let adapter = TransportAdapter::new(
+                &config.kafka,
+                &config.routing.dlq,
+                &config.dlq_load.topics,
+                governor,
+            )
+            .await?;
             Ok(Self::Kafka(adapter))
         }
     }
@@ -1187,16 +1338,152 @@ mod discovery_tests {
 
     #[test]
     fn empty_topics_discover_only_land_and_load_topics() {
-        let cfg = TransportAdapter::convert_config(&KafkaConfig::default(), &dlq_land());
+        let cfg = TransportAdapter::convert_config(&KafkaConfig::default(), &dlq_land(), &[]);
 
         assert!(cfg.auto_discover, "an empty topic list auto-discovers");
         assert_eq!(cfg.topic_include, [LANDING_TOPIC_INCLUDE]);
         assert_eq!(resolve(&cfg, BROKER_TOPICS), ["main_land", "x_load"]);
     }
 
+    /// The fleet's five DLQ topics, plus a sixth `_dlq` topic nobody loads.
+    const DLQ_TOPICS: &[&str] = &[
+        "dfe_receiver_dlq",
+        "dfe_loader_dlq",
+        "dfe_archiver_dlq",
+        "dfe_fetcher_dlq",
+        "dfe_transform_dlq",
+        "other_dlq",
+    ];
+
+    #[test]
+    fn discovery_subscribes_each_dlq_load_topic_and_no_other_dlq_topic() {
+        let loaded = crate::config::DlqLoadConfig::default().topics;
+        let broker: Vec<&str> = BROKER_TOPICS.iter().chain(DLQ_TOPICS).copied().collect();
+        let strimzi: &[&str] = &[
+            "strimzi.cruisecontrol.metrics",
+            "strimzi.cruisecontrol.modeltrainingsamples",
+        ];
+        // Every broker topic no exclude takes out, under a broad include.
+        let broad: &[&str] = &[
+            "_schemas",
+            "connect-offsets",
+            "main_land",
+            "strimzi.cruisecontrol.metrics",
+            "strimzi.cruisecontrol.modeltrainingsamples",
+            "x_load",
+        ];
+        let broad_and_dlq_land: Vec<&str> = broad.iter().copied().chain(["dlq_land"]).collect();
+        // (the loader's own DLQ topic, topic_regex, what discovery subscribes to
+        // beside the five loaded topics)
+        let cases: [(&str, Option<&str>, &[&str]); 4] = [
+            ("dlq_land", None, &["main_land", "x_load"]),
+            ("dlq_land", Some("^strimzi\\."), strimzi),
+            ("dlq_land", Some(".*"), broad),
+            // The loader's own DLQ topic is one it loads.
+            ("dfe_loader_dlq", Some(".*"), &broad_and_dlq_land),
+        ];
+        for (own, topic_regex, data) in cases {
+            let kafka = KafkaConfig {
+                topic_regex: topic_regex.map(str::to_string),
+                ..KafkaConfig::default()
+            };
+            let dlq = DlqConfig {
+                topic: own.to_string(),
+                ..DlqConfig::default()
+            };
+            let cfg = TransportAdapter::convert_config(&kafka, &dlq, &loaded);
+
+            let mut want: Vec<&str> = data.iter().chain(&DLQ_TOPICS[..5]).copied().collect();
+            want.sort_unstable();
+            assert_eq!(resolve(&cfg, &broker), want, "{own} {topic_regex:?}");
+            assert!(cfg.auto_discover, "{own} {topic_regex:?}");
+        }
+    }
+
+    #[test]
+    fn a_narrowed_exclude_lets_through_the_loaded_names_and_nothing_else() {
+        let fleet = crate::config::DlqLoadConfig::default().topics;
+        let prefixed = vec!["__dfe_loader_dlq".to_string(), "__x".to_string()];
+        let mut candidates: Vec<String> = [
+            "",
+            "_dlq",
+            "other_dlq",
+            "dlq",
+            "dfe_dlq",
+            "__",
+            "__consumer_offsets",
+            "main_land",
+            "a\nb_dlq",
+        ]
+        .map(String::from)
+        .to_vec();
+        for name in fleet.iter().chain(&prefixed) {
+            for (i, _) in name.char_indices() {
+                candidates.push(name[..i].to_string());
+                candidates.push(format!("{}{}", &name[..i], &name[i + 1..]));
+                candidates.push(format!("{}x{}", &name[..i], &name[i + 1..]));
+            }
+            candidates.extend([
+                name.clone(),
+                format!("x{name}"),
+                format!("{name}x"),
+                format!("{name}_dlq"),
+                format!("__{name}"),
+            ]);
+        }
+        // (exclude, the loaded topics, whether those names get through)
+        let cases: [(&str, &[String], bool); 5] = [
+            ("_dlq$", &fleet, true),
+            ("^__", &prefixed, true),
+            ("^dfe_loader_dlq$", &fleet, true),
+            ("\\.dlq$", &fleet, true),
+            // Not a literal, so it is kept whole and the names stay out.
+            ("dlq", &fleet, false),
+        ];
+        for (pattern, loaded, let_through) in cases {
+            let original = regex::Regex::new(pattern).expect("the exclude compiles");
+            let narrowed = exclude_except(pattern, loaded)
+                .map(|p| regex::Regex::new(&p).expect("the narrowed exclude compiles"));
+            for topic in &candidates {
+                let excluded = narrowed.as_ref().is_some_and(|re| re.is_match(topic));
+                let want = original.is_match(topic) && !(let_through && loaded.contains(topic));
+                assert_eq!(excluded, want, "{pattern} on {topic:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn an_explicit_topic_list_gains_each_dlq_load_topic_once() {
+        let kafka = KafkaConfig {
+            topics: vec!["main_land".to_string(), "dfe_loader_dlq".to_string()],
+            ..KafkaConfig::default()
+        };
+        let loaded = crate::config::DlqLoadConfig::default().topics;
+        // (topics dlq_load names, the subscription)
+        let cases: [(&[String], &[&str]); 2] = [
+            (&[], &["main_land", "dfe_loader_dlq"]),
+            (
+                &loaded,
+                &[
+                    "main_land",
+                    "dfe_loader_dlq",
+                    "dfe_receiver_dlq",
+                    "dfe_archiver_dlq",
+                    "dfe_fetcher_dlq",
+                    "dfe_transform_dlq",
+                ],
+            ),
+        ];
+        for (dlq_load, want) in cases {
+            let cfg = TransportAdapter::convert_config(&kafka, &DlqConfig::default(), dlq_load);
+            assert!(!cfg.auto_discover);
+            assert_eq!(cfg.topics, want);
+        }
+    }
+
     #[test]
     fn dlq_exclude_is_appended_to_scalo_defaults() {
-        let cfg = TransportAdapter::convert_config(&KafkaConfig::default(), &dlq_land());
+        let cfg = TransportAdapter::convert_config(&KafkaConfig::default(), &dlq_land(), &[]);
 
         let defaults = scalo_default_excludes();
         assert!(!defaults.is_empty(), "scalo ships default excludes");
@@ -1210,7 +1497,7 @@ mod discovery_tests {
             topic_regex: Some("^strimzi\\.".to_string()),
             ..KafkaConfig::default()
         };
-        let cfg = TransportAdapter::convert_config(&kafka, &dlq_land());
+        let cfg = TransportAdapter::convert_config(&kafka, &dlq_land(), &[]);
 
         assert_eq!(cfg.topic_include, ["^strimzi\\."]);
         assert!(cfg.topic_exclude.iter().any(|p| p == "^dlq_land$"));
@@ -1229,7 +1516,7 @@ mod discovery_tests {
             topic_regex: Some(String::new()),
             ..KafkaConfig::default()
         };
-        let cfg = TransportAdapter::convert_config(&kafka, &dlq_land());
+        let cfg = TransportAdapter::convert_config(&kafka, &dlq_land(), &[]);
 
         assert_eq!(resolve(&cfg, BROKER_TOPICS), ["main_land", "x_load"]);
     }
@@ -1245,7 +1532,7 @@ mod discovery_tests {
             topic_suffix: ".dlq".to_string(),
             ..DlqConfig::default()
         };
-        let cfg = TransportAdapter::convert_config(&kafka, &dlq);
+        let cfg = TransportAdapter::convert_config(&kafka, &dlq, &[]);
 
         let resolved = resolve(
             &cfg,
@@ -1256,7 +1543,7 @@ mod discovery_tests {
 
     #[test]
     fn load_still_suppresses_land_for_the_same_source() {
-        let cfg = TransportAdapter::convert_config(&KafkaConfig::default(), &dlq_land());
+        let cfg = TransportAdapter::convert_config(&KafkaConfig::default(), &dlq_land(), &[]);
 
         let resolved = resolve(&cfg, &["auth_land", "auth_load", "events_land"]);
         assert_eq!(resolved, ["auth_load", "events_land"]);

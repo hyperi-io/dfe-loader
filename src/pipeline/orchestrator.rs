@@ -36,7 +36,7 @@ use crate::clickhouse::{
     SchemaCache, SharedSchemaCache,
 };
 use crate::column_meta::{ColumnMetaCache, parse_directives};
-use crate::config::{Config, SharedConfig};
+use crate::config::{Config, DlqLoadConfig, SharedConfig};
 use crate::kafka::transport::{PartitionRead, ReceivedBatch};
 use crate::kafka::{TransportAdapter, TransportBackend};
 use crate::metrics::{Metrics, ServerState};
@@ -118,6 +118,9 @@ pub struct Orchestrator {
     /// only where a revoked partition is read again: committed at receipt, the
     /// rows are its only copy.
     leases: Leases<PartitionLease>,
+    /// The DLQ topics the transport subscribed at startup. A reload never
+    /// changes them, so a topic still read is still pinned and never re-dead-lettered.
+    dlq_load: DlqLoadConfig,
 }
 
 /// A hold whose attempts are never further apart than the flush interval,
@@ -136,9 +139,10 @@ struct Stages {
 }
 
 impl Stages {
-    fn new(config: &Config) -> Self {
+    fn new(config: &Config, dlq_load: &DlqLoadConfig) -> Self {
         Self {
-            router: Router::with_metadata(&config.routing, &config.metadata),
+            router: Router::with_metadata(&config.routing, &config.metadata)
+                .with_pinned_topics(&dlq_load.topics, &dlq_load.table),
             transformer: Transformer::with_routing(
                 &config.timestamp_dq,
                 &config.metadata,
@@ -169,6 +173,7 @@ impl Orchestrator {
         let unsettled = unsettled_for(&config);
         Self {
             unsettled,
+            dlq_load: config.dlq_load.clone(),
             config,
             shared_config: None,
             shutdown: CancellationToken::new(),
@@ -199,6 +204,7 @@ impl Orchestrator {
         let unsettled = unsettled_for(&config);
         Self {
             unsettled,
+            dlq_load: config.dlq_load.clone(),
             config,
             shared_config: None,
             shutdown: CancellationToken::new(),
@@ -463,7 +469,7 @@ impl Orchestrator {
         // expired schema drops the extractor path and its @renamed mappings (#25).
         let _schema_refresh_handle = schema_cache.start_background_refresh(resolve_tx.clone());
 
-        let mut stages = Stages::new(&self.config);
+        let mut stages = Stages::new(&self.config, &self.dlq_load);
 
         // Pipeline mode gate: json_primary (default) or legacy_flatten.
         // json_primary uses HeaderExtractor + zero-copy _json splice; legacy_flatten
@@ -483,7 +489,8 @@ impl Orchestrator {
         };
         let mut pending_schema_buffer = super::pending_schema::PendingSchemaBuffer::new(
             PendingSchemaConfig::from_schema_config(&self.config.schema, on_full),
-        );
+        )
+        .with_dlq_load(&self.dlq_load);
 
         // Tables ClickHouse has confirmed absent. The processor re-routes their
         // messages to the default table; a failed fetch never lands here.
@@ -633,7 +640,7 @@ impl Orchestrator {
 
                         // --- Hot-reloaded: takes effect on next batch ---
                         // Rows already buffered keep the table they were routed to.
-                        let new_stages = Stages::new(&new_config);
+                        let new_stages = Stages::new(&new_config, &self.dlq_load);
                         if new_stages.default_table != stages.default_table {
                             // The default is never held absent: its rows wait for it instead.
                             absent_tables.remove(&new_stages.default_table);
@@ -1645,6 +1652,7 @@ impl Orchestrator {
         dlq: Option<&'d Arc<Dlq>>,
         dead_letters: Vec<DlqEntry>,
     ) -> Option<(&'d Arc<Dlq>, Vec<DlqEntry>)> {
+        let dead_letters = self.drop_loaded_dead_letters(dead_letters);
         if dead_letters.is_empty() {
             return None;
         }
@@ -1970,18 +1978,24 @@ impl Orchestrator {
 
     /// Take everything held for another attempt, pointing each batch whose
     /// table `ClickHouse` has since confirmed absent at the default table,
-    /// where new records for that table already go.
+    /// where new records for that table already go. A batch of dead letters
+    /// stays for its own table, which only dead letters route to, until
+    /// [`Self::retire_held_dead_letters`] drops it.
     fn take_unsettled_for(
         &mut self,
         absent: &super::types::AbsentTables,
         default_table: &str,
     ) -> Held {
+        self.retire_held_dead_letters();
         let mut held = self.take_unsettled();
         if absent.is_empty() {
             return held;
         }
         for batch in &mut held.batches {
-            if batch.table.as_str() == default_table || !absent.contains(&batch.table) {
+            if batch.table.as_str() == default_table
+                || !absent.contains(&batch.table)
+                || self.dlq_load.loads_into(&batch.table)
+            {
                 continue;
             }
             warn!(
@@ -2114,6 +2128,67 @@ impl Orchestrator {
         crate::metrics::count_dead_letters_dropped(reason, dead_letters.len() as u64);
         if self.holds_answers {
             self.settle_dead_letters_as(dead_letters, DeliveryStatus::Dropped);
+        }
+    }
+
+    /// Drop every dead letter read from a `dlq_load` topic, and return the rest.
+    ///
+    /// Dead-lettering one again would feed it back to the topic it was read
+    /// from. Each is counted under `dlq_load` and its offset committed, and the
+    /// record stays on its DLQ topic until retention.
+    fn drop_loaded_dead_letters(&mut self, dead_letters: Vec<DlqEntry>) -> Vec<DlqEntry> {
+        let dlq_load = &self.dlq_load;
+        let (dropped, kept): (Vec<DlqEntry>, Vec<DlqEntry>) =
+            dead_letters.into_iter().partition(|entry| {
+                entry
+                    .source
+                    .as_ref()
+                    .and_then(|source| source.topic.as_deref())
+                    .is_some_and(|topic| dlq_load.loads(topic))
+            });
+        if dropped.is_empty() {
+            return kept;
+        }
+        static LOADED_TS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        if scalo::logger::log_debounced(&LOADED_TS, 60_000) {
+            error!(
+                rows = dropped.len(),
+                reason = %dropped[0].reason,
+                "Dead letters read from a DLQ topic did not load -- dropped, never dead-lettered again, counted in pipeline_dead_letters_dropped_total (max 1 per 60s)"
+            );
+        }
+        self.drop_dead_letters(&dropped, DROPPED_DLQ_LOAD);
+        self.dlq_placed.extend(placed_offsets(&dropped));
+        kept
+    }
+
+    /// Drop every batch held for the `dlq_load` table past
+    /// `schema.pending_max_age_secs`, the age a dead letter waiting for that
+    /// table's schema is retired at.
+    ///
+    /// Each row is counted under `dlq_load` and its offset committed, and the
+    /// record stays on its DLQ topic until retention.
+    fn retire_held_dead_letters(&mut self) {
+        let max_age = Duration::from_secs(self.config.schema.pending_max_age_secs);
+        let dlq_load = &self.dlq_load;
+        let expired = self
+            .unsettled
+            .take_held_past(max_age, |table| dlq_load.loads_into(table));
+        for batch in expired {
+            let rows = batch.rows.len();
+            static HELD_TS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            if scalo::logger::log_debounced(&HELD_TS, 60_000) {
+                error!(
+                    table = %batch.table,
+                    rows,
+                    max_age_secs = max_age.as_secs(),
+                    "Dead letters held for the dlq table past the pending-schema age cap -- dropped, never dead-lettered again, counted in pipeline_dead_letters_dropped_total (max 1 per 60s)"
+                );
+            }
+            self.memory_guard.release(batch.reserved_bytes());
+            self.record_rows_lost(rows);
+            crate::metrics::count_dead_letters_dropped(DROPPED_DLQ_LOAD, rows as u64);
+            self.dlq_placed.extend(batch.offsets);
         }
     }
 
@@ -2352,6 +2427,9 @@ fn warn_restart_required(old: &Config, new: &Config) {
     // Under the routing hot path, so an edit here no longer rolls the pods.
     if old.routing.dlq != new.routing.dlq {
         warn!("routing.dlq config changed -- requires restart to take effect");
+    }
+    if old.dlq_load != new.dlq_load {
+        warn!("dlq_load config changed -- requires restart to take effect");
     }
     if old.field_mapping != new.field_mapping {
         warn!("field_mapping config changed -- requires restart to take effect");
@@ -2744,6 +2822,9 @@ const DROPPED_NO_DLQ: &str = "dead_letter";
 /// `reason` for rejected rows with no payload bytes for the DLQ.
 const DROPPED_NO_PAYLOAD: &str = "no_payload";
 
+/// `reason` for dead letters read from a `dlq_load` topic that failed to load.
+const DROPPED_DLQ_LOAD: &str = "dlq_load";
+
 /// The record sequence number a gRPC offset carries: the adapter stores each
 /// token's `seq` as the message offset.
 fn seq_of(offset: i64) -> u64 {
@@ -2782,7 +2863,8 @@ fn dlq_backends(config: &Config) -> (scalo::dlq::DlqConfig, Option<scalo::transp
         dlq.kafka.enabled = false;
         return (dlq, None);
     }
-    let kafka = TransportAdapter::convert_config(&config.kafka, &config.routing.dlq);
+    // The DLQ producer subscribes to nothing.
+    let kafka = TransportAdapter::convert_config(&config.kafka, &config.routing.dlq, &[]);
     (dlq, Some(kafka))
 }
 
@@ -3043,15 +3125,12 @@ fn attach_row_offsets(failed: &mut [FailedRow], offsets: &[KafkaOffset]) {
 
 /// The DLQ entry for one permanently rejected row, or `None` when there are
 /// no bytes to hand over.
+///
+/// The reason names the table and column but never a value: scalo logs it, and
+/// the payload already carries the row.
 fn rejected_entry(table: &str, payloads: &[Arc<[u8]>], row: &FailedRow) -> Option<DlqEntry> {
     let payload = rejected_payload(payloads, row)?;
-    let reason = match &row.value {
-        Some(value) => format!(
-            "clickhouse_permanent_reject table={table}: {} {value}",
-            row.reason
-        ),
-        None => format!("clickhouse_permanent_reject table={table}: {}", row.reason),
-    };
+    let reason = format!("clickhouse_permanent_reject table={table}: {}", row.reason);
     let entry = DlqEntry::new("loader", reason, payload).with_destination(table);
     Some(match &row.offset {
         Some(offset) => entry.with_source(scalo::dlq::DlqSource::kafka(
@@ -3382,7 +3461,7 @@ mod tests {
         config.routing.default_table = "landing".to_string();
         config.routing.default_org_id = "tenant-zero".to_string();
         config.metadata.source_fields = vec!["source_name".to_string()];
-        let stages = Stages::new(&config);
+        let stages = Stages::new(&config, &config.dlq_load);
 
         assert_eq!(stages.default_table, "tenantdb.landing");
         assert_eq!(stages.router.default_org_id(), "tenant-zero");
@@ -3827,7 +3906,6 @@ mod tests {
                 }),
                 reason: reason.to_string(),
                 row_json: None,
-                value: None,
             })
             .collect()
     }
@@ -4288,9 +4366,15 @@ mod tests {
     async fn rejected_rows_carry_their_own_reason_and_kafka_source() {
         let dir = dlq_dir("source");
         let dlq = file_dlq(&dir);
+        // A value a reason must never carry: scalo logs the reason.
+        let refused = "lambda.amazonaws.com";
         let payloads: Vec<Arc<[u8]>> = vec![
-            Arc::from(&b"{\"tags\":[\"a\"]}"[..]),
-            Arc::from(&b"{\"tags\":[\"b\"]}"[..]),
+            Arc::from(&b"{\"source_ip\":\"10.0.0.1\"}"[..]),
+            Arc::from(
+                format!("{{\"source_ip\":\"{refused}\"}}")
+                    .into_bytes()
+                    .as_slice(),
+            ),
         ];
         // Salvage isolated row 1 only; row 0 landed.
         let failed = vec![FailedRow {
@@ -4300,16 +4384,24 @@ mod tests {
                 partition: 3,
                 offset: 77,
             }),
-            reason: "RowBinary encode: unsupported value".to_string(),
+            reason: "RowBinary encode: encoding error for column 'source_ip': invalid IP address"
+                .to_string(),
             row_json: None,
-            value: Some("[\"b\"]".to_string()),
         }];
 
         let dead_letters = rejected_entries(&payloads, &failed);
         assert_eq!(dead_letters.len(), 1);
         assert_eq!(
             dead_letters[0].reason,
-            "clickhouse_permanent_reject table=dfe.main: RowBinary encode: unsupported value [\"b\"]"
+            "clickhouse_permanent_reject table=dfe.main: RowBinary encode: encoding error for column 'source_ip': invalid IP address"
+        );
+        assert!(
+            !dead_letters[0].reason.contains(refused),
+            "the reason is logged, so it names the column, never its value"
+        );
+        assert!(
+            String::from_utf8_lossy(&dead_letters[0].payload).contains(refused),
+            "the payload carries the row the value is in"
         );
         assert_eq!(dead_letters[0].destination.as_deref(), Some("dfe.main"));
         let source = dead_letters[0]
@@ -4328,7 +4420,7 @@ mod tests {
 
         let spooled = spooled_lines(&dir);
         assert_eq!(spooled.len(), 1, "only the isolated row is DLQ'd");
-        assert!(spooled[0].contains("unsupported value"));
+        assert!(spooled[0].contains("invalid IP address"));
         assert!(spooled[0].contains("dfe-events"));
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -4347,7 +4439,6 @@ mod tests {
             offset: Some(offset("dfe-events", 0, 10)),
             reason: "code 117".to_string(),
             row_json: Some(br#"{"_raw":"{\"user\":\"kaz\"}"}"#.to_vec()),
-            value: None,
         }];
 
         assert_eq!(
@@ -4379,7 +4470,6 @@ mod tests {
             offset: None,
             reason: "code 117".to_string(),
             row_json: Some(row_bytes.clone()),
-            value: None,
         };
         let empty: Vec<Arc<[u8]>> = vec![Arc::from(&[][..])];
         assert_eq!(rejected_payload(&empty, &failed), Some(row_bytes));
@@ -4397,7 +4487,6 @@ mod tests {
             offset: None,
             reason: "code 117".to_string(),
             row_json: None,
-            value: None,
         };
         assert_eq!(rejected_payload(&empty, &nothing), None);
         assert!(rejected_entries(&empty, &[nothing]).is_empty());
@@ -4606,6 +4695,106 @@ mod tests {
         dlq.shutdown().await.expect("stop the DLQ");
     }
 
+    /// A dead letter of the record read from `topic` at `offset`.
+    fn dead_letter_on(topic: &str, offset: i64) -> DlqEntry {
+        DlqEntry::new(
+            "loader",
+            "clickhouse_permanent_reject table=dfe.dlq",
+            b"{}".to_vec(),
+        )
+        .with_source(scalo::dlq::DlqSource::kafka(topic, 0, offset))
+    }
+
+    #[tokio::test]
+    async fn a_dead_letter_read_from_a_dlq_topic_is_dropped_counted_and_committed() {
+        let dir = dlq_dir("dlqload");
+        let dlq = file_dlq(&dir);
+        let mut orchestrator = Orchestrator::new(Config::default());
+        let recorder = crate::metrics::counting::CountingRecorder::default();
+        let _local = metrics::set_default_local_recorder(&recorder);
+
+        // A 64-deep record, the deepest a sender takes, is 65 deep under _json.
+        let envelope = format!(r#"{{"service":"receiver","_json":{}}}"#, nested_object(64));
+        let fan = fan_out_batched_records(vec![crate::kafka::KafkaMessage {
+            payload: envelope.into_bytes(),
+            topic: Arc::from("dfe_loader_dlq"),
+            partition: 0,
+            offset: 5,
+            key: None,
+            timestamp_ms: None,
+        }]);
+        assert_eq!(
+            offsets(&fan.too_deep),
+            vec![5],
+            "the envelope is refused for its depth"
+        );
+        orchestrator.dead_letter_too_deep(fan.too_deep);
+        // A record that waited past the age cap for an absent dlq table.
+        orchestrator.retire_pending(vec![(
+            crate::kafka::KafkaMessage {
+                payload: br#"{"service":"fetcher","_json":{}}"#.to_vec(),
+                topic: Arc::from("dfe_fetcher_dlq"),
+                partition: 0,
+                offset: 3,
+                key: None,
+                timestamp_ms: None,
+            },
+            ExpireReason::AgeExceeded {
+                age_ms: 30_000,
+                table: "dfe.dlq".to_string(),
+            },
+        )]);
+        let mut dead_letters = orchestrator.take_queued_dead_letters();
+        dead_letters.extend([
+            dead_letter_on("main_land", 7),
+            dead_letter_on("dfe_loader_dlq", 41),
+            dead_letter_on("dfe_receiver_dlq", 9),
+        ]);
+        settle(&mut orchestrator, Some(&dlq), dead_letters, in_30s()).await;
+
+        assert_eq!(
+            recorder.labelled(
+                crate::metrics::DEAD_LETTERS_DROPPED_TOTAL,
+                "reason",
+                "dlq_load"
+            ),
+            4,
+            "every dead letter read from a DLQ topic is dropped and counted"
+        );
+        let spooled = spooled_lines(&dir);
+        assert_eq!(
+            spooled.len(),
+            1,
+            "only the data topic's dead letter reaches the DLQ"
+        );
+        assert!(spooled[0].contains("main_land"), "{}", spooled[0]);
+        assert_eq!(orchestrator.stats().messages_dlq, 1);
+        assert!(
+            orchestrator.unsettled.is_empty(),
+            "a dropped dead letter is never held"
+        );
+        let mut committed: Vec<(String, i64)> = orchestrator
+            .dlq_commit(Vec::new())
+            .iter()
+            .map(|o| (o.topic.to_string(), o.offset))
+            .collect();
+        committed.sort_unstable();
+        let committed: Vec<(&str, i64)> = committed.iter().map(|(t, o)| (t.as_str(), *o)).collect();
+        assert_eq!(
+            committed,
+            [
+                ("dfe_fetcher_dlq", 3),
+                ("dfe_loader_dlq", 5),
+                ("dfe_loader_dlq", 41),
+                ("dfe_receiver_dlq", 9),
+                ("main_land", 7)
+            ],
+            "a dropped dead letter's offset commits, so its DLQ topic shows no lag"
+        );
+        dlq.shutdown().await.expect("stop the DLQ");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[tokio::test]
     async fn a_held_dlq_retry_gives_up_before_a_push_arriving_now_would_expire() {
         let listening = Config {
@@ -4782,7 +4971,6 @@ mod tests {
                 offset: None,
                 reason: "code 469".to_string(),
                 row_json: None,
-                value: None,
             })
             .collect();
         failed.push(FailedRow {
@@ -4790,7 +4978,6 @@ mod tests {
             offset: Some(offset("other", 2, 5)),
             reason: "code 469".to_string(),
             row_json: None,
-            value: None,
         });
         let batch: Vec<KafkaOffset> = (40..44).map(|off| offset("dfe-events", 0, off)).collect();
 
@@ -4822,7 +5009,6 @@ mod tests {
                 offset: None,
                 reason: "code 117".to_string(),
                 row_json: None,
-                value: None,
             })
             .collect();
         attach_row_offsets(&mut failed, &batch);
@@ -4880,12 +5066,22 @@ mod tests {
         for off in 200..205 {
             buffered_row(&mut buffers, "dfe.kept", 1, off);
         }
+        // Dead letters read from a DLQ topic, whose table is absent too.
+        for off in 300..305 {
+            buffers.push(
+                "dfe.dlq",
+                serde_json::json!({"id": off}).as_object().unwrap().clone(),
+                Some(offset("dfe_loader_dlq", 2, off)),
+                None,
+            );
+        }
         for batch in buffers.get_ready_for_flush() {
             orchestrator.unsettled.hold(batch);
         }
         let mut absent =
             super::super::types::AbsentTables::new(ABSENT_TABLE_TTL, ABSENT_TABLE_CAPACITY);
         absent.insert("dfe.gone", std::time::Instant::now());
+        absent.insert("dfe.dlq", std::time::Instant::now());
 
         let held = orchestrator.take_unsettled_for(&absent, "dfe.main");
 
@@ -4901,10 +5097,82 @@ mod tests {
         assert_eq!(
             taken,
             vec![
+                ("dfe.dlq".to_string(), 5, (300..305).collect()),
                 ("dfe.kept".to_string(), 5, (200..205).collect()),
                 ("dfe.main".to_string(), 5, (100..105).collect()),
             ],
-            "only the batch for the absent table moves, with its rows and offsets"
+            "only the batch for the absent table moves, with its rows and offsets, and dead letters never do"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_dead_letter_batch_held_past_the_age_cap_is_dropped_counted_and_committed() {
+        let mut orchestrator = Orchestrator::new(Config::default());
+        let recorder = crate::metrics::counting::CountingRecorder::default();
+        let _local = metrics::set_default_local_recorder(&recorder);
+        let cap = Duration::from_secs(orchestrator.config.schema.pending_max_age_secs);
+        let mut buffers = staged_buffers();
+        for off in 200..205 {
+            buffered_row(&mut buffers, "dfe.kept", 1, off);
+        }
+        for off in 300..305 {
+            buffers.push(
+                "dfe.dlq",
+                serde_json::json!({"id": off}).as_object().unwrap().clone(),
+                Some(offset("dfe_loader_dlq", 2, off)),
+                None,
+            );
+        }
+        for batch in buffers.get_ready_for_flush() {
+            orchestrator.unsettled.hold(batch);
+        }
+        let absent =
+            super::super::types::AbsentTables::new(ABSENT_TABLE_TTL, ABSENT_TABLE_CAPACITY);
+        let dropped = |recorder: &crate::metrics::counting::CountingRecorder| {
+            recorder.labelled(
+                crate::metrics::DEAD_LETTERS_DROPPED_TOTAL,
+                "reason",
+                "dlq_load",
+            )
+        };
+        let tables = |held: &Held| {
+            let mut out: Vec<String> = held.batches.iter().map(|b| b.table.to_string()).collect();
+            out.sort();
+            out
+        };
+
+        // Under the cap, both are taken for another attempt, which fails and
+        // holds them again without restarting their age.
+        tokio::time::advance(cap.saturating_sub(Duration::from_secs(1))).await;
+        let held = orchestrator.take_unsettled_for(&absent, "dfe.main");
+        assert_eq!(tables(&held), ["dfe.dlq", "dfe.kept"]);
+        assert_eq!(dropped(&recorder), 0);
+        for batch in held.batches {
+            orchestrator.unsettled.hold(batch);
+        }
+        orchestrator.unsettled.rearm();
+
+        tokio::time::advance(Duration::from_secs(1)).await;
+        let held = orchestrator.take_unsettled_for(&absent, "dfe.main");
+
+        assert_eq!(
+            tables(&held),
+            ["dfe.kept"],
+            "a batch for any other table is retried past the cap"
+        );
+        assert_eq!(dropped(&recorder), 5, "each dropped row is counted");
+        let mut committed: Vec<(String, i64)> = orchestrator
+            .dlq_commit(Vec::new())
+            .iter()
+            .map(|o| (o.topic.to_string(), o.offset))
+            .collect();
+        committed.sort_unstable();
+        assert_eq!(
+            committed,
+            (300..305)
+                .map(|off| ("dfe_loader_dlq".to_string(), off))
+                .collect::<Vec<_>>(),
+            "a dropped row's offset commits, so its DLQ topic shows no lag"
         );
     }
 
