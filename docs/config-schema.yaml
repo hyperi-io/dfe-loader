@@ -29,6 +29,7 @@ description: |-
   - `computed_columns.*` -- computed column cache built at startup
   - `column_directives.*` -- column directive cache built at startup
   - `routing.dlq` -- DLQ backends opened at startup
+  - `dlq_load.*` -- DLQ topics subscribed at startup
   - `field_mapping.*` -- mapping rules built at startup
   - `enrichment.*` -- enrichment pipeline built at startup
 type: object
@@ -178,6 +179,17 @@ properties:
       - host
       - source_type
       - event_type
+  dlq_load:
+    description: Kafka DLQ topics loaded into a table of their own. **Restart required.**
+    $ref: "#/$defs/DlqLoadConfig"
+    default:
+      topics:
+      - dfe_receiver_dlq
+      - dfe_loader_dlq
+      - dfe_archiver_dlq
+      - dfe_fetcher_dlq
+      - dfe_transform_dlq
+      table: dlq
   routing:
     description: Table and tenant routing. **Hot-reloaded**, `routing.dlq` aside.
     $ref: "#/$defs/RoutingConfig"
@@ -1138,6 +1150,32 @@ $defs:
     - description: Fail the entire batch on the first parse error.
       type: string
       const: fail_batch
+  DlqLoadConfig:
+    description: |-
+      Kafka DLQ topics whose dead letters the loader loads into a table of their own.
+
+      A dead letter carries the routing fields of the record it wraps, so each
+      topic here routes to `table` whatever its records name. One that fails is
+      dropped and counted, never dead-lettered again. Empty `topics` loads none.
+    type: object
+    properties:
+      topics:
+        description: DLQ topics to consume, alongside the data topics.
+        type: array
+        items:
+          type: string
+        default:
+        - dfe_receiver_dlq
+        - dfe_loader_dlq
+        - dfe_archiver_dlq
+        - dfe_fetcher_dlq
+        - dfe_transform_dlq
+      table:
+        description: |-
+          Table every record from `topics` lands in, in the database `routing`
+          picks for its tenant.
+        type: string
+        default: dlq
   RoutingConfig:
     type: object
     properties:

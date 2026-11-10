@@ -283,9 +283,6 @@ pub struct FailedRow {
     /// The promoted row, serialised, for the DLQ to carry when the batch's
     /// parallel raw-payload slot is empty. Filled by `rejected_row_bytes`.
     pub row_json: Option<Vec<u8>>,
-    /// The value the encoder refused, as JSON, for the DLQ reason only. Kept
-    /// out of `reason` because that is logged. Filled by `rejected_value`.
-    pub value: Option<String>,
 }
 
 /// Whether binary-split salvage can actually isolate this failure to a row.
@@ -317,24 +314,6 @@ fn rejected_row_bytes(
         return None;
     }
     row.and_then(|r| serde_json::to_vec(r).ok())
-}
-
-/// Longest refused value a DLQ reason quotes, in chars.
-const REJECTED_VALUE_MAX_CHARS: usize = 200;
-
-/// The row's value for the column a local encode failure names, as JSON, or
-/// `None` when the failure names no column.
-fn rejected_value(err: &crate::Error, row: Option<&Map<String, Value>>) -> Option<String> {
-    let (crate::Error::ClickHouse(message) | crate::Error::ClickHousePermanent(message)) = err
-    else {
-        return None;
-    };
-    let (column, _) = message
-        .strip_prefix(LOCAL_ENCODE)?
-        .strip_prefix("encoding error for column '")?
-        .split_once('\'')?;
-    let json = serde_json::to_string(row?.get(column)?).ok()?;
-    Some(json.chars().take(REJECTED_VALUE_MAX_CHARS).collect())
 }
 
 /// Handles batch inserts to `ClickHouse` with retry logic.
@@ -1058,7 +1037,6 @@ impl Inserter {
                             offset: offsets.get(i).cloned(),
                             reason: reason.clone(),
                             row_json: rejected_row_bytes(raw_payloads.get(i), rows.get(i)),
-                            value: None,
                         })
                         .collect();
                     return InsertResult::with_failures(0, failed).with_server_answer(answered);
@@ -1144,7 +1122,6 @@ impl Inserter {
                         offset: offsets.get(i).cloned(),
                         reason: "Max salvage depth exceeded".to_string(),
                         row_json: rejected_row_bytes(raw_payloads.get(i), rows.get(i)),
-                        value: None,
                     });
                 }
                 return;
@@ -1164,7 +1141,6 @@ impl Inserter {
                                 offset: offsets.first().cloned(),
                                 reason: e.to_string(),
                                 row_json: rejected_row_bytes(raw_payloads.first(), rows.first()),
-                                value: rejected_value(&e, rows.first()),
                             });
                         } else {
                             out.retry_reason.get_or_insert_with(|| e.to_string());
@@ -1367,14 +1343,12 @@ mod tests {
                 offset: None,
                 reason: "Schema mismatch".to_string(),
                 row_json: None,
-                value: None,
             },
             FailedRow {
                 row_index: 10,
                 offset: None,
                 reason: "Invalid data".to_string(),
                 row_json: None,
-                value: None,
             },
         ];
         let result = InsertResult::with_failures(98, failed);
@@ -1426,41 +1400,6 @@ mod tests {
     #[test_case::test_case(crate::Error::Buffer("Max retries exceeded".into()), false ; "not_a_clickhouse_error")]
     fn only_the_servers_own_code_reads_as_an_answer(err: crate::Error, answered: bool) {
         assert_eq!(answered_by_server(&err), answered, "{err}");
-    }
-
-    #[test_case::test_case(
-        "encoding error for column 'source_ip': invalid IP address", Some("\"lambda.amazonaws.com\"")
-        ; "named_column_quotes_its_value"
-    )]
-    #[test_case::test_case(
-        "encoding error for column 'port': value out of range", Some("70000")
-        ; "non_string_value_as_json"
-    )]
-    #[test_case::test_case("encoding error for column 'absent': bad", None ; "column_not_in_the_row")]
-    #[test_case::test_case("encoding error for column '': whole row", None ; "whole_row_failure")]
-    #[test_case::test_case("column kind: enum value is not one of the column's members", None ; "no_column_named")]
-    fn a_local_encode_failure_names_the_refused_value(message: &str, expected: Option<&str>) {
-        let row: Map<String, Value> =
-            serde_json::from_str(r#"{"source_ip": "lambda.amazonaws.com", "port": 70000}"#)
-                .expect("test row is valid JSON");
-        let err = crate::Error::ClickHousePermanent(format!("{LOCAL_ENCODE}{message}"));
-        assert_eq!(rejected_value(&err, Some(&row)).as_deref(), expected);
-    }
-
-    #[test]
-    fn a_long_refused_value_is_cut_and_a_server_refusal_names_none() {
-        let row: Map<String, Value> =
-            serde_json::from_value(serde_json::json!({ "note": "x".repeat(500) }))
-                .expect("test row is a JSON object");
-        let local = crate::Error::ClickHousePermanent(format!(
-            "{LOCAL_ENCODE}encoding error for column 'note': too long"
-        ));
-        let quoted = rejected_value(&local, Some(&row)).expect("the column is in the row");
-        assert_eq!(quoted.chars().count(), REJECTED_VALUE_MAX_CHARS);
-        let server = crate::Error::ClickHousePermanent(
-            "RowBinary insert: encoding error for column 'note': Code: 117".into(),
-        );
-        assert_eq!(rejected_value(&server, Some(&row)), None);
     }
 
     #[test_case::test_case(InsertResult::success(3), true ; "rows_landed")]
@@ -2051,7 +1990,6 @@ mod tests {
                 offset: None,
                 reason: format!("Error at row {i}"),
                 row_json: None,
-                value: None,
             })
             .collect();
         let result = InsertResult::with_failures(0, failed);
@@ -2077,7 +2015,6 @@ mod tests {
             offset: Some(offset.clone()),
             reason: "Type mismatch".to_string(),
             row_json: None,
-            value: None,
         };
         assert_eq!(row.row_index, 7);
         assert!(row.offset.is_some());
@@ -2094,7 +2031,6 @@ mod tests {
             offset: None,
             reason: "No offset (manual insert path)".to_string(),
             row_json: None,
-            value: None,
         };
         assert!(row.offset.is_none());
     }
@@ -2141,7 +2077,6 @@ mod tests {
             offset: None,
             reason: "Erreur: données invalides 世界 🚫".to_string(),
             row_json: None,
-            value: None,
         };
         assert!(row.reason.contains("世界"));
         assert!(row.reason.contains("🚫"));

@@ -16,6 +16,8 @@ Routing picks the `db.table` a message lands in, before any flattening, from fie
 flowchart TB
     MSG["parsed message"]
     ORG{"org_routes lists the tenant?"}
+    PIN{"read from a dlq_load topic?"}
+    DLQTBL["dlq_load.table"]
     TBF{"a table_fields value?"}
     TOPIC{"topic is {source}_land / {source}_load?"}
     DEFDB["default_db"]
@@ -27,7 +29,9 @@ flowchart TB
     MSG --> ORG
     ORG -->|yes| ORGDB --> OUT
     ORG -->|no| DEFDB --> OUT
-    MSG --> TBF
+    MSG --> PIN
+    PIN -->|yes| DLQTBL --> OUT
+    PIN -->|no| TBF
     TBF -->|yes| OUT
     TBF -->|no| TOPIC
     TOPIC -->|yes| SRC --> OUT
@@ -50,6 +54,8 @@ flowchart TB
 ## How a field is resolved
 
 `table_fields` is an ordered list. The first field carrying a value wins, and the value is the table name. A null or empty value counts as absent, so `{"_source": ""}` falls through to the next field, then the topic, then `default_table`. It never reaches the DLQ. Dot-notation walks nested objects, so `table_fields = ["event.category"]` reads `category` inside the `event` object.
+
+A record read from a `dlq_load` topic skips `table_fields` and lands in `dlq_load.table`. A dead letter carries the `_source` of the record it wraps, which would send it back to the table that refused it. See [configuration](../configuration.md#loading-dead-letters).
 
 ## The tenant
 

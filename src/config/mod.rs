@@ -39,10 +39,10 @@ pub use loader::{
 };
 pub use pipeline::{
     AutoDownloadConfig, CaptureMode, CoercionConfig, ComputedColumnsConfig, DEFAULT_ORG_ID,
-    DlqConfig, EnrichmentConfig, ExternalTopic, FieldMappingConfig, FieldMappingOverride,
-    FieldSanitizationConfig, GeoIpConfig, GeoIpProvider, MetadataConfig, NullHandling, OrgRoute,
-    PayloadConfig, ReputationEnrichmentConfig, RiskScoringConfig, RoutingConfig, SchemaConfig,
-    TableCaptureConfig, TimestampDqConfig,
+    DlqConfig, DlqLoadConfig, EnrichmentConfig, ExternalTopic, FieldMappingConfig,
+    FieldMappingOverride, FieldSanitizationConfig, GeoIpConfig, GeoIpProvider, MetadataConfig,
+    NullHandling, OrgRoute, PayloadConfig, ReputationEnrichmentConfig, RiskScoringConfig,
+    RoutingConfig, SchemaConfig, TableCaptureConfig, TimestampDqConfig,
 };
 pub use shared::SharedConfig;
 pub use watcher::{ConfigWatcher, WatcherConfig};

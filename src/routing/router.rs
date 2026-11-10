@@ -4,9 +4,10 @@
 //! Routes messages to destination db.table based on event data
 //!
 //! Routing happens PRE-flattening using dot notation for nested field access.
-//! The table is the first `table_fields` entry carrying a value (default:
-//! `_source`), else the source the topic names, else `default_table`. The
-//! database is `default_db` unless `org_routes` lists the record's tenant.
+//! The table is the one a pinned topic names, else the first `table_fields`
+//! entry carrying a value (default: `_source`), else the source the topic
+//! names, else `default_table`. The database is `default_db` unless
+//! `org_routes` lists the record's tenant.
 //! A null or empty routing value counts as absent.
 //!
 //! ## Performance
@@ -47,6 +48,8 @@ pub enum TableChoice {
     /// Neither a routing field nor the topic named a table, so `default_table`
     /// was used.
     DefaultFallback,
+    /// The topic is pinned to a table, which no routing field can override.
+    Pinned,
 }
 
 /// The header field every record's source is read from first.
@@ -112,6 +115,8 @@ pub struct Router {
     /// `source_fields` and the `table_fields`, so the policy leaves none of them
     /// to steer the record.
     source_paths: Vec<String>,
+    /// Table by topic, for topics whose records route by topic alone.
+    pinned: FxHashMap<String, String>,
 }
 
 /// Whether a routing value is absent in all but name: null or empty text.
@@ -169,7 +174,22 @@ impl Router {
                 .map(|policy| (policy.topic.clone(), policy.clone()))
                 .collect(),
             source_paths,
+            pinned: FxHashMap::default(),
         }
+    }
+
+    /// Route every record read from one of `topics` to `table`, ahead of
+    /// `table_fields`.
+    ///
+    /// A dead letter carries the `_source` of the record it wraps, so routing
+    /// it by its fields sends it back to the table that refused it.
+    #[must_use]
+    pub fn with_pinned_topics(mut self, topics: &[String], table: &str) -> Self {
+        self.pinned = topics
+            .iter()
+            .map(|topic| (topic.clone(), table.to_string()))
+            .collect();
+        self
     }
 
     /// Hold a record read from an external-pipeline topic to its source's own
@@ -361,6 +381,9 @@ impl Router {
     #[inline]
     pub fn route_value_on_topic(&self, value: &Value, topic: &str) -> (RouteResult, TableChoice) {
         let db = self.extract_db_from_value(value);
+        if let Some(table) = self.pinned.get(topic) {
+            return (self.build_route_result(db, table), TableChoice::Pinned);
+        }
         let (table, choice) = match self.extract_first_match_from_value(value, &self.table_fields) {
             Some(named) => (named, TableChoice::Named),
             None => match self.source_topic_name(topic) {
@@ -1325,6 +1348,61 @@ mod tests {
                 RouteResult::Table("acme.cisco_ios".to_string()),
                 TableChoice::Topic
             )
+        );
+    }
+
+    // ---- a pinned topic routes by topic alone ----
+
+    #[test]
+    fn a_dead_letter_routes_to_its_pinned_table_whatever_it_names() {
+        use serde_json::json;
+
+        let mut config = RoutingConfig {
+            org_routes: vec![org("acme", None)],
+            ..RoutingConfig::default()
+        };
+        config
+            .source_to_table
+            .insert("dlq".to_string(), "renamed".to_string());
+        let router =
+            Router::new(&config).with_pinned_topics(&["dfe_loader_dlq".to_string()], "dlq");
+        // (envelope, topic, expected route)
+        let cases = [
+            // The copied _source names the table that refused the original.
+            (
+                json!({"_source": "auth", "_json": {"_source": "auth"}}),
+                "dfe_loader_dlq",
+                ("dfe.dlq", TableChoice::Pinned),
+            ),
+            (
+                json!({"_raw": "not json"}),
+                "dfe_loader_dlq",
+                ("dfe.dlq", TableChoice::Pinned),
+            ),
+            // The tenant still picks the database.
+            (
+                json!({"_org_id": "acme", "_source": "auth"}),
+                "dfe_loader_dlq",
+                ("acme.dlq", TableChoice::Pinned),
+            ),
+            // The same record on a topic that is not pinned routes by its fields.
+            (
+                json!({"_org_id": "acme", "_source": "auth"}),
+                "dfe_receiver_dlq",
+                ("acme.auth", TableChoice::Named),
+            ),
+        ];
+        for (value, topic, (table, choice)) in cases {
+            assert_eq!(
+                router.route_value_on_topic(&value, topic),
+                (RouteResult::Table(table.to_string()), choice),
+                "{value} on {topic}"
+            );
+        }
+        assert_eq!(
+            router.route_value_traced(&json!({"_source": "auth"})).1,
+            TableChoice::Named,
+            "a route with no topic is never pinned"
         );
     }
 }

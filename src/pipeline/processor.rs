@@ -369,7 +369,12 @@ impl MessageProcessor<'_> {
                 log_fields_unstored(&table, &promoted.unstored);
             }
             let stage_inputs = promoted.stage_inputs;
+            let sourced_json = promoted.sourced_json;
             let mut promoted = promoted.fields;
+            // A `_json` a directive filled is the column's value, so no splice replaces it.
+            let splice = || -> Option<Arc<[u8]>> {
+                (!sourced_json).then(|| Arc::from(msg.payload.as_slice()))
+            };
 
             // raw_payload carries Kafka bytes for the zero-copy _json splice, so
             // every mode that populates _json passes it.
@@ -378,10 +383,10 @@ impl MessageProcessor<'_> {
             // json_only and extracted_only keep _raw NULL, so a raw field the
             // header pass promoted is dropped, as on the legacy path.
             let raw: Option<Arc<[u8]>> = match capture_mode {
-                CaptureMode::Full => Some(Arc::from(msg.payload.as_slice())),
+                CaptureMode::Full => splice(),
                 CaptureMode::JsonOnly => {
                     promoted.remove(raw_output);
-                    Some(Arc::from(msg.payload.as_slice()))
+                    splice()
                 }
                 CaptureMode::RawOnly => None,
                 CaptureMode::ExtractedOnly => {
@@ -550,7 +555,8 @@ mod tests {
         }
 
         fn with_config(config: Config) -> Self {
-            let router = Router::with_metadata(&config.routing, &config.metadata);
+            let router = Router::with_metadata(&config.routing, &config.metadata)
+                .with_pinned_topics(&config.dlq_load.topics, &config.dlq_load.table);
             let transformer = Transformer::new(
                 &config.timestamp_dq,
                 &config.metadata,
@@ -2962,5 +2968,208 @@ mod tests {
         };
         assert_eq!(text("_org_id"), Some("acme"), "{:?}", processed.data);
         assert_eq!(text("_source"), Some("ext"), "{:?}", processed.data);
+    }
+
+    // ========================================================================
+    // Dead letters loaded from a DLQ topic
+    // ========================================================================
+
+    /// The dlq table's columns as dfe-schemas renders them: name, type, COMMENT.
+    const DLQ_COLUMNS: &[(&str, &str, &str)] = &[
+        (
+            "_timestamp",
+            "DateTime64(3)",
+            "@source: timestamp | now() - Event timestamp",
+        ),
+        (
+            "_org_id",
+            "LowCardinality(String)",
+            "@source: _org_id - Tenant",
+        ),
+        (
+            "_source",
+            "LowCardinality(Nullable(String))",
+            "@source: first(_source) | topic_name - Data source label",
+        ),
+        ("_raw", "Nullable(String)", "Raw payload text"),
+        (
+            "_json",
+            "JSON",
+            "@source: _json - The original payload as structured JSON, empty for a raw entry",
+        ),
+        (
+            "service",
+            "LowCardinality(String)",
+            "Service that dead-lettered the record",
+        ),
+        ("reason", "String", "Why the record was rejected"),
+        ("attempts", "UInt32", "Delivery attempts"),
+        ("destination", "LowCardinality(String)", "Table or topic"),
+        (
+            "source_topic",
+            "Nullable(String)",
+            "@source: source.topic - Topic",
+        ),
+        (
+            "source_partition",
+            "Nullable(Int32)",
+            "@source: source.partition - Partition",
+        ),
+        (
+            "source_offset",
+            "Nullable(Int64)",
+            "@source: source.offset - Offset",
+        ),
+        (
+            "raw_encoding",
+            "LowCardinality(Nullable(String))",
+            "@source: _raw_encoding - Encoding of a raw entry",
+        ),
+    ];
+
+    /// Process a DLQ entry read from `topic` against the dlq table, cached with
+    /// its column directives once a first pass names the table.
+    fn load_dead_letter(
+        harness: &TestHarness,
+        topic: &str,
+        entry: &serde_json::Value,
+    ) -> super::ProcessedMessage {
+        use crate::clickhouse::{ColumnInfo, ParsedType, TableSchema};
+        use crate::column_meta::parse_directives;
+
+        let msg = harness.make_msg_on(topic, &serde_json::to_vec(entry).expect("serialize"));
+        let table = match harness.processor_json_primary().process(&msg) {
+            Err(crate::Error::SchemaPending { table }) => table,
+            Ok(row) => return row,
+            Err(e) => panic!("a dead letter loads: {e:?}"),
+        };
+        let (db, tbl) = table.split_once('.').expect("db.table");
+        harness.col_meta_cache.apply_ddl(
+            &table,
+            DLQ_COLUMNS
+                .iter()
+                .map(|(name, _, comment)| ((*name).to_string(), parse_directives(comment)))
+                .collect(),
+        );
+        harness.schema_cache.insert(
+            table.clone(),
+            TableSchema {
+                database: db.to_string(),
+                table: tbl.to_string(),
+                columns: DLQ_COLUMNS
+                    .iter()
+                    .enumerate()
+                    .map(|(i, (name, ty, comment))| ColumnInfo {
+                        name: (*name).to_string(),
+                        type_name: (*ty).to_string(),
+                        parsed_type: ParsedType::parse(ty),
+                        position: i as u64 + 1,
+                        default_kind: String::new(),
+                        default_expression: String::new(),
+                        comment: (*comment).to_string(),
+                        is_in_primary_key: false,
+                        is_in_sorting_key: false,
+                    })
+                    .collect(),
+                comment: String::new(),
+            },
+        );
+        harness
+            .processor_json_primary()
+            .process(&msg)
+            .unwrap_or_else(|e| panic!("a dead letter loads: {e:?}"))
+    }
+
+    #[test]
+    fn a_dead_letter_lands_in_the_dlq_table_with_its_original_under_json() {
+        let harness = TestHarness::new();
+        let original = json!({
+            "_org_id": "acme",
+            "_source": "aws-cloudtrail",
+            "sourceIPAddress": "lambda.amazonaws.com"
+        });
+        // The entry scalo writes for a refused event: the original under
+        // _json, its header copied beside it.
+        let event = json!({
+            "timestamp": 1_762_740_000_000_i64,
+            "service": "loader",
+            "reason": "clickhouse_permanent_reject table=dfe.aws-cloudtrail: invalid IP address",
+            "attempts": 0,
+            "destination": "dfe.aws-cloudtrail",
+            "source": {"topic": "aws-cloudtrail_land", "partition": 2, "offset": 42},
+            "_org_id": "acme",
+            "_source": "aws-cloudtrail",
+            "_json": original
+        });
+        // A payload that was not one JSON object, from a sender with no header.
+        let raw = json!({
+            "timestamp": 1_762_740_000_000_i64,
+            "service": "receiver",
+            "reason": "payload is not JSON",
+            "attempts": 1,
+            "_raw": "AAH/",
+            "_raw_encoding": "base64"
+        });
+        // (entry, _org_id, _source, _json, raw_encoding, source_topic)
+        let cases = [
+            (
+                &event,
+                "acme",
+                "aws-cloudtrail",
+                original.clone(),
+                None,
+                Some("aws-cloudtrail_land"),
+            ),
+            (
+                &raw,
+                "default",
+                "dfe_loader_dlq",
+                json!({}),
+                Some("base64"),
+                None,
+            ),
+        ];
+        for (entry, org, source, json_column, encoding, source_topic) in cases {
+            let row = load_dead_letter(&harness, "dfe_loader_dlq", entry);
+            let text = |field: &str| row.data.get(field).and_then(serde_json::Value::as_str);
+
+            assert_eq!(
+                row.table, "dfe.dlq",
+                "the copied _source never routes it: {entry}"
+            );
+            assert!(
+                row.raw_payload.is_none(),
+                "the envelope is not spliced into _json"
+            );
+            assert_eq!(row.data.get("_json"), Some(&json_column), "{entry}");
+            assert_eq!(text("_org_id"), Some(org), "{entry}");
+            assert_eq!(text("_source"), Some(source), "{entry}");
+            assert_eq!(
+                text("_timestamp"),
+                Some("2025-11-10T02:00:00.000Z"),
+                "{entry}"
+            );
+            assert_eq!(text("raw_encoding"), encoding, "{entry}");
+            assert_eq!(text("source_topic"), source_topic, "{entry}");
+            assert_eq!(text("service"), entry["service"].as_str(), "{entry}");
+            assert_eq!(row.data.get("attempts"), entry.get("attempts"), "{entry}");
+        }
+    }
+
+    #[test]
+    fn a_json_column_with_no_directive_still_takes_the_whole_payload() {
+        let harness = TestHarness::new();
+        let processed = json_primary_on_topic(
+            &harness,
+            "dfe_loader_dlq",
+            br#"{"service":"loader","_json":{"a":1}}"#,
+            &[("_json", "JSON"), ("service", "String")],
+        )
+        .unwrap_or_else(|e| panic!("processed: {e:?}"));
+        assert_eq!(processed.table, "dfe.dlq");
+        assert!(
+            processed.raw_payload.is_some() && !processed.data.contains_key("_json"),
+            "with no directive the payload is spliced, as for every other table"
+        );
     }
 }

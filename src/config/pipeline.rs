@@ -497,6 +497,47 @@ impl DlqConfig {
     }
 }
 
+/// Kafka DLQ topics whose dead letters the loader loads into a table of their own.
+///
+/// A dead letter carries the routing fields of the record it wraps, so each
+/// topic here routes to `table` whatever its records name. One that fails is
+/// dropped and counted, never dead-lettered again. Empty `topics` loads none.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct DlqLoadConfig {
+    /// DLQ topics to consume, alongside the data topics.
+    pub topics: Vec<String>,
+    /// Table every record from `topics` lands in, in the database `routing`
+    /// picks for its tenant.
+    pub table: String,
+}
+
+impl Default for DlqLoadConfig {
+    fn default() -> Self {
+        Self {
+            // The fleet DLQ standard's per-app topics, which a DFE bootstrap creates.
+            topics: [
+                "dfe_receiver_dlq",
+                "dfe_loader_dlq",
+                "dfe_archiver_dlq",
+                "dfe_fetcher_dlq",
+                "dfe_transform_dlq",
+            ]
+            .map(String::from)
+            .to_vec(),
+            table: "dlq".to_string(),
+        }
+    }
+}
+
+impl DlqLoadConfig {
+    /// Whether records read from `topic` are dead letters to load.
+    #[must_use]
+    pub fn loads(&self, topic: &str) -> bool {
+        self.topics.iter().any(|t| t == topic)
+    }
+}
+
 // ============================================================================
 // Batch Processing Configuration
 // ============================================================================

@@ -51,6 +51,7 @@ pub use super::pipeline::*;
 /// - `computed_columns.*` -- computed column cache built at startup
 /// - `column_directives.*` -- column directive cache built at startup
 /// - `routing.dlq` -- DLQ backends opened at startup
+/// - `dlq_load.*` -- DLQ topics subscribed at startup
 /// - `field_mapping.*` -- mapping rules built at startup
 /// - `enrichment.*` -- enrichment pipeline built at startup
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
@@ -86,6 +87,8 @@ pub struct Config {
     /// Batch processing engine config (SIMD parse, pre-route, parallelism). **Restart required.**
     #[serde(default)]
     pub batch_processing: BatchProcessingConfig,
+    /// Kafka DLQ topics loaded into a table of their own. **Restart required.**
+    pub dlq_load: DlqLoadConfig,
 
     // --- Hot-reloaded (takes effect on next batch) ---
     /// Table and tenant routing. **Hot-reloaded**, `routing.dlq` aside.
@@ -140,6 +143,7 @@ impl Default for Config {
             hot_reload: HotReloadConfig::default(),
             scaling: ScalingConfig::default(),
             batch_processing: BatchProcessingConfig::default(),
+            dlq_load: DlqLoadConfig::default(),
             routing: RoutingConfig::default(),
             buffer: BufferConfig::default(),
             memory: MemoryConfig::default(),
@@ -702,6 +706,18 @@ impl Config {
         }
 
         self.validate_external_topics()?;
+
+        // An empty name would subscribe to no topic, or route a dead letter to no table.
+        if self.dlq_load.topics.iter().any(String::is_empty) {
+            return Err(crate::Error::Config(
+                "dlq_load.topics must not hold an empty value".into(),
+            ));
+        }
+        if !self.dlq_load.topics.is_empty() && self.dlq_load.table.is_empty() {
+            return Err(crate::Error::Config(
+                "dlq_load.table must not be empty while dlq_load.topics names a topic".into(),
+            ));
+        }
 
         // Memory validation
         if self.memory.pressure_threshold < 0.0 || self.memory.pressure_threshold > 1.0 {
@@ -1848,6 +1864,41 @@ kafka:
                 (other, _) => panic!("{name}: unexpected {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn dlq_load_names_every_topic_and_a_table_while_it_loads() {
+        type Break = fn(&mut DlqLoadConfig);
+        let cases: [(&str, Break, Option<&str>); 5] = [
+            ("the shipped default", |_| {}, None),
+            (
+                "an empty topic",
+                |d| d.topics.push(String::new()),
+                Some("dlq_load.topics"),
+            ),
+            ("no table", |d| d.table.clear(), Some("dlq_load.table")),
+            ("nothing to load", |d| d.topics.clear(), None),
+            (
+                "nothing to load and no table",
+                |d| {
+                    d.topics.clear();
+                    d.table.clear();
+                },
+                None,
+            ),
+        ];
+        for (name, tweak, want) in cases {
+            let mut config = Config::default();
+            tweak(&mut config.dlq_load);
+            match (config.validate(), want) {
+                (Ok(()), None) => {}
+                (Err(e), Some(text)) => assert!(e.to_string().contains(text), "{name}: {e}"),
+                (other, _) => panic!("{name}: unexpected {other:?}"),
+            }
+        }
+        let shipped = DlqLoadConfig::default();
+        assert_eq!(shipped.table, "dlq");
+        assert!(shipped.loads("dfe_loader_dlq") && !shipped.loads("main_land"));
     }
 
     #[test]

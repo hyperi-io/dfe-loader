@@ -21,8 +21,8 @@ use rdkafka::producer::{FutureProducer, FutureRecord};
 use serde_json::json;
 
 use dfe_loader::config::{
-    BufferConfig, ClickHouseConfig, Config, DlqConfig, KafkaConfig, MetadataConfig, OrgRoute,
-    RoutingConfig, SaslConfig, TimestampDqConfig, TlsConfig,
+    BufferConfig, ClickHouseConfig, Config, DlqConfig, DlqLoadConfig, KafkaConfig, MetadataConfig,
+    OrgRoute, RoutingConfig, SaslConfig, TimestampDqConfig, TlsConfig,
 };
 use dfe_loader::pipeline::Orchestrator;
 
@@ -393,6 +393,11 @@ async fn test_kafka_to_clickhouse_bulk_load() {
             tls: kafka_tls_from_env(),
             ..Default::default()
         },
+        // The shared stack's DLQ topics hold other runs' dead letters.
+        dlq_load: DlqLoadConfig {
+            topics: vec![],
+            ..Default::default()
+        },
         clickhouse: ch_config_from_env(),
         routing: RoutingConfig {
             table_fields: vec!["_source".to_string()],
@@ -594,6 +599,11 @@ async fn test_kafka_to_clickhouse_org_routing() {
             topics: vec![topic.clone()],
             sasl: sasl_config_from_env(),
             tls: kafka_tls_from_env(),
+            ..Default::default()
+        },
+        // The shared stack's DLQ topics hold other runs' dead letters.
+        dlq_load: DlqLoadConfig {
+            topics: vec![],
             ..Default::default()
         },
         clickhouse: ch_config_from_env(),

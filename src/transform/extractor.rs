@@ -25,7 +25,7 @@
 //! | Column | Behaviour |
 //! |---|---|
 //! | `_uuid`, `_timestamp_load` | Skipped — ClickHouse DEFAULT generates these |
-//! | `_json` | Skipped — zero-copy splice at serialisation time |
+//! | `_json` | Skipped — zero-copy splice at serialisation time, unless a `@source` directive names the field it reads, `{}` when that field is absent |
 //! | `_org_id` | `routing.org_id_field` alone, never a directive. Absent, null or empty is `routing.default_org_id` |
 //! | `_source` | A null or empty value reads as absent, so the column's fallback applies |
 //! | `_timestamp_received` | The first hop's `_timestamp_received` stamp, then the directive's fields, then current UTC time |
@@ -77,6 +77,8 @@ pub struct HeaderExtraction {
     /// The payload's top-level fields that land nowhere: no column took them
     /// and the table has no `_json` column. DFE's own `_` fields are left out.
     pub unstored: Vec<String>,
+    /// Whether a directive filled `_json`, which then takes no payload splice.
+    pub sourced_json: bool,
 }
 
 impl HeaderExtraction {
@@ -86,6 +88,7 @@ impl HeaderExtraction {
             empty_reason: Some(reason),
             stage_inputs: Vec::new(),
             unstored: Vec::new(),
+            sourced_json: false,
         }
     }
 }
@@ -153,6 +156,8 @@ struct TablePlan {
     contended: FxHashSet<Box<str>>,
     /// Whether the table has a `_json` column to keep the whole payload in.
     stores_payload: bool,
+    /// Whether a directive fills the table's `_json` column from one field.
+    sources_json: bool,
 }
 
 impl TablePlan {
@@ -250,8 +255,16 @@ impl HeaderExtractor {
     /// generates, then `_org_id`, `_timestamp` and `_timestamp_received`, then
     /// `@skip`, then `@source`/`@renamed`, then the column-name rules.
     fn sources_for<'a>(&'a self, name: &'a str, renamed: &'a [String], skip: bool) -> Sources<'a> {
-        if matches!(name, "_uuid" | "_timestamp_load" | "_json") {
+        if matches!(name, "_uuid" | "_timestamp_load") {
             return Sources::None;
+        }
+        // `_json` holds the whole payload unless a directive names the field it reads.
+        if name == "_json" {
+            return if skip || renamed.is_empty() {
+                Sources::None
+            } else {
+                Sources::List(renamed)
+            };
         }
         // The tenant comes from `org_id_field` alone, so no directive can point it at a sender field.
         if name == "_org_id" {
@@ -360,9 +373,13 @@ impl HeaderExtractor {
         ddl_version: u64,
     ) -> TablePlan {
         let mut claims: FxHashMap<Box<str>, u32> = FxHashMap::default();
+        let mut sources_json = false;
         for col in schema.columns.iter().filter(|col| !is_generated(col)) {
             let directives = col_meta.get(table, &col.name);
             let sources = self.sources_for(&col.name, &directives.renamed, directives.skip);
+            if col.name == "_json" {
+                sources_json = !matches!(sources, Sources::None);
+            }
             sources.try_each(|path| {
                 if let Some(count) = claims.get_mut(path) {
                     *count += 1;
@@ -389,7 +406,8 @@ impl HeaderExtractor {
             columns: schema.columns.iter().map(|col| col.name.clone()).collect(),
             ddl_version,
             contended,
-            stores_payload: schema.columns.iter().any(|col| col.name == "_json"),
+            stores_payload: !sources_json && schema.columns.iter().any(|col| col.name == "_json"),
+            sources_json,
         }
     }
 
@@ -466,7 +484,21 @@ impl HeaderExtractor {
             let name = &col.name;
 
             // ClickHouse generates these — never inject from source data.
-            if matches!(name.as_str(), "_uuid" | "_timestamp_load" | "_json") || is_generated(col) {
+            if matches!(name.as_str(), "_uuid" | "_timestamp_load") || is_generated(col) {
+                continue;
+            }
+
+            // _json: the payload is spliced in later, unless a directive names its field.
+            if name == "_json" {
+                if plan.sources_json {
+                    let directives = col_meta.get(table, name);
+                    let found = self
+                        .sources_for(name, &directives.renamed, directives.skip)
+                        .try_each(|path| take_path(&mut parsed, path, name, &mut map, contended));
+                    if !found {
+                        map.insert(name.clone(), Value::Object(Map::new()));
+                    }
+                }
                 continue;
             }
 
@@ -562,6 +594,7 @@ impl HeaderExtractor {
             empty_reason,
             stage_inputs: taken,
             unstored,
+            sourced_json: plan.sources_json,
         }
     }
 }
@@ -867,19 +900,46 @@ mod tests {
     }
 
     #[test]
-    fn test_skips_json_column() {
-        let extractor = default_extractor();
-        let raw = br#"{"_json": "anything"}"#;
-        let schema = make_schema(&["_json"]);
-        let col_meta = empty_col_meta();
+    fn the_json_column_is_spliced_unless_a_directive_names_its_field() {
+        use crate::column_meta::parse_directives;
+        use rustc_hash::FxHashMap;
 
-        let map = extractor
-            .extract(raw, "dfe.events", &schema, &col_meta, None)
-            .fields;
-        assert!(
-            map.is_empty(),
-            "_json must not be injected (zero-copy splice path)"
-        );
+        let schema = make_schema(&["_json", "service"]);
+        // (column COMMENT, payload, the _json value taken, whether it is sourced)
+        let cases: [(&str, &[u8], Option<Value>, bool); 5] = [
+            ("", br#"{"_json": "anything"}"#, None, false),
+            (
+                "@source: _json - The original payload",
+                br#"{"_json": {"a": {"b": 1}}, "service": "loader"}"#,
+                Some(serde_json::json!({"a": {"b": 1}})),
+                true,
+            ),
+            (
+                "@source: _json - empty for a raw entry",
+                br#"{"_raw": "AAH/", "service": "receiver"}"#,
+                Some(serde_json::json!({})),
+                true,
+            ),
+            (
+                "@source: first(record/_json)",
+                br#"{"_json": {"x": 1}, "record": {"y": 2}}"#,
+                Some(serde_json::json!({"y": 2})),
+                true,
+            ),
+            ("@skip", br#"{"_json": {"a": 1}}"#, None, false),
+        ];
+        for (comment, raw, want, sourced) in cases {
+            // Its own extractor and cache each, so no case reads another's plan.
+            let extractor = default_extractor();
+            let col_meta = ColumnMetaCache::new(ColumnDirectivesConfig::default());
+            let mut ddl = FxHashMap::default();
+            ddl.insert("_json".to_string(), parse_directives(comment));
+            col_meta.apply_ddl("dfe.dlq", ddl);
+
+            let extraction = extractor.extract(raw, "dfe.dlq", &schema, &col_meta, None);
+            assert_eq!(extraction.fields.get("_json"), want.as_ref(), "{comment}");
+            assert_eq!(extraction.sourced_json, sourced, "{comment}");
+        }
     }
 
     #[test]
