@@ -5143,7 +5143,7 @@ mod tests {
 
         // Under the cap, both are taken for another attempt, which fails and
         // holds them again without restarting their age.
-        tokio::time::advance(cap - Duration::from_secs(1)).await;
+        tokio::time::advance(cap.saturating_sub(Duration::from_secs(1))).await;
         let held = orchestrator.take_unsettled_for(&absent, "dfe.main");
         assert_eq!(tables(&held), ["dfe.dlq", "dfe.kept"]);
         assert_eq!(dropped(&recorder), 0);
