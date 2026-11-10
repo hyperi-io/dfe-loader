@@ -1287,10 +1287,13 @@ mod discovery_tests {
 
     use super::*;
 
-    /// A Strimzi broker: two loader topics plus everything else that lives on it.
+    /// A Strimzi broker: two loader topics, two a `topic_regex` can pick, plus
+    /// everything else that lives on it.
     const BROKER_TOPICS: &[&str] = &[
         "main_land",
         "x_load",
+        "audit.events",
+        "audit.logins",
         "strimzi.cruisecontrol.metrics",
         "strimzi.cruisecontrol.modeltrainingsamples",
         "dlq_land",
@@ -1359,25 +1362,18 @@ mod discovery_tests {
     fn discovery_subscribes_each_dlq_load_topic_and_no_other_dlq_topic() {
         let loaded = crate::config::DlqLoadConfig::default().topics;
         let broker: Vec<&str> = BROKER_TOPICS.iter().chain(DLQ_TOPICS).copied().collect();
-        let strimzi: &[&str] = &[
-            "strimzi.cruisecontrol.metrics",
-            "strimzi.cruisecontrol.modeltrainingsamples",
-        ];
-        // Every broker topic no exclude takes out, under a broad include.
-        let broad: &[&str] = &[
-            "_schemas",
-            "connect-offsets",
-            "main_land",
-            "strimzi.cruisecontrol.metrics",
-            "strimzi.cruisecontrol.modeltrainingsamples",
-            "x_load",
-        ];
+        let audit: &[&str] = &["audit.events", "audit.logins"];
+        // Every broker topic no exclude takes out, under a broad include. scalo's
+        // defaults drop the Strimzi, Connect and schema-registry topics.
+        let broad: &[&str] = &["audit.events", "audit.logins", "main_land", "x_load"];
         let broad_and_dlq_land: Vec<&str> = broad.iter().copied().chain(["dlq_land"]).collect();
         // (the loader's own DLQ topic, topic_regex, what discovery subscribes to
         // beside the five loaded topics)
-        let cases: [(&str, Option<&str>, &[&str]); 4] = [
+        let cases: [(&str, Option<&str>, &[&str]); 5] = [
             ("dlq_land", None, &["main_land", "x_load"]),
-            ("dlq_land", Some("^strimzi\\."), strimzi),
+            ("dlq_land", Some("^audit\\."), audit),
+            // A regex naming a system topic still cannot reach it.
+            ("dlq_land", Some("^strimzi\\."), &[]),
             ("dlq_land", Some(".*"), broad),
             // The loader's own DLQ topic is one it loads.
             ("dfe_loader_dlq", Some(".*"), &broad_and_dlq_land),
@@ -1494,19 +1490,16 @@ mod discovery_tests {
     #[test]
     fn topic_regex_replaces_the_include_and_keeps_the_dlq_exclude() {
         let kafka = KafkaConfig {
-            topic_regex: Some("^strimzi\\.".to_string()),
+            topic_regex: Some("^audit\\.".to_string()),
             ..KafkaConfig::default()
         };
         let cfg = TransportAdapter::convert_config(&kafka, &dlq_land(), &[]);
 
-        assert_eq!(cfg.topic_include, ["^strimzi\\."]);
+        assert_eq!(cfg.topic_include, ["^audit\\."]);
         assert!(cfg.topic_exclude.iter().any(|p| p == "^dlq_land$"));
         assert_eq!(
             resolve(&cfg, BROKER_TOPICS),
-            [
-                "strimzi.cruisecontrol.metrics",
-                "strimzi.cruisecontrol.modeltrainingsamples"
-            ]
+            ["audit.events", "audit.logins"]
         );
     }
 
