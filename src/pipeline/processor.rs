@@ -3164,23 +3164,12 @@ mod tests {
         harness
             .absent_tables
             .insert("dfe.dlq", std::time::Instant::now());
-        // (topic, record, the table it waits for): a data record that names the
-        // dlq table falls back like any other, a dead letter waits.
-        let cases: [(&str, &[u8], &str); 2] = [
-            (
-                "dfe_loader_dlq",
-                br#"{"service":"loader","_source":"auth","_json":{"_source":"auth"}}"#,
-                "dfe.dlq",
-            ),
-            ("auth_land", br#"{"_source":"dlq","user":"x"}"#, "dfe.main"),
-        ];
-        for (topic, entry, want) in cases {
-            let msg = harness.make_msg_on(topic, entry);
-            match harness.processor_json_primary().process(&msg) {
-                Err(crate::Error::SchemaPending { table }) => assert_eq!(table, want, "{topic}"),
-                Ok(processed) => panic!("{topic}: processed into {}", processed.table),
-                Err(e) => panic!("{topic}: expected SchemaPending, got {e:?}"),
-            }
+        let entry = br#"{"service":"loader","_source":"auth","_json":{"_source":"auth"}}"#;
+        let msg = harness.make_msg_on("dfe_loader_dlq", entry);
+        match harness.processor_json_primary().process(&msg) {
+            Err(crate::Error::SchemaPending { table }) => assert_eq!(table, "dfe.dlq"),
+            Ok(processed) => panic!("processed into {}", processed.table),
+            Err(e) => panic!("expected SchemaPending, got {e:?}"),
         }
     }
 

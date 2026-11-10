@@ -399,6 +399,15 @@ impl Router {
             .get(table)
             .map_or(table, String::as_str);
 
+        // A pinned table holds dead letters alone, so any other record naming
+        // it lands in the default table, as one naming an unknown table does.
+        if self.pinned.values().any(|pinned| pinned == table) {
+            return (
+                self.build_route_result(db, &self.default_table),
+                TableChoice::DefaultFallback,
+            );
+        }
+
         (self.build_route_result(db, table), choice)
     }
 
@@ -1363,7 +1372,7 @@ mod tests {
         };
         config
             .source_to_table
-            .insert("dlq".to_string(), "renamed".to_string());
+            .insert("legacy".to_string(), "dlq".to_string());
         let router =
             Router::new(&config).with_pinned_topics(&["dfe_loader_dlq".to_string()], "dlq");
         // (envelope, topic, expected route)
@@ -1390,6 +1399,23 @@ mod tests {
                 json!({"_org_id": "acme", "_source": "auth"}),
                 "dfe_receiver_dlq",
                 ("acme.auth", TableChoice::Named),
+            ),
+            // The pinned table holds dead letters alone: a data record naming it,
+            // directly or through source_to_table, lands in the default table.
+            (
+                json!({"_source": "dlq"}),
+                "auth_land",
+                ("dfe.main", TableChoice::DefaultFallback),
+            ),
+            (
+                json!({"_org_id": "acme", "_source": "legacy"}),
+                "auth_land",
+                ("acme.main", TableChoice::DefaultFallback),
+            ),
+            (
+                json!({"message": "x"}),
+                "dlq_land",
+                ("dfe.main", TableChoice::DefaultFallback),
             ),
         ];
         for (value, topic, (table, choice)) in cases {

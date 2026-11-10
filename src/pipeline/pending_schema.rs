@@ -23,6 +23,7 @@ use rustc_hash::FxHashMap;
 
 use crate::buffer::{KafkaOffset, Purged};
 use crate::clickhouse::SchemaCache;
+use crate::config::DlqLoadConfig;
 use crate::kafka::KafkaMessage;
 
 /// Per-buffer configuration.
@@ -101,8 +102,9 @@ pub(crate) struct PendingSchemaBuffer {
     /// `expire()` call (added in a later task).
     evicted: VecDeque<(KafkaMessage, ExpireReason)>,
     config: PendingSchemaConfig,
-    /// Topics whose messages wait for their own table even once it is absent.
-    pinned: Vec<String>,
+    /// The table dead letters load into, whose messages wait for it even once
+    /// it is absent.
+    dlq_load: Option<DlqLoadConfig>,
 }
 
 impl PendingSchemaBuffer {
@@ -113,15 +115,15 @@ impl PendingSchemaBuffer {
             total_count: 0,
             evicted: VecDeque::new(),
             config,
-            pinned: Vec::new(),
+            dlq_load: None,
         }
     }
 
-    /// Keep each message read from one of `topics` waiting for its table when
-    /// that table is absent, rather than releasing it to fall back.
+    /// Keep messages for the table `dlq_load` loads into waiting when that
+    /// table is absent. Only dead letters route there, and none falls back.
     #[must_use]
-    pub fn with_pinned_topics(mut self, topics: &[String]) -> Self {
-        self.pinned = topics.to_vec();
+    pub fn with_dlq_load(mut self, dlq_load: &DlqLoadConfig) -> Self {
+        self.dlq_load = Some(dlq_load.clone());
         self
     }
 
@@ -229,42 +231,28 @@ impl PendingSchemaBuffer {
     ///
     /// An absent table's messages are released so the processor can re-route
     /// them to the default table; holding them would only age them out to DLQ.
-    /// A pinned topic's message never re-routes, so it stays for its table or
-    /// the age cap. Clears the per-table request timestamp of a drained table
-    /// so a later miss for it triggers a fresh resolution request.
+    /// The dead letters' table is the exception: nothing there re-routes, so
+    /// they stay for it or the age cap. Clears the per-table request timestamp
+    /// so a later miss for the same table triggers a fresh resolution request.
     pub fn take_ready(
         &mut self,
         schema_cache: &SchemaCache,
         absent: &super::types::AbsentTables,
     ) -> Vec<KafkaMessage> {
         let mut out = Vec::new();
-        let ready_tables: Vec<(String, bool)> = self
+        let waits = |t: &str| self.dlq_load.as_ref().is_some_and(|d| d.loads_into(t));
+        let ready_tables: Vec<String> = self
             .per_table
             .keys()
-            .filter_map(|t| {
-                if schema_cache.get(t).is_some() {
-                    Some((t.clone(), true))
-                } else {
-                    absent.contains(t).then(|| (t.clone(), false))
-                }
-            })
+            .filter(|t| schema_cache.get(t).is_some() || (absent.contains(t) && !waits(t)))
+            .cloned()
             .collect();
-        for (table, resolved) in ready_tables {
-            let Some(queue) = self.per_table.get_mut(&table) else {
-                continue;
-            };
-            let before = queue.len();
-            let (waiting, released): (VecDeque<PendingMsg>, VecDeque<PendingMsg>) =
-                std::mem::take(queue).into_iter().partition(|p| {
-                    !resolved && self.pinned.iter().any(|topic| *topic == *p.msg.topic)
-                });
-            *queue = waiting;
-            self.total_count -= before - queue.len();
-            if queue.is_empty() {
-                self.per_table.remove(&table);
+        for table in ready_tables {
+            if let Some(queue) = self.per_table.remove(&table) {
+                self.total_count -= queue.len();
                 self.last_requested_at.remove(&table);
+                out.extend(queue.into_iter().map(|p| p.msg));
             }
-            out.extend(released.into_iter().map(|p| p.msg));
         }
         out
     }
@@ -517,37 +505,32 @@ mod tests {
     }
 
     #[test]
-    fn a_pinned_topics_message_waits_for_its_absent_table() {
-        let mut buf = PendingSchemaBuffer::new(small_cfg())
-            .with_pinned_topics(&["dfe_loader_dlq".to_string()]);
-        let on = |topic: &str, payload: &[u8]| KafkaMessage {
-            topic: Arc::from(topic),
-            ..make_msg(payload)
-        };
-        buf.enqueue("dfe.dlq".into(), on("dfe_loader_dlq", b"pinned"))
-            .unwrap();
-        buf.enqueue("dfe.dlq".into(), on("auth_land", b"routed"))
-            .unwrap();
+    fn a_dead_letter_waits_for_its_absent_table() {
+        let mut buf =
+            PendingSchemaBuffer::new(small_cfg()).with_dlq_load(&DlqLoadConfig::default());
+        buf.enqueue("dfe.dlq".into(), make_msg(b"pinned")).unwrap();
+        buf.enqueue("dfe.gone".into(), make_msg(b"routed")).unwrap();
 
         let cache = SchemaCache::new(300);
         let mut absent = no_absent_tables();
         absent.insert("dfe.dlq", Instant::now());
+        absent.insert("dfe.gone", Instant::now());
 
-        // The absent table releases the routed record to fall back, never the pinned one.
+        // An absent table releases its records to fall back, the dead letters' table never.
         let released = buf.take_ready(&cache, &absent);
         assert_eq!(released.len(), 1);
         assert_eq!(released[0].payload, b"routed");
-        assert_eq!(buf.len(), 1);
+        assert_eq!(buf.len_per_table("dfe.dlq"), 1);
         assert!(
             !buf.tables_needing_rerequest(
                 Instant::now() + Duration::from_secs(3),
                 Duration::from_secs(2)
             )
             .is_empty(),
-            "the table the pinned record waits for is still asked about"
+            "the table the dead letter waits for is still asked about"
         );
 
-        // Once the table exists the pinned record goes to it.
+        // Once the table exists the dead letter goes to it.
         cache.insert("dfe.dlq".into(), dummy_schema("dfe.dlq"));
         let released = buf.take_ready(&cache, &absent);
         assert_eq!(released.len(), 1);

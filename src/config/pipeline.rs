@@ -536,6 +536,15 @@ impl DlqLoadConfig {
     pub fn loads(&self, topic: &str) -> bool {
         self.topics.iter().any(|t| t == topic)
     }
+
+    /// Whether `db_table` is the table dead letters load into, in any database.
+    #[must_use]
+    pub fn loads_into(&self, db_table: &str) -> bool {
+        !self.topics.is_empty()
+            && db_table
+                .split_once('.')
+                .is_some_and(|(_, table)| table == self.table)
+    }
 }
 
 // ============================================================================

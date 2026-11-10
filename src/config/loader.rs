@@ -1899,6 +1899,20 @@ kafka:
         let shipped = DlqLoadConfig::default();
         assert_eq!(shipped.table, "dlq");
         assert!(shipped.loads("dfe_loader_dlq") && !shipped.loads("main_land"));
+        // (table, loaded into while topics are named, with none named)
+        for (table, named, none) in [
+            ("dfe.dlq", true, false),
+            ("acme.dlq", true, false),
+            ("dfe.dlq_extra", false, false),
+            ("dlq", false, false),
+        ] {
+            let off = DlqLoadConfig {
+                topics: vec![],
+                ..DlqLoadConfig::default()
+            };
+            assert_eq!(shipped.loads_into(table), named, "{table}");
+            assert_eq!(off.loads_into(table), none, "{table} with no topics");
+        }
     }
 
     #[test]

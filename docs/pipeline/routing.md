@@ -55,7 +55,7 @@ flowchart TB
 
 `table_fields` is an ordered list. The first field carrying a value wins, and the value is the table name. A null or empty value counts as absent, so `{"_source": ""}` falls through to the next field, then the topic, then `default_table`. It never reaches the DLQ. Dot-notation walks nested objects, so `table_fields = ["event.category"]` reads `category` inside the `event` object.
 
-A record read from a `dlq_load` topic skips `table_fields` and lands in `dlq_load.table`. A dead letter carries the `_source` of the record it wraps, which would send it back to the table that refused it. See [configuration](../configuration.md#loading-dead-letters).
+A record read from a `dlq_load` topic skips `table_fields` and lands in `dlq_load.table`. A dead letter carries the `_source` of the record it wraps, which would send it back to the table that refused it. Any other record that resolves to `dlq_load.table` lands in `default_table` instead. See [configuration](../configuration.md#loading-dead-letters).
 
 ## The tenant
 

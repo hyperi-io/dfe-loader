@@ -490,7 +490,7 @@ impl Orchestrator {
         let mut pending_schema_buffer = super::pending_schema::PendingSchemaBuffer::new(
             PendingSchemaConfig::from_schema_config(&self.config.schema, on_full),
         )
-        .with_pinned_topics(&self.dlq_load.topics);
+        .with_dlq_load(&self.dlq_load);
 
         // Tables ClickHouse has confirmed absent. The processor re-routes their
         // messages to the default table; a failed fetch never lands here.
@@ -1978,8 +1978,8 @@ impl Orchestrator {
 
     /// Take everything held for another attempt, pointing each batch whose
     /// table `ClickHouse` has since confirmed absent at the default table,
-    /// where new records for that table already go. A batch holding a dead
-    /// letter stays for its own table, as the dead letter would.
+    /// where new records for that table already go. A batch of dead letters
+    /// stays for its own table, which only dead letters route to.
     fn take_unsettled_for(
         &mut self,
         absent: &super::types::AbsentTables,
@@ -1990,13 +1990,9 @@ impl Orchestrator {
             return held;
         }
         for batch in &mut held.batches {
-            let holds_dead_letters = batch
-                .offsets
-                .iter()
-                .any(|offset| self.dlq_load.loads(&offset.topic));
             if batch.table.as_str() == default_table
                 || !absent.contains(&batch.table)
-                || holds_dead_letters
+                || self.dlq_load.loads_into(&batch.table)
             {
                 continue;
             }
