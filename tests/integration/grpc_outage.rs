@@ -29,6 +29,7 @@ use dfe_loader::config::Config;
 use dfe_loader::metrics::{Metrics, ServerState};
 use dfe_loader::pipeline::Orchestrator;
 use scalo::ScalingPressure;
+use scalo::dlq::DlqEntry;
 use scalo::metrics::MetricsManager;
 use scalo::scaling::ScalingPressureConfig;
 use scalo::transport::grpc::proto::transport_client::TransportClient;
@@ -486,28 +487,31 @@ pub(super) fn counter_value(manager: &MetricsManager, name: &str, labels: &str) 
         .sum()
 }
 
-/// Decode standard-alphabet base64, the encoding the file DLQ gives a payload.
-pub(super) fn decode_base64(text: &str) -> Option<Vec<u8>> {
-    let mut out = Vec::with_capacity(text.len() * 3 / 4);
-    let mut acc = 0_u32;
-    let mut bits = 0_u32;
-    for c in text.bytes().take_while(|&c| c != b'=') {
-        let value = match c {
-            b'A'..=b'Z' => c - b'A',
-            b'a'..=b'z' => c - b'a' + 26,
-            b'0'..=b'9' => c - b'0' + 52,
-            b'+' => 62,
-            b'/' => 63,
-            _ => return None,
+/// Every entry the file DLQ under `dir` has written, read back through scalo's
+/// own entry format, skipping any torn line.
+pub(super) fn dead_letters(dir: &Path) -> Vec<DlqEntry> {
+    fn walk(dir: &Path, out: &mut Vec<DlqEntry>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
         };
-        acc = (acc << 6) | u32::from(value);
-        bits += 6;
-        if bits >= 8 {
-            bits -= 8;
-            out.push((acc >> bits) as u8);
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, out);
+                continue;
+            }
+            let Ok(body) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            out.extend(
+                body.lines()
+                    .filter_map(|line| serde_json::from_str::<DlqEntry>(line).ok()),
+            );
         }
     }
-    Some(out)
+    let mut out = Vec::new();
+    walk(dir, &mut out);
+    out
 }
 
 /// Every id the file DLQ under `dir` has written, skipping any torn line.
@@ -518,36 +522,13 @@ pub(super) fn dead_lettered_ids(dir: &Path) -> BTreeSet<u64> {
 /// The reason the file DLQ under `dir` recorded for each id it has written,
 /// skipping any torn line.
 pub(super) fn dead_letter_reasons(dir: &Path) -> std::collections::BTreeMap<u64, String> {
-    fn walk(dir: &Path, reasons: &mut std::collections::BTreeMap<u64, String>) {
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            return;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                walk(&path, reasons);
-                continue;
-            }
-            let Ok(body) = std::fs::read_to_string(&path) else {
-                continue;
-            };
-            for line in body.lines() {
-                let Ok(entry) = serde_json::from_str::<serde_json::Value>(line) else {
-                    continue;
-                };
-                let id = decode_base64(entry["payload"].as_str().unwrap_or_default())
-                    .and_then(|payload| serde_json::from_slice::<serde_json::Value>(&payload).ok())
-                    .and_then(|record| record["id"].as_u64());
-                if let Some(id) = id {
-                    let reason = entry["reason"].as_str().unwrap_or_default().to_string();
-                    reasons.insert(id, reason);
-                }
-            }
-        }
-    }
-    let mut reasons = std::collections::BTreeMap::new();
-    walk(dir, &mut reasons);
-    reasons
+    dead_letters(dir)
+        .into_iter()
+        .filter_map(|entry| {
+            let record = serde_json::from_slice::<serde_json::Value>(&entry.payload).ok()?;
+            Some((record["id"].as_u64()?, entry.reason))
+        })
+        .collect()
 }
 
 /// Wait until the DLQ holds every id in `want`, or the budget runs out.
