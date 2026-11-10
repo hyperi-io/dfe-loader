@@ -4449,10 +4449,11 @@ mod tests {
 
         let spooled = spooled_lines(&dir);
         assert_eq!(spooled.len(), 1);
-        // The file backend base64s the payload, so an empty one spools as "".
+        // The promoted row is a JSON object, so the DLQ writes it under `_json`.
         let entry: serde_json::Value = serde_json::from_str(&spooled[0]).expect("NDJSON entry");
-        assert!(
-            !entry["payload"].as_str().expect("payload field").is_empty(),
+        assert_eq!(
+            entry["_json"],
+            serde_json::json!({"_raw": "{\"user\":\"kaz\"}"}),
             "the payload must survive, not just the reason: {}",
             spooled[0]
         );
@@ -4627,16 +4628,17 @@ mod tests {
         )
     }
 
-    /// A dead letter for the gRPC record `seq`, with `bytes` of payload.
+    /// A dead letter for the gRPC record `seq`, with `bytes` of binary payload,
+    /// which the DLQ writes as base64.
     fn dead_letter_for(seq: i64, bytes: usize) -> DlqEntry {
-        DlqEntry::new("loader", "clickhouse_permanent_reject", vec![b'x'; bytes])
+        DlqEntry::new("loader", "clickhouse_permanent_reject", vec![0xff; bytes])
             .with_source(scalo::dlq::DlqSource::kafka("main_land", 0, seq))
     }
 
     #[tokio::test]
     async fn a_dead_letter_over_a_kafka_only_dlqs_ceiling_is_dropped_counted_and_not_retried() {
-        // 8 000 bytes fits a 10 000-byte ceiling raw, and not once base64
-        // grows it by a third: no retry can ever land it.
+        // 8 000 binary bytes fit a 10 000-byte ceiling raw, and not once base64
+        // grows them by a third: no retry can ever land it.
         let dlq = kafka_only_dlq(10_000);
         assert!(dlq.is_enabled(), "the Kafka backend built");
         assert!(dlq.refusal(&dead_letter_for(41, 8_000)).is_some());
