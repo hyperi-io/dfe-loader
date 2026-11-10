@@ -139,12 +139,6 @@ struct Stages {
 }
 
 impl Stages {
-    /// Whether rows routed to `table` wait for it rather than fall back when it
-    /// does not exist: the default table, and the table dead letters load into.
-    fn waits_for(&self, table: &str) -> bool {
-        table == self.default_table || self.router.is_pinned_table(table)
-    }
-
     fn new(config: &Config, dlq_load: &DlqLoadConfig) -> Self {
         Self {
             router: Router::with_metadata(&config.routing, &config.metadata)
@@ -495,7 +489,8 @@ impl Orchestrator {
         };
         let mut pending_schema_buffer = super::pending_schema::PendingSchemaBuffer::new(
             PendingSchemaConfig::from_schema_config(&self.config.schema, on_full),
-        );
+        )
+        .with_pinned_topics(&self.dlq_load.topics);
 
         // Tables ClickHouse has confirmed absent. The processor re-routes their
         // messages to the default table; a failed fetch never lands here.
@@ -775,9 +770,9 @@ impl Orchestrator {
                             // Populate SchemaCache for HeaderExtractor (Change A)
                             schema_cache.insert(table.clone(), schema);
                         }
-                        SchemaResolution::TableNotFound if stages.waits_for(table) => {
-                            // Nothing falls back from the default table or a DLQ table, so neither
-                            // is recorded absent and their rows wait in the pending-schema buffer.
+                        SchemaResolution::TableNotFound if *table == stages.default_table => {
+                            // Nothing falls back from the default table, so it is never recorded
+                            // absent and its rows wait for it in the pending-schema buffer.
                             schema_cache.invalidate(table);
                             static DEFAULT_ABSENT_TS: std::sync::atomic::AtomicU64 =
                                 std::sync::atomic::AtomicU64::new(0);
@@ -785,7 +780,7 @@ impl Orchestrator {
                                 warn!(
                                     table = %table,
                                     pending = pending_schema_buffer.len_per_table(table),
-                                    "A table that never falls back does not exist, rows routed to it wait for it (max 1 per 60s)"
+                                    "The default table does not exist, rows routed to it wait for it (max 1 per 60s)"
                                 );
                             }
                         }
@@ -1983,7 +1978,8 @@ impl Orchestrator {
 
     /// Take everything held for another attempt, pointing each batch whose
     /// table `ClickHouse` has since confirmed absent at the default table,
-    /// where new records for that table already go.
+    /// where new records for that table already go. A batch holding a dead
+    /// letter stays for its own table, as the dead letter would.
     fn take_unsettled_for(
         &mut self,
         absent: &super::types::AbsentTables,
@@ -1994,7 +1990,14 @@ impl Orchestrator {
             return held;
         }
         for batch in &mut held.batches {
-            if batch.table.as_str() == default_table || !absent.contains(&batch.table) {
+            let holds_dead_letters = batch
+                .offsets
+                .iter()
+                .any(|offset| self.dlq_load.loads(&offset.topic));
+            if batch.table.as_str() == default_table
+                || !absent.contains(&batch.table)
+                || holds_dead_letters
+            {
                 continue;
             }
             warn!(
@@ -3433,15 +3436,6 @@ mod tests {
         let stages = Stages::new(&config, &config.dlq_load);
 
         assert_eq!(stages.default_table, "tenantdb.landing");
-        // The default table and the DLQ table, in any database, are waited for.
-        for (table, waits) in [
-            ("tenantdb.landing", true),
-            ("tenantdb.dlq", true),
-            ("acme.dlq", true),
-            ("tenantdb.auth", false),
-        ] {
-            assert_eq!(stages.waits_for(table), waits, "{table}");
-        }
         assert_eq!(stages.router.default_org_id(), "tenant-zero");
         assert_eq!(
             stages
@@ -5044,12 +5038,22 @@ mod tests {
         for off in 200..205 {
             buffered_row(&mut buffers, "dfe.kept", 1, off);
         }
+        // Dead letters read from a DLQ topic, whose table is absent too.
+        for off in 300..305 {
+            buffers.push(
+                "dfe.dlq",
+                serde_json::json!({"id": off}).as_object().unwrap().clone(),
+                Some(offset("dfe_loader_dlq", 2, off)),
+                None,
+            );
+        }
         for batch in buffers.get_ready_for_flush() {
             orchestrator.unsettled.hold(batch);
         }
         let mut absent =
             super::super::types::AbsentTables::new(ABSENT_TABLE_TTL, ABSENT_TABLE_CAPACITY);
         absent.insert("dfe.gone", std::time::Instant::now());
+        absent.insert("dfe.dlq", std::time::Instant::now());
 
         let held = orchestrator.take_unsettled_for(&absent, "dfe.main");
 
@@ -5065,10 +5069,11 @@ mod tests {
         assert_eq!(
             taken,
             vec![
+                ("dfe.dlq".to_string(), 5, (300..305).collect()),
                 ("dfe.kept".to_string(), 5, (200..205).collect()),
                 ("dfe.main".to_string(), 5, (100..105).collect()),
             ],
-            "only the batch for the absent table moves, with its rows and offsets"
+            "only the batch for the absent table moves, with its rows and offsets, and dead letters never do"
         );
     }
 

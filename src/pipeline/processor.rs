@@ -3161,12 +3161,20 @@ mod tests {
     #[test]
     fn a_dead_letter_never_falls_back_to_the_default_table() {
         let mut harness = TestHarness::new();
-        let now = std::time::Instant::now();
-        harness.absent_tables.insert("dfe.dlq", now);
-        harness.absent_tables.insert("dfe.auth", now);
-        let entry = br#"{"service":"loader","_source":"auth","_json":{"_source":"auth"}}"#;
-        // (topic, the table the record waits for)
-        for (topic, want) in [("dfe_loader_dlq", "dfe.dlq"), ("auth_land", "dfe.main")] {
+        harness
+            .absent_tables
+            .insert("dfe.dlq", std::time::Instant::now());
+        // (topic, record, the table it waits for): a data record that names the
+        // dlq table falls back like any other, a dead letter waits.
+        let cases: [(&str, &[u8], &str); 2] = [
+            (
+                "dfe_loader_dlq",
+                br#"{"service":"loader","_source":"auth","_json":{"_source":"auth"}}"#,
+                "dfe.dlq",
+            ),
+            ("auth_land", br#"{"_source":"dlq","user":"x"}"#, "dfe.main"),
+        ];
+        for (topic, entry, want) in cases {
             let msg = harness.make_msg_on(topic, entry);
             match harness.processor_json_primary().process(&msg) {
                 Err(crate::Error::SchemaPending { table }) => assert_eq!(table, want, "{topic}"),

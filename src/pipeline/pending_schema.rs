@@ -101,6 +101,8 @@ pub(crate) struct PendingSchemaBuffer {
     /// `expire()` call (added in a later task).
     evicted: VecDeque<(KafkaMessage, ExpireReason)>,
     config: PendingSchemaConfig,
+    /// Topics whose messages wait for their own table even once it is absent.
+    pinned: Vec<String>,
 }
 
 impl PendingSchemaBuffer {
@@ -111,7 +113,16 @@ impl PendingSchemaBuffer {
             total_count: 0,
             evicted: VecDeque::new(),
             config,
+            pinned: Vec::new(),
         }
+    }
+
+    /// Keep each message read from one of `topics` waiting for its table when
+    /// that table is absent, rather than releasing it to fall back.
+    #[must_use]
+    pub fn with_pinned_topics(mut self, topics: &[String]) -> Self {
+        self.pinned = topics.to_vec();
+        self
     }
 
     pub fn len(&self) -> usize {
@@ -218,26 +229,42 @@ impl PendingSchemaBuffer {
     ///
     /// An absent table's messages are released so the processor can re-route
     /// them to the default table; holding them would only age them out to DLQ.
-    /// Clears the per-table request timestamp so a later miss for the same
-    /// table triggers a fresh resolution request.
+    /// A pinned topic's message never re-routes, so it stays for its table or
+    /// the age cap. Clears the per-table request timestamp of a drained table
+    /// so a later miss for it triggers a fresh resolution request.
     pub fn take_ready(
         &mut self,
         schema_cache: &SchemaCache,
         absent: &super::types::AbsentTables,
     ) -> Vec<KafkaMessage> {
         let mut out = Vec::new();
-        let ready_tables: Vec<String> = self
+        let ready_tables: Vec<(String, bool)> = self
             .per_table
             .keys()
-            .filter(|t| schema_cache.get(t).is_some() || absent.contains(t))
-            .cloned()
+            .filter_map(|t| {
+                if schema_cache.get(t).is_some() {
+                    Some((t.clone(), true))
+                } else {
+                    absent.contains(t).then(|| (t.clone(), false))
+                }
+            })
             .collect();
-        for table in ready_tables {
-            if let Some(queue) = self.per_table.remove(&table) {
-                self.total_count -= queue.len();
+        for (table, resolved) in ready_tables {
+            let Some(queue) = self.per_table.get_mut(&table) else {
+                continue;
+            };
+            let before = queue.len();
+            let (waiting, released): (VecDeque<PendingMsg>, VecDeque<PendingMsg>) =
+                std::mem::take(queue).into_iter().partition(|p| {
+                    !resolved && self.pinned.iter().any(|topic| *topic == *p.msg.topic)
+                });
+            *queue = waiting;
+            self.total_count -= before - queue.len();
+            if queue.is_empty() {
+                self.per_table.remove(&table);
                 self.last_requested_at.remove(&table);
-                out.extend(queue.into_iter().map(|p| p.msg));
             }
+            out.extend(released.into_iter().map(|p| p.msg));
         }
         out
     }
@@ -487,6 +514,45 @@ mod tests {
             "a table ClickHouse never answered for stays buffered"
         );
         assert_eq!(buf.len_per_table("dfe.unreachable"), 1);
+    }
+
+    #[test]
+    fn a_pinned_topics_message_waits_for_its_absent_table() {
+        let mut buf = PendingSchemaBuffer::new(small_cfg())
+            .with_pinned_topics(&["dfe_loader_dlq".to_string()]);
+        let on = |topic: &str, payload: &[u8]| KafkaMessage {
+            topic: Arc::from(topic),
+            ..make_msg(payload)
+        };
+        buf.enqueue("dfe.dlq".into(), on("dfe_loader_dlq", b"pinned"))
+            .unwrap();
+        buf.enqueue("dfe.dlq".into(), on("auth_land", b"routed"))
+            .unwrap();
+
+        let cache = SchemaCache::new(300);
+        let mut absent = no_absent_tables();
+        absent.insert("dfe.dlq", Instant::now());
+
+        // The absent table releases the routed record to fall back, never the pinned one.
+        let released = buf.take_ready(&cache, &absent);
+        assert_eq!(released.len(), 1);
+        assert_eq!(released[0].payload, b"routed");
+        assert_eq!(buf.len(), 1);
+        assert!(
+            !buf.tables_needing_rerequest(
+                Instant::now() + Duration::from_secs(3),
+                Duration::from_secs(2)
+            )
+            .is_empty(),
+            "the table the pinned record waits for is still asked about"
+        );
+
+        // Once the table exists the pinned record goes to it.
+        cache.insert("dfe.dlq".into(), dummy_schema("dfe.dlq"));
+        let released = buf.take_ready(&cache, &absent);
+        assert_eq!(released.len(), 1);
+        assert_eq!(released[0].payload, b"pinned");
+        assert_eq!(buf.len(), 0);
     }
 
     #[test]
