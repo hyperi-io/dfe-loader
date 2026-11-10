@@ -19,8 +19,8 @@ use std::path::Path;
 use std::time::Duration;
 
 use super::grpc_outage::{
-    clickhouse_address, decode_base64, free_port, grpc_loader, push_ids, query_client,
-    start_loader, wait_for_loader, wait_landed, with_file_dlq,
+    clickhouse_address, dead_letters, free_port, grpc_loader, push_ids, query_client, start_loader,
+    wait_for_loader, wait_landed, with_file_dlq,
 };
 use crate::common::containers::TestInfrastructure;
 use crate::common::unique_table_name;
@@ -42,34 +42,11 @@ fn nested_object(depth: usize) -> String {
 
 /// Every payload the file DLQ under `dir` holds with the depth reason.
 fn dead_lettered_too_deep(dir: &Path) -> Vec<Vec<u8>> {
-    fn walk(dir: &Path, out: &mut Vec<Vec<u8>>) {
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            return;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                walk(&path, out);
-                continue;
-            }
-            let Ok(body) = std::fs::read_to_string(&path) else {
-                continue;
-            };
-            for line in body.lines() {
-                let Ok(entry) = serde_json::from_str::<serde_json::Value>(line) else {
-                    continue;
-                };
-                if entry["reason"].as_str() == Some(TOO_DEEP)
-                    && let Some(payload) = entry["payload"].as_str().and_then(decode_base64)
-                {
-                    out.push(payload);
-                }
-            }
-        }
-    }
-    let mut out = Vec::new();
-    walk(dir, &mut out);
-    out
+    dead_letters(dir)
+        .into_iter()
+        .filter(|entry| entry.reason == TOO_DEEP)
+        .map(|entry| entry.payload)
+        .collect()
 }
 
 #[test]
