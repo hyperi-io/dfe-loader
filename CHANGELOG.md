@@ -3,6 +3,17 @@
 Rendered by CI and committed back at the end of a release -- do not edit by
 hand. Release notes also appear on the GitHub Releases page, one per tag.
 
+## [1.18.68](https://github.com/hyperi-io/dfe-loader/compare/v1.18.67...v1.18.68) (2026-11-10)
+
+### Bug Fixes
+
+* **ci:** drop Namespace runners, add test-tier ([35d6984](https://github.com/hyperi-io/dfe-loader/commit/35d69843a80a86d65f67a5bcf011c7724d32693f))
+* **dlq:** load dead letters into the dlq table ([#322](https://github.com/hyperi-io/dfe-loader/issues/322)) ([cd4337b](https://github.com/hyperi-io/dfe-loader/commit/cd4337bf174163e36223db8d8c4279b3bebf1f04))
+* **dlq:** name the refused value and its table ([#320](https://github.com/hyperi-io/dfe-loader/issues/320)) ([026806a](https://github.com/hyperi-io/dfe-loader/commit/026806ac8b08378645fe4a79513afd07937170d0))
+* **docs:** call the search component dfe-hyperdx ([b2b1c30](https://github.com/hyperi-io/dfe-loader/commit/b2b1c30d7d1982b044655360355299008e7c6dd0))
+* **loader:** rebuild on scalo 2.14.28 ([#323](https://github.com/hyperi-io/dfe-loader/issues/323)) ([0103018](https://github.com/hyperi-io/dfe-loader/commit/0103018e5e6b8303b574c0260f609d82649d8cc7))
+* **tests:** read DLQ entries through scalo ([#324](https://github.com/hyperi-io/dfe-loader/issues/324)) ([4ae0136](https://github.com/hyperi-io/dfe-loader/commit/4ae01365f7f61a23b378c212ce416c2874d9fa08))
+
 ## [1.18.67](https://github.com/hyperi-io/dfe-loader/compare/v1.18.66...v1.18.67) (2026-11-09)
 
 ### Bug Fixes
