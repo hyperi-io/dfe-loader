@@ -1979,12 +1979,14 @@ impl Orchestrator {
     /// Take everything held for another attempt, pointing each batch whose
     /// table `ClickHouse` has since confirmed absent at the default table,
     /// where new records for that table already go. A batch of dead letters
-    /// stays for its own table, which only dead letters route to.
+    /// stays for its own table, which only dead letters route to, until
+    /// [`Self::retire_held_dead_letters`] drops it.
     fn take_unsettled_for(
         &mut self,
         absent: &super::types::AbsentTables,
         default_table: &str,
     ) -> Held {
+        self.retire_held_dead_letters();
         let mut held = self.take_unsettled();
         if absent.is_empty() {
             return held;
@@ -2158,6 +2160,36 @@ impl Orchestrator {
         self.drop_dead_letters(&dropped, DROPPED_DLQ_LOAD);
         self.dlq_placed.extend(placed_offsets(&dropped));
         kept
+    }
+
+    /// Drop every batch held for the `dlq_load` table past
+    /// `schema.pending_max_age_secs`, the age a dead letter waiting for that
+    /// table's schema is retired at.
+    ///
+    /// Each row is counted under `dlq_load` and its offset committed, and the
+    /// record stays on its DLQ topic until retention.
+    fn retire_held_dead_letters(&mut self) {
+        let max_age = Duration::from_secs(self.config.schema.pending_max_age_secs);
+        let dlq_load = &self.dlq_load;
+        let expired = self
+            .unsettled
+            .take_held_past(max_age, |table| dlq_load.loads_into(table));
+        for batch in expired {
+            let rows = batch.rows.len();
+            static HELD_TS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            if scalo::logger::log_debounced(&HELD_TS, 60_000) {
+                error!(
+                    table = %batch.table,
+                    rows,
+                    max_age_secs = max_age.as_secs(),
+                    "Dead letters held for the dlq table past the pending-schema age cap -- dropped, never dead-lettered again, counted in pipeline_dead_letters_dropped_total (max 1 per 60s)"
+                );
+            }
+            self.memory_guard.release(batch.reserved_bytes());
+            self.record_rows_lost(rows);
+            crate::metrics::count_dead_letters_dropped(DROPPED_DLQ_LOAD, rows as u64);
+            self.dlq_placed.extend(batch.offsets);
+        }
     }
 
     /// Drop every dead letter no backend of `dlq` can ever hold, and return
@@ -5070,6 +5102,77 @@ mod tests {
                 ("dfe.main".to_string(), 5, (100..105).collect()),
             ],
             "only the batch for the absent table moves, with its rows and offsets, and dead letters never do"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_dead_letter_batch_held_past_the_age_cap_is_dropped_counted_and_committed() {
+        let mut orchestrator = Orchestrator::new(Config::default());
+        let recorder = crate::metrics::counting::CountingRecorder::default();
+        let _local = metrics::set_default_local_recorder(&recorder);
+        let cap = Duration::from_secs(orchestrator.config.schema.pending_max_age_secs);
+        let mut buffers = staged_buffers();
+        for off in 200..205 {
+            buffered_row(&mut buffers, "dfe.kept", 1, off);
+        }
+        for off in 300..305 {
+            buffers.push(
+                "dfe.dlq",
+                serde_json::json!({"id": off}).as_object().unwrap().clone(),
+                Some(offset("dfe_loader_dlq", 2, off)),
+                None,
+            );
+        }
+        for batch in buffers.get_ready_for_flush() {
+            orchestrator.unsettled.hold(batch);
+        }
+        let absent =
+            super::super::types::AbsentTables::new(ABSENT_TABLE_TTL, ABSENT_TABLE_CAPACITY);
+        let dropped = |recorder: &crate::metrics::counting::CountingRecorder| {
+            recorder.labelled(
+                crate::metrics::DEAD_LETTERS_DROPPED_TOTAL,
+                "reason",
+                "dlq_load",
+            )
+        };
+        let tables = |held: &Held| {
+            let mut out: Vec<String> = held.batches.iter().map(|b| b.table.to_string()).collect();
+            out.sort();
+            out
+        };
+
+        // Under the cap, both are taken for another attempt, which fails and
+        // holds them again without restarting their age.
+        tokio::time::advance(cap - Duration::from_secs(1)).await;
+        let held = orchestrator.take_unsettled_for(&absent, "dfe.main");
+        assert_eq!(tables(&held), ["dfe.dlq", "dfe.kept"]);
+        assert_eq!(dropped(&recorder), 0);
+        for batch in held.batches {
+            orchestrator.unsettled.hold(batch);
+        }
+        orchestrator.unsettled.rearm();
+
+        tokio::time::advance(Duration::from_secs(1)).await;
+        let held = orchestrator.take_unsettled_for(&absent, "dfe.main");
+
+        assert_eq!(
+            tables(&held),
+            ["dfe.kept"],
+            "a batch for any other table is retried past the cap"
+        );
+        assert_eq!(dropped(&recorder), 5, "each dropped row is counted");
+        let mut committed: Vec<(String, i64)> = orchestrator
+            .dlq_commit(Vec::new())
+            .iter()
+            .map(|o| (o.topic.to_string(), o.offset))
+            .collect();
+        committed.sort_unstable();
+        assert_eq!(
+            committed,
+            (300..305)
+                .map(|off| ("dfe_loader_dlq".to_string(), off))
+                .collect::<Vec<_>>(),
+            "a dropped row's offset commits, so its DLQ topic shows no lag"
         );
     }
 

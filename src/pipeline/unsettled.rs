@@ -15,10 +15,11 @@
 //! its record is queued, so a held row exists nowhere else and intake pauses
 //! while anything is held.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use backon::{BackoffBuilder, ExponentialBuilder};
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use scalo::dlq::DlqEntry;
 use scalo::sink_stack::SinkStackConfig;
 use tokio::time::Instant;
@@ -28,9 +29,21 @@ use crate::buffer::{FlushBatch, KafkaOffset, Purged};
 /// The delay schedule `ExponentialBuilder` produces.
 type Schedule = <ExponentialBuilder as BackoffBuilder>::Backoff;
 
+/// Topic, partition and offset of a batch's first row.
+type FirstRow = (Arc<str>, i32, i64);
+
+/// The first row of `batch`, where it came from Kafka.
+fn first_row(batch: &FlushBatch) -> Option<FirstRow> {
+    let first = batch.offsets.first()?;
+    Some((Arc::clone(&first.topic), first.partition, first.offset))
+}
+
 /// Held rows and the schedule their next attempt runs on.
 pub(crate) struct Unsettled {
     batches: Vec<FlushBatch>,
+    /// When each held batch was first held, by the offset of its first row,
+    /// which another attempt keeps.
+    first_held: FxHashMap<FirstRow, Instant>,
     dead_letters: Vec<DlqEntry>,
     /// The lowest offset per partition of rows this process no longer holds,
     /// which only a re-read from Kafka after a restart can place.
@@ -125,6 +138,7 @@ impl Unsettled {
         let builder = config.backoff().without_max_times();
         Self {
             batches: Vec::new(),
+            first_held: FxHashMap::default(),
             dead_letters: Vec::new(),
             awaiting_reread: Vec::new(),
             builder,
@@ -135,7 +149,36 @@ impl Unsettled {
 
     /// Hold a batch whose insert failed.
     pub(crate) fn hold(&mut self, batch: FlushBatch) {
+        if let Some(first) = first_row(&batch) {
+            self.first_held.entry(first).or_insert_with(Instant::now);
+        }
         self.batches.push(batch);
+    }
+
+    /// Take every held batch for a table `retires` names that was first held
+    /// at least `max_age` ago. A batch with no Kafka offset is never taken.
+    pub(crate) fn take_held_past(
+        &mut self,
+        max_age: Duration,
+        retires: impl Fn(&str) -> bool,
+    ) -> Vec<FlushBatch> {
+        let now = Instant::now();
+        let first_held = &self.first_held;
+        let (expired, kept): (Vec<FlushBatch>, Vec<FlushBatch>) = std::mem::take(&mut self.batches)
+            .into_iter()
+            .partition(|batch| {
+                retires(&batch.table)
+                    && first_row(batch)
+                        .and_then(|first| first_held.get(&first))
+                        .is_some_and(|at| now.duration_since(*at) >= max_age)
+            });
+        self.batches = kept;
+        for batch in &expired {
+            if let Some(first) = first_row(batch) {
+                self.first_held.remove(&first);
+            }
+        }
+        expired
     }
 
     /// Hold dead letters the DLQ did not prove written.
@@ -210,8 +253,10 @@ impl Unsettled {
     }
 
     /// Schedule the next attempt while anything is held; start the schedule
-    /// over once nothing is.
+    /// over once nothing is. A batch no longer held loses its first-held time.
     pub(crate) fn rearm(&mut self) {
+        let held: FxHashSet<FirstRow> = self.batches.iter().filter_map(first_row).collect();
+        self.first_held.retain(|first, _| held.contains(first));
         if self.is_empty() {
             self.retry_at = None;
             self.schedule = self.builder.build();

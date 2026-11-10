@@ -718,6 +718,7 @@ impl Config {
                 "dlq_load.table must not be empty while dlq_load.topics names a topic".into(),
             ));
         }
+        self.refuse_dead_letter_default(&self.dlq_load)?;
 
         // Memory validation
         if self.memory.pressure_threshold < 0.0 || self.memory.pressure_threshold > 1.0 {
@@ -744,6 +745,25 @@ impl Config {
             }
         }
 
+        Ok(())
+    }
+
+    /// Refuse a default table that is `dlq_load`'s table while it loads: every
+    /// record falling back to the default would land among the dead letters.
+    ///
+    /// A reload checks against the `dlq_load` the process started with, which
+    /// changes only on restart.
+    ///
+    /// # Errors
+    ///
+    /// A config error naming both keys.
+    pub fn refuse_dead_letter_default(&self, dlq_load: &DlqLoadConfig) -> Result<()> {
+        if !dlq_load.topics.is_empty() && self.routing.default_table == dlq_load.table {
+            return Err(crate::Error::Config(format!(
+                "routing.default_table must not equal dlq_load.table ({}), which holds dead letters only",
+                dlq_load.table
+            )));
+        }
         Ok(())
     }
 
@@ -1868,28 +1888,45 @@ kafka:
 
     #[test]
     fn dlq_load_names_every_topic_and_a_table_while_it_loads() {
-        type Break = fn(&mut DlqLoadConfig);
-        let cases: [(&str, Break, Option<&str>); 5] = [
+        type Break = fn(&mut Config);
+        let cases: [(&str, Break, Option<&str>); 7] = [
             ("the shipped default", |_| {}, None),
             (
                 "an empty topic",
-                |d| d.topics.push(String::new()),
+                |c| c.dlq_load.topics.push(String::new()),
                 Some("dlq_load.topics"),
             ),
-            ("no table", |d| d.table.clear(), Some("dlq_load.table")),
-            ("nothing to load", |d| d.topics.clear(), None),
+            (
+                "no table",
+                |c| c.dlq_load.table.clear(),
+                Some("dlq_load.table"),
+            ),
+            ("nothing to load", |c| c.dlq_load.topics.clear(), None),
             (
                 "nothing to load and no table",
-                |d| {
-                    d.topics.clear();
-                    d.table.clear();
+                |c| {
+                    c.dlq_load.topics.clear();
+                    c.dlq_load.table.clear();
+                },
+                None,
+            ),
+            (
+                "the default table is the dlq table",
+                |c| c.routing.default_table = "dlq".into(),
+                Some("routing.default_table"),
+            ),
+            (
+                "the default table is the dlq table, with nothing to load",
+                |c| {
+                    c.routing.default_table = "dlq".into();
+                    c.dlq_load.topics.clear();
                 },
                 None,
             ),
         ];
         for (name, tweak, want) in cases {
             let mut config = Config::default();
-            tweak(&mut config.dlq_load);
+            tweak(&mut config);
             match (config.validate(), want) {
                 (Ok(()), None) => {}
                 (Err(e), Some(text)) => assert!(e.to_string().contains(text), "{name}: {e}"),
