@@ -50,6 +50,125 @@ fn start_error(context: &str, e: TransportError) -> crate::Error {
     }
 }
 
+/// The topic exclude `pattern` with every topic `loaded` names taken out of
+/// what it excludes, or `None` once it excludes nothing else.
+///
+/// scalo applies an exclude ahead of every include, and the regex crate has no
+/// lookahead. So an exact, prefix or suffix literal is rewritten to the same
+/// set less those names, and any other pattern that matches one stays whole,
+/// leaving that topic unsubscribed.
+fn exclude_except(pattern: &str, loaded: &[String]) -> Option<String> {
+    let Ok(exclude) = regex::Regex::new(pattern) else {
+        return Some(pattern.to_string());
+    };
+    let hits: Vec<&str> = loaded
+        .iter()
+        .map(String::as_str)
+        .filter(|topic| exclude.is_match(topic))
+        .collect();
+    if hits.is_empty() {
+        return Some(pattern.to_string());
+    }
+    let (anchored_start, rest) = match pattern.strip_prefix('^') {
+        Some(rest) => (true, rest),
+        None => (false, pattern),
+    };
+    let (anchored_end, text) = match rest.strip_suffix('$').and_then(regex_literal) {
+        Some(text) => (true, Some(text)),
+        None => (false, regex_literal(rest)),
+    };
+    match (anchored_start, anchored_end, text) {
+        (true, true, Some(_)) => None,
+        (true, false, Some(prefix)) => {
+            let rests: Vec<&str> = hits
+                .iter()
+                .filter_map(|topic| topic.strip_prefix(prefix.as_str()))
+                .collect();
+            Some(format!(
+                "(?s)^{}{}$",
+                regex::escape(&prefix),
+                none_of(&rests)
+            ))
+        }
+        (false, true, Some(suffix)) => {
+            let rests: Vec<&str> = hits
+                .iter()
+                .filter_map(|topic| topic.strip_suffix(suffix.as_str()))
+                .collect();
+            Some(format!(
+                "(?s)^{}{}$",
+                none_of(&rests),
+                regex::escape(&suffix)
+            ))
+        }
+        _ => {
+            tracing::warn!(
+                pattern,
+                topics = ?hits,
+                "A topic exclude matches dlq_load topics and is not a literal, so they stay unsubscribed"
+            );
+            Some(pattern.to_string())
+        }
+    }
+}
+
+/// The literal text `escaped` matches, when it is exactly `regex::escape` of one.
+fn regex_literal(escaped: &str) -> Option<String> {
+    let mut text = String::with_capacity(escaped.len());
+    let mut chars = escaped.chars();
+    while let Some(c) = chars.next() {
+        text.push(if c == '\\' { chars.next()? } else { c });
+    }
+    (regex::escape(&text) == escaped).then_some(text)
+}
+
+/// A trie of the words [`none_of`] leaves out.
+#[derive(Default)]
+struct WordTrie {
+    word: bool,
+    next: std::collections::BTreeMap<char, WordTrie>,
+}
+
+/// A regex group matching every whole string but `words`.
+///
+/// A string is none of them when it leaves the trie by a character no word has
+/// next, runs on past a word's end, or stops where no word does.
+fn none_of(words: &[&str]) -> String {
+    let mut root = WordTrie::default();
+    for word in words {
+        let mut node = &mut root;
+        for c in word.chars() {
+            node = node.next.entry(c).or_default();
+        }
+        node.word = true;
+    }
+    let mut alternatives = Vec::new();
+    none_of_below(&root, &mut String::new(), &mut alternatives);
+    // The empty string is the one stop with no text to write.
+    let empty = if root.word { "" } else { "?" };
+    format!("(?:{}){empty}", alternatives.join("|"))
+}
+
+/// Push the alternatives for every string that diverges at or below `node`.
+fn none_of_below(node: &WordTrie, path: &mut String, alternatives: &mut Vec<String>) {
+    let at = regex::escape(path);
+    if !node.word && !path.is_empty() {
+        alternatives.push(at.clone());
+    }
+    if node.next.is_empty() {
+        alternatives.push(format!("{at}.+"));
+    } else {
+        // `\u{..}` escapes, which a class reads as the character whatever it is.
+        let next: String = node.next.keys().flat_map(|c| c.escape_unicode()).collect();
+        alternatives.push(format!("{at}[^{next}].*"));
+    }
+    for (c, child) in &node.next {
+        path.push(*c);
+        none_of_below(child, path, alternatives);
+        path.pop();
+    }
+}
+
 /// A received block: the passing messages plus any inbound-filter DLQ entries.
 ///
 /// The DLQ entries are surfaced (never silently dropped) so the orchestrator
@@ -129,8 +248,8 @@ impl TransportAdapter {
     /// scalo's default excludes (`^__`, `_dlq$`), never replacing them.
     ///
     /// Each `dlq_load` topic is subscribed too: appended to an explicit list,
-    /// or included by name under discovery, with every exclude that matches it
-    /// dropped, since an exclude wins over an include.
+    /// or included by name under discovery, with every exclude narrowed to let
+    /// those names through and nothing else (see `exclude_except`).
     pub fn convert_config(
         config: &KafkaConfig,
         dlq: &DlqConfig,
@@ -177,10 +296,10 @@ impl TransportAdapter {
                 .iter()
                 .map(|topic| format!("^{}$", regex::escape(topic))),
         );
-        transport_config.topic_exclude.retain(|pattern| {
-            !regex::Regex::new(pattern)
-                .is_ok_and(|exclude| dlq_load.iter().any(|topic| exclude.is_match(topic)))
-        });
+        transport_config.topic_exclude = std::mem::take(&mut transport_config.topic_exclude)
+            .iter()
+            .filter_map(|pattern| exclude_except(pattern, dlq_load))
+            .collect();
 
         // SASL configuration
         if let Some(ref sasl) = config.sasl
@@ -1233,48 +1352,104 @@ mod discovery_tests {
         "dfe_archiver_dlq",
         "dfe_fetcher_dlq",
         "dfe_transform_dlq",
-        "acme_dlq",
+        "other_dlq",
     ];
 
     #[test]
-    fn discovery_subscribes_each_dlq_load_topic_past_every_exclude() {
+    fn discovery_subscribes_each_dlq_load_topic_and_no_other_dlq_topic() {
         let loaded = crate::config::DlqLoadConfig::default().topics;
         let broker: Vec<&str> = BROKER_TOPICS.iter().chain(DLQ_TOPICS).copied().collect();
-        // (topic_regex, what discovery subscribes to beside the loaded topics)
-        let cases: [(Option<&str>, &[&str]); 2] = [
-            (None, &["main_land", "x_load"]),
-            (
-                Some("^strimzi\\."),
-                &[
-                    "strimzi.cruisecontrol.metrics",
-                    "strimzi.cruisecontrol.modeltrainingsamples",
-                ],
-            ),
+        let strimzi: &[&str] = &[
+            "strimzi.cruisecontrol.metrics",
+            "strimzi.cruisecontrol.modeltrainingsamples",
         ];
-        for (topic_regex, data) in cases {
+        // Every broker topic no exclude takes out, under a broad include.
+        let broad: &[&str] = &[
+            "_schemas",
+            "connect-offsets",
+            "main_land",
+            "strimzi.cruisecontrol.metrics",
+            "strimzi.cruisecontrol.modeltrainingsamples",
+            "x_load",
+        ];
+        let broad_and_dlq_land: Vec<&str> = broad.iter().copied().chain(["dlq_land"]).collect();
+        // (the loader's own DLQ topic, topic_regex, what discovery subscribes to
+        // beside the five loaded topics)
+        let cases: [(&str, Option<&str>, &[&str]); 4] = [
+            ("dlq_land", None, &["main_land", "x_load"]),
+            ("dlq_land", Some("^strimzi\\."), strimzi),
+            ("dlq_land", Some(".*"), broad),
+            // The loader's own DLQ topic is one it loads.
+            ("dfe_loader_dlq", Some(".*"), &broad_and_dlq_land),
+        ];
+        for (own, topic_regex, data) in cases {
             let kafka = KafkaConfig {
                 topic_regex: topic_regex.map(str::to_string),
                 ..KafkaConfig::default()
             };
-            let cfg = TransportAdapter::convert_config(&kafka, &dlq_land(), &loaded);
+            let dlq = DlqConfig {
+                topic: own.to_string(),
+                ..DlqConfig::default()
+            };
+            let cfg = TransportAdapter::convert_config(&kafka, &dlq, &loaded);
 
             let mut want: Vec<&str> = data.iter().chain(&DLQ_TOPICS[..5]).copied().collect();
             want.sort_unstable();
-            assert_eq!(resolve(&cfg, &broker), want, "{topic_regex:?}");
-            assert!(cfg.auto_discover, "{topic_regex:?}");
-            assert_eq!(
-                cfg.topic_exclude,
-                ["^__", "^dlq_land$"],
-                "an exclude no loaded topic matches stays"
-            );
+            assert_eq!(resolve(&cfg, &broker), want, "{own} {topic_regex:?}");
+            assert!(cfg.auto_discover, "{own} {topic_regex:?}");
         }
-        // The loader's own DLQ topic is one it loads, so its exclude goes too.
-        let own = TransportAdapter::convert_config(
-            &KafkaConfig::default(),
-            &DlqConfig::default(),
-            &loaded,
-        );
-        assert_eq!(own.topic_exclude, ["^__"]);
+    }
+
+    #[test]
+    fn a_narrowed_exclude_lets_through_the_loaded_names_and_nothing_else() {
+        let fleet = crate::config::DlqLoadConfig::default().topics;
+        let prefixed = vec!["__dfe_loader_dlq".to_string(), "__x".to_string()];
+        let mut candidates: Vec<String> = [
+            "",
+            "_dlq",
+            "other_dlq",
+            "dlq",
+            "dfe_dlq",
+            "__",
+            "__consumer_offsets",
+            "main_land",
+            "a\nb_dlq",
+        ]
+        .map(String::from)
+        .to_vec();
+        for name in fleet.iter().chain(&prefixed) {
+            for (i, _) in name.char_indices() {
+                candidates.push(name[..i].to_string());
+                candidates.push(format!("{}{}", &name[..i], &name[i + 1..]));
+                candidates.push(format!("{}x{}", &name[..i], &name[i + 1..]));
+            }
+            candidates.extend([
+                name.clone(),
+                format!("x{name}"),
+                format!("{name}x"),
+                format!("{name}_dlq"),
+                format!("__{name}"),
+            ]);
+        }
+        // (exclude, the loaded topics, whether those names get through)
+        let cases: [(&str, &[String], bool); 5] = [
+            ("_dlq$", &fleet, true),
+            ("^__", &prefixed, true),
+            ("^dfe_loader_dlq$", &fleet, true),
+            ("\\.dlq$", &fleet, true),
+            // Not a literal, so it is kept whole and the names stay out.
+            ("dlq", &fleet, false),
+        ];
+        for (pattern, loaded, let_through) in cases {
+            let original = regex::Regex::new(pattern).expect("the exclude compiles");
+            let narrowed = exclude_except(pattern, loaded)
+                .map(|p| regex::Regex::new(&p).expect("the narrowed exclude compiles"));
+            for topic in &candidates {
+                let excluded = narrowed.as_ref().is_some_and(|re| re.is_match(topic));
+                let want = original.is_match(topic) && !(let_through && loaded.contains(topic));
+                assert_eq!(excluded, want, "{pattern} on {topic:?}");
+            }
+        }
     }
 
     #[test]

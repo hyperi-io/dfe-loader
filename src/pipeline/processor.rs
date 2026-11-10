@@ -283,15 +283,17 @@ impl MessageProcessor<'_> {
             log_routing_field_absent(&msg.topic, &routed);
         }
 
-        // An unknown source names a table that does not exist, so it lands in the
-        // default table rather than the DLQ. The emptiness check keeps the common
+        // An unknown source lands in the default table rather than the DLQ, and a
+        // dead letter waits for its own. The emptiness check keeps the common
         // case free of a hash lookup.
-        let (table, fell_back_from) =
-            if !self.absent_tables.is_empty() && self.absent_tables.contains(&routed) {
-                (self.default_table.to_string(), Some(routed))
-            } else {
-                (routed, None)
-            };
+        let (table, fell_back_from) = if choice != TableChoice::Pinned
+            && !self.absent_tables.is_empty()
+            && self.absent_tables.contains(&routed)
+        {
+            (self.default_table.to_string(), Some(routed))
+        } else {
+            (routed, None)
+        };
 
         // Step 4: Build the promoted field map.
         //
@@ -3153,6 +3155,24 @@ mod tests {
             assert_eq!(text("source_topic"), source_topic, "{entry}");
             assert_eq!(text("service"), entry["service"].as_str(), "{entry}");
             assert_eq!(row.data.get("attempts"), entry.get("attempts"), "{entry}");
+        }
+    }
+
+    #[test]
+    fn a_dead_letter_never_falls_back_to_the_default_table() {
+        let mut harness = TestHarness::new();
+        let now = std::time::Instant::now();
+        harness.absent_tables.insert("dfe.dlq", now);
+        harness.absent_tables.insert("dfe.auth", now);
+        let entry = br#"{"service":"loader","_source":"auth","_json":{"_source":"auth"}}"#;
+        // (topic, the table the record waits for)
+        for (topic, want) in [("dfe_loader_dlq", "dfe.dlq"), ("auth_land", "dfe.main")] {
+            let msg = harness.make_msg_on(topic, entry);
+            match harness.processor_json_primary().process(&msg) {
+                Err(crate::Error::SchemaPending { table }) => assert_eq!(table, want, "{topic}"),
+                Ok(processed) => panic!("{topic}: processed into {}", processed.table),
+                Err(e) => panic!("{topic}: expected SchemaPending, got {e:?}"),
+            }
         }
     }
 

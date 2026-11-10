@@ -115,9 +115,11 @@ Precedence, highest wins: **DDL tag > per-table > global**.
 
 A dead letter carries the `_source` of the record it wraps, so routing it by its fields would send it back to the table that refused it. Each `dlq_load` topic routes to `dlq_load.table` instead, in the database `routing` picks for its tenant. The dlq table's `_json` column reads the entry's own `_json` key (`@source: _json`), so the original record lands there rather than the whole entry.
 
-A record from a `dlq_load` topic that fails again is dropped, never dead-lettered, and counted in `pipeline_dead_letters_dropped_total{reason="dlq_load"}` and `dfe_loader_rows_lost_total`. Its offset commits, and the entry stays on the DLQ topic until retention.
+A dead letter never falls back to the default table. When `dlq_load.table` does not exist, in the default database or a tenant's own, its records wait in the pending-schema buffer with their offsets uncommitted, as rows for a missing default table do. Past `schema.pending_max_age_secs` they retire like any record whose table never resolved.
 
-Under auto-discovery each topic is included by name, and any exclude that matches one is dropped, scalo's `_dlq$` and the loader's own `routing.dlq.topic` included. So a `kafka.topic_regex` that matches other `*_dlq` topics consumes those too, routed by their fields. An explicit `kafka.topics` list gains each `dlq_load` topic it lacks.
+A record from a `dlq_load` topic that fails again, or retires that way, is dropped, never dead-lettered. It is counted in `pipeline_dead_letters_dropped_total{reason="dlq_load"}` and `dfe_loader_rows_lost_total`. Its offset commits, and the entry stays on the DLQ topic until retention.
+
+Under auto-discovery each topic is included by name. An exclude that matches one, such as scalo's `_dlq$` or the loader's own `routing.dlq.topic`, is narrowed to let exactly those names through, so no other `*_dlq` topic is subscribed. An explicit `kafka.topics` list gains each `dlq_load` topic it lacks.
 
 The gRPC transport reads no Kafka topic, so a gRPC loader loads no dead letters and keeps its file DLQ.
 

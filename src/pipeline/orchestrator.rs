@@ -139,6 +139,12 @@ struct Stages {
 }
 
 impl Stages {
+    /// Whether rows routed to `table` wait for it rather than fall back when it
+    /// does not exist: the default table, and the table dead letters load into.
+    fn waits_for(&self, table: &str) -> bool {
+        table == self.default_table || self.router.is_pinned_table(table)
+    }
+
     fn new(config: &Config, dlq_load: &DlqLoadConfig) -> Self {
         Self {
             router: Router::with_metadata(&config.routing, &config.metadata)
@@ -769,9 +775,9 @@ impl Orchestrator {
                             // Populate SchemaCache for HeaderExtractor (Change A)
                             schema_cache.insert(table.clone(), schema);
                         }
-                        SchemaResolution::TableNotFound if *table == stages.default_table => {
-                            // Nothing falls back from the default table, so it is never recorded
-                            // absent and its rows wait for it in the pending-schema buffer.
+                        SchemaResolution::TableNotFound if stages.waits_for(table) => {
+                            // Nothing falls back from the default table or a DLQ table, so neither
+                            // is recorded absent and their rows wait in the pending-schema buffer.
                             schema_cache.invalidate(table);
                             static DEFAULT_ABSENT_TS: std::sync::atomic::AtomicU64 =
                                 std::sync::atomic::AtomicU64::new(0);
@@ -779,7 +785,7 @@ impl Orchestrator {
                                 warn!(
                                     table = %table,
                                     pending = pending_schema_buffer.len_per_table(table),
-                                    "The default table does not exist, rows routed to it wait for it (max 1 per 60s)"
+                                    "A table that never falls back does not exist, rows routed to it wait for it (max 1 per 60s)"
                                 );
                             }
                         }
@@ -3427,6 +3433,15 @@ mod tests {
         let stages = Stages::new(&config, &config.dlq_load);
 
         assert_eq!(stages.default_table, "tenantdb.landing");
+        // The default table and the DLQ table, in any database, are waited for.
+        for (table, waits) in [
+            ("tenantdb.landing", true),
+            ("tenantdb.dlq", true),
+            ("acme.dlq", true),
+            ("tenantdb.auth", false),
+        ] {
+            assert_eq!(stages.waits_for(table), waits, "{table}");
+        }
         assert_eq!(stages.router.default_org_id(), "tenant-zero");
         assert_eq!(
             stages
@@ -4692,6 +4707,21 @@ mod tests {
             "the envelope is refused for its depth"
         );
         orchestrator.dead_letter_too_deep(fan.too_deep);
+        // A record that waited past the age cap for an absent dlq table.
+        orchestrator.retire_pending(vec![(
+            crate::kafka::KafkaMessage {
+                payload: br#"{"service":"fetcher","_json":{}}"#.to_vec(),
+                topic: Arc::from("dfe_fetcher_dlq"),
+                partition: 0,
+                offset: 3,
+                key: None,
+                timestamp_ms: None,
+            },
+            ExpireReason::AgeExceeded {
+                age_ms: 30_000,
+                table: "dfe.dlq".to_string(),
+            },
+        )]);
         let mut dead_letters = orchestrator.take_queued_dead_letters();
         dead_letters.extend([
             dead_letter_on("main_land", 7),
@@ -4706,7 +4736,7 @@ mod tests {
                 "reason",
                 "dlq_load"
             ),
-            3,
+            4,
             "every dead letter read from a DLQ topic is dropped and counted"
         );
         let spooled = spooled_lines(&dir);
@@ -4731,6 +4761,7 @@ mod tests {
         assert_eq!(
             committed,
             [
+                ("dfe_fetcher_dlq", 3),
                 ("dfe_loader_dlq", 5),
                 ("dfe_loader_dlq", 41),
                 ("dfe_receiver_dlq", 9),

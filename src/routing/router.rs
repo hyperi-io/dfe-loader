@@ -192,6 +192,17 @@ impl Router {
         self
     }
 
+    /// Whether `db_table` is a pinned topic's table, in any database.
+    ///
+    /// A record routed there never falls back to `default_table`, so a missing
+    /// table cannot put dead letters among a tenant's data.
+    #[must_use]
+    pub fn is_pinned_table(&self, db_table: &str) -> bool {
+        db_table
+            .split_once('.')
+            .is_some_and(|(_, table)| self.pinned.values().any(|pinned| pinned == table))
+    }
+
     /// Hold a record read from an external-pipeline topic to its source's own
     /// tenant and source.
     ///
@@ -1404,5 +1415,15 @@ mod tests {
             TableChoice::Named,
             "a route with no topic is never pinned"
         );
+        // The pinned table in any database never falls back.
+        for (table, pinned) in [
+            ("dfe.dlq", true),
+            ("acme.dlq", true),
+            ("dfe.main", false),
+            ("dfe.dlq_extra", false),
+            ("dlq", false),
+        ] {
+            assert_eq!(router.is_pinned_table(table), pinned, "{table}");
+        }
     }
 }
