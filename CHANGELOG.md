@@ -3,6 +3,12 @@
 Rendered by CI and committed back at the end of a release -- do not edit by
 hand. Release notes also appear on the GitHub Releases page, one per tag.
 
+## [1.18.70](https://github.com/hyperi-io/dfe-loader/compare/v1.18.69...v1.18.70) (2026-11-11)
+
+### Bug Fixes
+
+* **loader:** dfe-clickhouse 0.1.11, risk scoring and discovery from config ([b6044a0](https://github.com/hyperi-io/dfe-loader/commit/b6044a03550ea6f0cdb3cd34706dca52c6a75b64))
+
 ## [1.18.69](https://github.com/hyperi-io/dfe-loader/compare/v1.18.68...v1.18.69) (2026-11-11)
 
 ### Bug Fixes
