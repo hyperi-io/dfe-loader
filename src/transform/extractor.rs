@@ -98,13 +98,11 @@ impl HeaderExtraction {
 /// Both the extraction loop and the table plan resolve a column through
 /// `sources_for`, so a column cannot be counted as claiming one path and then
 /// read from another.
-enum Sources<'a> {
+pub(super) enum Sources<'a> {
     /// The column takes no value from the payload.
     None,
     /// Try each path in order; the first one present wins.
     List(&'a [String]),
-    /// Try each compiled-in path in order; the first one present wins.
-    Fixed(&'static [&'static str]),
     /// Try the first path, then the second when there is one.
     Pair(&'a str, Option<&'a str>),
     /// Try each compiled-in path, then each listed path the compiled-in ones
@@ -115,11 +113,10 @@ enum Sources<'a> {
 impl<'a> Sources<'a> {
     /// Visit each source path in order, stopping at the first `f` accepts.
     #[inline]
-    fn try_each(&self, mut f: impl FnMut(&'a str) -> bool) -> bool {
+    pub(super) fn try_each(&self, mut f: impl FnMut(&'a str) -> bool) -> bool {
         match *self {
             Sources::None => false,
             Sources::List(paths) => paths.iter().any(|path| f(path.as_str())),
-            Sources::Fixed(paths) => paths.iter().any(|path| f(path)),
             Sources::Pair(first, second) => f(first) || second.is_some_and(f),
             Sources::FixedThen(fixed, listed) => {
                 fixed.iter().any(|path| f(path))
@@ -132,16 +129,22 @@ impl<'a> Sources<'a> {
     }
 }
 
-/// The payload keys `_timestamp` reads, in order.
-///
-/// `@timestamp` is ECS's spelling, so without it a beats event lands with its
-/// load time as its event time (dfe-engine#498). `timestamp` stays first, which
-/// leaves a source already sending that key unaffected.
-static TIMESTAMP_SOURCES: &[&str] = &["timestamp", "@timestamp", "_timestamp"];
-
 /// The receive stamp DFE's first hop writes, read ahead of any directive so a
 /// column whose header predates it still records when DFE received the event.
 static RECEIVED_STAMPS: &[&str] = &["_timestamp_received"];
+
+/// The paths a header column reads when its table carries no directive for it.
+///
+/// `_timestamp_received` reads the first hop's stamp, and any other `_foo`
+/// reads `foo`, then `_foo`. The legacy transformer reads the event time and
+/// the receive stamp through this, so both paths agree on an undirected table.
+pub(super) fn undirected_sources(name: &str) -> Sources<'_> {
+    match name {
+        "_timestamp_received" => Sources::FixedThen(RECEIVED_STAMPS, &[]),
+        _ if name.starts_with('_') => Sources::Pair(&name[1..], Some(name)),
+        _ => Sources::Pair(name, None),
+    }
+}
 
 /// Per-table extraction state derived from the schema and its directives.
 ///
@@ -252,8 +255,9 @@ impl HeaderExtractor {
     /// Resolve the source paths a column reads.
     ///
     /// Mirrors the branch order of `extract()`: the columns `ClickHouse`
-    /// generates, then `_org_id`, `_timestamp` and `_timestamp_received`, then
-    /// `@skip`, then `@source`/`@renamed`, then the column-name rules.
+    /// generates, then `_org_id` and `_timestamp_received`, then `@skip`, then
+    /// `@source`/`@renamed`, then the column-name rules. `_timestamp` takes the
+    /// same path as any column, so its directive alone names the fields it reads.
     fn sources_for<'a>(&'a self, name: &'a str, renamed: &'a [String], skip: bool) -> Sources<'a> {
         if matches!(name, "_uuid" | "_timestamp_load") {
             return Sources::None;
@@ -269,10 +273,6 @@ impl HeaderExtractor {
         // The tenant comes from `org_id_field` alone, so no directive can point it at a sender field.
         if name == "_org_id" {
             return Sources::Pair(&self.org_id_field, None);
-        }
-        // _timestamp reads the payload ahead of any directive.
-        if name == "_timestamp" {
-            return Sources::Fixed(TIMESTAMP_SOURCES);
         }
         // _timestamp_received reads the edge stamp ahead of its directive.
         if name == "_timestamp_received" {
@@ -298,9 +298,7 @@ impl HeaderExtractor {
             "_source" if self.capture_source && self.metadata_enabled => {
                 Sources::List(&self.source_fields)
             }
-            // _foo reads "foo" before falling back to the literal "_foo".
-            _ if name.starts_with('_') => Sources::Pair(&name[1..], Some(name)),
-            _ => Sources::Pair(name, None),
+            _ => undirected_sources(name),
         }
     }
 
@@ -529,12 +527,13 @@ impl HeaderExtractor {
                 continue;
             }
 
-            // _timestamp: extract from source, fall back to now() if missing.
+            // _timestamp: the fields its directive names, fall back to now() if missing.
             // The column is NOT Nullable and has no DEFAULT — omitting it would
             // produce 1970-01-01 00:00:00.000 (epoch zero).
             if name == "_timestamp" {
+                let directives = col_meta.get(table, name);
                 let found = self
-                    .sources_for(name, &[], false)
+                    .sources_for(name, &directives.renamed, directives.skip)
                     .try_each(|path| take_path(&mut parsed, path, name, &mut map, contended));
                 if !found {
                     map.insert(name.clone(), Value::String(utc_text(&now)));
@@ -1899,43 +1898,63 @@ mod tests {
         );
     }
 
+    /// `_timestamp` reads the fields its directive names and nothing else, so
+    /// the common header's directive decides whether ECS's `@timestamp` is the
+    /// event time (dfe-engine#498). No match is the ingest time.
     #[test]
-    fn test_timestamp_read_from_ecs_at_timestamp_498() {
-        // Every Elastic shipper sends the event time as `@timestamp`, never
-        // `timestamp`. Reading only `timestamp` left `| now()` to fire, so each
-        // beats event landed bucketed on its load time (dfe-engine#498).
+    fn timestamp_reads_the_fields_its_directive_names() {
+        use crate::column_meta::parse_directives;
+
+        const ECS: &str =
+            "@source: first(timestamp/@timestamp/_timestamp) | now() - Event timestamp";
+        const PLAIN: &str = "@source: timestamp | now() - Event timestamp";
+        let at = r#""@timestamp": "2024-03-05 01:02:03.456""#;
+        let plain = r#""timestamp": "2026-03-15 10:30:00.123""#;
+        let own = r#""_timestamp": "2025-01-02 03:04:05.678""#;
+        // (directive, payload fields, event time or None for the ingest time)
+        let cases: [(Option<&str>, String, Option<&str>); 7] = [
+            (Some(ECS), at.to_string(), Some("2024-03-05T01:02:03.456Z")),
+            (
+                Some(ECS),
+                format!("{plain}, {at}"),
+                Some("2026-03-15T10:30:00.123Z"),
+            ),
+            (Some(ECS), own.to_string(), Some("2025-01-02T03:04:05.678Z")),
+            (Some(PLAIN), at.to_string(), None),
+            (
+                Some(PLAIN),
+                format!("{plain}, {at}"),
+                Some("2026-03-15T10:30:00.123Z"),
+            ),
+            // An undirected column reads `timestamp`, then `_timestamp`.
+            (None, at.to_string(), None),
+            (None, own.to_string(), Some("2025-01-02T03:04:05.678Z")),
+        ];
         let extractor = default_extractor();
-        let raw = br#"{"@timestamp": "2024-03-05 01:02:03.456", "message": "x"}"#;
         let schema = make_schema(&["_timestamp", "message"]);
-        let col_meta = empty_col_meta();
-
-        let map = extractor
-            .extract(raw, "dfe.events", &schema, &col_meta, None)
-            .fields;
-        assert_eq!(
-            map.get("_timestamp"),
-            Some(&Value::String("2024-03-05T01:02:03.456Z".into())),
-            "_timestamp must carry the event's own time, not the load time"
-        );
-    }
-
-    #[test]
-    fn test_plain_timestamp_wins_over_at_timestamp_498() {
-        // A payload carrying both keeps the undecorated spelling, so a source
-        // already sending `timestamp` is unaffected by the ECS addition.
-        let extractor = default_extractor();
-        let raw =
-            br#"{"timestamp": "2026-03-15 10:30:00.123", "@timestamp": "2024-03-05 01:02:03.456"}"#;
-        let schema = make_schema(&["_timestamp"]);
-        let col_meta = empty_col_meta();
-
-        let map = extractor
-            .extract(raw, "dfe.events", &schema, &col_meta, None)
-            .fields;
-        assert_eq!(
-            map.get("_timestamp"),
-            Some(&Value::String("2026-03-15T10:30:00.123Z".into()))
-        );
+        for (directive, fields, want) in cases {
+            let col_meta = empty_col_meta();
+            if let Some(comment) = directive {
+                let mut ddl = FxHashMap::default();
+                ddl.insert("_timestamp".to_string(), parse_directives(comment));
+                col_meta.apply_ddl("dfe.events", ddl);
+            }
+            let raw = format!(r#"{{{fields}, "message": "x"}}"#);
+            let map = extractor
+                .extract(raw.as_bytes(), "dfe.events", &schema, &col_meta, None)
+                .fields;
+            let got = map.get("_timestamp");
+            match want {
+                Some(ts) => {
+                    assert_eq!(
+                        got,
+                        Some(&Value::String(ts.into())),
+                        "{directive:?} {fields}"
+                    );
+                }
+                None => assert!(is_ingest_time(got), "{directive:?} {fields}: {got:?}"),
+            }
+        }
     }
 
     // ========================================================================
@@ -2192,7 +2211,7 @@ mod tests {
         );
         ddl.insert(
             "_timestamp".to_string(),
-            parse_directives("@source: timestamp | now()"),
+            parse_directives("@source: first(timestamp/@timestamp/_timestamp) | now()"),
         );
         let cache = ColumnMetaCache::new(ColumnDirectivesConfig::default());
         cache.apply_ddl("dfe.proofsyslog", ddl);

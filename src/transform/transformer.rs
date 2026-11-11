@@ -12,15 +12,10 @@ use serde_json::{Map, Value};
 use crate::Result;
 use crate::config::{FieldSanitizationConfig, MetadataConfig, RoutingConfig, TimestampDqConfig};
 use crate::datetime::{self, utc_text};
+use crate::transform::extractor::undirected_sources;
 use crate::transform::flatten::flatten_value_owned;
 use crate::transform::timestamp::{TimestampResult, TimestampValidator};
 
-/// Static field names (avoids allocation per message)
-/// Input field names - what we read from source data
-static TIMESTAMP_INPUT_FIELD: &str = "timestamp";
-/// ECS's spelling of the event time, read when `timestamp` is absent.
-static TIMESTAMP_ECS_INPUT_FIELD: &str = "@timestamp";
-static TIMESTAMP_RECEIVED_INPUT_FIELD: &str = "timestamp_received";
 /// Output field names - all common header fields use underscore prefix
 static TIMESTAMP_OUTPUT_FIELD: &str = "_timestamp";
 static TIMESTAMP_RECEIVED_OUTPUT_FIELD: &str = "_timestamp_received";
@@ -221,13 +216,8 @@ impl Transformer {
         // Steps 3-8: Common header field injection (skip all when disabled)
         if self.common_header_enabled {
             // Step 3: Validate/correct timestamp, writing to the output field
-            // (_timestamp). `timestamp` is taken; `@timestamp` -- the spelling a
-            // beats record uses, which sanitisation strips the `@` from only
-            // after this step -- is read in place, so the sanitised `timestamp`
-            // a meta column reads still appears (dfe-engine#498).
-            let ts_input = data
-                .remove(TIMESTAMP_INPUT_FIELD)
-                .or_else(|| data.get(TIMESTAMP_ECS_INPUT_FIELD).cloned());
+            // (_timestamp), from the fields an undirected header column reads.
+            let ts_input = take_undirected(&mut data, TIMESTAMP_OUTPUT_FIELD);
             match (ts_input, &self.timestamp_validator) {
                 (Some(mut ts_value), None) => {
                     datetime::normalise_zoned(&mut ts_value);
@@ -284,9 +274,8 @@ impl Transformer {
                 data.insert(TIMESTAMP_COLLECTOR_FIELD.into(), ts);
             }
 
-            // Step 4b: Extract timestamp_received if present (nullable)
-            // This is when the receiver/loader received the event
-            if let Some(mut ts) = data.remove(TIMESTAMP_RECEIVED_INPUT_FIELD) {
+            // Step 4b: Extract the receive stamp if present (nullable)
+            if let Some(mut ts) = take_undirected(&mut data, TIMESTAMP_RECEIVED_OUTPUT_FIELD) {
                 datetime::normalise_zoned(&mut ts);
                 data.insert(TIMESTAMP_RECEIVED_OUTPUT_FIELD.into(), ts);
             }
@@ -546,6 +535,17 @@ impl Default for Transformer {
     }
 }
 
+/// Take the first field present of those header column `column` reads with no
+/// directive, the same fields the schema-guided extractor reads.
+fn take_undirected(data: &mut Map<String, Value>, column: &str) -> Option<Value> {
+    let mut taken = None;
+    undirected_sources(column).try_each(|path| {
+        taken = data.remove(path);
+        taken.is_some()
+    });
+    taken
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -611,15 +611,13 @@ mod tests {
 
         let result = transformer.transform(input).unwrap();
 
-        // The header claims @timestamp before sanitisation strips the prefix,
-        // so _timestamp carries the event's own time (dfe-engine#498) and the
-        // sanitised `timestamp` still appears for a meta column to read.
-        assert_eq!(
+        // An undirected _timestamp reads `timestamp`, then `_timestamp`, so
+        // `@timestamp` is left to sanitisation, as on the extractor path.
+        assert_ne!(
             result.data["_timestamp"],
-            serde_json::json!("2024-12-24T10:00:00.000Z"),
-            "_timestamp must carry the event's own time, not the load time"
+            serde_json::json!("2024-12-24T10:00:00.000Z")
         );
-        assert!(result.data.contains_key("timestamp")); // sanitized from @timestamp
+        assert_eq!(result.data["timestamp"], "2024-12-24T10:00:00Z"); // sanitized from @timestamp
         assert!(result.data.contains_key("version")); // sanitized from @version
         assert!(!result.data.contains_key("@timestamp"));
         assert!(!result.data.contains_key("@version"));
@@ -982,17 +980,39 @@ mod tests {
         assert!(result.data.contains_key("_timestamp"));
     }
 
+    /// The receive stamp is the first hop's `_timestamp_received`, the field the
+    /// extractor reads. `timestamp_received` is an ordinary payload field.
     #[test]
-    fn test_transform_extracts_timestamp_received() {
+    fn test_transform_reads_the_receive_stamp_the_extractor_reads() {
         let transformer = Transformer::default();
-        // timestamp_received → _timestamp_received
-        let raw = br#"{"event": "x", "timestamp_received": "2024-01-01T00:00:00Z"}"#;
-        let value: Value = serde_json::from_slice(raw).unwrap();
-        let result = transformer.transform_with_raw(value, None, None).unwrap();
-        // _timestamp_received should be present
-        assert!(result.data.contains_key("_timestamp_received"));
-        // Original field should be removed (ownership transferred)
-        assert!(!result.data.contains_key("timestamp_received"));
+        // (payload, _timestamp_received, timestamp_received kept)
+        let cases: [(&[u8], Option<&str>, bool); 3] = [
+            (
+                br#"{"event": "x", "_timestamp_received": "2024-01-01T00:00:00Z"}"#,
+                Some("2024-01-01T00:00:00.000Z"),
+                false,
+            ),
+            (
+                br#"{"event": "x", "timestamp_received": "2024-01-01T00:00:00Z"}"#,
+                None,
+                true,
+            ),
+            (br#"{"event": "x"}"#, None, false),
+        ];
+        for (raw, stamp, kept) in cases {
+            let value: Value = serde_json::from_slice(raw).unwrap();
+            let result = transformer.transform_with_raw(value, None, None).unwrap();
+            assert_eq!(
+                result
+                    .data
+                    .get("_timestamp_received")
+                    .and_then(Value::as_str),
+                stamp,
+                "{}",
+                String::from_utf8_lossy(raw)
+            );
+            assert_eq!(result.data.contains_key("timestamp_received"), kept);
+        }
     }
 
     #[test]
@@ -1000,7 +1020,7 @@ mod tests {
         // An offset is moved to UTC and the zone kept.
         let transformer = Transformer::default();
         let raw = br#"{"event": "x",
-            "timestamp_received": "2026-04-07T17:03:00.123+10:00",
+            "_timestamp_received": "2026-04-07T17:03:00.123+10:00",
             "tags": {"collector": {"timestamp": "2026-04-07T01:33:00.123456-05:30"}}}"#;
         let value: Value = serde_json::from_slice(raw).unwrap();
         let result = transformer.transform_with_raw(value, None, None).unwrap();
@@ -1017,7 +1037,7 @@ mod tests {
     #[test]
     fn test_transform_received_without_a_zone_is_untouched() {
         let transformer = Transformer::default();
-        let raw = br#"{"event": "x", "timestamp_received": 1775545380123}"#;
+        let raw = br#"{"event": "x", "_timestamp_received": 1775545380123}"#;
         let value: Value = serde_json::from_slice(raw).unwrap();
         let result = transformer.transform_with_raw(value, None, None).unwrap();
         assert_eq!(

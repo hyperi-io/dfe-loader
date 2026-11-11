@@ -135,7 +135,7 @@ SETTINGS index_granularity = 8192
 | Nullable | No |
 | Default | None |
 | Codec | `Delta, ZSTD(1)` |
-| Source | `@source: timestamp \| now()` |
+| Source | `@source: first(timestamp/@timestamp/_timestamp) \| now()` |
 
 **Purpose:** When the event actually occurred (event time).
 
@@ -146,12 +146,7 @@ SETTINGS index_granularity = 8192
 - Fallback to `now()` ensures no NULL values in non-nullable column.
 - minmax index enables efficient range scans.
 
-**Field resolution order:**
-
-1. `timestamp` field in source data.
-2. `@timestamp` field (common in log formats).
-3. `_timestamp` field.
-4. Fallback to `now()` if all missing/invalid.
+**Field resolution order:** the fields the column's directive names, first one present wins, then `now()`. The common header's directive reads `timestamp`, then `@timestamp` (ECS's spelling, which every Elastic shipper sends), then `_timestamp`. A column with no directive reads `timestamp`, then `_timestamp`.
 
 **Validation:**
 
@@ -744,7 +739,7 @@ Using the DDL Expression Language (see [../clickhouse/ddl-directives.md](../clic
 | Column | Expression | Description |
 |--------|------------|-------------|
 | `_timestamp_load` | `@generated: now64(3)` | DB generates on insert |
-| `_timestamp` | `@source: timestamp \| now()` | From source with fallback |
+| `_timestamp` | `@source: first(timestamp/@timestamp/_timestamp) \| now()` | From source with fallback |
 | `_timestamp_received` | `@source: timestamp_received` | Optional, from source |
 | `_uuid` | `@generated: generateUUIDv7()` | DB generates on insert |
 | `_org_id` | `@source: org_id` | Required from source |
