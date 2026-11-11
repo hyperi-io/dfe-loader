@@ -1172,9 +1172,9 @@ dependencies = [
 
 [[package]]
 name = "dfe-clickhouse"
-version = "0.1.10"
+version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f45c9c5d373c402f8f39a805b3c859b7dfc0add77b5e61cdfd53c383b822ab4c"
+checksum = "459bcf7d97b2395e1894ef43a3024bbf0e89e97bb07776fd3ff626485c76c40d"
 dependencies = [
  "backon",
  "bytes",
@@ -4463,7 +4463,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d43fb82d550b07e6f929a58d7d0935182602f48ddead875f5ee313c41c8f07fe"
 dependencies = [
  "annotate-snippets",
- "base64 0.23.1",
+ "base64 0.22.1",
  "encoding_rs_io",
  "granit-parser",
  "nohash-hasher",
