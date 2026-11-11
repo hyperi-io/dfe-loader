@@ -2864,7 +2864,7 @@ fn dlq_backends(config: &Config) -> (scalo::dlq::DlqConfig, Option<scalo::transp
         return (dlq, None);
     }
     // The DLQ producer subscribes to nothing.
-    let kafka = TransportAdapter::convert_config(&config.kafka, &config.routing.dlq, &[]);
+    let kafka = TransportAdapter::convert_config(&config.kafka, &config.routing, &[]);
     (dlq, Some(kafka))
 }
 

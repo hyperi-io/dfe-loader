@@ -12,24 +12,27 @@
 //! ## Hot Path Optimizations
 //!
 //! 1. **Integer math only**: All scores are u8 (0-100), no floating point
-//! 2. **Preset configurations**: Pre-computed country/region risk tables
-//! 3. **Short-circuit evaluation**: Early exit if risk is already critical
-//! 4. **Schema-aware output**: Only compute needed risk components
+//! 2. **Pre-computed country sets**: the configured preset's lists, built once
+//! 3. **Schema-aware output**: Only compute needed risk components
+//!
+//! Every country list, weight, score and level band comes from
+//! [`RiskScoringConfig`].
 
 use std::collections::HashMap;
 
 use super::geoip::GeoIpResult;
 use super::reputation::ReputationResult;
+use crate::config::{RiskLevelBands, RiskScores, RiskScoringConfig, RiskWeights};
 
 /// Risk level category (low cardinality for `ClickHouse`)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RiskLevel {
     #[default]
-    Minimal, // 0-19
-    Low,      // 20-39
-    Medium,   // 40-59
-    High,     // 60-79
-    Critical, // 80-100
+    Minimal,
+    Low,
+    Medium,
+    High,
+    Critical,
 }
 
 impl RiskLevel {
@@ -43,16 +46,20 @@ impl RiskLevel {
         }
     }
 
-    /// Derive risk level from score (0-100)
+    /// The level `score` falls in under `bands`.
     #[inline]
-    pub fn from_score(score: u8) -> Self {
-        match score {
-            0..=19 => RiskLevel::Minimal,
-            20..=39 => RiskLevel::Low,
-            40..=59 => RiskLevel::Medium,
-            60..=79 => RiskLevel::High,
-            80..=100 => RiskLevel::Critical,
-            _ => RiskLevel::Critical, // Safety for > 100
+    #[must_use]
+    pub fn from_score(score: u8, bands: &RiskLevelBands) -> Self {
+        if score >= bands.critical {
+            RiskLevel::Critical
+        } else if score >= bands.high {
+            RiskLevel::High
+        } else if score >= bands.medium {
+            RiskLevel::Medium
+        } else if score >= bands.low {
+            RiskLevel::Low
+        } else {
+            RiskLevel::Minimal
         }
     }
 }
@@ -184,149 +191,34 @@ impl RiskOutput {
     }
 }
 
-/// Risk weight configuration
-#[derive(Debug, Clone)]
-pub struct RiskWeights {
-    /// Geographic risk weight (0-100)
-    pub geo_weight: u8,
-    /// Reputation risk weight (0-100)
-    pub reputation_weight: u8,
-    /// Privacy risk weight (0-100)
-    pub privacy_weight: u8,
-    /// Threat risk weight (0-100)
-    pub threat_weight: u8,
-}
-
-impl Default for RiskWeights {
-    fn default() -> Self {
-        Self {
-            geo_weight: 15,
-            reputation_weight: 25,
-            privacy_weight: 25,
-            threat_weight: 35,
-        }
-    }
-}
-
-/// Preset risk configurations for different use cases
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RiskPreset {
-    /// US enterprise - high risk: CN, RU, KP, IR
-    UsEnterprise,
-    /// EU enterprise - GDPR-aware
-    EuEnterprise,
-    /// APAC enterprise - regional focus
-    ApacEnterprise,
-    /// Global - balanced, sanctions-focused
-    Global,
-    /// High security - financial/government
-    HighSecurity,
-}
-
-impl RiskPreset {
-    /// Get high-risk country codes for this preset
-    pub fn high_risk_countries(&self) -> &'static [&'static str] {
-        match self {
-            RiskPreset::UsEnterprise => &["CN", "RU", "KP", "IR", "SY", "CU", "VE"],
-            RiskPreset::EuEnterprise => &["RU", "KP", "IR", "SY", "BY"],
-            RiskPreset::ApacEnterprise => &["KP", "AF", "MM"],
-            RiskPreset::Global => &["KP", "IR", "SY"], // OFAC sanctions
-            RiskPreset::HighSecurity => &["CN", "RU", "KP", "IR", "SY", "CU", "VE", "BY", "MM"],
-        }
-    }
-
-    /// Get medium-risk country codes for this preset
-    pub fn medium_risk_countries(&self) -> &'static [&'static str] {
-        match self {
-            RiskPreset::UsEnterprise => &["UA", "BY", "PK", "NG", "VN"],
-            RiskPreset::EuEnterprise => &["CN", "UA", "PK"],
-            RiskPreset::ApacEnterprise => &["RU", "IR"],
-            RiskPreset::Global => &["RU", "CN", "VE", "CU"],
-            RiskPreset::HighSecurity => &["UA", "PK", "NG", "VN", "BD", "NP"],
-        }
-    }
-}
-
-/// Risk scorer configuration
-#[derive(Debug, Clone)]
-pub struct RiskConfig {
-    pub weights: RiskWeights,
-    pub preset: Option<RiskPreset>,
-    pub high_risk_countries: Vec<String>,
-    pub medium_risk_countries: Vec<String>,
-}
-
-impl Default for RiskConfig {
-    fn default() -> Self {
-        Self {
-            weights: RiskWeights::default(),
-            preset: Some(RiskPreset::Global),
-            high_risk_countries: Vec::new(),
-            medium_risk_countries: Vec::new(),
-        }
-    }
-}
-
-impl RiskConfig {
-    /// Create config from a preset
-    pub fn from_preset(preset: RiskPreset) -> Self {
-        Self {
-            weights: RiskWeights::default(),
-            preset: Some(preset),
-            high_risk_countries: Vec::new(),
-            medium_risk_countries: Vec::new(),
-        }
-    }
-}
-
 /// Risk scorer
 pub struct RiskScorer {
-    config: RiskConfig,
-    /// Pre-computed high-risk country set for O(1) lookup
+    weights: RiskWeights,
+    scores: RiskScores,
+    levels: RiskLevelBands,
+    /// The preset's high-risk countries, for O(1) lookup
     high_risk_set: rustc_hash::FxHashSet<String>,
-    /// Pre-computed medium-risk country set for O(1) lookup
+    /// The preset's medium-risk countries, for O(1) lookup
     medium_risk_set: rustc_hash::FxHashSet<String>,
 }
 
 impl RiskScorer {
-    /// Create a new risk scorer with default config
-    pub fn new() -> Self {
-        Self::with_config(RiskConfig::default())
-    }
-
-    /// Create with specific config
-    pub fn with_config(config: RiskConfig) -> Self {
-        let mut high_risk_set = rustc_hash::FxHashSet::default();
-        let mut medium_risk_set = rustc_hash::FxHashSet::default();
-
-        // Add preset countries
-        if let Some(preset) = config.preset {
-            for &code in preset.high_risk_countries() {
-                high_risk_set.insert(code.to_string());
-            }
-            for &code in preset.medium_risk_countries() {
-                medium_risk_set.insert(code.to_string());
-            }
-        }
-
-        // Add custom countries
-        for code in &config.high_risk_countries {
-            high_risk_set.insert(code.clone());
-        }
-        for code in &config.medium_risk_countries {
-            medium_risk_set.insert(code.clone());
-        }
-
+    /// A scorer for `config`. A preset `config.presets` does not hold scores
+    /// every country as `other_country`. [`RiskScoringConfig::validate`]
+    /// refuses one at load.
+    #[must_use]
+    pub fn new(config: &RiskScoringConfig) -> Self {
+        let countries = config.countries();
+        let set = |codes: Option<&Vec<String>>| -> rustc_hash::FxHashSet<String> {
+            codes.into_iter().flatten().cloned().collect()
+        };
         Self {
-            config,
-            high_risk_set,
-            medium_risk_set,
+            weights: config.weights.clone(),
+            scores: config.scores.clone(),
+            levels: config.levels.clone(),
+            high_risk_set: set(countries.map(|c| &c.high)),
+            medium_risk_set: set(countries.map(|c| &c.medium)),
         }
-    }
-
-    /// Create from a preset
-    pub fn from_preset(preset: RiskPreset) -> Self {
-        Self::with_config(RiskConfig::from_preset(preset))
     }
 
     /// Calculate risk score from input
@@ -341,22 +233,22 @@ impl RiskScorer {
         output.threat_risk_score = self.calculate_threat_risk(input, &mut output.risk_factors);
 
         // Weighted composite score
-        let weights = &self.config.weights;
-        let total_weight = weights.geo_weight as u32
-            + weights.reputation_weight as u32
-            + weights.privacy_weight as u32
-            + weights.threat_weight as u32;
+        let weights = &self.weights;
+        let total_weight = weights.geo as u32
+            + weights.reputation as u32
+            + weights.privacy as u32
+            + weights.threat as u32;
 
-        let weighted_sum = (output.geo_risk_score as u32 * weights.geo_weight as u32)
-            + (output.reputation_risk_score as u32 * weights.reputation_weight as u32)
-            + (output.privacy_risk_score as u32 * weights.privacy_weight as u32)
-            + (output.threat_risk_score as u32 * weights.threat_weight as u32);
+        let weighted_sum = (output.geo_risk_score as u32 * weights.geo as u32)
+            + (output.reputation_risk_score as u32 * weights.reputation as u32)
+            + (output.privacy_risk_score as u32 * weights.privacy as u32)
+            + (output.threat_risk_score as u32 * weights.threat as u32);
 
         if let Some(divided) = weighted_sum.checked_div(total_weight) {
             output.risk_score = divided.min(100) as u8;
         }
 
-        output.risk_level = RiskLevel::from_score(output.risk_score);
+        output.risk_level = RiskLevel::from_score(output.risk_score, &self.levels);
 
         output
     }
@@ -368,58 +260,35 @@ impl RiskScorer {
             return 0;
         }
 
-        // Unknown country = moderate risk
         let Some(country) = input.country_code else {
             factors.push("unknown_country");
-            return 35;
+            return self.scores.unknown_country;
         };
 
-        // High-risk country
         if self.high_risk_set.contains(country) {
             factors.push("high_risk_country");
-            return 90;
+            return self.scores.high_risk_country;
         }
 
-        // Medium-risk country
         if self.medium_risk_set.contains(country) {
             factors.push("medium_risk_country");
-            return 60;
+            return self.scores.medium_risk_country;
         }
 
-        // Normal country - low base risk
-        15
+        self.scores.other_country
     }
 
     /// Calculate reputation risk score
     fn calculate_reputation_risk(&self, input: &RiskInput, factors: &mut Vec<&'static str>) -> u8 {
-        let mut score: u8 = 0;
-
-        if input.is_vpn {
-            score = score.saturating_add(50);
-            factors.push("vpn_detected");
-        }
-
-        if input.is_proxy {
-            score = score.saturating_add(60);
-            factors.push("proxy_detected");
-        }
-
-        if input.is_tor {
-            score = score.saturating_add(80);
-            factors.push("tor_detected");
-        }
-
-        if input.is_datacenter {
-            score = score.saturating_add(40);
-            factors.push("datacenter_ip");
-        }
-
-        if input.is_relay {
-            score = score.saturating_add(45);
-            factors.push("private_relay");
-        }
-
-        score.min(100)
+        let s = &self.scores;
+        let signals = [
+            (input.is_vpn, s.vpn, "vpn_detected"),
+            (input.is_proxy, s.proxy, "proxy_detected"),
+            (input.is_tor, s.tor, "tor_detected"),
+            (input.is_datacenter, s.datacenter, "datacenter_ip"),
+            (input.is_relay, s.relay, "private_relay"),
+        ];
+        add_signals(&signals, factors)
     }
 
     /// Calculate privacy risk score (anonymization attempts)
@@ -441,57 +310,54 @@ impl RiskScorer {
 
         match anonymizer_count {
             0 => 0,
-            1 => 40,
+            1 => self.scores.one_anonymiser,
             2 => {
                 factors.push("multi_layer_anonymization");
-                70
+                self.scores.two_anonymisers
             }
             _ => {
                 factors.push("extensive_anonymization");
-                95
+                self.scores.three_anonymisers
             }
         }
     }
 
     /// Calculate threat risk score
     fn calculate_threat_risk(&self, input: &RiskInput, factors: &mut Vec<&'static str>) -> u8 {
-        let mut score: u8 = 0;
-
-        if input.is_botnet {
-            score = score.saturating_add(95);
-            factors.push("botnet_ip");
-        }
-
-        if input.is_malicious {
-            score = score.saturating_add(90);
-            factors.push("malicious_ip");
-        }
-
-        if input.is_spam {
-            score = score.saturating_add(70);
-            factors.push("spam_source");
-        }
-
-        if input.is_scanner {
-            score = score.saturating_add(60);
-            factors.push("scanner_ip");
-        }
+        let s = &self.scores;
+        let signals = [
+            (input.is_botnet, s.botnet, "botnet_ip"),
+            (input.is_malicious, s.malicious, "malicious_ip"),
+            (input.is_spam, s.spam, "spam_source"),
+            (input.is_scanner, s.scanner, "scanner_ip"),
+        ];
+        let score = add_signals(&signals, factors);
 
         // Include abuse score from external sources
-        if input.abuse_score > 0 {
-            score = score.saturating_add(input.abuse_score);
-            if input.abuse_score >= 80 {
-                factors.push("high_abuse_score");
-            }
+        if input.abuse_score > 0 && input.abuse_score >= s.high_abuse_score {
+            factors.push("high_abuse_score");
         }
-
-        score.min(100)
+        score.saturating_add(input.abuse_score).min(100)
     }
 }
 
+/// The sum of the scores of the signals that are set, capped at 100, with each
+/// one's factor pushed.
+fn add_signals(signals: &[(bool, u8, &'static str)], factors: &mut Vec<&'static str>) -> u8 {
+    let mut score: u8 = 0;
+    for &(set, points, factor) in signals {
+        if set {
+            score = score.saturating_add(points);
+            factors.push(factor);
+        }
+    }
+    score.min(100)
+}
+
 impl Default for RiskScorer {
+    /// A scorer for the shipped default config.
     fn default() -> Self {
-        Self::new()
+        Self::new(&RiskScoringConfig::default())
     }
 }
 
@@ -499,23 +365,30 @@ impl Default for RiskScorer {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_risk_level_from_score() {
-        assert_eq!(RiskLevel::from_score(0), RiskLevel::Minimal);
-        assert_eq!(RiskLevel::from_score(19), RiskLevel::Minimal);
-        assert_eq!(RiskLevel::from_score(20), RiskLevel::Low);
-        assert_eq!(RiskLevel::from_score(39), RiskLevel::Low);
-        assert_eq!(RiskLevel::from_score(40), RiskLevel::Medium);
-        assert_eq!(RiskLevel::from_score(59), RiskLevel::Medium);
-        assert_eq!(RiskLevel::from_score(60), RiskLevel::High);
-        assert_eq!(RiskLevel::from_score(79), RiskLevel::High);
-        assert_eq!(RiskLevel::from_score(80), RiskLevel::Critical);
-        assert_eq!(RiskLevel::from_score(100), RiskLevel::Critical);
+    /// A scorer for the shipped preset `name`.
+    fn scorer_for(name: &str) -> RiskScorer {
+        RiskScorer::new(&RiskScoringConfig {
+            preset: name.to_string(),
+            ..RiskScoringConfig::default()
+        })
+    }
+
+    /// A scorer for the default config with `weights`.
+    fn weighted(geo: u8, reputation: u8, privacy: u8, threat: u8) -> RiskScorer {
+        RiskScorer::new(&RiskScoringConfig {
+            weights: RiskWeights {
+                geo,
+                reputation,
+                privacy,
+                threat,
+            },
+            ..RiskScoringConfig::default()
+        })
     }
 
     #[test]
     fn test_clean_input() {
-        let scorer = RiskScorer::new();
+        let scorer = RiskScorer::default();
         let input = RiskInput::default();
         let output = scorer.score(&input);
 
@@ -527,7 +400,7 @@ mod tests {
 
     #[test]
     fn test_high_risk_country() {
-        let scorer = RiskScorer::from_preset(RiskPreset::UsEnterprise);
+        let scorer = scorer_for("us_enterprise");
         let input = RiskInput {
             country_code: Some("CN"),
             ..Default::default()
@@ -540,7 +413,7 @@ mod tests {
 
     #[test]
     fn test_tor_detection() {
-        let scorer = RiskScorer::new();
+        let scorer = RiskScorer::default();
         let input = RiskInput {
             is_tor: true,
             ..Default::default()
@@ -554,7 +427,7 @@ mod tests {
 
     #[test]
     fn test_botnet_critical() {
-        let scorer = RiskScorer::new();
+        let scorer = RiskScorer::default();
         let input = RiskInput {
             is_botnet: true,
             is_malicious: true,
@@ -571,7 +444,7 @@ mod tests {
 
     #[test]
     fn test_multi_layer_anonymization() {
-        let scorer = RiskScorer::new();
+        let scorer = RiskScorer::default();
         let input = RiskInput {
             is_vpn: true,
             is_tor: true,
@@ -585,7 +458,7 @@ mod tests {
 
     #[test]
     fn test_private_ip_no_geo_risk() {
-        let scorer = RiskScorer::new();
+        let scorer = RiskScorer::default();
         let input = RiskInput {
             is_private: true,
             ..Default::default()
@@ -621,7 +494,7 @@ mod tests {
 
     #[test]
     fn test_preset_us_enterprise_high_risk_countries() {
-        let scorer = RiskScorer::from_preset(RiskPreset::UsEnterprise);
+        let scorer = scorer_for("us_enterprise");
 
         // CN is high-risk for UsEnterprise
         let input = RiskInput {
@@ -652,7 +525,7 @@ mod tests {
 
     #[test]
     fn test_preset_eu_enterprise() {
-        let scorer = RiskScorer::from_preset(RiskPreset::EuEnterprise);
+        let scorer = scorer_for("eu_enterprise");
 
         // RU is high-risk for EuEnterprise
         let input = RiskInput {
@@ -673,7 +546,7 @@ mod tests {
 
     #[test]
     fn test_preset_apac_enterprise() {
-        let scorer = RiskScorer::from_preset(RiskPreset::ApacEnterprise);
+        let scorer = scorer_for("apac_enterprise");
 
         // KP is high-risk for APAC
         let input = RiskInput {
@@ -702,7 +575,7 @@ mod tests {
 
     #[test]
     fn test_preset_global() {
-        let scorer = RiskScorer::from_preset(RiskPreset::Global);
+        let scorer = scorer_for("global");
 
         // KP, IR, SY are high-risk (OFAC sanctions)
         for code in &["KP", "IR", "SY"] {
@@ -728,7 +601,7 @@ mod tests {
 
     #[test]
     fn test_preset_high_security() {
-        let scorer = RiskScorer::from_preset(RiskPreset::HighSecurity);
+        let scorer = scorer_for("high_security");
 
         // HighSecurity has the largest high-risk set
         for code in &["CN", "RU", "KP", "IR", "SY", "CU", "VE", "BY", "MM"] {
@@ -763,7 +636,7 @@ mod tests {
 
     #[test]
     fn test_reputation_risk_saturates_at_100() {
-        let scorer = RiskScorer::new();
+        let scorer = RiskScorer::default();
         // VPN (50) + Proxy (60) + Tor (80) + Datacenter (40) + Relay (45) = 275, capped at 100
         let input = RiskInput {
             is_vpn: true,
@@ -782,7 +655,7 @@ mod tests {
 
     #[test]
     fn test_threat_risk_saturates_at_100() {
-        let scorer = RiskScorer::new();
+        let scorer = RiskScorer::default();
         // Botnet (95) + Malicious (90) + Spam (70) + Scanner (60) = 315, capped at 100
         let input = RiskInput {
             is_botnet: true,
@@ -800,7 +673,7 @@ mod tests {
 
     #[test]
     fn test_threat_risk_with_high_abuse_score() {
-        let scorer = RiskScorer::new();
+        let scorer = RiskScorer::default();
         let input = RiskInput {
             abuse_score: 95,
             is_botnet: true, // 95 + 95 + 90 (malicious implied by botnet? no) = 95 + 95 = 190 -> cap 100
@@ -818,7 +691,7 @@ mod tests {
 
     #[test]
     fn test_completely_clean_private_ip() {
-        let scorer = RiskScorer::new();
+        let scorer = RiskScorer::default();
         let input = RiskInput {
             country_code: Some("AU"),
             is_private: true,
@@ -840,7 +713,7 @@ mod tests {
 
     #[test]
     fn test_clean_known_country_minimal_risk() {
-        let scorer = RiskScorer::new();
+        let scorer = RiskScorer::default();
         let input = RiskInput {
             country_code: Some("US"),
             ..Default::default()
@@ -862,7 +735,7 @@ mod tests {
 
     #[test]
     fn test_risk_level_minimal() {
-        let scorer = RiskScorer::new();
+        let scorer = RiskScorer::default();
         let input = RiskInput {
             country_code: Some("AU"),
             is_private: true,
@@ -875,7 +748,7 @@ mod tests {
 
     #[test]
     fn test_risk_level_low() {
-        let scorer = RiskScorer::new();
+        let scorer = RiskScorer::default();
         // Unknown country (35 geo) + single VPN (50 rep, 40 priv)
         // Weighted: (35*15 + 50*25 + 40*25 + 0*35) / 100 = (525 + 1250 + 1000) / 100 = 27.75 -> 27
         let input = RiskInput {
@@ -893,7 +766,7 @@ mod tests {
 
     #[test]
     fn test_risk_level_medium() {
-        let scorer = RiskScorer::from_preset(RiskPreset::UsEnterprise);
+        let scorer = scorer_for("us_enterprise");
         // Weighted: (60 geo * 15 + 90 rep * 25 + 40 priv * 25 + 0 threat * 35) / 100
         // = (900 + 2250 + 1000) / 100 = 41 -> Medium
         let input = RiskInput {
@@ -917,7 +790,7 @@ mod tests {
 
     #[test]
     fn test_risk_level_high() {
-        let scorer = RiskScorer::from_preset(RiskPreset::UsEnterprise);
+        let scorer = scorer_for("us_enterprise");
         // High risk country (90 geo) + Tor (80 rep, 40 priv) + botnet (95 threat)
         // Weighted: (90*15 + 80*25 + 40*25 + 100*35) / 100 = (1350+2000+1000+3500)/100 = 78.5 -> 78
         let input = RiskInput {
@@ -938,7 +811,7 @@ mod tests {
 
     #[test]
     fn test_risk_level_critical() {
-        let scorer = RiskScorer::from_preset(RiskPreset::HighSecurity);
+        let scorer = scorer_for("high_security");
         // All signals maxed out
         let input = RiskInput {
             country_code: Some("KP"), // 90 geo
@@ -967,19 +840,7 @@ mod tests {
 
     #[test]
     fn test_custom_weights_threat_only() {
-        // 100% threat weight, 0 everything else
-        let config = RiskConfig {
-            weights: RiskWeights {
-                geo_weight: 0,
-                reputation_weight: 0,
-                privacy_weight: 0,
-                threat_weight: 100,
-            },
-            preset: Some(RiskPreset::Global),
-            high_risk_countries: Vec::new(),
-            medium_risk_countries: Vec::new(),
-        };
-        let scorer = RiskScorer::with_config(config);
+        let scorer = weighted(0, 0, 0, 100);
 
         let input = RiskInput {
             country_code: Some("KP"), // Would be 90 geo, but weight=0
@@ -999,18 +860,7 @@ mod tests {
 
     #[test]
     fn test_custom_weights_geo_only() {
-        let config = RiskConfig {
-            weights: RiskWeights {
-                geo_weight: 100,
-                reputation_weight: 0,
-                privacy_weight: 0,
-                threat_weight: 0,
-            },
-            preset: Some(RiskPreset::Global),
-            high_risk_countries: Vec::new(),
-            medium_risk_countries: Vec::new(),
-        };
-        let scorer = RiskScorer::with_config(config);
+        let scorer = weighted(100, 0, 0, 0);
 
         let input = RiskInput {
             country_code: Some("KP"),
@@ -1024,19 +874,7 @@ mod tests {
 
     #[test]
     fn test_zero_total_weight() {
-        // Edge case: all weights zero
-        let config = RiskConfig {
-            weights: RiskWeights {
-                geo_weight: 0,
-                reputation_weight: 0,
-                privacy_weight: 0,
-                threat_weight: 0,
-            },
-            preset: None,
-            high_risk_countries: Vec::new(),
-            medium_risk_countries: Vec::new(),
-        };
-        let scorer = RiskScorer::with_config(config);
+        let scorer = weighted(0, 0, 0, 0);
 
         let input = RiskInput {
             country_code: Some("KP"),
@@ -1055,7 +893,7 @@ mod tests {
 
     #[test]
     fn test_unknown_country_code() {
-        let scorer = RiskScorer::from_preset(RiskPreset::UsEnterprise);
+        let scorer = scorer_for("us_enterprise");
         let input = RiskInput {
             country_code: Some("ZZ"), // Not a real country
             ..Default::default()
@@ -1067,7 +905,7 @@ mod tests {
 
     #[test]
     fn test_empty_string_country_code() {
-        let scorer = RiskScorer::new();
+        let scorer = RiskScorer::default();
         let input = RiskInput {
             country_code: Some(""),
             ..Default::default()
@@ -1079,7 +917,7 @@ mod tests {
 
     #[test]
     fn test_no_country_code() {
-        let scorer = RiskScorer::new();
+        let scorer = RiskScorer::default();
         let input = RiskInput {
             country_code: None,
             ..Default::default()
@@ -1095,7 +933,7 @@ mod tests {
 
     #[test]
     fn test_tor_vpn_botnet_high_risk_country_critical() {
-        let scorer = RiskScorer::from_preset(RiskPreset::UsEnterprise);
+        let scorer = scorer_for("us_enterprise");
         let input = RiskInput {
             country_code: Some("IR"),
             is_tor: true,
@@ -1141,7 +979,7 @@ mod tests {
 
     #[test]
     fn test_privacy_risk_zero_anonymizers() {
-        let scorer = RiskScorer::new();
+        let scorer = RiskScorer::default();
         let input = RiskInput::default();
         let output = scorer.score(&input);
         assert_eq!(output.privacy_risk_score, 0);
@@ -1149,7 +987,7 @@ mod tests {
 
     #[test]
     fn test_privacy_risk_single_anonymizer() {
-        let scorer = RiskScorer::new();
+        let scorer = RiskScorer::default();
         let input = RiskInput {
             is_vpn: true,
             ..Default::default()
@@ -1160,7 +998,7 @@ mod tests {
 
     #[test]
     fn test_privacy_risk_two_anonymizers() {
-        let scorer = RiskScorer::new();
+        let scorer = RiskScorer::default();
         let input = RiskInput {
             is_vpn: true,
             is_proxy: true,
@@ -1173,7 +1011,7 @@ mod tests {
 
     #[test]
     fn test_privacy_risk_three_plus_anonymizers() {
-        let scorer = RiskScorer::new();
+        let scorer = RiskScorer::default();
         let input = RiskInput {
             is_vpn: true,
             is_proxy: true,
@@ -1187,7 +1025,7 @@ mod tests {
 
     #[test]
     fn test_privacy_risk_all_four_anonymizers() {
-        let scorer = RiskScorer::new();
+        let scorer = RiskScorer::default();
         let input = RiskInput {
             is_vpn: true,
             is_proxy: true,
@@ -1299,7 +1137,7 @@ mod tests {
 
     #[test]
     fn test_abuse_score_below_threshold_no_factor() {
-        let scorer = RiskScorer::new();
+        let scorer = RiskScorer::default();
         let input = RiskInput {
             abuse_score: 79, // Below 80 threshold
             ..Default::default()
@@ -1314,7 +1152,7 @@ mod tests {
 
     #[test]
     fn test_abuse_score_at_threshold() {
-        let scorer = RiskScorer::new();
+        let scorer = RiskScorer::default();
         let input = RiskInput {
             abuse_score: 80,
             ..Default::default()
@@ -1325,7 +1163,7 @@ mod tests {
 
     #[test]
     fn test_abuse_score_zero_no_contribution() {
-        let scorer = RiskScorer::new();
+        let scorer = RiskScorer::default();
         let input = RiskInput {
             abuse_score: 0,
             ..Default::default()
@@ -1335,84 +1173,81 @@ mod tests {
     }
 
     // ========================================================================
-    // Custom countries in config
+    // Configured lists, scores and bands
     // ========================================================================
 
+    /// Every value the scorer uses comes from config: a deployment's own
+    /// preset, scores and bands change the output.
     #[test]
-    fn test_custom_high_risk_countries() {
-        let config = RiskConfig {
-            weights: RiskWeights::default(),
-            preset: None, // No preset
-            high_risk_countries: vec!["XX".to_string(), "YY".to_string()],
-            medium_risk_countries: vec!["ZZ".to_string()],
+    fn configured_presets_scores_and_bands_drive_the_score() {
+        let mut config = RiskScoringConfig {
+            preset: "mine".to_string(),
+            ..RiskScoringConfig::default()
         };
-        let scorer = RiskScorer::with_config(config);
+        config.presets.insert(
+            "mine".to_string(),
+            crate::config::RiskCountries {
+                high: vec!["XX".to_string()],
+                medium: vec!["ZZ".to_string()],
+            },
+        );
+        config.scores.high_risk_country = 70;
+        config.scores.medium_risk_country = 30;
+        config.scores.vpn = 10;
+        config.levels.low = 5;
+        let scorer = RiskScorer::new(&config);
 
-        let input = RiskInput {
-            country_code: Some("XX"),
-            ..Default::default()
-        };
-        let output = scorer.score(&input);
-        assert_eq!(output.geo_risk_score, 90);
-
-        let input = RiskInput {
-            country_code: Some("ZZ"),
-            ..Default::default()
-        };
-        let output = scorer.score(&input);
-        assert_eq!(output.geo_risk_score, 60);
+        // (country, vpn, geo score, reputation score, level)
+        let cases = [
+            (Some("XX"), false, 70, 0, RiskLevel::Low),
+            (Some("ZZ"), false, 30, 0, RiskLevel::Minimal),
+            // KP is high risk in the shipped presets, not in this one.
+            (Some("KP"), false, 15, 0, RiskLevel::Minimal),
+            (Some("AU"), true, 15, 10, RiskLevel::Low),
+        ];
+        for (country, is_vpn, geo, reputation, level) in cases {
+            let output = scorer.score(&RiskInput {
+                country_code: country,
+                is_vpn,
+                ..Default::default()
+            });
+            assert_eq!(output.geo_risk_score, geo, "{country:?}");
+            assert_eq!(output.reputation_risk_score, reputation, "{country:?}");
+            assert_eq!(output.risk_level, level, "{country:?}");
+        }
     }
-
-    #[test]
-    fn test_custom_countries_merged_with_preset() {
-        let config = RiskConfig {
-            weights: RiskWeights::default(),
-            preset: Some(RiskPreset::Global),
-            high_risk_countries: vec!["XX".to_string()],
-            medium_risk_countries: Vec::new(),
-        };
-        let scorer = RiskScorer::with_config(config);
-
-        // XX from custom
-        let input = RiskInput {
-            country_code: Some("XX"),
-            ..Default::default()
-        };
-        let output = scorer.score(&input);
-        assert_eq!(output.geo_risk_score, 90);
-
-        // KP from preset
-        let input = RiskInput {
-            country_code: Some("KP"),
-            ..Default::default()
-        };
-        let output = scorer.score(&input);
-        assert_eq!(output.geo_risk_score, 90);
-    }
-
-    // ========================================================================
-    // Risk level boundary values (exhaustive)
-    // ========================================================================
 
     #[test]
     fn test_risk_level_boundary_values_exhaustive() {
-        // Test every boundary value
-        assert_eq!(RiskLevel::from_score(0), RiskLevel::Minimal);
-        assert_eq!(RiskLevel::from_score(1), RiskLevel::Minimal);
-        assert_eq!(RiskLevel::from_score(19), RiskLevel::Minimal);
-        assert_eq!(RiskLevel::from_score(20), RiskLevel::Low);
-        assert_eq!(RiskLevel::from_score(39), RiskLevel::Low);
-        assert_eq!(RiskLevel::from_score(40), RiskLevel::Medium);
-        assert_eq!(RiskLevel::from_score(59), RiskLevel::Medium);
-        assert_eq!(RiskLevel::from_score(60), RiskLevel::High);
-        assert_eq!(RiskLevel::from_score(79), RiskLevel::High);
-        assert_eq!(RiskLevel::from_score(80), RiskLevel::Critical);
-        assert_eq!(RiskLevel::from_score(99), RiskLevel::Critical);
-        assert_eq!(RiskLevel::from_score(100), RiskLevel::Critical);
-
-        // Safety for values > 100
-        assert_eq!(RiskLevel::from_score(101), RiskLevel::Critical);
-        assert_eq!(RiskLevel::from_score(255), RiskLevel::Critical);
+        let shipped = RiskLevelBands::default();
+        let custom = RiskLevelBands {
+            low: 10,
+            medium: 50,
+            high: 70,
+            critical: 95,
+        };
+        // (bands, score, level)
+        let cases = [
+            (&shipped, 0, RiskLevel::Minimal),
+            (&shipped, 19, RiskLevel::Minimal),
+            (&shipped, 20, RiskLevel::Low),
+            (&shipped, 39, RiskLevel::Low),
+            (&shipped, 40, RiskLevel::Medium),
+            (&shipped, 59, RiskLevel::Medium),
+            (&shipped, 60, RiskLevel::High),
+            (&shipped, 79, RiskLevel::High),
+            (&shipped, 80, RiskLevel::Critical),
+            (&shipped, 100, RiskLevel::Critical),
+            (&shipped, 255, RiskLevel::Critical),
+            (&custom, 9, RiskLevel::Minimal),
+            (&custom, 10, RiskLevel::Low),
+            (&custom, 69, RiskLevel::Medium),
+            (&custom, 94, RiskLevel::High),
+            (&custom, 95, RiskLevel::Critical),
+        ];
+        for (bands, score, level) in cases {
+            assert_eq!(RiskLevel::from_score(score, bands), level, "{score}");
+        }
     }
 
     #[test]

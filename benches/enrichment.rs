@@ -6,9 +6,10 @@
 //! Measures CPU cost per operation for `GeoIP`, Reputation, and Risk scoring.
 
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
+use dfe_loader::config::RiskScoringConfig;
 use dfe_loader::enrich::geoip::{GeoIpEnricher, GeoIpResult};
 use dfe_loader::enrich::reputation::{ReputationEnricher, ThreatSource, ThreatType};
-use dfe_loader::enrich::risk::{RiskInput, RiskPreset, RiskScorer};
+use dfe_loader::enrich::risk::{RiskInput, RiskScorer};
 use std::hint::black_box;
 use std::net::IpAddr;
 
@@ -160,7 +161,7 @@ fn bench_reputation_prefix_match(c: &mut Criterion) {
 }
 
 fn bench_risk_minimal(c: &mut Criterion) {
-    let scorer = RiskScorer::new();
+    let scorer = RiskScorer::default();
 
     c.bench_function("risk/minimal_input", |b| {
         b.iter(|| {
@@ -171,7 +172,7 @@ fn bench_risk_minimal(c: &mut Criterion) {
 }
 
 fn bench_risk_full_input(c: &mut Criterion) {
-    let scorer = RiskScorer::new();
+    let scorer = RiskScorer::default();
 
     c.bench_function("risk/full_input", |b| {
         b.iter(|| {
@@ -190,7 +191,10 @@ fn bench_risk_full_input(c: &mut Criterion) {
 }
 
 fn bench_risk_with_preset(c: &mut Criterion) {
-    let scorer = RiskScorer::from_preset(RiskPreset::HighSecurity);
+    let scorer = RiskScorer::new(&RiskScoringConfig {
+        preset: "high_security".to_string(),
+        ..RiskScoringConfig::default()
+    });
 
     c.bench_function("risk/high_security_preset", |b| {
         b.iter(|| {
@@ -205,7 +209,7 @@ fn bench_risk_with_preset(c: &mut Criterion) {
 }
 
 fn bench_risk_from_enrichment(c: &mut Criterion) {
-    let scorer = RiskScorer::new();
+    let scorer = RiskScorer::default();
 
     // Simulate results from GeoIP and Reputation
     let geo_result = GeoIpResult {
@@ -235,7 +239,7 @@ fn bench_risk_from_enrichment(c: &mut Criterion) {
 fn bench_full_enrichment_pipeline(c: &mut Criterion) {
     let geoip = GeoIpEnricher::new();
     let reputation = ReputationEnricher::new();
-    let risk = RiskScorer::new();
+    let risk = RiskScorer::default();
 
     // Add some blocklist entries
     reputation.add_ip(

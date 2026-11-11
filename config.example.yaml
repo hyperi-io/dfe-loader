@@ -159,6 +159,8 @@ routing:
 
   # Topic suffixes stripped when deriving _source from Kafka topic name
   # Example: topic "auth_land" with suffix "_land" → _source = "auth"
+  # With kafka.topics and kafka.topic_regex unset, auto-discovery subscribes to
+  # the topics ending in one of these.
   topic_suffixes:
     - _land
     - _load
@@ -304,10 +306,44 @@ metadata:
   raw_source_fields: []
   raw_output: "_raw"
 
-# Type coercion settings
-coercion:
-  unknown_type_fallback: String
-  array_to_json: true
+# IP enrichment. Risk scoring weighs the GeoIP and reputation results, so it
+# needs at least one of them on.
+enrichment:
+  ip_fields: [src_ip, client_ip, ip, source_ip]
+  risk_scoring:
+    enabled: false
+    # One of the presets below. A name not listed is refused at startup.
+    preset: global
+    # Shipped: global, us_enterprise, eu_enterprise, apac_enterprise,
+    # high_security. An entry here replaces the shipped one of that name, or
+    # adds a preset, and the rest stay as shipped.
+    # presets:
+    #   global:
+    #     high: [KP, IR, SY]
+    #     medium: [RU, CN, VE, CU]
+    weights: {geo: 15, reputation: 25, privacy: 25, threat: 35}
+    # Score each signal gives its component, 0-100. Reputation and threat
+    # signals add up, capped at 100.
+    scores:
+      unknown_country: 35
+      high_risk_country: 90
+      medium_risk_country: 60
+      other_country: 15
+      vpn: 50
+      proxy: 60
+      tor: 80
+      datacenter: 40
+      relay: 45
+      one_anonymiser: 40
+      two_anonymisers: 70
+      three_anonymisers: 95
+      botnet: 95
+      malicious: 90
+      spam: 70
+      scanner: 60
+      high_abuse_score: 80   # abuse score that adds the high_abuse_score factor
+    # Lowest composite score of each level. Below low is minimal.
+    levels: {low: 20, medium: 40, high: 60, critical: 80}
 
 # Field mapping (rename/copy source fields to destination schema names)
 # Maps incoming field names to standardised schemas (ECS, CIM, etc.)

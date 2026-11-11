@@ -15,7 +15,7 @@ use tracing::{debug, info, warn};
 use crate::config::Config;
 use crate::enrich::geoip::{GeoIpEnricher, GeoIpResult};
 use crate::enrich::reputation::{ReputationEnricher, ReputationResult, ThreatSource, ThreatType};
-use crate::enrich::risk::{RiskInput, RiskOutput, RiskPreset, RiskScorer};
+use crate::enrich::risk::{RiskInput, RiskOutput, RiskScorer};
 
 /// Active enrichment pipeline (GeoIP + reputation + risk scoring).
 ///
@@ -88,15 +88,8 @@ impl EnrichmentPipeline {
         };
 
         let risk = if config.enrichment.risk_scoring.enabled {
-            let preset = match config.enrichment.risk_scoring.preset.as_str() {
-                "us_enterprise" => RiskPreset::UsEnterprise,
-                "eu_enterprise" => RiskPreset::EuEnterprise,
-                "apac_enterprise" => RiskPreset::ApacEnterprise,
-                "high_security" => RiskPreset::HighSecurity,
-                _ => RiskPreset::Global,
-            };
             info!(preset = %config.enrichment.risk_scoring.preset, "Risk scoring enabled");
-            Some(RiskScorer::from_preset(preset))
+            Some(RiskScorer::new(&config.enrichment.risk_scoring))
         } else {
             None
         };
@@ -264,6 +257,14 @@ fn inject_risk(data: &mut serde_json::Map<String, Value>, output: &RiskOutput) {
 mod tests {
     use super::*;
     use serde_json::{Map, json};
+
+    /// A scorer for the shipped preset `name`.
+    fn scorer_for(name: &str) -> RiskScorer {
+        RiskScorer::new(&crate::config::RiskScoringConfig {
+            preset: name.to_string(),
+            ..crate::config::RiskScoringConfig::default()
+        })
+    }
 
     // ========================================================================
     // extract_enrich_ip
@@ -585,7 +586,7 @@ mod tests {
 
     #[test]
     fn pipeline_with_risk_only_is_active() {
-        let scorer = RiskScorer::from_preset(RiskPreset::Global);
+        let scorer = scorer_for("global");
         let pipeline = EnrichmentPipeline {
             ip_fields: vec!["src_ip".into()],
             geoip: None,
@@ -618,7 +619,7 @@ mod tests {
 
     #[test]
     fn enrich_noop_when_no_ip_found() {
-        let scorer = RiskScorer::from_preset(RiskPreset::Global);
+        let scorer = scorer_for("global");
         let pipeline = EnrichmentPipeline {
             ip_fields: vec!["src_ip".into()],
             geoip: None,
@@ -670,7 +671,7 @@ mod tests {
         let addr: IpAddr = "198.51.100.99".parse().expect("valid IP");
         enricher.add_ip(addr, ThreatType::Tor, ThreatSource::TorProject);
 
-        let scorer = RiskScorer::from_preset(RiskPreset::HighSecurity);
+        let scorer = scorer_for("high_security");
 
         let pipeline = EnrichmentPipeline {
             ip_fields: vec!["client_ip".into()],
@@ -960,7 +961,7 @@ mod tests {
         let addr: IpAddr = "203.0.113.100".parse().expect("valid");
         enricher.add_ip(addr, ThreatType::Botnet, ThreatSource::AbuseCh);
 
-        let scorer = RiskScorer::from_preset(RiskPreset::HighSecurity);
+        let scorer = scorer_for("high_security");
 
         let pipeline = EnrichmentPipeline {
             ip_fields: vec!["src_ip".into(), "client_ip".into()],
@@ -1006,7 +1007,7 @@ mod tests {
         let addr: IpAddr = "203.0.113.200".parse().expect("valid");
         enricher.add_ip(addr, ThreatType::Malware, ThreatSource::AbuseCh);
 
-        let scorer = RiskScorer::from_preset(RiskPreset::Global);
+        let scorer = scorer_for("global");
 
         let pipeline = EnrichmentPipeline {
             ip_fields: vec!["ip".into()],
@@ -1084,7 +1085,7 @@ mod tests {
     fn enrich_risk_only_without_geo_or_rep_skips_scoring() {
         // Risk scorer alone can't produce meaningful output without GeoIP or reputation.
         // Implementation: risk only runs when geo_result.is_some() || rep_result.is_some().
-        let scorer = RiskScorer::from_preset(RiskPreset::Global);
+        let scorer = scorer_for("global");
         let pipeline = EnrichmentPipeline {
             ip_fields: vec!["ip".into()],
             geoip: None,
@@ -1277,7 +1278,7 @@ mod tests {
 
     #[test]
     fn enrich_empty_data_map_is_noop() {
-        let scorer = RiskScorer::from_preset(RiskPreset::Global);
+        let scorer = scorer_for("global");
         let pipeline = EnrichmentPipeline {
             ip_fields: vec!["src_ip".into()],
             geoip: None,

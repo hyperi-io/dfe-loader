@@ -103,9 +103,6 @@ pub struct Config {
     pub field_sanitization: FieldSanitizationConfig,
     /// Common header injection, tags, _raw handling. **Hot-reloaded.**
     pub metadata: MetadataConfig,
-    /// Type coercion config. Refused unless every field is at its default: the
-    /// dynamic insert applies fixed coercion rules.
-    pub coercion: CoercionConfig,
     /// Field mapping overrides. **Restart required.**
     pub field_mapping: FieldMappingConfig,
     /// IP enrichment field selection. **Restart required.**
@@ -150,7 +147,6 @@ impl Default for Config {
             timestamp_dq: TimestampDqConfig::default(),
             field_sanitization: FieldSanitizationConfig::default(),
             metadata: MetadataConfig::default(),
-            coercion: CoercionConfig::default(),
             field_mapping: FieldMappingConfig::default(),
             enrichment: EnrichmentConfig::default(),
         }
@@ -626,7 +622,6 @@ impl Config {
         registry::register("metrics", &self.metrics);
         registry::register("logging", &self.logging);
         registry::register("payload", &self.payload);
-        registry::register("coercion", &self.coercion);
         registry::register("enrichment", &self.enrichment);
     }
 
@@ -697,11 +692,33 @@ impl Config {
         }
 
         self.refuse_unread_settings()?;
+        self.enrichment
+            .risk_scoring
+            .validate()
+            .map_err(crate::Error::Config)?;
 
         // An empty default would land every unstamped record in no org at all.
         if self.routing.default_org_id.is_empty() {
             return Err(crate::Error::Config(
                 "routing.default_org_id must not be empty".into(),
+            ));
+        }
+
+        // An empty suffix strips nothing, and with no suffix auto-discovery has
+        // no topic to subscribe to.
+        if self.routing.topic_suffixes.iter().any(String::is_empty) {
+            return Err(crate::Error::Config(
+                "routing.topic_suffixes must not hold an empty value".into(),
+            ));
+        }
+        let discovers = self.transport != TRANSPORT_GRPC
+            && self.kafka.topics.is_empty()
+            && self.kafka.topic_regex.as_deref().is_none_or(str::is_empty);
+        if discovers && self.routing.topic_suffixes.is_empty() {
+            return Err(crate::Error::Config(
+                "routing.topic_suffixes must name a suffix while kafka.topics and \
+                 kafka.topic_regex are unset: auto-discovery subscribes to topics ending in one"
+                    .into(),
             ));
         }
 
@@ -808,35 +825,10 @@ impl Config {
     /// Refuse a setting no code reads, rather than accept it and ignore it.
     ///
     /// The dynamic insert applies fixed coercion rules
-    /// (`docs/clickhouse/clickhouse-ext.md`), so the `coercion` section and the
-    /// `coerce` column directive stay at their defaults, and an invalid
-    /// timestamp is always replaced with the ingest time.
+    /// (`docs/clickhouse/clickhouse-ext.md`), so the `coerce` column directive
+    /// stays unset, and an invalid timestamp is always replaced with the ingest
+    /// time.
     fn refuse_unread_settings(&self) -> Result<()> {
-        let c = &self.coercion;
-        let d = CoercionConfig::default();
-        let set: Vec<&str> = [
-            ("type_mappings", c.type_mappings != d.type_mappings),
-            (
-                "unknown_type_fallback",
-                c.unknown_type_fallback != d.unknown_type_fallback,
-            ),
-            ("null_handling", c.null_handling != d.null_handling),
-            ("null_strings", c.null_strings != d.null_strings),
-            ("default_timezone", c.default_timezone != d.default_timezone),
-            ("timezone_fields", c.timezone_fields != d.timezone_fields),
-            ("array_to_json", c.array_to_json != d.array_to_json),
-            ("strict", c.strict != d.strict),
-        ]
-        .into_iter()
-        .filter_map(|(name, changed)| changed.then_some(name))
-        .collect();
-        if !set.is_empty() {
-            return Err(crate::Error::Config(format!(
-                "coercion.{} reaches no encoder -- the dynamic insert applies fixed \
-                 coercion rules. Leave the coercion section at its defaults.",
-                set.join(", coercion.")
-            )));
-        }
         let directives = &self.column_directives;
         if let Some(column) = directives
             .global
@@ -1279,17 +1271,31 @@ mod tests {
         assert!(config.validate().is_ok());
     }
 
-    /// A setting no code reads is refused rather than accepted and ignored:
-    /// the `coercion` section, a `coerce` column directive, and any
+    /// A setting no code reads, or a value the loader cannot use, is refused
+    /// rather than accepted and ignored: an empty or missing topic suffix under
+    /// discovery, an unknown risk preset, a risk score past 100, risk level
+    /// bands out of order, a `coerce` column directive, and any
     /// `timestamp_dq.invalid_action` but the one the loader takes.
     #[test]
     fn a_setting_nothing_honours_is_refused() {
-        let cases: [(&str, fn(&mut Config)); 5] = [
-            ("coercion.strict", |c| c.coercion.strict = true),
-            ("coercion.default_timezone", |c| {
-                c.coercion.default_timezone = "Australia/Sydney".into();
+        let cases: [(&str, fn(&mut Config)); 7] = [
+            ("routing.topic_suffixes must not hold an empty value", |c| {
+                c.routing.topic_suffixes.push(String::new());
             }),
-            ("coercion.null_strings", |c| c.coercion.null_strings.clear()),
+            ("routing.topic_suffixes must name a suffix", |c| {
+                c.routing.topic_suffixes.clear();
+            }),
+            (
+                "preset 'us' is not a preset -- valid: apac_enterprise, eu_enterprise, \
+                 global, high_security, us_enterprise",
+                |c| c.enrichment.risk_scoring.preset = "us".into(),
+            ),
+            ("enrichment.risk_scoring.scores.tor", |c| {
+                c.enrichment.risk_scoring.scores.tor = 101;
+            }),
+            ("enrichment.risk_scoring.levels", |c| {
+                c.enrichment.risk_scoring.levels.high = 30;
+            }),
             ("timestamp_dq.invalid_action", |c| {
                 c.timestamp_dq.invalid_action = "drop".into();
             }),
@@ -1462,55 +1468,47 @@ mod tests {
         assert!(config.parse_mechanism().is_none());
     }
 
-    // ========================================================================
-    // Coercion Config Tests
-    // ========================================================================
-
+    /// A config file overrides any risk list, weight, score or band, and a
+    /// preset it sets replaces only the shipped preset of that name.
     #[test]
-    fn test_coercion_config_is_null_string() {
-        let config = CoercionConfig::default();
+    fn a_config_file_overrides_the_risk_scoring_defaults() {
+        let yaml = r"
+enrichment:
+  risk_scoring:
+    enabled: true
+    preset: global
+    presets:
+      global:
+        high: [XX]
+      mine:
+        medium: [ZZ]
+    weights:
+      threat: 50
+    scores:
+      tor: 70
+    levels:
+      critical: 90
+";
+        let config: Config =
+            scalo::yaml::from_str(yaml, "config.yaml", scalo::yaml::Profile::Config).unwrap();
+        config.validate().unwrap();
+        let risk = &config.enrichment.risk_scoring;
+        let shipped = crate::config::RiskScoringConfig::default();
 
-        // Empty string is null
-        assert!(config.is_null_string(""));
-
-        // Standard null strings
-        assert!(config.is_null_string("null"));
-        assert!(config.is_null_string("NULL"));
-        assert!(config.is_null_string("None"));
-        assert!(config.is_null_string("nil"));
-        assert!(config.is_null_string("undefined"));
-        assert!(config.is_null_string("\\N"));
-        assert!(config.is_null_string("N/A"));
-        assert!(config.is_null_string("NaN"));
-
-        // Not null strings
-        assert!(!config.is_null_string("hello"));
-        assert!(!config.is_null_string("0"));
-        assert!(!config.is_null_string("false"));
-    }
-
-    #[test]
-    fn test_coercion_config_get_coercer_category() {
-        let mut config = CoercionConfig::default();
-        config
-            .type_mappings
-            .insert("MyInt".to_string(), "Int".to_string());
-        config
-            .type_mappings
-            .insert("SpecialString".to_string(), "String".to_string());
-
-        // Custom mappings
-        assert_eq!(config.get_coercer_category("MyInt"), "Int");
-        assert_eq!(config.get_coercer_category("SpecialString"), "String");
-
-        // Unknown type falls back to default
-        assert_eq!(config.get_coercer_category("UnknownType"), "String");
-    }
-
-    #[test]
-    fn test_null_handling_default() {
-        let handling = NullHandling::default();
-        assert_eq!(handling, NullHandling::Default);
+        assert_eq!(risk.countries().unwrap().high, ["XX"]);
+        assert_eq!(risk.countries().unwrap().medium, [] as [String; 0]);
+        assert_eq!(risk.presets["mine"].medium, ["ZZ"]);
+        assert_eq!(
+            risk.presets["high_security"],
+            shipped.presets["high_security"]
+        );
+        assert_eq!(risk.presets.len(), shipped.presets.len() + 1);
+        assert_eq!(risk.weights.threat, 50);
+        assert_eq!(risk.weights.geo, shipped.weights.geo);
+        assert_eq!(risk.scores.tor, 70);
+        assert_eq!(risk.scores.vpn, shipped.scores.vpn);
+        assert_eq!(risk.levels.critical, 90);
+        assert_eq!(risk.levels.low, shipped.levels.low);
     }
 
     // ========================================================================

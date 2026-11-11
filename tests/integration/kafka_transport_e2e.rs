@@ -37,7 +37,7 @@ use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::producer::{FutureProducer, FutureRecord};
 
 use dfe_loader::buffer::KafkaOffset;
-use dfe_loader::config::{Config, DlqConfig, KafkaConfig};
+use dfe_loader::config::{Config, DlqConfig, KafkaConfig, RoutingConfig};
 use dfe_loader::kafka::{TransportAdapter, TransportBackend};
 
 use crate::common::containers::TestInfrastructure;
@@ -217,7 +217,7 @@ async fn test_kafka_transport_construction() {
     let (_infra, _bootstrap, config) =
         spin_up_kafka("construction-group", vec!["construction-topic".to_string()]).await;
 
-    let adapter = TransportAdapter::new(&config, &DlqConfig::default(), &[], None)
+    let adapter = TransportAdapter::new(&config, &RoutingConfig::default(), &[], None)
         .await
         .expect("TransportAdapter should build against a live broker");
 
@@ -246,7 +246,7 @@ async fn test_kafka_transport_recv_empty() {
     // Pre-create the topic so the subscription has something to attach to.
     ensure_topic(&bootstrap, topic).await;
 
-    let adapter = TransportAdapter::new(&config, &DlqConfig::default(), &[], None)
+    let adapter = TransportAdapter::new(&config, &RoutingConfig::default(), &[], None)
         .await
         .expect("adapter build");
 
@@ -304,7 +304,7 @@ async fn test_kafka_transport_send_recv_roundtrip() {
     let producer = make_producer(&bootstrap);
     produce(&producer, topic, &payloads).await;
 
-    let adapter = TransportAdapter::new(&config, &DlqConfig::default(), &[], None)
+    let adapter = TransportAdapter::new(&config, &RoutingConfig::default(), &[], None)
         .await
         .expect("adapter build");
 
@@ -368,7 +368,7 @@ async fn test_kafka_transport_commit_offset() {
     produce(&producer, topic, &payloads).await;
 
     // --- First consumer: read 3, commit their offsets ---
-    let adapter_a = TransportAdapter::new(&config, &DlqConfig::default(), &[], None)
+    let adapter_a = TransportAdapter::new(&config, &RoutingConfig::default(), &[], None)
         .await
         .expect("first adapter");
 
@@ -402,7 +402,7 @@ async fn test_kafka_transport_commit_offset() {
     drop(adapter_a);
 
     // Empty-offset commit is a no-op — exercise the early-return branch.
-    let adapter_noop = TransportAdapter::new(&config, &DlqConfig::default(), &[], None)
+    let adapter_noop = TransportAdapter::new(&config, &RoutingConfig::default(), &[], None)
         .await
         .expect("noop adapter");
     adapter_noop
@@ -413,7 +413,7 @@ async fn test_kafka_transport_commit_offset() {
     drop(adapter_noop);
 
     // --- Second consumer, same group: should NOT see the first 3 ---
-    let adapter_b = TransportAdapter::new(&config, &DlqConfig::default(), &[], None)
+    let adapter_b = TransportAdapter::new(&config, &RoutingConfig::default(), &[], None)
         .await
         .expect("second adapter");
 
@@ -456,7 +456,7 @@ async fn test_kafka_transport_max_messages_limit() {
     let producer = make_producer(&bootstrap);
     produce(&producer, topic, &payloads).await;
 
-    let adapter = TransportAdapter::new(&config, &DlqConfig::default(), &[], None)
+    let adapter = TransportAdapter::new(&config, &RoutingConfig::default(), &[], None)
         .await
         .expect("adapter build");
 
@@ -520,7 +520,7 @@ async fn test_kafka_transport_auto_create_topic() {
     let producer = make_producer(&bootstrap);
     produce(&producer, &topic, &[b"first-message".to_vec()]).await;
 
-    let adapter = TransportAdapter::new(&config, &DlqConfig::default(), &[], None)
+    let adapter = TransportAdapter::new(&config, &RoutingConfig::default(), &[], None)
         .await
         .expect("adapter build after topic auto-create");
 
@@ -595,7 +595,7 @@ async fn test_kafka_invalid_brokers() {
 
     // Must return an error, not panic. rdkafka may accept a nonsense hostname
     // and only fail later on recv; both outcomes are acceptable.
-    match TransportAdapter::new(&config, &DlqConfig::default(), &[], None).await {
+    match TransportAdapter::new(&config, &RoutingConfig::default(), &[], None).await {
         Ok(adapter) => {
             // Construction succeeded — recv should fail or return empty within
             // a reasonable window. We tolerate either, but it must NOT panic.
@@ -702,9 +702,12 @@ async fn test_auto_discovery_subscribes_only_land_and_load_topics() {
         produce(&producer, topic, &[br#"{"event_category":"x"}"#.to_vec()]).await;
     }
 
-    let dlq = DlqConfig {
-        topic: "dlq_land".to_string(),
-        ..DlqConfig::default()
+    let dlq = RoutingConfig {
+        dlq: DlqConfig {
+            topic: "dlq_land".to_string(),
+            ..DlqConfig::default()
+        },
+        ..RoutingConfig::default()
     };
 
     // The same resolver KafkaTransport::new runs when topics is empty.
@@ -754,7 +757,7 @@ async fn test_kafka_transport_convert_config_auto_discover() {
         ..Default::default()
     };
 
-    let out = TransportAdapter::convert_config(&config, &DlqConfig::default(), &[]);
+    let out = TransportAdapter::convert_config(&config, &RoutingConfig::default(), &[]);
     assert_eq!(out.brokers.len(), 2);
     assert_eq!(out.group, "cfg-group");
     assert!(

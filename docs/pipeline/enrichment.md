@@ -41,6 +41,18 @@ Risk scoring is a composite: it needs at least GeoIP or reputation enabled to
 have anything to weigh. Enabling it alone does nothing useful, which the config
 documents at the field.
 
+Every value the scorer uses is config under `enrichment.risk_scoring`, with the shipped values as defaults. `config.example.yaml` lists them all.
+
+| Key | What it sets | Default |
+|-----|--------------|---------|
+| `preset` | the entry in `presets` whose country lists apply | `global` |
+| `presets` | `high` and `medium` country lists by name | `global`, `us_enterprise`, `eu_enterprise`, `apac_enterprise`, `high_security` |
+| `weights` | `geo`, `reputation`, `privacy`, `threat` share of the composite | 15, 25, 25, 35 |
+| `scores` | what each signal adds to its component: country class, VPN, proxy, Tor, datacenter, relay, anonymiser count, botnet, malicious, spam, scanner, and the `high_abuse_score` threshold | `config.example.yaml` |
+| `levels` | lowest composite score of `low`, `medium`, `high`, `critical` | 20, 40, 60, 80 |
+
+A `presets` entry in config replaces the shipped preset of that name, or adds a new one, and the rest stay as shipped. Startup and a reload refuse a `preset` that `presets` does not hold, naming the valid ones, as well as a score over 100 and level bands that do not rise strictly within 1-100.
+
 ## Where the GeoIP databases come from
 
 With `geoip.enabled` on, startup provisions the MMDB files through scalo's `geoip_download`, then opens them with `maxminddb`. An explicit `geoip.city_db_path` or `asn_db_path` is used as given. Otherwise a file in `geoip.auto_download.data_dir` (default `/var/lib/dfe/geoip`, the volume the deployment contract mounts) younger than `max_age_days` is kept, a missing or older one is downloaded, and a failed download falls back to the old file. A download larger than `max_database_bytes` (default 512 MiB), or one that does not read as an MMDB, is refused. A missing database leaves enrichment inactive and never stops the loader.
