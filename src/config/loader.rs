@@ -1496,7 +1496,7 @@ enrichment:
         let shipped = crate::config::RiskScoringConfig::default();
 
         assert_eq!(risk.countries().unwrap().high, ["XX"]);
-        assert!(risk.countries().unwrap().medium.is_empty());
+        assert_eq!(risk.countries().unwrap().medium, [] as [String; 0]);
         assert_eq!(risk.presets["mine"].medium, ["ZZ"]);
         assert_eq!(
             risk.presets["high_security"],
