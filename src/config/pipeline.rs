@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: BUSL-1.1
 // Copyright (c) 2026 HYPERI PTY LIMITED
 
-//! Pipeline configuration: routing, enrichment, coercion, metadata, field mapping.
+//! Pipeline configuration: routing, enrichment, metadata, field mapping.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 
 use scalo::config::sensitive::SensitiveString;
@@ -364,18 +364,33 @@ impl Default for ReputationEnrichmentConfig {
     }
 }
 
-/// Risk scoring configuration
+/// Risk scoring configuration. Every country list, weight, score and level band
+/// below is a default a deployment can override.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct RiskScoringConfig {
     /// Enable risk scoring (requires at least `GeoIP` or reputation to be useful)
     pub enabled: bool,
 
-    /// Risk preset to use for country risk tables
-    ///
-    /// Options: "global" (default), "`us_enterprise`", "`eu_enterprise`",
-    ///          "`apac_enterprise`", "`high_security`"
+    /// The entry in `presets` whose country lists apply. A name `presets` does
+    /// not hold is refused at load.
     pub preset: String,
+
+    /// Country lists by preset name. The loader ships `global`,
+    /// `us_enterprise`, `eu_enterprise`, `apac_enterprise` and `high_security`.
+    /// An entry set in config replaces the shipped entry of that name, or adds
+    /// a new preset, and leaves the others as shipped.
+    #[serde(deserialize_with = "over_shipped_presets")]
+    pub presets: BTreeMap<String, RiskCountries>,
+
+    /// Weight of each component in the composite score.
+    pub weights: RiskWeights,
+
+    /// Score each signal gives its component, 0-100.
+    pub scores: RiskScores,
+
+    /// Lowest composite score of each level above `minimal`.
+    pub levels: RiskLevelBands,
 }
 
 impl Default for RiskScoringConfig {
@@ -383,6 +398,254 @@ impl Default for RiskScoringConfig {
         Self {
             enabled: false,
             preset: "global".into(),
+            presets: shipped_risk_presets(),
+            weights: RiskWeights::default(),
+            scores: RiskScores::default(),
+            levels: RiskLevelBands::default(),
+        }
+    }
+}
+
+impl RiskScoringConfig {
+    /// The country lists `preset` names.
+    #[must_use]
+    pub fn countries(&self) -> Option<&RiskCountries> {
+        self.presets.get(&self.preset)
+    }
+
+    /// Refuse a preset `presets` does not hold, a score past 100, and level
+    /// bands that do not rise strictly within 1-100.
+    ///
+    /// # Errors
+    ///
+    /// The offending key under `enrichment.risk_scoring`, and the valid preset
+    /// names for an unknown preset.
+    pub fn validate(&self) -> std::result::Result<(), String> {
+        if self.countries().is_none() {
+            let valid: Vec<&str> = self.presets.keys().map(String::as_str).collect();
+            return Err(format!(
+                "enrichment.risk_scoring.preset '{}' is not a preset -- valid: {}",
+                self.preset,
+                valid.join(", ")
+            ));
+        }
+        if let Some((name, score)) = self.scores.named().into_iter().find(|(_, s)| *s > 100) {
+            return Err(format!(
+                "enrichment.risk_scoring.scores.{name} is {score} -- a score is 0-100"
+            ));
+        }
+        let l = &self.levels;
+        if !(0 < l.low && l.low < l.medium && l.medium < l.high && l.high < l.critical)
+            || l.critical > 100
+        {
+            return Err(format!(
+                "enrichment.risk_scoring.levels must rise strictly within 1-100 \
+                 (low {}, medium {}, high {}, critical {})",
+                l.low, l.medium, l.high, l.critical
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// The high- and medium-risk country codes of one preset (ISO 3166-1 alpha-2).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct RiskCountries {
+    /// Countries scored `scores.high_risk_country`.
+    pub high: Vec<String>,
+    /// Countries scored `scores.medium_risk_country`.
+    pub medium: Vec<String>,
+}
+
+/// The presets the loader ships, as `(name, high-risk, medium-risk)`.
+const SHIPPED_RISK_PRESETS: [(&str, &[&str], &[&str]); 5] = [
+    // OFAC sanctions
+    ("global", &["KP", "IR", "SY"], &["RU", "CN", "VE", "CU"]),
+    (
+        "us_enterprise",
+        &["CN", "RU", "KP", "IR", "SY", "CU", "VE"],
+        &["UA", "BY", "PK", "NG", "VN"],
+    ),
+    (
+        "eu_enterprise",
+        &["RU", "KP", "IR", "SY", "BY"],
+        &["CN", "UA", "PK"],
+    ),
+    ("apac_enterprise", &["KP", "AF", "MM"], &["RU", "IR"]),
+    (
+        "high_security",
+        &["CN", "RU", "KP", "IR", "SY", "CU", "VE", "BY", "MM"],
+        &["UA", "PK", "NG", "VN", "BD", "NP"],
+    ),
+];
+
+fn shipped_risk_presets() -> BTreeMap<String, RiskCountries> {
+    let owned =
+        |codes: &[&str]| -> Vec<String> { codes.iter().map(|c| (*c).to_string()).collect() };
+    SHIPPED_RISK_PRESETS
+        .iter()
+        .map(|(name, high, medium)| {
+            let countries = RiskCountries {
+                high: owned(high),
+                medium: owned(medium),
+            };
+            ((*name).to_string(), countries)
+        })
+        .collect()
+}
+
+/// Lay the configured presets over the shipped ones.
+fn over_shipped_presets<'de, D>(
+    deserializer: D,
+) -> std::result::Result<BTreeMap<String, RiskCountries>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let mut presets = shipped_risk_presets();
+    presets.extend(BTreeMap::<String, RiskCountries>::deserialize(
+        deserializer,
+    )?);
+    Ok(presets)
+}
+
+/// Weight of each component in the composite score. All zero scores 0.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct RiskWeights {
+    /// Geographic component.
+    pub geo: u8,
+    /// Reputation component.
+    pub reputation: u8,
+    /// Privacy (anonymiser) component.
+    pub privacy: u8,
+    /// Threat component.
+    pub threat: u8,
+}
+
+impl Default for RiskWeights {
+    fn default() -> Self {
+        Self {
+            geo: 15,
+            reputation: 25,
+            privacy: 25,
+            threat: 35,
+        }
+    }
+}
+
+/// Score each signal gives its component. Reputation and threat signals add
+/// up, capped at 100.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct RiskScores {
+    /// Geo: a public IP with no country.
+    pub unknown_country: u8,
+    /// Geo: a country in the preset's `high` list.
+    pub high_risk_country: u8,
+    /// Geo: a country in the preset's `medium` list.
+    pub medium_risk_country: u8,
+    /// Geo: any other country.
+    pub other_country: u8,
+    /// Reputation: VPN exit.
+    pub vpn: u8,
+    /// Reputation: open proxy.
+    pub proxy: u8,
+    /// Reputation: Tor exit.
+    pub tor: u8,
+    /// Reputation: datacenter range.
+    pub datacenter: u8,
+    /// Reputation: private relay.
+    pub relay: u8,
+    /// Privacy: one anonymiser among VPN, proxy, Tor and relay.
+    pub one_anonymiser: u8,
+    /// Privacy: two anonymisers.
+    pub two_anonymisers: u8,
+    /// Privacy: three or more anonymisers.
+    pub three_anonymisers: u8,
+    /// Threat: botnet member.
+    pub botnet: u8,
+    /// Threat: known malicious.
+    pub malicious: u8,
+    /// Threat: spam source.
+    pub spam: u8,
+    /// Threat: scanner.
+    pub scanner: u8,
+    /// Threat: the external abuse score at or above which the row carries the
+    /// `high_abuse_score` factor. The abuse score itself is added as given.
+    pub high_abuse_score: u8,
+}
+
+impl Default for RiskScores {
+    fn default() -> Self {
+        Self {
+            unknown_country: 35,
+            high_risk_country: 90,
+            medium_risk_country: 60,
+            other_country: 15,
+            vpn: 50,
+            proxy: 60,
+            tor: 80,
+            datacenter: 40,
+            relay: 45,
+            one_anonymiser: 40,
+            two_anonymisers: 70,
+            three_anonymisers: 95,
+            botnet: 95,
+            malicious: 90,
+            spam: 70,
+            scanner: 60,
+            high_abuse_score: 80,
+        }
+    }
+}
+
+impl RiskScores {
+    /// Every score with its config key.
+    fn named(&self) -> [(&'static str, u8); 17] {
+        [
+            ("unknown_country", self.unknown_country),
+            ("high_risk_country", self.high_risk_country),
+            ("medium_risk_country", self.medium_risk_country),
+            ("other_country", self.other_country),
+            ("vpn", self.vpn),
+            ("proxy", self.proxy),
+            ("tor", self.tor),
+            ("datacenter", self.datacenter),
+            ("relay", self.relay),
+            ("one_anonymiser", self.one_anonymiser),
+            ("two_anonymisers", self.two_anonymisers),
+            ("three_anonymisers", self.three_anonymisers),
+            ("botnet", self.botnet),
+            ("malicious", self.malicious),
+            ("spam", self.spam),
+            ("scanner", self.scanner),
+            ("high_abuse_score", self.high_abuse_score),
+        ]
+    }
+}
+
+/// Lowest composite score of each risk level. Below `low` is `minimal`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct RiskLevelBands {
+    /// Lowest `low` score.
+    pub low: u8,
+    /// Lowest `medium` score.
+    pub medium: u8,
+    /// Lowest `high` score.
+    pub high: u8,
+    /// Lowest `critical` score.
+    pub critical: u8,
+}
+
+impl Default for RiskLevelBands {
+    fn default() -> Self {
+        Self {
+            low: 20,
+            medium: 40,
+            high: 60,
+            critical: 80,
         }
     }
 }
@@ -1045,98 +1308,6 @@ pub enum CaptureMode {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct TableCaptureConfig {
     pub mode: CaptureMode,
-}
-
-// ============================================================================
-// Type Coercion Configuration
-// ============================================================================
-
-/// Null handling strategy
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, schemars::JsonSchema,
-)]
-#[serde(rename_all = "lowercase")]
-pub enum NullHandling {
-    /// Substitute type-appropriate default value (recommended)
-    #[default]
-    Default,
-    /// Return error for null in non-nullable column
-    Error,
-    /// Pass null through (may cause `ClickHouse` errors)
-    Passthrough,
-}
-
-/// Type coercion configuration. No encoder reads it, so `Config::validate`
-/// refuses any field set away from its default.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(default)]
-pub struct CoercionConfig {
-    /// Map custom type names to base coercer categories
-    /// e.g., {"MyCustomInt": "Int", "SpecialString": "String"}
-    pub type_mappings: std::collections::HashMap<String, String>,
-
-    /// Fallback coercer for unknown types (default: "String")
-    pub unknown_type_fallback: String,
-
-    /// How to handle null values in non-nullable columns
-    pub null_handling: NullHandling,
-
-    /// Strings to recognise as null (case-sensitive)
-    pub null_strings: Vec<String>,
-
-    /// Default timezone for naive timestamps (IANA name or +HH:MM)
-    pub default_timezone: String,
-
-    /// Event fields to check for timezone info
-    pub timezone_fields: Vec<String>,
-
-    /// Convert arrays to JSON strings if true
-    pub array_to_json: bool,
-
-    /// Strict mode: fail on any coercion error
-    pub strict: bool,
-}
-
-impl Default for CoercionConfig {
-    fn default() -> Self {
-        Self {
-            type_mappings: std::collections::HashMap::new(),
-            unknown_type_fallback: "String".to_string(),
-            null_handling: NullHandling::Default,
-            null_strings: vec![
-                "null".to_string(),
-                "NULL".to_string(),
-                "Null".to_string(),
-                "None".to_string(),
-                "nil".to_string(),
-                "undefined".to_string(),
-                "\\N".to_string(),
-                "<null>".to_string(),
-                "NA".to_string(),
-                "N/A".to_string(),
-                "n/a".to_string(),
-                "NaN".to_string(),
-            ],
-            default_timezone: "UTC".to_string(),
-            timezone_fields: vec!["tags_collector_timezone".to_string()],
-            array_to_json: true,
-            strict: false,
-        }
-    }
-}
-
-impl CoercionConfig {
-    /// Check if a string value should be treated as null
-    pub fn is_null_string(&self, value: &str) -> bool {
-        value.is_empty() || self.null_strings.iter().any(|s| s == value)
-    }
-
-    /// Get the coercer category for a type, checking custom mappings first
-    pub fn get_coercer_category(&self, type_name: &str) -> &str {
-        self.type_mappings
-            .get(type_name)
-            .map_or(&self.unknown_type_fallback, std::string::String::as_str)
-    }
 }
 
 // ============================================================================

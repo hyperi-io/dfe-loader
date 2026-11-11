@@ -41,9 +41,7 @@ pub mod schema;
 pub use client_http::{ChClient, ClickHouseQueryClient, PoolStats, SharedQueryClient};
 pub use config::{ClickHouseConfig, InsertFormat, Timeouts, Transport, host_implies_tls};
 pub use error::{ClickHouseError, ErrorCategory};
-pub use types::{
-    ColumnInfo, NULL_STRINGS, ParsedType, TableSchema, default_value_for_category, is_null_string,
-};
+pub use types::{ColumnInfo, ParsedType, TableSchema};
 
 // Export resilience modules
 pub use inserter::{BatchDisposition, FailedRow, InsertResult, Inserter, InserterConfig};

@@ -80,54 +80,6 @@ impl TableSchema {
     }
 }
 
-/// Default values for `ClickHouse` types (used when handling nulls).
-///
-/// These are safe zero values that avoid NULL in `ClickHouse`
-/// (following `ClickHouse` best practices to avoid Nullable overhead).
-#[must_use]
-pub fn default_value_for_category(category: &str) -> &'static str {
-    match category {
-        "String" => "",
-        "Int" | "UInt" => "0",
-        "Float" | "Decimal" => "0.0",
-        "Bool" => "false",
-        "Date" => "1970-01-01",
-        "DateTime" | "DateTime64" => "1970-01-01T00:00:00Z",
-        "UUID" => "00000000-0000-0000-0000-000000000000",
-        "IPv4" => "0.0.0.0",
-        "IPv6" => "::",
-        "Array" => "[]",
-        "Map" => "{}",
-        "JSON" => "{}",
-        "Enum" => "",
-        "Geo" => "(0, 0)",
-        _ => "",
-    }
-}
-
-/// Common null string representations to recognise.
-pub const NULL_STRINGS: &[&str] = &[
-    "null",
-    "NULL",
-    "Null",
-    "None",
-    "nil",
-    "undefined",
-    "\\N",
-    "<null>",
-    "NA",
-    "N/A",
-    "n/a",
-    "NaN",
-    "",
-];
-
-/// Check if a string value represents null.
-#[must_use]
-pub fn is_null_string(value: &str) -> bool {
-    NULL_STRINGS.contains(&value)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -155,16 +107,6 @@ mod tests {
             columns,
             comment: String::new(),
         }
-    }
-
-    #[test]
-    fn test_null_strings() {
-        assert!(is_null_string("null"));
-        assert!(is_null_string("NULL"));
-        assert!(is_null_string("None"));
-        assert!(is_null_string(""));
-        assert!(!is_null_string("hello"));
-        assert!(!is_null_string("0"));
     }
 
     // ---- NEW: TableSchema tests ----
@@ -275,98 +217,5 @@ mod tests {
         col.is_in_sorting_key = true;
         assert!(col.is_in_primary_key);
         assert!(col.is_in_sorting_key);
-    }
-
-    // ---- NEW: default_value_for_category tests ----
-
-    #[test]
-    fn default_values_all_known_categories() {
-        assert_eq!(default_value_for_category("String"), "");
-        assert_eq!(default_value_for_category("Int"), "0");
-        assert_eq!(default_value_for_category("UInt"), "0");
-        assert_eq!(default_value_for_category("Float"), "0.0");
-        assert_eq!(default_value_for_category("Decimal"), "0.0");
-        assert_eq!(default_value_for_category("Bool"), "false");
-        assert_eq!(default_value_for_category("Date"), "1970-01-01");
-        assert_eq!(
-            default_value_for_category("DateTime"),
-            "1970-01-01T00:00:00Z"
-        );
-        assert_eq!(
-            default_value_for_category("DateTime64"),
-            "1970-01-01T00:00:00Z"
-        );
-        assert_eq!(
-            default_value_for_category("UUID"),
-            "00000000-0000-0000-0000-000000000000"
-        );
-        assert_eq!(default_value_for_category("IPv4"), "0.0.0.0");
-        assert_eq!(default_value_for_category("IPv6"), "::");
-        assert_eq!(default_value_for_category("Array"), "[]");
-        assert_eq!(default_value_for_category("Map"), "{}");
-        assert_eq!(default_value_for_category("JSON"), "{}");
-        assert_eq!(default_value_for_category("Enum"), "");
-        assert_eq!(default_value_for_category("Geo"), "(0, 0)");
-    }
-
-    #[test]
-    fn default_value_unknown_category_returns_empty() {
-        assert_eq!(default_value_for_category(""), "");
-        assert_eq!(default_value_for_category("SomeFutureType"), "");
-        assert_eq!(default_value_for_category("Tuple"), "");
-    }
-
-    // ---- NEW: is_null_string edge cases ----
-
-    #[test]
-    fn null_string_all_known_representations() {
-        for &s in NULL_STRINGS {
-            assert!(is_null_string(s), "Expected '{s}' to be recognised as null");
-        }
-    }
-
-    #[test]
-    fn null_string_case_sensitivity() {
-        // "null", "NULL", "Null" are in the list, but not "nULL" or "nUll"
-        assert!(is_null_string("null"));
-        assert!(is_null_string("NULL"));
-        assert!(is_null_string("Null"));
-        assert!(!is_null_string("nULL"));
-        assert!(!is_null_string("nUll"));
-    }
-
-    #[test]
-    fn null_string_whitespace_not_recognised() {
-        assert!(!is_null_string(" "));
-        assert!(!is_null_string("  null  "));
-        assert!(!is_null_string("\tnull"));
-        assert!(!is_null_string("null\n"));
-    }
-
-    #[test]
-    fn null_string_similar_but_not_null() {
-        assert!(!is_null_string("0"));
-        assert!(!is_null_string("false"));
-        assert!(!is_null_string("no"));
-        assert!(!is_null_string("nulls"));
-        assert!(!is_null_string("NONE")); // "None" is in list, "NONE" is not
-        assert!(!is_null_string("Nil")); // "nil" is in list, "Nil" is not
-    }
-
-    #[test]
-    fn null_string_backslash_n() {
-        // \\N is a ClickHouse-specific null representation
-        assert!(is_null_string("\\N"));
-        assert!(!is_null_string("\\n")); // lowercase — not in list
-    }
-
-    #[test]
-    fn null_string_na_variants() {
-        assert!(is_null_string("NA"));
-        assert!(is_null_string("N/A"));
-        assert!(is_null_string("n/a"));
-        assert!(is_null_string("NaN"));
-        assert!(!is_null_string("na")); // not in list
-        assert!(!is_null_string("nan")); // not in list
     }
 }

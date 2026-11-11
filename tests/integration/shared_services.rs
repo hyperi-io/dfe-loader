@@ -24,7 +24,7 @@ use dfe_loader::buffer::KafkaOffset;
 use dfe_loader::clickhouse::client_http::build_client;
 use dfe_loader::clickhouse::config::{ClickHouseConfig, InsertFormat, Transport};
 use dfe_loader::clickhouse::{ClickHouseQueryClient, Inserter, InserterConfig};
-use dfe_loader::config::{DlqConfig, KafkaConfig, SaslConfig, TlsConfig};
+use dfe_loader::config::{KafkaConfig, RoutingConfig, SaslConfig, TlsConfig};
 use dfe_loader::kafka::TransportAdapter;
 
 use crate::common::containers::{
@@ -704,7 +704,7 @@ async fn kafka_cases(target: &KafkaTarget, topic: &str, group: &str) -> Result<(
     }
 
     let config = target.loader_config(group, topic);
-    let first = TransportAdapter::new(&config, &DlqConfig::default(), &[], None)
+    let first = TransportAdapter::new(&config, &RoutingConfig::default(), &[], None)
         .await
         .map_err(|e| format!("first adapter: {e}"))?;
     let got = receive(&first, 6).await;
@@ -735,7 +735,7 @@ async fn kafka_cases(target: &KafkaTarget, topic: &str, group: &str) -> Result<(
     // in the group holds the partition from the second one.
     drop(first);
 
-    let second = TransportAdapter::new(&config, &DlqConfig::default(), &[], None)
+    let second = TransportAdapter::new(&config, &RoutingConfig::default(), &[], None)
         .await
         .map_err(|e| format!("second adapter: {e}"))?;
     let rest: Vec<String> = receive(&second, 3)
