@@ -26,8 +26,10 @@ scalo). The default subcommand is `run`.
 | `top` | live TUI dashboard polling the running loader's `/metrics` |
 | `metrics-manifest` | print the metric catalogue as JSON without starting the loader |
 
-Environment variables use generic names (`LOG_LEVEL`, not a loader-specific
-prefix); the config cascade derives the prefixed forms. See
+Loader settings take `DFE_LOADER_*` environment variables: flat
+(`DFE_LOADER_CLICKHOUSE_HOSTS`) or nested on a double underscore
+(`DFE_LOADER_CLICKHOUSE__PROTOCOL`). Only scalo's own CLI flags have generic
+env names (`LOG_LEVEL`, `METRICS_ADDR`). See
 [configuration.md](configuration.md).
 
 ## Check before you boot
@@ -36,9 +38,9 @@ prefix); the config cascade derives the prefixed forms. See
 bad config fails fast and visibly rather than at first insert. The guards
 include the transport/format matrix:
 
-- `insert_format = json_each_row` with `transport = native` is rejected --
-  JSONEachRow needs HTTP. Use `transport = http`, or `insert_format =
-  row_binary` (which works on both).
+- `clickhouse.insert_format: jsoneachrow` with `clickhouse.protocol: native`
+  is refused -- JSONEachRow needs HTTP. Use `protocol: http`, or the
+  `rowbinary` default (which works on both).
 - Port/transport mismatches (native on 8123, HTTP on 9000/9440) are flagged.
 
 See [clickhouse/insert-formats.md](clickhouse/insert-formats.md).
@@ -83,7 +85,7 @@ The insert tail is built to degrade, not stall:
 - **Batch salvage** -- a data error binary-splits the batch to isolate the bad
   row(s); only those go to the DLQ, the good rows still land.
 - **Sink-down gate** -- a flush cycle in which every insert failed opens the
-  circuit gate on the scaling signal (`dfe_loader_scaling_circuit_open`), which
+  circuit gate on the scaling signal (`scaling_circuit_open`), which
   zeroes the pressure KEDA reads: more pods cannot relieve a dead ClickHouse.
   The next successful insert closes it. A failed insert never sends its batch to
   the DLQ. The batch is held and retried (below).
@@ -125,11 +127,6 @@ The figure it checks is what the kernel charges the loader. On scalo 2.12.2 and 
 
 `memory.current` also counts reclaimable page cache, such as the mmap'd MaxMind database or a file DLQ, so the brake can engage a little early. That is the safe direction.
 
-## Source of truth
+## Scaling
 
-| Data | Source |
-|------|--------|
-| Version | `git describe --tags` / `version` subcommand |
-| Tasks | GitHub Issues |
-| History | `git log` |
-| Config schema | [configuration.md](configuration.md) |
+The contract's ScaledObject scales on CPU and carries a disabled Kafka lag trigger, so raw consumer lag never scales the loader. In a DFE deployment, dfe-infra's values set the CPU target to 70%, add the scaling-pressure trigger (target 70, read through dfe-keda-shim) and a 120 s cooldown. The slim profile clears the pressure trigger, so slim scales on CPU alone. The engine's [KEDA scaling page](https://github.com/hyperi-io/dfe-engine/blob/main/docs/deployment/keda-scaling.md) covers the triggers for every app.

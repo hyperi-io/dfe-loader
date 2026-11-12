@@ -25,7 +25,7 @@ view, [clickhouse/](clickhouse/) for the insert layer, and
 
 | You give it | It handles | You don't write |
 |-------------|------------|-----------------|
-| A Kafka/gRPC/Memory topic | JSON parse (sonic-rs, SIMD), zero-copy `Arc<[u8]>`, anything not JSON dead-lettered | A consumer, a parser, an input gate |
+| A Kafka topic or a gRPC push | JSON parse (sonic-rs, SIMD), zero-copy `Arc<[u8]>`, anything not JSON dead-lettered | A consumer, a parser, an input gate |
 | The routing fields (`table_fields`, `org_routes`) | Pre-flatten routing to `db.table`, dot-notation nested access, the default table on a miss | A router, a dispatch table |
 | A ClickHouse table | Schema reflected from `system.columns`, fields promoted to typed columns, the rest kept in `_json` | A schema mapping, an ORM, a migration |
 | `insert_format` (default RowBinary) | Dynamic `Map<String,Value>` -> RowBinary over the HTTP `Client`; JSONEachRow fallback | A serialiser, a type encoder, a wire format |

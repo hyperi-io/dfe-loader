@@ -45,6 +45,7 @@ flowchart TB
 | `routing.table_fields` | fields whose value selects the table, first one carrying a value wins. Dot-notation reaches nested fields (`event.category`). Default `["_source"]` |
 | `routing.default_db` | database for every org `org_routes` does not list -- default `dfe` |
 | `routing.default_table` | table used when neither a `table_fields` value nor the topic names one -- default `main`, so an unrouted message lands in `dfe.main` |
+| `routing.source_to_table` | maps a source value to the table its records land in, `{cisco-ios: network}` say -- default `{}`, so a source lands in the table of its own name |
 | `routing.topic_suffixes` | suffixes that mark a topic as one source's own -- default `_land` / `_load`, so `cisco-ios_load` names the source `cisco-ios`. With `kafka.topics` and `kafka.topic_regex` unset, auto-discovery subscribes to the topics ending in one, so an empty list or an empty suffix is refused |
 | `routing.org_id_field` | field the tenant is read from -- default `_org_id`, the common-header field the first hop stamps |
 | `routing.default_org_id` | tenant for a record that carries none -- default `default`, the deployment's default org |
@@ -99,7 +100,7 @@ a record arriving there with no `table_fields` value routes to `dfe.cisco-ios`.
 
 A topic names a source only when one of `routing.topic_suffixes` strips off it
 AND what is left does not resolve to `default_table`. Both halves matter:
-`main_land` strips to the landing table, so its records genuinely have no
+`main_land` strips to the landing table, so its records have no
 source of their own and keep the default fallback; a topic with no suffix to
 strip is not `{source}_land` or `{source}_load` and names no source at all.
 `source_to_table` is applied before the comparison, so a source mapped onto the
