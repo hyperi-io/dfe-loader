@@ -11,7 +11,7 @@
 # Common header schema v2
 
 Every event the loader writes -- regardless of the transport it arrived on
-(Kafka, gRPC, Memory) -- gets a standardised common header injected before
+(a Kafka topic or a gRPC push) -- gets a standardised common header injected before
 insert. This is the base schema shared by all event tables in the DFE (Data
 Fusion Engine) pipeline. This page documents the full field set, the DDL, and the
 ORDER BY / PARTITION BY / codec / index decisions behind it.
@@ -32,10 +32,13 @@ The common header is the **base** of every table's schema -- not the complete
 schema itself. The loader injects these system fields into every event.
 
 - **Landing table** (`dfe.main`): schema IS just the common header. This is the
-  catch-all for unrouted events and the only table auto-created by the loader.
+  catch-all for unrouted events.
 - **Other tables** (e.g., `dfe.auth`, `dfe.metrics`): schema = common header
-  plus data-specific columns. These tables are created externally (by DBAs or IaC)
-  with their own columns alongside the common header.
+  plus data-specific columns, alongside the common header.
+
+The loader creates no table, the landing table included. It reads the schema the
+deployment created (in DFE, the engine's schema phase) and holds records for a
+table that does not exist yet in its pending-schema buffer.
 
 ```text
 +----------------------------------+
@@ -242,7 +245,7 @@ generateUUIDv7NonMonotonic()
 | Nullable | No |
 | Default | None |
 | Codec | `ZSTD(1)` |
-| Source | `@source: org_id` |
+| Source | `routing.org_id_field` (default `_org_id`), never a column directive |
 
 **Purpose:** Organisation/tenant identifier for multi-tenancy and RLS.
 
@@ -250,27 +253,23 @@ generateUUIDv7NonMonotonic()
 
 - First in ORDER BY -- every query has an org_id filter (RLS).
 - LowCardinality for dictionary encoding (orgs are highly repeated).
-- Required field -- cannot be NULL.
-- Extracted from source and stored for query-time filtering.
+- Required field -- cannot be NULL. A record whose field is absent, null or
+  empty is written under `routing.default_org_id`.
+- Read from the field `routing.org_id_field` names and nothing else, so no
+  column comment can point the tenant at a field a sender writes.
 
 **Row-Level Security (RLS):**
 
 ```sql
 -- Create row policy for tenant isolation
-CREATE ROW POLICY org_isolation ON common.events
+CREATE ROW POLICY org_isolation ON dfe.main
 FOR SELECT
 USING _org_id = currentUser()
 TO ALL;
-
--- Or with role-based access
-CREATE ROW POLICY org_policy ON common.events
-FOR SELECT
-USING _org_id IN (
-    SELECT org_id FROM system.role_mappings
-    WHERE role = currentUser()
-)
-TO analytics_users;
 ```
+
+In a DFE deployment the engine's reconciler writes the row policies that scope
+each org's console users, so a deployment does not hand-write them.
 
 **Why LowCardinality:**
 
@@ -371,9 +370,9 @@ native columnar JSON. `_raw` is the original wire format before parsing.
 
 **Configuration:**
 
-```toml
-[metadata]
-capture_mode = "full"  # full (default) | json_only | raw_only | extracted_only
+```yaml
+metadata:
+  capture_mode: full  # full (default) | json_only | raw_only | extracted_only
 ```
 
 `capture_mode` controls `_json` and `_raw` population -- see the Capture Modes
@@ -419,23 +418,23 @@ stored as the string it is, under `value`.
 
 **Configuration:**
 
-```toml
-[metadata]
-tags_fields = ["tags", "_tags", "meta", "metadata.tags"]
-tags_output = "_tags"
-drop_tags = false  # Remove source tags after extraction
+```yaml
+metadata:
+  tags_fields: [tags, _tags, meta, metadata.tags]
+  tags_output: _tags
+  drop_tags: false  # Remove source tags after extraction
 ```
 
 #### Reading the wrapped list back
 
 ```sql
 SELECT _tags.list.:`Array(Nullable(String))` AS tags
-FROM dfe.default
+FROM dfe.main
 WHERE arrayExists(x -> x = 'filebeat', _tags.list.:`Array(Nullable(String))`)
 ```
 
 An object source passes through untouched, so `_tags` holding `{"list": [...]}`
-cannot be told apart from a source that genuinely sent that key.
+cannot be told apart from a source that sent that key itself.
 
 ## Underscore prefix convention
 
@@ -653,8 +652,8 @@ INDEX idx_timestamp _timestamp TYPE minmax GRANULARITY 1
 INDEX idx_raw_text _raw TYPE text(tokenizer = 'default') GRANULARITY 64
 ```
 
-Auto-init creates this index on every `_raw` column unless `capture_mode` is
-`extracted_only` (in which case `_raw` is NULL and an index would be meaningless).
+The common header DDL carries this index on every `_raw` column. Under
+`capture_mode: extracted_only` `_raw` is NULL and the index has nothing to hold.
 
 **Trade-offs:**
 
@@ -667,13 +666,6 @@ Auto-init creates this index on every `_raw` column unless `capture_mode` is
 If you do not need full-text search on the raw payload, set
 `capture_mode = "extracted_only"` -- `_raw` is NULL and the text index is skipped
 entirely.
-
-**Configuration:**
-
-```toml
-[auto_init]
-create_text_index = true  # Default: create text index on _raw
-```
 
 ## Engine selection
 
@@ -690,7 +682,7 @@ ENGINE = SharedMergeTree()
 **Benefits:**
 
 - Automatic replication without ZooKeeper.
-- Seamless horizontal scaling.
+- Adding a replica moves no data: every replica reads the same shared storage.
 - No replica configuration needed.
 
 ### ReplicatedMergeTree (clustered)
@@ -721,21 +713,8 @@ ENGINE = MergeTree()
 - No external dependencies.
 - Fastest for local development.
 
-### Auto-detection
-
-The loader auto-detects the best engine:
-
-```rust
-pub fn best_engine(&self) -> TableEngine {
-    if self.shared_merge_tree {
-        TableEngine::SharedMergeTree
-    } else if self.is_clustered {
-        TableEngine::ReplicatedMergeTree
-    } else {
-        TableEngine::MergeTree
-    }
-}
-```
+The loader does not pick the engine: it writes to whatever table the deployment
+created.
 
 ## Source field mapping
 
@@ -747,7 +726,7 @@ Using the DDL Expression Language (see [../clickhouse/ddl-directives.md](../clic
 | `_timestamp` | `@source: timestamp \| now()` | From source with fallback |
 | `_timestamp_received` | `@source: timestamp_received` | Optional, from source |
 | `_uuid` | `@generated: generateUUIDv7()` | DB generates on insert |
-| `_org_id` | `@source: org_id` | Required from source |
+| `_org_id` | not a directive | `routing.org_id_field` (default `_org_id`), else `routing.default_org_id` |
 | `_raw` | `@source: first(raw/_raw)` | The source's own raw data, never a JSON payload `_json` holds |
 | `_json` | not a directive | Populated by capture_mode, not by a column expression |
 | `_tags` | `@source: first(tags/_tags/meta/metadata.tags)` | First match wins |
@@ -772,38 +751,20 @@ A table with a `_json` column keeps the whole payload, so a field no column hold
 
 ### Loader config
 
-```toml
-[routing]
-org_id_field = "_org_id"          # Field to extract for _org_id
-default_org_id = "default"         # Tenant for a record with none
-org_routes = []                    # Empty = shared schema
-table_fields = ["event_category"]  # Field for table routing
-default_db = "common"
-default_table = "default"
+```yaml
+routing:
+  org_id_field: _org_id             # Field to extract for _org_id
+  default_org_id: default           # Tenant for a record with none
+  org_routes: []                    # Empty = shared schema
+  table_fields: [event_category]    # Field for table routing
+  default_db: dfe
+  default_table: main
 
-[metadata]
-capture_mode = "full"              # full (default) | json_only | raw_only | extracted_only
-tags_fields = ["tags", "_tags", "meta", "metadata.tags"]
-tags_output = "_tags"
-drop_tags = false                  # Keep tags in _json after extraction
-
-[timestamp]
-field = "timestamp"                # Primary timestamp field
-fallback = "now()"                 # Fallback if missing
-formats = ["rfc3339", "epoch_ms", "epoch_s", "epoch_us", "epoch_ns"]
-```
-
-### Auto-initialisation
-
-```toml
-[auto_init]
-enabled = true
-create_topics = true
-create_database = true
-create_table = true
-create_text_index = true
-topic_partitions = 3
-topic_replication_factor = 1
+metadata:
+  capture_mode: full                # full (default) | json_only | raw_only | extracted_only
+  tags_fields: [tags, _tags, meta, metadata.tags]
+  tags_output: _tags
+  drop_tags: false                  # Keep tags in _json after extraction
 ```
 
 ## Implementation files
@@ -820,53 +781,6 @@ The profile YAML itself lives in
 and reaches the loader only as deployed ClickHouse columns -- see
 [schemas.md](../deployment/schemas.md).
 
-## Migration from v1
-
-### Breaking changes
-
-1. **Underscore prefix:** all system fields now prefixed with `_`.
-   - `timestamp` -> `_timestamp`
-   - `uuid` -> `_uuid`
-   - `org_id` -> `_org_id`
-   - `tags` -> `_tags`
-
-2. **New fields:**
-   - `_timestamp_load` (load time, was implicit).
-   - `_timestamp_received` (optional received time).
-   - `_raw` (raw payload, was `logoriginal`).
-   - `_json` (JSON payload, was `logjson`).
-
-3. **ORDER BY change:**
-   - v1: `ORDER BY (timestamp, uuid)`
-   - v2: `ORDER BY (_org_id, _timestamp_load, _uuid)`
-
-### Migration script
-
-```sql
--- Create new table with v2 schema
-CREATE TABLE common.events_v2 AS common.events
-ENGINE = MergeTree()
-ORDER BY (_org_id, _timestamp_load, _uuid)
-PARTITION BY (toYYYYMM(_timestamp_load), _org_id);
-
--- Migrate data
-INSERT INTO common.events_v2
-SELECT
-    now64(3) AS _timestamp_load,
-    timestamp AS _timestamp,
-    NULL AS _timestamp_received,
-    uuid AS _uuid,
-    org_id AS _org_id,
-    logoriginal AS _raw,
-    logjson AS _json,
-    tags AS _tags
-FROM common.events;
-
--- Swap tables
-RENAME TABLE common.events TO common.events_v1,
-             common.events_v2 TO common.events;
-```
-
 ## Profiles
 
 The common header is controlled by **profiles** -- named, versioned YAML
@@ -882,43 +796,11 @@ Profiles define:
 
 - **Field set**: which common header columns to inject.
 - **Field behaviour**: source expression for each field (how it is populated).
-- **DDL structure**: ORDER BY, PARTITION BY, indexes (for default table creation).
+- **DDL structure**: ORDER BY, PARTITION BY, indexes, for the table DDL the
+  deployment creates.
 
 Profiles do NOT define data-specific columns. Those come from the source data or
 are defined in the table's own DDL.
-
-### Profile versioning
-
-Tables created by auto-init are tagged with their profile name and version in the
-table comment:
-
-```sql
-COMMENT '@schema_source: core | @schema_version: 2 | @profile: timeseries | @profile_version: 1'
-```
-
-The migration tooling (`ProfileDiff`) can compare a profile's current version
-against an existing table's tagged version and generate safe `ALTER TABLE ADD
-COLUMN` statements for any missing common header fields.
-
-### Custom profiles
-
-User-defined profiles can be loaded from YAML files:
-
-```yaml
-# config
-profiles:
-  default: timeseries
-  custom_dir: /etc/dfe-loader/profiles
-  table_profiles:
-    dfe.metrics: minimal
-```
-
-## Version history
-
-| Version | Date | Changes |
-|---------|------|---------|
-| 1.0 | 2025-12 | Initial schema (no underscore prefix) |
-| 2.0 | 2026-01 | Underscore prefix, added `_timestamp_received`, RLS support |
 
 ## References
 

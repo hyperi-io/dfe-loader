@@ -14,8 +14,7 @@ This is the type catalogue the dynamic encoder works against. When dfe-loader
 reflects a table from `system.columns`, every column comes back as one of these
 types (possibly wrapped in `Nullable` or `LowCardinality`), and the encoder in
 `dfe-clickhouse`'s `dynamic` module has to turn a `Value` into the right bytes for it. Use
-this page when you are designing a schema, or when you are extending the encoder
-to cover a type it does not yet handle.
+this page when you are designing a schema.
 
 Nothing here is loader-invented: it is the ClickHouse type system as of the
 24.8+ line, annotated with how each type lands on the native wire. For how those
@@ -38,7 +37,7 @@ Sources:
 
 | Status | Meaning |
 |--------|---------|
-| GA | Generally Available, production-ready |
+| GA | Generally Available |
 | Beta | Beta, stable but may change |
 | Experimental | Experimental, requires setting flag |
 | Deprecated | Deprecated, avoid in new code |
@@ -125,7 +124,7 @@ Sources:
 
 | Type | Bytes | Format |
 |------|-------|--------|
-| `IPv4` | 4 | UInt32 alias, big-endian |
+| `IPv4` | 4 | UInt32, little-endian on the wire |
 | `IPv6` | 16 | FixedString(16), network byte order |
 
 ### Enum types (GA)
@@ -171,9 +170,11 @@ Supported inner types: String, FixedString, Date, DateTime, numbers
 
 ---
 
-## Semi-structured types (new -- 2024/2025)
+## Semi-structured types
 
-### Variant type (GA as of late 2024)
+DFE's floor for these, and for the `text` index, is ClickHouse 26.2+.
+
+### Variant type
 
 ```sql
 Variant(T1, T2, T3, ...)
@@ -194,7 +195,7 @@ Variant(String, UInt64, Array(String))
 - Separate column for each type variant
 - Only the active variant has data for each row
 
-### Dynamic type (GA as of late 2024)
+### Dynamic type
 
 ```sql
 Dynamic
@@ -216,7 +217,7 @@ types discovered at runtime.
 - Multiple data columns
 - Overflow column for excess types
 
-### JSON type (GA as of late 2024)
+### JSON type
 
 ```sql
 JSON
@@ -310,11 +311,6 @@ type the encoder does not cover (a `Variant` column, for one) fails the write
 with `DynamicError::UnsupportedType`, and the rows are held rather than
 dead-lettered.
 
-**Historical note:** clickhouse-arrow (a DFE fork) was trialled in early
-development and dropped -- RowBinary insert throughput matched Arrow within noise
-(the path is network-dominated) while avoiding the complexity of building Arrow
-RecordBatches.
-
 ---
 
 ## Native protocol serialisation notes
@@ -395,5 +391,5 @@ Elasticsearch lets any field carry one value or many, so a scalar bound for an `
 
 The rationale for RowBinary as the default: schema-reflected RowBinary skips the
 server-side JSON parse, cuts ClickHouse CPU, and gives full type support without
-requiring compile-time schemas. The `Map<String, Value>` model is preserved
-end-to-end -- encoding happens against `system.columns` at runtime.
+requiring compile-time schemas. Records stay a `Map<String, Value>` from
+intake to insert -- encoding happens against `system.columns` at runtime.
