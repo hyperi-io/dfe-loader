@@ -16,7 +16,7 @@ targeted bake-off against the specific DFE use-case, not a general benchmark.
 Keep it when you re-evaluate: the bake-offs cost real time, and the conclusions
 are still load-bearing.
 
-For the current insert path and the dynamic encoder seam, see
+For the current insert path and the dynamic encoder, see
 [../clickhouse/insert-formats.md](../clickhouse/insert-formats.md) and
 [../clickhouse/clickhouse-ext.md](../clickhouse/clickhouse-ext.md). This doc is
 the "why we landed here", not the "how it works now".
