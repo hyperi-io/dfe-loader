@@ -84,7 +84,7 @@ On the RowBinary path the loader sets
 `input_format_binary_read_json_as_string=1` on the insert so the server reads
 that string back as a JSON value rather than a literal `String`. The setting is
 applied automatically whenever the resolved schema contains a JSON column -- no
-configuration needed. See [clickhouse-ext.md](clickhouse-ext.md) for the seam
+configuration needed. See [clickhouse-ext.md](clickhouse-ext.md) for the dynamic insert
 and [types.md](types.md) for per-type encoding.
 
 ## When the schema drifts
