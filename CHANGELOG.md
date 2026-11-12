@@ -3,6 +3,12 @@
 Rendered by CI and committed back at the end of a release -- do not edit by
 hand. Release notes also appear on the GitHub Releases page, one per tag.
 
+## [1.18.71](https://github.com/hyperi-io/dfe-loader/compare/v1.18.70...v1.18.71) (2026-11-12)
+
+### Bug Fixes
+
+* **transform:** count computed-column failures ([1b98ed7](https://github.com/hyperi-io/dfe-loader/commit/1b98ed75aeac5bb0ac7d364c02193ab86b35460b))
+
 ## [1.18.70](https://github.com/hyperi-io/dfe-loader/compare/v1.18.69...v1.18.70) (2026-11-11)
 
 ### Bug Fixes
