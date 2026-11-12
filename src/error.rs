@@ -15,7 +15,7 @@ pub enum Error {
     ClickHouse(String),
 
     /// An insert that can never succeed for this payload — an unencodable value
-    /// or a deterministic server rejection. Retrying it wedges the partition,
+    /// or a deterministic server rejection. Retrying it holds the partition forever,
     /// so the caller must DLQ the rows and commit the offsets.
     #[error("ClickHouse permanently rejected the data: {0}")]
     ClickHousePermanent(String),

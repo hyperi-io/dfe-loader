@@ -498,7 +498,7 @@ impl Metrics {
     }
 
     /// Record a row DLQ'd because ClickHouse rejected it deterministically and
-    /// retrying it would wedge the partition.
+    /// retrying it would hold the partition forever.
     pub fn record_permanent_reject(&self, table: &str) {
         metrics::counter!(
             names::PERMANENT_REJECT_TOTAL,
