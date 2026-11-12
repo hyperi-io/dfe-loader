@@ -211,7 +211,7 @@ restricted CEL profile:
 
 Regex (`matches()`), iteration (`map()`, `filter()`, `exists()`, `all()`,
 `exists_one()`) and time (`timestamp()`, `duration()`) are blocked unless
-scalo's `expression` config section unlocks them. Any other function is refused.
+scalo's `expression` config section allows them. Any other function is refused.
 There is no GeoIP, hashing or string-rewriting function: GeoIP, reputation and
 risk come from the loader's `geoip` and `enrichment` config, not from
 `@computed`.
