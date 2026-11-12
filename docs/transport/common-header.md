@@ -67,7 +67,7 @@ those come from the source data or are defined in the table's own DDL.
 
 ## Common header DDL (default table)
 
-The following DDL shows the common header as used for the default table.
+This is the common header as the default table uses it.
 Non-default tables would include these columns alongside their own data-specific
 columns.
 
