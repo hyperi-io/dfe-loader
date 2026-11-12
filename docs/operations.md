@@ -48,10 +48,11 @@ See [clickhouse/insert-formats.md](clickhouse/insert-formats.md).
 ## Observe
 
 - **Metrics** -- Prometheus text on `/metrics`. The loader emits the DFE metric
-  groups (dual-emit: legacy `loader_*` names alongside the standard group
-  names), plus rdkafka consumer stats and config-reload counters. On the direct
+  groups (dual-emit: the older names such as `buffer_rows` and
+  `batches_flushed_total` alongside the standard group names), plus rdkafka consumer stats and config-reload counters. On the direct
   gRPC transport there are no broker offsets, so `kafka_offsets_committed_total`
   and the consumer offset counters stay flat while the transport counters move.
+- **Computed columns** -- a CEL expression that fails leaves its column unset and the record goes on. `dfe_loader_computed_eval_failures_total{table, column, stage}` counts each failure, and the first runtime failure per table and column logs a warning with the error. See [clickhouse/ddl-directives.md](clickhouse/ddl-directives.md).
 - **Catalogue** -- `dfe-loader metrics-manifest` prints every metric the loader
   registers, so a dashboard or scaling rule can be written against the
   catalogue rather than a running pod.

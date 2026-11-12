@@ -21,6 +21,7 @@ use crate::clickhouse::SharedSchemaCache;
 use crate::clickhouse::TableSchema;
 use crate::column_meta::ColumnMetaCache;
 use crate::config::{CaptureMode, Config};
+use crate::metrics::names;
 use crate::payload::{LeadingBytes, opens_json_document};
 use crate::routing::{RouteResult, Router, TableChoice, TenantReplaced};
 use crate::transform::extractor::NO_COLUMN_MATCHED;
@@ -32,12 +33,6 @@ use crate::transform::{
 use super::capture::CaptureOverrides;
 use super::enrichment::EnrichmentPipeline;
 use super::types::ProcessedMessage;
-
-/// Records on an external-pipeline topic whose `_org_id` was replaced, by `topic`.
-pub(crate) const EXTERNAL_ORG_ID_REPLACED_TOTAL: &str = "loader_external_org_id_replaced_total";
-
-/// Records on an external-pipeline topic whose `_source` was replaced, by `topic`.
-pub(crate) const EXTERNAL_SOURCE_REPLACED_TOTAL: &str = "loader_external_source_replaced_total";
 
 /// Immutable processing context for parallel message processing.
 ///
@@ -70,7 +65,7 @@ pub(crate) struct MessageProcessor<'a> {
 /// payload field with no allowlist, so labelling it would let untrusted input
 /// grow the label set without bound.
 fn log_header_pass_skipped(table: &str, reason: &str) {
-    metrics::counter!("dfe_loader_header_pass_skipped_total").increment(1);
+    metrics::counter!(names::HEADER_PASS_SKIPPED_TOTAL).increment(1);
     static SKIPPED_TS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     if scalo::logger::log_debounced(&SKIPPED_TS, 60_000) {
         error!(
@@ -87,11 +82,11 @@ fn log_header_pass_skipped(table: &str, reason: &str) {
 /// `routing.external_topics` reaches here, so the label set is the config's.
 fn count_external_replaced(topic: &str, replaced: TenantReplaced) {
     if replaced.org_id {
-        metrics::counter!(EXTERNAL_ORG_ID_REPLACED_TOTAL, "topic" => topic.to_string())
+        metrics::counter!(names::EXTERNAL_ORG_ID_REPLACED_TOTAL, "topic" => topic.to_string())
             .increment(1);
     }
     if replaced.source {
-        metrics::counter!(EXTERNAL_SOURCE_REPLACED_TOTAL, "topic" => topic.to_string())
+        metrics::counter!(names::EXTERNAL_SOURCE_REPLACED_TOTAL, "topic" => topic.to_string())
             .increment(1);
     }
 }
@@ -99,7 +94,7 @@ fn count_external_replaced(topic: &str, replaced: TenantReplaced) {
 /// Report payload fields that land nowhere, at most once a minute, so a source
 /// field a table has no column for is not lost unseen.
 fn log_fields_unstored(table: &str, fields: &[String]) {
-    metrics::counter!("dfe_loader_fields_unstored_total").increment(fields.len() as u64);
+    metrics::counter!(names::FIELDS_UNSTORED_TOTAL).increment(fields.len() as u64);
     static UNSTORED_TS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     if scalo::logger::log_debounced(&UNSTORED_TS, 60_000) {
         warn!(
@@ -125,7 +120,7 @@ struct RoutingFieldWarn {
 /// The topic stays out of the metric labels for the same reason the table does
 /// above: on the gRPC transport it arrives in request metadata.
 fn log_routing_field_absent(topic: &str, table: &str) {
-    metrics::counter!("dfe_loader_routing_field_absent_total").increment(1);
+    metrics::counter!(names::ROUTING_FIELD_ABSENT_TOTAL).increment(1);
 
     // Keyed by topic so a second broken source is not hidden by the first; the
     // subscribed topic set bounds the map.

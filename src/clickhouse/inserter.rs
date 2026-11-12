@@ -990,7 +990,7 @@ impl Inserter {
                     if crate::clickhouse::error::is_max_dynamic_paths_error(&err_str) {
                         // Metric: always (dashboards need accurate count)
                         metrics::counter!(
-                            "loader_json_max_paths_exceeded_total",
+                            crate::metrics::names::JSON_MAX_PATHS_EXCEEDED_TOTAL,
                             "table" => table.to_string()
                         )
                         .increment(1);

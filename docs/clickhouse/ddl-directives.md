@@ -236,7 +236,10 @@ risk come from the loader's `geoip` and `enrichment` config, not from
 - An expression that does not compile, a function outside the profile
   included, is logged as a warning and the column is skipped.
 - An expression that fails per record, a missing field say, leaves the column
-  empty. No error is logged and the record is not dead-lettered.
+  empty and the record is not dead-lettered. The first failure per table and
+  column logs one warning with the error.
+- `dfe_loader_computed_eval_failures_total{table, column, stage}` counts every
+  failure, `stage` being `compile`, `context` or `eval`.
 - A `null` result leaves the column empty too.
 
 The `computed_columns` config section sets or overrides the same expressions:
