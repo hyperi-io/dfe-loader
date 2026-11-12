@@ -4,12 +4,14 @@
 //! Metrics via scalo `MetricsManager` + DFE metric groups.
 //!
 //! Three layers:
-//! 1. `ServiceMetrics` — platform `dfe_*` metrics (records, transport, scaling)
-//! 2. Metric groups — standardised `dfe_loader_*` metrics (app, buffer, consumer, sink)
-//! 3. Loader-specific — per-table gauges, salvage, routing metrics
+//! 1. `ServiceMetrics` -- platform metrics (records, transport, scaling)
+//! 2. scalo metric groups -- app, buffer, consumer, sink
+//! 3. Loader-specific -- the `dfe_loader_*` and per-table `loader_*` series, named in [`names`]
 //!
-//! Legacy `loader_*` names are dual-emitted alongside new `dfe_loader_*` names.
-//! Remove legacy names after dashboard migration.
+//! Every name is bare unless `metrics.namespace` sets a prefix, which the recorder adds to all of them.
+//!
+//! The loader's older names (`buffer_rows`, `batches_flushed_total`, `insert_latency_seconds`, ...) are
+//! dual-emitted beside the scalo group names because the engine's dashboards read them.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -23,6 +25,45 @@ use scalo::metrics::groups::{
     SchemaCacheMetrics, SinkMetrics,
 };
 use scalo::metrics::{MetricsManager, ServiceMetrics, TransportKind, ValidationFailureReason};
+
+/// Every metric name the loader owns, each spelled once.
+pub mod names {
+    /// A loader-owned name under `dfe_loader_`, or under `loader_` for the per-table series dashboards read.
+    macro_rules! name {
+        (legacy $name:literal) => {
+            concat!("loader_", $name)
+        };
+        ($name:literal) => {
+            concat!("dfe_loader_", $name)
+        };
+    }
+
+    pub const HEADER_PASS_SKIPPED_TOTAL: &str = name!("header_pass_skipped_total");
+    pub const ROUTING_FIELD_ABSENT_TOTAL: &str = name!("routing_field_absent_total");
+    pub const FIELDS_UNSTORED_TOTAL: &str = name!("fields_unstored_total");
+    pub const PENDING_SCHEMA_OVERFLOW_TOTAL: &str = name!("pending_schema_overflow_total");
+    pub const PENDING_SCHEMA_EXPIRED_TOTAL: &str = name!("pending_schema_expired_total");
+    pub const PENDING_SCHEMA_MESSAGES: &str = name!("pending_schema_messages");
+    pub const ROWS_LOST_TOTAL: &str = name!("rows_lost_total");
+    pub const SCHEMA_PREWARM_RETRIES_TOTAL: &str = name!("schema_prewarm_retries_total");
+    pub const SCHEMA_PREWARM_FAILED_TABLES: &str = name!("schema_prewarm_failed_tables");
+    pub const BATCHED_ARRAY_MESSAGES_TOTAL: &str = name!("batched_array_messages_total");
+    pub const BATCHED_ARRAY_RECORDS_TOTAL: &str = name!("batched_array_records_total");
+    pub const BATCHED_NDJSON_MESSAGES_TOTAL: &str = name!("batched_ndjson_messages_total");
+    pub const BATCHED_NDJSON_RECORDS_TOTAL: &str = name!("batched_ndjson_records_total");
+    pub const DUPLICATE_HEADER_TOTAL: &str = name!("duplicate_header_total");
+    pub const PERMANENT_REJECT_TOTAL: &str = name!("permanent_reject_total");
+    pub const UNKNOWN_TABLE_FALLBACK_TOTAL: &str = name!("unknown_table_fallback_total");
+    /// Computed columns left unset, by `table`, `column` and `stage` (`compile`, `context`, `eval`).
+    pub const COMPUTED_EVAL_FAILURES_TOTAL: &str = name!("computed_eval_failures_total");
+
+    pub const MESSAGES_BY_TABLE_TOTAL: &str = name!(legacy "messages_by_table_total");
+    pub const JSON_MAX_PATHS_EXCEEDED_TOTAL: &str = name!(legacy "json_max_paths_exceeded_total");
+    pub const BUFFER_ROWS_BY_TABLE: &str = name!(legacy "buffer_rows_by_table");
+    pub const BUFFER_BYTES_BY_TABLE: &str = name!(legacy "buffer_bytes_by_table");
+    pub const EXTERNAL_ORG_ID_REPLACED_TOTAL: &str = name!(legacy "external_org_id_replaced_total");
+    pub const EXTERNAL_SOURCE_REPLACED_TOTAL: &str = name!(legacy "external_source_replaced_total");
+}
 
 /// Dead letters dropped with nowhere to go, by `reason`: scalo's pipeline
 /// counter, which `ServiceMetrics` registers.
@@ -45,9 +86,9 @@ pub fn count_retry(stage: &'static str) {
 /// Application metrics backed by scalo `MetricsManager`.
 ///
 /// Registers metrics at three layers:
-/// - `dfe_*` platform metrics via `ServiceMetrics`
-/// - `dfe_loader_*` standardised metrics via metric groups
-/// - `loader_*` legacy metrics (dual-emit, remove after dashboard migration)
+/// - platform metrics via `ServiceMetrics`
+/// - scalo's standard groups
+/// - the loader's own, named in [`names`], and the older names dashboards read
 #[derive(Clone)]
 pub struct Metrics {
     dfe: Arc<ServiceMetrics>,
@@ -132,7 +173,7 @@ pub struct Metrics {
     /// its Service.
     pub clickhouse_connected: Gauge,
 
-    // Legacy loader_* metrics (dual-emit — remove after dashboard migration)
+    // Older loader names, dual-emitted because the engine's dashboards read them
     pub messages_received: Counter,
     pub messages_processed: Counter,
     pub messages_dlq: Counter,
@@ -157,24 +198,30 @@ impl Metrics {
         // Emitted from the processor, which holds no Metrics handle; registered
         // here so the catalogue names it (#158).
         let _ = manager.counter(
-            "dfe_loader_header_pass_skipped_total",
+            names::HEADER_PASS_SKIPPED_TOTAL,
             "Messages rejected because the header pass promoted no columns",
         );
         let _ = manager.counter(
-            "dfe_loader_routing_field_absent_total",
+            names::ROUTING_FIELD_ABSENT_TOTAL,
             "Records on a source topic that named no table and fell back to the default",
         );
         let _ = manager.counter(
-            crate::pipeline::processor::EXTERNAL_ORG_ID_REPLACED_TOTAL,
+            names::EXTERNAL_ORG_ID_REPLACED_TOTAL,
             "Records on an external-pipeline topic whose _org_id was replaced with the source's own, by topic",
         );
         let _ = manager.counter(
-            crate::pipeline::processor::EXTERNAL_SOURCE_REPLACED_TOTAL,
+            names::EXTERNAL_SOURCE_REPLACED_TOTAL,
             "Records on an external-pipeline topic whose _source was replaced with the source's own, by topic",
         );
         let _ = manager.counter(
-            "dfe_loader_fields_unstored_total",
+            names::FIELDS_UNSTORED_TOTAL,
             "Payload fields that matched no column, in a table with no _json column to keep them",
+        );
+        let _ = manager.counter_with_labels(
+            names::COMPUTED_EVAL_FAILURES_TOTAL,
+            "Computed columns left unset because their CEL expression failed, by table, column and stage",
+            &["table", "column", "stage"],
+            "transform",
         );
 
         Self {
@@ -280,52 +327,52 @@ impl Metrics {
 
             // Schema resolution (#36 buffer, #158 catalogue)
             pending_schema_overflow: manager.counter(
-                "dfe_loader_pending_schema_overflow_total",
+                names::PENDING_SCHEMA_OVERFLOW_TOTAL,
                 "Messages DLQ'd because a pending-schema buffer hit its cap",
             ),
             pending_schema_expired: manager.counter(
-                "dfe_loader_pending_schema_expired_total",
+                names::PENDING_SCHEMA_EXPIRED_TOTAL,
                 "Pending-schema messages DLQ'd by the expire sweep",
             ),
             pending_schema_messages: manager.gauge(
-                "dfe_loader_pending_schema_messages",
+                names::PENDING_SCHEMA_MESSAGES,
                 "Messages held awaiting schema resolution",
             ),
             rows_lost: manager.counter(
-                "dfe_loader_rows_lost_total",
+                names::ROWS_LOST_TOTAL,
                 "Rows neither ClickHouse nor a DLQ took, which nothing will deliver again",
             ),
             schema_prewarm_retries: manager.counter(
-                "dfe_loader_schema_prewarm_retries_total",
+                names::SCHEMA_PREWARM_RETRIES_TOTAL,
                 "Schema pre-warm retry rounds beyond the first",
             ),
             schema_prewarm_failed_tables: manager.gauge(
-                "dfe_loader_schema_prewarm_failed_tables",
+                names::SCHEMA_PREWARM_FAILED_TABLES,
                 "Tables still failing schema pre-warm after the retry budget",
             ),
 
             // Batched-array fan-out (#128)
             batched_array_messages: manager.counter(
-                "dfe_loader_batched_array_messages_total",
+                names::BATCHED_ARRAY_MESSAGES_TOTAL,
                 "Received messages carrying a batch of records as a JSON array",
             ),
             batched_array_records: manager.counter(
-                "dfe_loader_batched_array_records_total",
+                names::BATCHED_ARRAY_RECORDS_TOTAL,
                 "Records split out of batched-array messages",
             ),
 
             // Newline-separated batch fan-out (#184)
             batched_ndjson_messages: manager.counter(
-                "dfe_loader_batched_ndjson_messages_total",
+                names::BATCHED_NDJSON_MESSAGES_TOTAL,
                 "Received messages carrying newline-separated JSON records",
             ),
             batched_ndjson_records: manager.counter(
-                "dfe_loader_batched_ndjson_records_total",
+                names::BATCHED_NDJSON_RECORDS_TOTAL,
                 "Records split out of newline-separated messages",
             ),
 
             duplicate_header: manager.counter(
-                "dfe_loader_duplicate_header_total",
+                names::DUPLICATE_HEADER_TOTAL,
                 "Records dead-lettered for carrying the _org_id or _source key more than once",
             ),
         }
@@ -368,7 +415,7 @@ impl Metrics {
     pub fn record_processed(&self, table: &str) {
         self.messages_processed.increment(1);
         self.app.record_processed(1);
-        metrics::counter!("loader_messages_by_table_total", "table" => table.to_string())
+        metrics::counter!(names::MESSAGES_BY_TABLE_TOTAL, "table" => table.to_string())
             .increment(1);
     }
 
@@ -425,15 +472,6 @@ impl Metrics {
         self.dfe.transport_send_errors(TransportKind::Http, 1);
     }
 
-    /// Record a max_dynamic_paths limit hit on a JSON column.
-    pub fn record_max_dynamic_paths_exceeded(&self, table: &str) {
-        metrics::counter!(
-            "loader_json_max_paths_exceeded_total",
-            "table" => table.to_string()
-        )
-        .increment(1);
-    }
-
     /// Record a message DLQ'd because its pending-schema buffer hit a per-table
     /// or global cap (#36).
     pub fn record_pending_schema_overflow(&self) {
@@ -463,7 +501,7 @@ impl Metrics {
     /// retrying it would wedge the partition.
     pub fn record_permanent_reject(&self, table: &str) {
         metrics::counter!(
-            "dfe_loader_permanent_reject_total",
+            names::PERMANENT_REJECT_TOTAL,
             "table" => table.to_string()
         )
         .increment(1);
@@ -480,7 +518,7 @@ impl Metrics {
             return;
         }
         metrics::counter!(
-            "dfe_loader_unknown_table_fallback_total",
+            names::UNKNOWN_TABLE_FALLBACK_TOTAL,
             "table" => table.to_string()
         )
         .increment(n);
@@ -511,9 +549,8 @@ impl Metrics {
 
     /// Update per-table buffer depth.
     pub fn update_per_table_buffer(&self, table: &str, rows: usize, bytes: usize) {
-        metrics::gauge!("loader_buffer_rows_by_table", "table" => table.to_string())
-            .set(rows as f64);
-        metrics::gauge!("loader_buffer_bytes_by_table", "table" => table.to_string())
+        metrics::gauge!(names::BUFFER_ROWS_BY_TABLE, "table" => table.to_string()).set(rows as f64);
+        metrics::gauge!(names::BUFFER_BYTES_BY_TABLE, "table" => table.to_string())
             .set(bytes as f64);
     }
 
@@ -839,6 +876,7 @@ mod tests {
             "dfe_loader_header_pass_skipped_total",
             "dfe_loader_routing_field_absent_total",
             "dfe_loader_fields_unstored_total",
+            "dfe_loader_computed_eval_failures_total",
             "loader_external_org_id_replaced_total",
             "loader_external_source_replaced_total",
             "dfe_loader_batched_array_messages_total",
@@ -1035,13 +1073,6 @@ mod tests {
     fn metrics_record_error() {
         let m = test_metrics();
         m.record_error();
-    }
-
-    #[test]
-    fn metrics_record_max_dynamic_paths_exceeded() {
-        let m = test_metrics();
-        m.record_max_dynamic_paths_exceeded("dfe.events");
-        m.record_max_dynamic_paths_exceeded(""); // empty table
     }
 
     #[test]

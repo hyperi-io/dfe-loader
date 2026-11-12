@@ -13,11 +13,40 @@
 //! 3. `ClickHouse` column COMMENT `@computed:` directive
 
 use std::collections::HashMap;
+use std::fmt::Display;
+use std::sync::LazyLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 
-use rustc_hash::FxHashMap;
+use metrics::Counter;
+use parking_lot::Mutex;
+use rustc_hash::{FxHashMap, FxHashSet};
 use tracing::{debug, warn};
 
 use crate::config::ComputedColumnsConfig;
+use crate::metrics::names;
+
+/// `(table, column)` pairs whose runtime failure has been logged, so each logs once per process
+/// across rebuilds.
+static LOGGED_COLUMNS: LazyLock<Mutex<FxHashSet<(String, String)>>> = LazyLock::new(Mutex::default);
+
+/// One column's failure counter at one stage.
+#[derive(Debug)]
+struct StageCounter {
+    stage: &'static str,
+    counter: Counter,
+}
+
+impl StageCounter {
+    fn new(table: &str, column: &str, stage: &'static str) -> Self {
+        let counter = metrics::counter!(
+            names::COMPUTED_EVAL_FAILURES_TOTAL,
+            "table" => table.to_string(),
+            "column" => column.to_string(),
+            "stage" => stage
+        );
+        Self { stage, counter }
+    }
+}
 
 /// Origin of a computed column definition (for precedence).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,11 +68,41 @@ struct CompiledColumn {
     program: cel::Program,
     /// Origin for precedence resolution
     _origin: ComputedOrigin,
+    /// Failures building the CEL context the expression reads.
+    context_failures: StageCounter,
+    /// Failures executing the expression.
+    eval_failures: StageCounter,
+    /// Set at the first failure, so later ones cost one load instead of a lock.
+    logged: AtomicBool,
+}
+
+impl CompiledColumn {
+    /// Count a failure and log the column's first one, carrying the error.
+    fn record_failure(&self, table: &str, failures: &StageCounter, error: impl Display) {
+        failures.counter.increment(1);
+        if self.logged.load(Ordering::Relaxed) || self.logged.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        if LOGGED_COLUMNS
+            .lock()
+            .insert((table.to_string(), self.destination.clone()))
+        {
+            warn!(
+                table = %table,
+                column = %self.destination,
+                stage = failures.stage,
+                error = %error,
+                "Computed column expression failed, leaving the column unset (logged once per table and column)"
+            );
+        }
+    }
 }
 
 /// Pre-compiled computed columns for a single table.
 #[derive(Debug)]
 pub struct TableComputedColumns {
+    /// The `db.table` these columns belong to, for the failure log.
+    table: String,
     columns: Vec<CompiledColumn>,
     /// The variables the expressions read, each once.
     inputs: Vec<String>,
@@ -58,7 +117,8 @@ impl TableComputedColumns {
     /// Evaluate all computed columns against the message data and insert results.
     ///
     /// - Skips columns that already exist in `data` (don't overwrite source data)
-    /// - Evaluation failures silently skip the column (don't DLQ the message)
+    /// - A failed expression leaves its column unset and the message goes on, counted in
+    ///   `dfe_loader_computed_eval_failures_total` and logged once per table and column
     pub fn evaluate(&self, data: &mut serde_json::Map<String, serde_json::Value>) {
         if self.columns.is_empty() {
             return;
@@ -67,8 +127,16 @@ impl TableComputedColumns {
         // Build CEL context from current data
         let hash_data: HashMap<String, serde_json::Value> =
             data.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-        let Ok(context) = scalo::expression::build_context(&hash_data) else {
-            return;
+        let context = match scalo::expression::build_context(&hash_data) {
+            Ok(context) => context,
+            Err(e) => {
+                for col in &self.columns {
+                    if !data.contains_key(&col.destination) {
+                        col.record_failure(&self.table, &col.context_failures, &e);
+                    }
+                }
+                return;
+            }
         };
 
         for col in &self.columns {
@@ -77,13 +145,14 @@ impl TableComputedColumns {
                 continue;
             }
 
-            if let Ok(value) = col.program.execute(&context) {
-                let json_val = cel_to_json(&value);
-                if !json_val.is_null() {
-                    data.insert(col.destination.clone(), json_val);
+            match col.program.execute(&context) {
+                Ok(value) => {
+                    let json_val = cel_to_json(&value);
+                    if !json_val.is_null() {
+                        data.insert(col.destination.clone(), json_val);
+                    }
                 }
-            } else {
-                // Evaluation failure → skip column silently
+                Err(e) => col.record_failure(&self.table, &col.eval_failures, &e),
             }
         }
     }
@@ -192,9 +261,15 @@ impl ComputedColumnCache {
                         destination: destination.clone(),
                         program,
                         _origin: ComputedOrigin::ColumnComment,
+                        context_failures: StageCounter::new(table, destination, "context"),
+                        eval_failures: StageCounter::new(table, destination, "eval"),
+                        logged: AtomicBool::new(false),
                     });
                 }
                 Err(e) => {
+                    StageCounter::new(table, destination, "compile")
+                        .counter
+                        .increment(1);
                     warn!(
                         table = %table,
                         column = %destination,
@@ -218,8 +293,14 @@ impl ComputedColumnCache {
                 }
             }
         }
-        self.tables
-            .insert(table.to_string(), TableComputedColumns { columns, inputs });
+        self.tables.insert(
+            table.to_string(),
+            TableComputedColumns {
+                table: table.to_string(),
+                columns,
+                inputs,
+            },
+        );
     }
 }
 
@@ -555,111 +636,294 @@ mod tests {
         assert_eq!(tc.len(), 1);
     }
 
-    #[test]
-    fn test_evaluate_computed_columns() {
-        let mut config = ComputedColumnsConfig::default();
-        config
-            .columns
-            .insert("is_high".to_string(), "score > 80".to_string());
+    /// Warn-level log output, shared by every thread that installs its dispatch.
+    #[derive(Clone, Default)]
+    struct Lines(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
 
-        let mut cache = ComputedColumnCache::new(config);
-        cache.build_and_cache(
-            "common.events",
-            &ColumnMetaCache::new(ColumnDirectivesConfig::default()),
-        );
+    impl std::io::Write for Lines {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .map_err(|_| std::io::ErrorKind::Other)?
+                .extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
 
-        let tc = cache.get("common.events").unwrap();
+    impl Lines {
+        fn dispatch(&self) -> tracing::Dispatch {
+            let writer = self.clone();
+            tracing::Dispatch::new(
+                tracing_subscriber::fmt()
+                    .with_max_level(tracing::Level::WARN)
+                    .with_ansi(false)
+                    .with_writer(move || writer.clone())
+                    .finish(),
+            )
+        }
 
-        let mut data = serde_json::Map::new();
-        data.insert("score".to_string(), serde_json::json!(95));
+        fn lines(&self) -> Vec<String> {
+            let bytes = self.0.lock().map(|b| b.clone()).unwrap_or_default();
+            String::from_utf8_lossy(&bytes)
+                .lines()
+                .map(str::to_string)
+                .collect()
+        }
+    }
 
-        tc.evaluate(&mut data);
-
-        assert_eq!(data.get("is_high"), Some(&serde_json::json!(true)));
+    /// One computed column, defined per table, against one record: `builds`
+    /// rebuilds, each evaluating `messages` records on every table at once, one
+    /// thread a table. Column names are unique per row because the log gate is
+    /// process-wide.
+    struct EvalCase {
+        name: &'static str,
+        column: &'static str,
+        /// `(db.table, expression)` for each table defining the column.
+        tables: &'static [(&'static str, &'static str)],
+        record: serde_json::Value,
+        builds: usize,
+        messages: usize,
+        want: Option<serde_json::Value>,
+        failed_stage: &'static str,
+        /// Failures counted for each table.
+        failures: u64,
+        /// Failure log lines across all tables.
+        failure_logs: usize,
     }
 
     #[test]
-    fn test_evaluate_does_not_overwrite_existing() {
-        let mut config = ComputedColumnsConfig::default();
-        config
-            .columns
-            .insert("status".to_string(), r#""computed_value""#.to_string());
+    fn evaluate_sets_the_column_or_counts_the_failure() {
+        use serde_json::json;
+        const TERNARY: &str = r#"score > 80 ? "high" : score > 40 ? "medium" : "low""#;
+        let cases = [
+            EvalCase {
+                name: "bool result",
+                column: "eval_case_is_high",
+                tables: &[("db.cases", "score > 80")],
+                record: json!({"score": 95}),
+                builds: 1,
+                messages: 1,
+                want: Some(json!(true)),
+                failed_stage: "eval",
+                failures: 0,
+                failure_logs: 0,
+            },
+            EvalCase {
+                name: "ternary high",
+                column: "eval_case_label_high",
+                tables: &[("db.cases", TERNARY)],
+                record: json!({"score": 95}),
+                builds: 1,
+                messages: 1,
+                want: Some(json!("high")),
+                failed_stage: "eval",
+                failures: 0,
+                failure_logs: 0,
+            },
+            EvalCase {
+                name: "ternary medium",
+                column: "eval_case_label_medium",
+                tables: &[("db.cases", TERNARY)],
+                record: json!({"score": 60}),
+                builds: 1,
+                messages: 1,
+                want: Some(json!("medium")),
+                failed_stage: "eval",
+                failures: 0,
+                failure_logs: 0,
+            },
+            EvalCase {
+                name: "ternary low",
+                column: "eval_case_label_low",
+                tables: &[("db.cases", TERNARY)],
+                record: json!({"score": 20}),
+                builds: 1,
+                messages: 1,
+                want: Some(json!("low")),
+                failed_stage: "eval",
+                failures: 0,
+                failure_logs: 0,
+            },
+            EvalCase {
+                name: "source value is never overwritten",
+                column: "eval_case_status",
+                tables: &[("db.cases", r#""computed_value""#)],
+                record: json!({"eval_case_status": "original"}),
+                builds: 1,
+                messages: 1,
+                want: Some(json!("original")),
+                failed_stage: "eval",
+                failures: 0,
+                failure_logs: 0,
+            },
+            EvalCase {
+                name: "a column the source already set is not evaluated, so not counted",
+                column: "eval_case_preset",
+                tables: &[("db.cases", r#"missing_field == "value""#)],
+                record: json!({"eval_case_preset": 1}),
+                builds: 1,
+                messages: 3,
+                want: Some(json!(1)),
+                failed_stage: "eval",
+                failures: 0,
+                failure_logs: 0,
+            },
+            EvalCase {
+                name: "missing field counts every message and logs once across rebuilds",
+                column: "eval_case_missing",
+                tables: &[("db.cases", r#"missing_field == "value""#)],
+                record: json!({"other": "hello"}),
+                builds: 2,
+                messages: 3,
+                want: None,
+                failed_stage: "eval",
+                failures: 6,
+                failure_logs: 1,
+            },
+            EvalCase {
+                name: "two tables failing on one column at once each log and count apart",
+                column: "eval_case_shared",
+                tables: &[
+                    ("db.shared_a", r#"missing_a == "value""#),
+                    ("db.shared_b", "missing_b > 1"),
+                ],
+                record: json!({"other": "hello"}),
+                builds: 2,
+                messages: 3,
+                want: None,
+                failed_stage: "eval",
+                failures: 6,
+                failure_logs: 2,
+            },
+            EvalCase {
+                name: "invalid expression counts each compile and never evaluates",
+                column: "eval_case_invalid",
+                tables: &[("db.cases", "this is not valid CEL <<<>>>")],
+                record: json!({"other": "hello"}),
+                builds: 2,
+                messages: 3,
+                want: None,
+                failed_stage: "compile",
+                failures: 2,
+                failure_logs: 0,
+            },
+        ];
 
-        let mut cache = ComputedColumnCache::new(config);
-        cache.build_and_cache(
-            "common.events",
-            &ColumnMetaCache::new(ColumnDirectivesConfig::default()),
-        );
+        let name = names::COMPUTED_EVAL_FAILURES_TOTAL;
+        assert_eq!(name, "dfe_loader_computed_eval_failures_total");
+        for case in cases {
+            let mut config = ComputedColumnsConfig::default();
+            for (table, expr) in case.tables {
+                let mut columns = indexmap::IndexMap::new();
+                columns.insert(case.column.to_string(), (*expr).to_string());
+                config.overrides.insert((*table).to_string(), columns);
+            }
+            let col_meta = ColumnMetaCache::new(ColumnDirectivesConfig::default());
+            let serde_json::Value::Object(record) = case.record else {
+                panic!("{}: the record is not an object", case.name);
+            };
 
-        let tc = cache.get("common.events").unwrap();
+            let recorder = crate::metrics::counting::CountingRecorder::default();
+            let output = Lines::default();
+            let dispatch = output.dispatch();
+            let mut got: Vec<Option<serde_json::Value>> = Vec::new();
+            tracing::dispatcher::with_default(&dispatch, || {
+                metrics::with_local_recorder(&recorder, || {
+                    let mut cache = ComputedColumnCache::new(config);
+                    for _ in 0..case.builds {
+                        for (table, _) in case.tables {
+                            cache.build_and_cache(table, &col_meta);
+                        }
+                        let cache = &cache;
+                        let record = &record;
+                        let dispatch = &dispatch;
+                        got = std::thread::scope(|scope| {
+                            let threads: Vec<_> = case
+                                .tables
+                                .iter()
+                                .map(|(table, _)| {
+                                    scope.spawn(move || {
+                                        tracing::dispatcher::with_default(dispatch, || {
+                                            let tc = cache.get(table)?;
+                                            let mut last = None;
+                                            for _ in 0..case.messages {
+                                                let mut data = record.clone();
+                                                tc.evaluate(&mut data);
+                                                last = data.get(case.column).cloned();
+                                            }
+                                            last
+                                        })
+                                    })
+                                })
+                                .collect();
+                            threads
+                                .into_iter()
+                                .map(|thread| {
+                                    thread
+                                        .join()
+                                        .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+                                })
+                                .collect()
+                        });
+                    }
+                });
+            });
 
-        let mut data = serde_json::Map::new();
-        data.insert("status".to_string(), serde_json::json!("original"));
-
-        tc.evaluate(&mut data);
-
-        // Should NOT be overwritten
-        assert_eq!(data.get("status"), Some(&serde_json::json!("original")));
-    }
-
-    #[test]
-    fn test_evaluate_missing_field_skips() {
-        let mut config = ComputedColumnsConfig::default();
-        config.columns.insert(
-            "result".to_string(),
-            r#"missing_field == "value""#.to_string(),
-        );
-
-        let mut cache = ComputedColumnCache::new(config);
-        cache.build_and_cache(
-            "common.events",
-            &ColumnMetaCache::new(ColumnDirectivesConfig::default()),
-        );
-
-        let tc = cache.get("common.events").unwrap();
-
-        let mut data = serde_json::Map::new();
-        data.insert("other".to_string(), serde_json::json!("hello"));
-
-        tc.evaluate(&mut data);
-
-        // result should not be added (expression failed on missing field)
-        assert!(!data.contains_key("result"));
-    }
-
-    #[test]
-    fn test_evaluate_string_expression() {
-        let mut config = ComputedColumnsConfig::default();
-        config.columns.insert(
-            "risk_label".to_string(),
-            r#"score > 80 ? "high" : score > 40 ? "medium" : "low""#.to_string(),
-        );
-
-        let mut cache = ComputedColumnCache::new(config);
-        cache.build_and_cache(
-            "common.events",
-            &ColumnMetaCache::new(ColumnDirectivesConfig::default()),
-        );
-
-        let tc = cache.get("common.events").unwrap();
-
-        // High score
-        let mut data1 = serde_json::Map::new();
-        data1.insert("score".to_string(), serde_json::json!(95));
-        tc.evaluate(&mut data1);
-        assert_eq!(data1.get("risk_label"), Some(&serde_json::json!("high")));
-
-        // Medium score
-        let mut data2 = serde_json::Map::new();
-        data2.insert("score".to_string(), serde_json::json!(60));
-        tc.evaluate(&mut data2);
-        assert_eq!(data2.get("risk_label"), Some(&serde_json::json!("medium")));
-
-        // Low score
-        let mut data3 = serde_json::Map::new();
-        data3.insert("score".to_string(), serde_json::json!(20));
-        tc.evaluate(&mut data3);
-        assert_eq!(data3.get("risk_label"), Some(&serde_json::json!("low")));
+            assert_eq!(
+                got.len(),
+                case.tables.len(),
+                "{}: one result a table",
+                case.name
+            );
+            for (got, (table, _)) in got.iter().zip(case.tables) {
+                assert_eq!(got, &case.want, "{}: {table} column value", case.name);
+                assert_eq!(
+                    recorder.labelled(name, "table", table),
+                    case.failures,
+                    "{}: {table} failures",
+                    case.name
+                );
+            }
+            let total = case.failures * case.tables.len() as u64;
+            assert_eq!(
+                recorder.labelled(name, "stage", case.failed_stage),
+                total,
+                "{}: {} failures",
+                case.name,
+                case.failed_stage
+            );
+            assert_eq!(
+                recorder.labelled(name, "column", case.column),
+                total,
+                "{}: every failure carries the column",
+                case.name
+            );
+            let lines = output.lines();
+            let failure_logs: Vec<&String> = lines
+                .iter()
+                .filter(|line| line.contains("logged once per table and column"))
+                .collect();
+            assert_eq!(
+                failure_logs.len(),
+                case.failure_logs,
+                "{}: failure log lines {lines:?}",
+                case.name
+            );
+            for (table, _) in case.tables.iter().take(case.failure_logs) {
+                assert!(
+                    failure_logs
+                        .iter()
+                        .any(|line| line.contains(&format!("table={table} "))
+                            && line.contains(case.column)
+                            && line.contains("error=")),
+                    "{}: no log line names {table}, the column and the error: {failure_logs:?}",
+                    case.name
+                );
+            }
+        }
     }
 
     // ========================================================================
@@ -757,27 +1021,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn cache_build_skips_invalid_expression() {
-        let mut config = ComputedColumnsConfig::default();
-        // Invalid CEL syntax
-        config
-            .columns
-            .insert("bad".to_string(), "this is not valid CEL @@@".to_string());
-        config
-            .columns
-            .insert("good".to_string(), "1 + 1".to_string());
-
-        let mut cache = ComputedColumnCache::new(config);
-        cache.build_and_cache(
-            "common.mix",
-            &ColumnMetaCache::new(ColumnDirectivesConfig::default()),
-        );
-        let tc = cache.get("common.mix").unwrap();
-        // bad expression skipped, good one compiled
-        assert_eq!(tc.len(), 1);
-    }
-
     // ========================================================================
     // cel_to_json: all CEL value types
     // ========================================================================
@@ -816,29 +1059,6 @@ mod tests {
         assert_eq!(data.get("as_float"), Some(&serde_json::json!(3.14)));
         assert_eq!(data.get("as_string"), Some(&serde_json::json!("text")));
         assert_eq!(data.get("as_list"), Some(&serde_json::json!([1, 2, 3])));
-    }
-
-    #[test]
-    fn evaluate_preserves_existing_field() {
-        // Implementation skips columns that already exist in data
-        let mut config = ComputedColumnsConfig::default();
-        config
-            .columns
-            .insert("val".to_string(), "x * 2".to_string());
-        let mut cache = ComputedColumnCache::new(config);
-        cache.build_and_cache(
-            "db.ovr",
-            &ColumnMetaCache::new(ColumnDirectivesConfig::default()),
-        );
-        let tc = cache.get("db.ovr").unwrap();
-
-        let mut data = serde_json::Map::new();
-        data.insert("x".to_string(), serde_json::json!(5));
-        data.insert("val".to_string(), serde_json::json!("original"));
-        tc.evaluate(&mut data);
-
-        // Pre-existing value wins — computed is skipped
-        assert_eq!(data.get("val"), Some(&serde_json::json!("original")));
     }
 
     #[test]
