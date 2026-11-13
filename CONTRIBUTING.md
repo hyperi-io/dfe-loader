@@ -226,7 +226,7 @@ Green lies three ways: `skip_if_no_clickhouse!()` and `skip_if_no_kafka!()` retu
 
 Inbound, declared in `dfe-infra/suite.yaml`:
 
-- **scalo-rs -> dfe-loader** (`cargo-dep`) -- `Cargo.toml:36` takes `scalo` by range for transports, config cascade, CLI, metrics, deployment contract and DLQ. A scalo release reaches this repo here.
+- **scalo-rs -> dfe-loader** (`cargo-dep`) -- `Cargo.toml:37` takes `scalo` by range for transports, config cascade, CLI, metrics, deployment contract and DLQ. A scalo release reaches this repo here.
 - **scalo-rs -> dfe-loader** (`generated-file`, lockstep) -- `Dockerfile` is emitted by `scalo::deployment::generate_dockerfile()` at schema version 4. Regenerate and commit the diff.
 Outbound, so what a change here can break:
 
