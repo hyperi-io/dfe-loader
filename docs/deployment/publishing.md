@@ -41,7 +41,7 @@ release:
   helm:
     enabled: true
     contract: emit
-    library: "2.14.3"
+    library: "<contract version>"
   container:
     enabled: true
     dockerfile: Dockerfile
@@ -56,13 +56,13 @@ The `Dockerfile` is generated from the app's deployment contract by scalo and co
 
 ## Tags generated
 
-For a stable release `v1.6.13`:
+For a stable release `v<version>`:
 
-- `ghcr.io/hyperi-io/dfe-loader:v1.6.13`
+- `ghcr.io/hyperi-io/dfe-loader:v<version>`
 - `ghcr.io/hyperi-io/dfe-loader:latest`
 - `ghcr.io/hyperi-io/dfe-loader:sha-<commit>`
 
-A prerelease (e.g. `v1.6.13-rc.1`) gets its version tag and `sha-<commit>`
+A prerelease (e.g. `v<version>-rc.1`) gets its version tag and `sha-<commit>`
 only. It never moves `latest`.
 
 ## Verification
@@ -70,9 +70,9 @@ only. It never moves `latest`.
 After a release:
 
 ```bash
-docker pull ghcr.io/hyperi-io/dfe-loader:v1.6.13
-docker run --rm ghcr.io/hyperi-io/dfe-loader:v1.6.13 --help
-docker manifest inspect ghcr.io/hyperi-io/dfe-loader:v1.6.13
+docker pull ghcr.io/hyperi-io/dfe-loader:v<version>
+docker run --rm ghcr.io/hyperi-io/dfe-loader:v<version> --help
+docker manifest inspect ghcr.io/hyperi-io/dfe-loader:v<version>
 ```
 
 ## Consumer usage
@@ -94,7 +94,7 @@ services:
 ```yaml
 containers:
   - name: dfe-loader
-    image: ghcr.io/hyperi-io/dfe-loader:v1.6.13
+    image: ghcr.io/hyperi-io/dfe-loader:v<version>
     ports:
       - containerPort: 9090
 ```
