@@ -100,6 +100,8 @@ Full cascade and per-setting behaviour: [docs/configuration.md](docs/configurati
 
 [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md), [COMMERCIAL.md](COMMERCIAL.md).
 
+The suite's published docs are at <https://dfe.docs.hyperi.io>, and this repository's pages at <https://dfe.docs.hyperi.io/dfe-loader/>.
+
 ## Help and contributing
 
 How to work in this repo, the commands that prove a change and what tends to bite are in [CONTRIBUTING.md](CONTRIBUTING.md). A question that is not a bug goes in a new issue.
