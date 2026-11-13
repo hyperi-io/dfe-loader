@@ -10,16 +10,7 @@
 
 # Common header schema v2
 
-Every record in every DFE table starts with the common header: events, context
-and metrics alike. The loader injects it before insert, whichever transport the
-record arrived on (a Kafka topic or a gRPC push). The rest of the stack keys on
-it: row-level security on `_org_id`, deduplication on `_uuid`, time windows and
-partitions on its timestamps, and the console's queries on all three. A change
-to a header field reaches every table the engine's schema phase creates and
-every query that filters on it, which is why the header moves only with its
-schema version. This page
-documents the full field set, the DDL, and the ORDER BY / PARTITION BY / codec /
-index decisions behind it.
+Every record in every DFE table starts with the common header: events, context and metrics alike. The loader injects it before insert, whichever transport the record arrived on (a Kafka topic or a gRPC push). The rest of the stack keys on it: row-level security on `_org_id`, uniqueness on `_uuid`, time windows and partitions on its timestamps, and the console's time and organisation filters on the same columns. A change to a header field reaches every table the engine's schema phase creates and every query that filters on it, which is why the header moves only with its schema version. This page documents the full field set, the DDL, and the ORDER BY / PARTITION BY / codec / index decisions behind it.
 
 ## Overview
 
@@ -36,8 +27,8 @@ Every table shares a common header that provides:
 The common header is the **base** of every table's schema -- not the complete
 schema itself. The loader injects these system fields into every record.
 
-- **Landing table** (`dfe.main`): schema IS just the common header. This is the
-  catch-all for unrouted records.
+- **Landing table** (`dfe.main` by default, another with `routing.default_table`):
+  schema IS just the common header. This is the catch-all for unrouted records.
 - **Other tables** (e.g., `dfe.auth`, `dfe.metrics`): schema = common header
   plus data-specific columns, alongside the common header.
 
