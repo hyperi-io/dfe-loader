@@ -37,11 +37,11 @@ The coercions a source value gets on the way: a zoned timestamp lands at the ins
 - An encoder refusal (`EncodingError` naming its column) is the payload's, and goes to salvage.
 - A column type the crate cannot encode is a loader gap, so the rows are held.
 
-Both client crates come from crates.io, with no `[patch]` and no git source:
+Both client crates come from crates.io, with no `[patch]` and no git source. `Cargo.toml` carries the version ranges:
 
 ```toml
-clickhouse = { version = ">=0.15.3, <0.16", features = ["lz4", "time", "rustls-tls", "rustls-tls-native-roots", "inserter"] }
-dfe-clickhouse = { version = ">=0.1.9, <0.2", default-features = false, features = ["ext", "tls", "dynamic"] }
+clickhouse = { version = "...", features = ["lz4", "time", "rustls-tls", "rustls-tls-native-roots", "inserter"] }
+dfe-clickhouse = { version = "...", default-features = false, features = ["ext", "tls", "dynamic"] }
 ```
 
 From `dfe-clickhouse` the loader also takes `ServerException::parse` (`ext`), which reads the code and message out of the `Code: N. DB::Exception: ...` text the HTTP client returns as `Error::BadResponse`, and `TcpClient` with its rustls trust (`tls`, which implies `tcp`) for `clickhouse.protocol: native`. `src/clickhouse/error.rs` classifies every insert rejection by the server's code and keeps at most 1 MiB of any error text.

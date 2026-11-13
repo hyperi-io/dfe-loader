@@ -27,7 +27,7 @@ dfe-archiver) a server that receives event batches, and gives dfe-receiver (and
 transformers) a client that pushes batches directly -- a Kafka-less path when you
 want one.
 
-- **Wire protocol:** gRPC (Protobuf over HTTP/2) via `tonic` 0.14.x.
+- **Wire protocol:** gRPC (Protobuf over HTTP/2) via `tonic`, at the version scalo-rs's `Cargo.toml` pins.
 - **Scope:** scalo transport module + dfe-loader, dfe-archiver, dfe-receiver.
 - **Feature flag:** `transport-grpc` (optional `tonic` + `prost` deps).
 
