@@ -10,12 +10,14 @@
 
 # Common header schema v2
 
-Every record in every DFE table starts with the common header: events, context,
-metrics, whatever the table holds. The loader injects it before insert, whichever
-transport the record arrived on (a Kafka topic or a gRPC push). The rest of the
-stack keys on it: row-level security on `_org_id`, deduplication on `_uuid`, time
-windows and partitions on its timestamps, and the console's queries on all three.
-Change a header field and every table and every reader moves with it. This page
+Every record in every DFE table starts with the common header: events, context
+and metrics alike. The loader injects it before insert, whichever transport the
+record arrived on (a Kafka topic or a gRPC push). The rest of the stack keys on
+it: row-level security on `_org_id`, deduplication on `_uuid`, time windows and
+partitions on its timestamps, and the console's queries on all three. A change
+to a header field reaches every table the engine's schema phase creates and
+every query that filters on it, which is why the header moves only with its
+schema version. This page
 documents the full field set, the DDL, and the ORDER BY / PARTITION BY / codec /
 index decisions behind it.
 
