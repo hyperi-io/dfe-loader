@@ -1,7 +1,7 @@
 <!--
   Project:      dfe-loader
   File:         docs/transport/common-header.md
-  Purpose:      Common header schema injected into every event table
+  Purpose:      The common header every record in every DFE table carries
   Language:     Markdown
 
   License:      BUSL-1.1
@@ -10,15 +10,11 @@
 
 # Common header schema v2
 
-Every event the loader writes -- regardless of the transport it arrived on
-(a Kafka topic or a gRPC push) -- gets a standardised common header injected before
-insert. This is the base schema shared by all event tables in the DFE (Data
-Fusion Engine) pipeline. This page documents the full field set, the DDL, and the
-ORDER BY / PARTITION BY / codec / index decisions behind it.
+Every record in every DFE table starts with the common header: events, context and metrics alike. The loader injects it before insert, whichever transport the record arrived on (a Kafka topic or a gRPC push). The rest of the stack keys on it: row-level security on `_org_id`, uniqueness on `_uuid`, time windows and partitions on its timestamps, and the console's time and organisation filters on the same columns. A change to a header field reaches every table the engine's schema phase creates and every query that filters on it, which is why the header moves only with its schema version. This page documents the full field set, the DDL, and the ORDER BY / PARTITION BY / codec / index decisions behind it.
 
 ## Overview
 
-Every event table shares a common header that provides:
+Every table shares a common header that provides:
 
 1. **Temporal ordering** -- multiple timestamp fields for different use cases.
 2. **Multi-tenancy** -- organisation ID for row-level security (RLS).
@@ -29,10 +25,10 @@ Every event table shares a common header that provides:
 ## Common header vs complete table schema
 
 The common header is the **base** of every table's schema -- not the complete
-schema itself. The loader injects these system fields into every event.
+schema itself. The loader injects these system fields into every record.
 
-- **Landing table** (`dfe.main`): schema IS just the common header. This is the
-  catch-all for unrouted events.
+- **Landing table** (`dfe.main` by default, another with `routing.default_table`):
+  schema IS just the common header. This is the catch-all for unrouted records.
 - **Other tables** (e.g., `dfe.auth`, `dfe.metrics`): schema = common header
   plus data-specific columns, alongside the common header.
 
@@ -207,7 +203,7 @@ column the header pass fills, not only this one.
 | Codec | None (UUID is already compact) |
 | Source | `@generated: generateUUIDv7()` |
 
-**Purpose:** Unique identifier for each event.
+**Purpose:** Unique identifier for each record.
 
 **Rationale:**
 
@@ -396,7 +392,7 @@ for backwards compatibility and mapped onto `capture_mode`.
 - Config-driven source field list (first match wins).
 - Stored as JSON for flexible querying.
 - Contains collector metadata, enrichment tags, routing info.
-- Nullable -- not all events have tags.
+- Nullable -- not all records have tags.
 
 **Field resolution order:**
 
@@ -660,7 +656,7 @@ The common header DDL carries this index on every `_raw` column. Under
 | Index type | Pros | Cons |
 |------------|------|------|
 | `text` (default) | GA in 26.2+, accurate, no false positives | ~50% insert overhead on `_raw` |
-| `ngrambf_v1` (legacy) | Lower storage | False positives; no reason to prefer on 26.2+ |
+| `ngrambf_v1` (legacy) | Lower storage | False positives, and no reason to prefer it on 26.2+ |
 | None | Zero overhead | Full scan for text search -- use `capture_mode = "extracted_only"` instead |
 
 If you do not need full-text search on the raw payload, set
@@ -788,7 +784,7 @@ definitions that specify which system fields to inject and how to populate them.
 
 | Profile | Fields | Use case |
 |---------|--------|----------|
-| `timeseries` (default) | 9 | Full common header for event ingestion |
+| `timeseries` (default) | 9 | Full common header for record ingestion |
 | `minimal` | 5 | High-volume structured data (no _raw,_tags, _source) |
 | `passthrough` | 4 | Transparent bridge (no _timestamp injection) |
 
