@@ -5529,7 +5529,7 @@ mod tests {
 
     #[test]
     fn a_withhold_on_one_partition_does_not_hold_another() {
-        // The watermark is per partition, so a wedged table on partition 0 must
+        // The watermark is per partition, so a table stuck on partition 0 must
         // not stall partition 1's progress.
         let committable = vec![
             offset("dfe-events", 0, 100),

@@ -294,7 +294,7 @@ pub fn retries(code: i32, message: &str) -> bool {
 ///    "connection reset by peer",...'``. Sniffing that hands the
 ///    classification to customer data: a payload holding "connection",
 ///    "timeout" or "socket" reads as a transport fault under transient-first
-///    and comes back forever, wedging the partition on one poison row.
+///    and comes back forever, holding the partition on one poison row.
 /// 2. **`JSONEachRow` is matched by column NAME, so no schema was held.** The
 ///    `RowBinary` path re-reads the schema before taking a refusal as the
 ///    rows' own, because a positional encode against a stale schema really
