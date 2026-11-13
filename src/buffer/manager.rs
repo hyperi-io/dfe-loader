@@ -820,9 +820,9 @@ mod tests {
             "extractor row 2 should have raw payload"
         );
         // Remaining transformer rows
-        for i in 3..batch.raw_payloads.len() {
+        for (i, payload) in batch.raw_payloads.iter().enumerate().skip(3) {
             assert!(
-                batch.raw_payloads[i].is_empty(),
+                payload.is_empty(),
                 "transformer row {i} should have empty raw payload"
             );
         }
