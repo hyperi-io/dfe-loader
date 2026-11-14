@@ -17,10 +17,7 @@ path = "src/lib.rs"
 name = "dfe-loader"
 path = "src/main.rs"
 
-# PGO workload driver — Kafka producer that drives realistic load against a
-# running dfe-loader during hyperi-ci Tier 2 PGO/BOLT builds.
-# `required-features` keeps it out of default builds; hyperi-ci ≥v1.9.2
-# respects this and skips the binary in detect-build-config.
+# PGO/BOLT workload driver, kept out of default builds by `required-features`.
 [[bin]]
 name = "pgo-driver"
 path = "src/bin/pgo_driver.rs"
@@ -31,24 +28,18 @@ required-features = ["pgo-driver"]
 tokio = { version = ">=1.54.1, <2", features = ["full"] }
 tokio-util = { version = ">=0.7.20, <0.8", features = ["rt"] }
 
-# Shared library with transport abstraction. The floor moves with
-# `release.helm.library` in .hyperi-ci.yaml: the library renders only the
-# contract version its scalo release writes.
+# The floor moves with `release.helm.library` in .hyperi-ci.yaml.
 scalo = { version = ">=2.14.29, <3", features = ["config-schema", "transport-kafka", "transport-grpc", "dlq-kafka", "config", "config-reload", "deployment", "version-check", "scaling", "cli-service", "top", "logger", "metrics", "service-metrics", "expression", "memory", "worker-batch", "governor", "secrets", "sink-stack", "geoip-download"] }
 
 # Steps scalo's jittered retry schedule (sink_stack backoff). Range MUST track
 # scalo's: BackoffBuilder only applies to the ExponentialBuilder scalo returns.
 backon = { version = ">=1.6.0, <2", default-features = false, features = ["std"] }
 
-# JSON Schema derivation for the reflectable config-schema capability
-# (scalo-rs#6). Same version range as scalo so cargo unifies to one schemars.
+# Config-schema derivation. Same range as scalo so cargo unifies to one schemars.
 schemars = { version = ">=1.2.3, <2", default-features = false, features = ["std", "derive", "preserve_order", "indexmap2"] }
 
-# CEL expression evaluation (same crate scalo uses, needed for Program type).
-# Range MUST track scalo's, which is `>=0.14.5, <0.15`: we hand cel::Program across
-# the scalo boundary, so a wider range here lets cargo resolve two semver-
-# incompatible cels and Program stops being the same type. In ignoreDeps so it
-# moves only with scalo.
+# Range MUST track scalo's: cel::Program crosses the scalo boundary, and two
+# semver-incompatible cels make it two types. In ignoreDeps, so it moves with scalo.
 cel = { version = ">=0.14.5, <0.15", features = ["json"] }
 
 # JSON parsing (SIMD-accelerated)
@@ -68,9 +59,7 @@ thiserror = ">=2.0.21, <3"
 tracing = ">=0.1.44, <0.2"
 metrics = ">=0.24.6, <0.25"
 
-# Memory management - jemalloc allocator (DFE policy 2026-04-17: jemalloc only)
-# `stats` builds jemalloc with --enable-stats; without it there is no
-# stats.allocated for the memory guard's heap source to read (#162).
+# `stats` gives the memory guard's heap source its stats.allocated.
 tikv-jemalloc-ctl = { version = ">=0.7.0, <0.8", optional = true, features = ["stats"] }
 tikv-jemallocator = { version = ">=0.7.0, <0.8", optional = true }
 
@@ -106,11 +95,7 @@ parking_lot = ">=0.13.0, <0.14"
 crossbeam-channel = ">=0.5.17, <0.6"
 indexmap = { version = ">=2.14.2, <3", features = ["serde"] }
 
-# File watching (config hot-reload) - using polling for S3/NFS/FUSE compatibility
-# notify = ">=6.1"  # Not needed - polling works on all filesystems
-
-# PGO workload driver — Kafka producer for hyperi-ci Tier 2 PGO/BOLT builds.
-# Optional, gated by the `pgo-driver` feature. Main loader binary doesn't link it.
+# The PGO workload driver's producer, behind the `pgo-driver` feature.
 rdkafka = { version = ">=0.39.0, <0.40", features = ["dynamic-linking"], optional = true }
 
 [dev-dependencies]
@@ -123,9 +108,7 @@ test-case = ">=3.4.1, <4"
 # Held on 0.12: 0.13 drops the rustls-tls-native-roots feature.
 reqwest = { version = ">=0.12, <0.13", default-features = false, features = ["blocking", "rustls-tls-native-roots"] }
 
-# The Kafka broker image pin and the TLS / mTLS / SASL_SSL broker fixture the
-# Kafka tests share, so neither is copied here. The production dependency above
-# does not carry this feature.
+# The Kafka tests' broker image pin and TLS/SASL broker fixture.
 scalo = { version = ">=2.14.29, <3", features = ["transport-kafka-test-support"] }
 
 # The status code a raw Push is refused with, through scalo's generated gRPC
@@ -186,37 +169,11 @@ name = "json_depth"
 harness = false
 
 [profile.release]
-lto = "thin"           # Link-time optimization (use "fat" for max perf, slower compile)
-codegen-units = 1      # Single codegen unit for better optimization
-panic = "abort"        # Smaller binary, no unwinding overhead
-strip = true           # Remove debug symbols
-opt-level = 3          # Maximum optimization (default for release, explicit for clarity)
-
-# =============================================================================
-# Advanced Optimization Options (Manual)
-# =============================================================================
-#
-# 1. Profile-Guided Optimization (PGO) - 10-20% improvement:
-#    cargo install cargo-pgo
-#    cargo pgo build
-#    ./target/x86_64-unknown-linux-gnu/release/dfe-loader  # Run with real workload
-#    cargo pgo optimize
-#
-# 2. BOLT Post-Link Optimization (additional 5-15% on top of PGO):
-#    cargo pgo bolt build
-#    ./target/x86_64-unknown-linux-gnu/release/dfe-loader-bolt-instrumented  # Run workload
-#    cargo pgo bolt optimize
-#
-# 3. Combined PGO + BOLT:
-#    cargo pgo optimize
-#    cargo pgo bolt optimize --with-pgo
-#
-# 4. Fat LTO (slower compile, sometimes faster runtime):
-#    Change lto = "thin" to lto = "fat"
-#
-# References:
-# - https://github.com/Kobzol/cargo-pgo
-# - https://nnethercote.github.io/perf-book/build-configuration.html
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = true
+opt-level = 3
 
 [profile.bench]
 inherits = "release"
@@ -229,13 +186,10 @@ strip = false
 
 [lints.rust]
 # Tests require unsafe for env::set_var/remove_var (edition 2024).
-# Production code has zero unsafe blocks — the lib target is clean.
 unsafe_code = "allow"
-# `#[cfg(tarpaulin)]` is set by cargo-tarpaulin at coverage time. Declaring
-# it here silences `unexpected_cfgs` without a build.rs.
+# cargo-tarpaulin sets `cfg(tarpaulin)`.
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tarpaulin)'] }
-# Some clippy allows below are 1.95+-only (e.g. `duration_suboptimal_units`).
-# 1.94 toolchains would otherwise fail with `unknown lint`.
+# Some clippy allows below name lints an older toolchain does not know.
 unknown_lints = "allow"
 
 [lints.clippy]
@@ -247,40 +201,27 @@ dbg_macro = "deny"
 module_name_repetitions = "allow"
 # #[must_use] goes where dropping the value is a bug, not on every pure function.
 must_use_candidate = "allow"
-# 117 doc comments name ClickHouse types and columns without backticks.
+# Doc comments name ClickHouse types and columns without backticks.
 doc_markdown = "allow"
-# 41 public Result fns have no # Errors section, and 4 no # Panics section.
 missing_errors_doc = "allow"
 missing_panics_doc = "allow"
-# 16 sites.
 items_after_statements = "allow"
-# 13 methods would become associated functions, which rewrites every caller.
+# Turning a method into an associated function rewrites every caller.
 unused_self = "allow"
-# 10 sites, and changing a signature rewrites its callers.
 needless_pass_by_value = "allow"
-# 9 sites.
 unreadable_literal = "allow"
-# 8 sites.
 doc_link_with_quotes = "allow"
-# 7 sites.
 match_same_arms = "allow"
-# 5 sites.
 struct_excessive_bools = "allow"
-# 4 functions run long, the largest at 665 lines, and splitting them needs its own change.
 too_many_lines = "allow"
-# 4 sites, and boxing a future changes the hot path, which needs a measurement first.
+# Boxing a future changes the hot path, which needs a measurement first.
 large_futures = "allow"
-# 3 sites.
 similar_names = "allow"
-# 3 sites.
 trivially_copy_pass_by_ref = "allow"
-# 2 sites.
 unused_async = "allow"
-# 20 sites, all in tests/.
+# The next three are tests only.
 manual_let_else = "allow"
-# 8 sites, all in tests/.
 default_trait_access = "allow"
-# 7 sites, all in tests/.
 format_push_string = "allow"
 # Dynamic Map<String, Value> patterns need flexible casting
 cast_possible_truncation = "allow"
@@ -288,8 +229,7 @@ cast_sign_loss = "allow"
 cast_precision_loss = "allow"
 cast_lossless = "allow"
 cast_possible_wrap = "allow"
-# Tests use `let mut cfg = X::default(); cfg.field = ...` for readability over
-# struct-init. Production code is unaffected.
+# Tests set fields after `X::default()` for readability.
 field_reassign_with_default = "allow"
 # Test data sometimes uses literal 3.14 etc. for clarity over `std::f64::consts::PI`.
 approx_constant = "allow"
@@ -297,24 +237,19 @@ approx_constant = "allow"
 too_many_arguments = "allow"
 # Mostly affects internal types in benches/tests where TupleX is fine.
 type_complexity = "allow"
-# `&Option<T>` appears in a few config setters where call-site ergonomics
-# (`set_x(&self.x)`) outweigh the API guideline.
+# Config setters take `&Option<T>` so call sites read `set_x(&self.x)`.
 ref_option = "allow"
-# Tests use `Duration::from_millis(30000)` etc. for symmetry with config
-# values stored in millis. Style-only.
+# Tests write durations in millis, as config stores them.
 duration_suboptimal_units = "allow"
-# `.map(|x| ...).unwrap_or(false)` is clearer than `.is_ok_and()` for some
-# readers. Stylistic.
 map_unwrap_or = "allow"
 
 [features]
 default = []
-# Allocator (DFE policy 2026-04-17: jemalloc at every channel, no mimalloc)
+# Allocator
 jemalloc = ["dep:tikv-jemallocator", "dep:tikv-jemalloc-ctl"]
 # Transport backends
 transport-memory = ["scalo/transport-memory"]  # Memory transport for unit tests
 # Testing
 testcontainers = []  # The tests that run real ClickHouse and Kafka containers (Docker required)
-# PGO workload driver (hyperi-ci Tier 2 — see scripts/pgo-workload.sh)
-# Pulls in rdkafka for the producer binary; main loader binary is unaffected.
+# PGO workload driver (scripts/pgo-workload.sh). Only that binary links rdkafka.
 pgo-driver = ["dep:rdkafka"]

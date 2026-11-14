@@ -17,19 +17,14 @@ not (
     or test(/^integration::container_hygiene::(a_started_container_carries_the_name_and_label_then_goes_away|the_shared_container_is_named_and_labelled_for_the_run|the_watcher_removes_the_container_once_its_owner_exits|a_sweep_leaves_another_owners_live_container_and_takes_a_lapsed_one)$/)
 )
 '''
-# No retries, deliberately. Retries here previously masked three real defects:
-# an amd64-only Kafka image running under emulation, a broker probed before it
-# served consumers, and tests asserting a cold consumer's first poll is clean.
-# A retry would have kept all three green and unfixed.
+# No retries: a retry keeps a real defect green.
 retries = 0
 # These tests are legitimately slower than unit tests; warn rather than kill,
 # but do not let a hung container run forever.
 slow-timeout = { period = "60s", terminate-after = 5 }
 
-# Tests that start a container of their own get their own concurrency budget:
-# each waits for a cold server or broker, and letting all of them start at once
-# starves each other of CPU and pushes them past the readiness timeout. The
-# shared instances start once per run, so tests on them stay fully parallel.
+# Tests that start their own container get a concurrency budget, or cold starts
+# starve each other past the readiness timeout.
 [test-groups]
 own-containers = { max-threads = 2 }
 

@@ -121,8 +121,7 @@ impl ServiceApp for App {
 
             // Share the runtime's single ScalingPressure engine (registered via
             // the `scaling_components` override below and served at
-            // /scaling/pressure to KEDA). scalo 2.10 unified scaling onto this one
-            // engine. If the scaling feature/section is off the runtime hands back
+            // /scaling/pressure to KEDA). If the scaling feature/section is off the runtime hands back
             // None; fall back to a standalone engine with the same components.
             let scaling = runtime
                 .scaling
@@ -162,9 +161,7 @@ impl ServiceApp for App {
             // Inject the runtime's SHARED memory guard (the same one feeding the
             // governor and worker pool) so in-flight byte accounting drives the
             // inbound brake — never a stand-alone guard the pipeline ignores.
-            // scalo 2.10 unified scaling onto ONE ScalingPressure engine (the
-            // separate per-pod scaling-signal cell was removed): the orchestrator
-            // pushes Kafka assigned-lag + ClickHouse sink circuit-open directly
+            // The orchestrator pushes Kafka assigned-lag + ClickHouse sink circuit-open directly
             // into this `scaling` engine, which is served to KEDA at
             // /scaling/pressure.
             let mut orchestrator = Orchestrator::with_metrics(config.clone(), metrics)

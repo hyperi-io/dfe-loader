@@ -281,7 +281,7 @@ impl TransportAdapter {
             client_id: config.client_id.clone(),
             auto_discover: topics.is_empty(),
             topics,
-            // scalo (>=2.8) rejects an unencrypted transport under a production
+            // scalo rejects an unencrypted transport under a production
             // profile at construction unless this is explicitly set. Secure by
             // default; operators opt in for mesh-encrypted in-cluster traffic.
             allow_insecure_transport: config.allow_insecure_transport,

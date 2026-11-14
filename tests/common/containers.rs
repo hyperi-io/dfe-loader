@@ -34,7 +34,7 @@ mod testcontainers_impl {
 
     /// ClickHouse to test against -- the server dfe-infra `versions.yaml`
     /// deploys and `docker-compose.dev.yaml` runs, pinned to the patch and its
-    /// digest rather than the 26.3 minor, so a rebuild of that tag cannot
+    /// digest rather than the minor, so a rebuild of that tag cannot
     /// change what a green run tested against.
     ///
     /// Tag and digest are separate consts because the org Renovate regex reads

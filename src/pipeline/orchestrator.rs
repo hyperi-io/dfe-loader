@@ -701,9 +701,7 @@ impl Orchestrator {
                     }
 
                     // Push the per-pod Kafka inbound scaling signal into the
-                    // unified ScalingPressure engine (scalo 2.10 collapsed the old
-                    // separate scaling-signal cell into ONE ScalingPressure served
-                    // to KEDA at /scaling/pressure). assigned_lag() sums lag over
+                    // ScalingPressure engine served to KEDA at /scaling/pressure. assigned_lag() sums lag over
                     // THIS pod's ASSIGNED partitions (scale-invariant). gRPC has no
                     // broker lag -> None -> the kafka_lag term stays 0 (CPU-only).
                     // The flush tick (every flush_age_secs, default 5s) is fresher
@@ -1472,7 +1470,7 @@ impl Orchestrator {
                 if let Some(ref m) = self.metrics {
                     m.record_flush(result.inserted, latency);
                     m.record_insert_quantities(batch_bytes, 1);
-                    // ClickHouse flush-size (bytes) distribution (2.8.10 audit).
+                    // ClickHouse flush-size (bytes) distribution.
                     m.record_flush_bytes(batch_bytes);
                 }
             }
@@ -1483,7 +1481,7 @@ impl Orchestrator {
                     self.stats.errors += 1;
                     if let Some(ref m) = self.metrics {
                         m.record_error();
-                        // ClickHouse-specific terminal insert error (2.8.10 audit).
+                        // ClickHouse-specific terminal insert error.
                         m.record_clickhouse_insert_error();
                     }
                     if self.holds_answers {
@@ -2964,7 +2962,7 @@ const SCHEMA_PAUSE_TABLES_LOGGED: usize = 5;
 ///
 /// This also settles a second hazard: `BufferManager::get_ready_for_flush`
 /// iterates an `FxHashMap`, so batch order is nondeterministic and a low-offset
-/// batch committing after a high one used to rewind the watermark. One commit
+/// batch committing after a high one would rewind the watermark. One commit
 /// per cycle cannot rewind.
 ///
 /// `withheld` carries every offset whose row is not placed yet: rows in a buffer
