@@ -25,8 +25,8 @@ Full adds every other real-server test: the inserter, readiness, data type, DLQ,
 
 | Service | Image | Container ports |
 |---|---|---|
-| ClickHouse | `clickhouse/clickhouse-server:26.3.42.3@sha256:21d572843e59539c7d100286b6f5a6053c341fe4b33c2d7b74b1ff7cb24c5399` | 8123 HTTP, 9000 native, 8443 HTTPS, 9440 native TLS |
-| Kafka | `apache/kafka:4.3.1@sha256:77e3df9054047a88b520d0cc46e16696d3b22022e1d580aeccd2632df6532837` | 9092 PLAINTEXT |
+| ClickHouse | the image `tests/common/containers.rs` pins | 8123 HTTP, 9000 native, 8443 HTTPS, 9440 native TLS |
+| Kafka | scalo's `KAFKA_IMAGE` | 9092 PLAINTEXT |
 
 The ClickHouse pin lives in `tests/common/containers.rs` and follows dfe-infra `versions.yaml`. The Kafka pin is scalo's `transport::kafka::test_support::KAFKA_IMAGE`, the line the DFE stack deploys.
 

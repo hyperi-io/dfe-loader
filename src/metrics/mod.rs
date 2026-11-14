@@ -118,7 +118,7 @@ pub struct Metrics {
     eps_last_update: Arc<parking_lot::Mutex<Instant>>,
     eps_last_count: Arc<AtomicU64>,
 
-    // ClickHouse sink domain metrics (scaling-signal gap audit, scalo 2.8.10).
+    // ClickHouse sink domain metrics.
     // The engine can only correlate signals that EXIST — these surface the
     // ClickHouse sink's load (latency, errors, throughput, backlog, batch size)
     // so they can drive a domain scaling pressure or KEDA Prometheus trigger.
@@ -292,15 +292,13 @@ impl Metrics {
             eps_last_update: Arc::new(parking_lot::Mutex::new(Instant::now())),
             eps_last_count: Arc::new(AtomicU64::new(0)),
 
-            // ClickHouse sink domain metrics (scaling-signal gap audit, 2.8.10)
+            // ClickHouse sink domain metrics
             ch_insert_duration: manager.histogram(
                 "clickhouse_insert_duration_seconds",
                 "ClickHouse insert batch latency",
             ),
-            // scalo 2.10 dropped histogram_count / histogram_with_unit: the
-            // remaining histogram constructors register the manifest unit as
-            // seconds. These two are a count (rows) and bytes distribution; the
-            // emitted metric is unchanged, only the manifest unit metadata.
+            // The histogram constructors register the manifest unit as seconds,
+            // though these two are a count (rows) and a bytes distribution.
             ch_flush_rows: manager.histogram(
                 "clickhouse_flush_rows",
                 "Rows per flush to ClickHouse (flush size)",
@@ -436,7 +434,7 @@ impl Metrics {
         self.dfe.transport_sent(TransportKind::Http, rows as u64);
         self.dfe.transport_send_duration("clickhouse", latency_secs);
 
-        // ClickHouse sink domain metrics (2.8.10 scaling-signal gap audit):
+        // ClickHouse sink domain metrics:
         // latency distribution, flush-size (rows), and throughput accounting.
         self.ch_insert_duration.record(latency_secs);
         self.ch_flush_rows.record(rows as f64);

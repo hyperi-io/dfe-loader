@@ -178,7 +178,7 @@ open target/criterion/report/index.html
 
 Mison-style structural indexing for schema-guided extraction. Based on the VLDB 2017 paper.
 
-### Current Benchmarks (v0.11.0)
+### Benchmarks at v0.11.0
 
 | Benchmark | Mison | Traditional | Ratio |
 |-----------|-------|-------------|-------|

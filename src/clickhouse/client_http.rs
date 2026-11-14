@@ -822,8 +822,7 @@ fn parse_db_table(table: &str, default_db: &str) -> (String, String) {
 /// `[A-Za-z0-9_.,= <>!'%-]`. Rejects: `;`, `(`, `)`, `--`, `/*`, `*/`, `\\`,
 /// backticks, newlines, tabs, and anything > 256 bytes.
 ///
-/// This is defence-in-depth; the method is not currently called from
-/// production paths. Real query parameterisation should be used for any
+/// This is defence-in-depth. Real query parameterisation should be used for any
 /// caller-controlled WHERE content.
 fn validate_where_clause(s: &str) -> Result<()> {
     if s.len() > 256 {

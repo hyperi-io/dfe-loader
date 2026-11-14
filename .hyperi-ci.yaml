@@ -6,44 +6,28 @@
 # Copyright: (c) 2026 HYPERI PTY LIMITED
 classification: product
 
-# Project language (auto-detected if not specified)
-# Values: python, typescript, golang, rust, bash, none
 language: rust
 
 # Quality checks
 quality:
   enabled: true
-  # Advisory ignores fed to cargo-audit and osv-scanner. cargo-deny reads
-  # deny.toml separately; osv-scanner does NOT, so the paste unmaintained
-  # advisory must be ignored here too or the release Quality stage fails.
+  # osv-scanner does not read deny.toml, so its ignores repeat here.
   ignore:
     - tool: osv-scanner
       id: RUSTSEC-2024-0436
       reason: "paste (dtolnay) unmaintained, no replacement; transitive dep. Mirrors the deny.toml ignore. Drop when a maintained fork lands."
-    # GHSA-w9wp-h8wv-79jx / CVE-2026-48504: opentelemetry_sdk 0.31.0 is in the
-    # lock through scalo, in the affected range (<= 0.32.0, fixed in 0.32.1).
-    # The flaw is in BaggagePropagator::extract_with_context, which parses an
-    # inbound W3C Baggage header before enforcing its size limits. It is
-    # unreachable: no Baggage propagator is registered in dfe-loader or in scalo,
-    # so the function is never called. Accepted as not reachable in dfe-infra
-    # docs/THREAT-MODEL.md, accepted risks. scalo cannot move to 0.32 while
-    # metrics-exporter-opentelemetry 0.2.1 requires opentelemetry ^0.31;
-    # hyperi-io/scalo-rs#281 tracks the move. A GitHub advisory with no RustSec
-    # entry, so only osv-scanner sees it and deny.toml needs no matching ignore.
+    # No RustSec entry, so deny.toml needs no matching ignore.
     - tool: osv-scanner
       id: GHSA-w9wp-h8wv-79jx
       reason: "CVE-2026-48504, opentelemetry_sdk 0.31.0 via scalo: unreachable, no Baggage propagator is registered in dfe-loader or scalo. Accepted risk in dfe-infra docs/THREAT-MODEL.md. Blocked on metrics-exporter-opentelemetry 0.2.1 requiring opentelemetry ^0.31; tracked in hyperi-io/scalo-rs#281."
   # Rust: test specific feature sets (avoids --all-features conflicts).
-  # DFE policy 2026-04-17 — jemalloc only; mimalloc removed.
   rust:
     features:
-      - "default"                    # Default features
-      - "default,jemalloc"           # With jemalloc allocator
-      - "default,testcontainers"     # With testcontainers integration tests
-      # Required: transport-memory gates MemoryTransportAdapter, so without
-      # this set the transport-adapter suite is compiled out rather than run.
-      # helm_contract.rs asserts it stays listed.
-      - "default,transport-memory"   # With the in-memory transport adapter
+      - "default"
+      - "default,jemalloc"
+      - "default,testcontainers"
+      # Without it the transport-adapter suite is compiled out. helm_contract.rs asserts it stays.
+      - "default,transport-memory"
 
 # Testing
 test:
@@ -56,7 +40,6 @@ test:
   # matrix and the peer tools. tests/TESTING.md says which tests are which.
   full:
     required_for_release: true
-  # min_coverage: 80       # Fail if coverage below this percentage
 
 # Building
 build:

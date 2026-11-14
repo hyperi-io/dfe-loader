@@ -470,7 +470,7 @@ pub const TEST_SUITE_LABEL: (&str, &str) = ("io.hyperi.test.suite", "dfe-loader-
 ///
 /// Pass `Some(test)` -- the owning test -- for anything a test starts for itself,
 /// which is everything here. `None` is for a container started once for a whole
-/// test binary; nothing does that today, and using it from several tests would
+/// test binary, and using it from several tests would
 /// make them collide on the name rather than share the container.
 ///
 /// The name ends in the owning process id, so two runs of one test on one

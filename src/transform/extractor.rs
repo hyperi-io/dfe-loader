@@ -753,9 +753,8 @@ fn get_split<'a>(parsed: &'a Map<String, Value>, path: &str) -> Option<&'a Value
 ///
 /// A null reads as absent, so `first()` tries the next path and `@default` applies.
 ///
-/// A common-header column used to empty the field it read, so a meta column
-/// reading the same field found nothing and landed NULL. A path in `contended`
-/// is copied instead, which leaves it there for the columns that follow.
+/// A path in `contended` is copied rather than taken, so a meta column reading
+/// the same field after a common-header column still finds it.
 ///
 /// `contended` is empty for every table with no shared source field, so the
 /// ordinary column costs one `is_empty` check and keeps the move.
