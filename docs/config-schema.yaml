@@ -272,8 +272,6 @@ properties:
       source_fields:
       - _source
       source_output: _source
-      disable_json_tables: []
-      disable_raw_tables: []
       remove_routing_fields: true
   field_mapping:
     description: Field mapping overrides. **Restart required.**
@@ -1553,7 +1551,7 @@ $defs:
           $ref: "#/$defs/CaptureMode"
         default: {}
       capture_json:
-        description: Store complete original Kafka message as JSON before transformation
+        description: "Not read: `capture_mode` decides whether `_json` is written."
         type: boolean
         default: true
       json_output:
@@ -1592,18 +1590,6 @@ $defs:
         description: Output field name for _source
         type: string
         default: _source
-      disable_json_tables:
-        description: Tables where _json capture is disabled (e.g., ["dfe.metrics"])
-        type: array
-        items:
-          type: string
-        default: []
-      disable_raw_tables:
-        description: Tables where _raw capture is disabled (e.g., ["dfe.metrics"])
-        type: array
-        items:
-          type: string
-        default: []
       remove_routing_fields:
         description: Remove routing fields from output after extraction
         type: boolean

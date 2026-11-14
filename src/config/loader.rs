@@ -1135,8 +1135,6 @@ mod tests {
         assert!(config.capture_raw);
         assert_eq!(config.raw_output, "_raw");
         assert_eq!(config.raw_source_fields, [] as [std::string::String; 0]);
-        assert_eq!(config.disable_json_tables, [] as [std::string::String; 0]);
-        assert_eq!(config.disable_raw_tables, [] as [std::string::String; 0]);
     }
 
     #[test]
@@ -1158,9 +1156,7 @@ mod tests {
             "json_output": "_custom_json",
             "capture_raw": false,
             "raw_output": "_custom_raw",
-            "raw_source_fields": ["original_log", "raw_message"],
-            "disable_json_tables": ["common.metrics"],
-            "disable_raw_tables": ["common.health"]
+            "raw_source_fields": ["original_log", "raw_message"]
         }"#;
         let config: MetadataConfig = serde_json::from_str(json_str).unwrap();
         assert!(!config.capture_json);
@@ -1171,8 +1167,6 @@ mod tests {
             config.raw_source_fields,
             vec!["original_log", "raw_message"]
         );
-        assert_eq!(config.disable_json_tables, vec!["common.metrics"]);
-        assert_eq!(config.disable_raw_tables, vec!["common.health"]);
     }
 
     // ========================================================================

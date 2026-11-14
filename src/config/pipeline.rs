@@ -1032,15 +1032,15 @@ pub struct MetadataConfig {
     #[serde(default)]
     pub table_capture_modes: HashMap<String, CaptureMode>,
 
-    // _json capture (Common Header v2) — DEPRECATED, use capture_mode
-    /// Store complete original Kafka message as JSON before transformation
+    // _json capture (Common Header v2)
+    /// Not read: `capture_mode` decides whether `_json` is written.
     #[serde(alias = "capture_logjson", default = "default_true")]
     pub capture_json: bool,
     /// Output field name for _json
     #[serde(alias = "logjson_output")]
     pub json_output: String,
 
-    // _raw field injection (Common Header v2) — DEPRECATED, use capture_mode
+    // _raw field injection (Common Header v2)
     // Implements @renamed: first(source_fields...) → raw_output
     // Silent no-op if destination already present in data
     /// Enable _raw field injection from source (zero-copy rename)
@@ -1060,12 +1060,6 @@ pub struct MetadataConfig {
     pub source_fields: Vec<String>,
     /// Output field name for _source
     pub source_output: String,
-
-    // Per-table capture overrides — DEPRECATED, use table_capture_modes
-    /// Tables where _json capture is disabled (e.g., ["dfe.metrics"])
-    pub disable_json_tables: Vec<String>,
-    /// Tables where _raw capture is disabled (e.g., ["dfe.metrics"])
-    pub disable_raw_tables: Vec<String>,
 
     // Routing field removal (Common Header v2)
     /// Remove routing fields from output after extraction
@@ -1095,11 +1089,11 @@ impl Default for MetadataConfig {
             capture_mode: CaptureMode::Full,
             table_capture_modes: HashMap::new(),
 
-            // _json capture defaults (deprecated — use capture_mode)
+            // _json capture defaults
             capture_json: true,
             json_output: "_json".to_string(),
 
-            // _raw capture defaults (deprecated — use capture_mode)
+            // _raw capture defaults
             capture_raw: true,
             raw_source_fields: Vec::new(),
             raw_output: "_raw".to_string(),
@@ -1108,10 +1102,6 @@ impl Default for MetadataConfig {
             capture_source: true,
             source_fields: vec!["_source".to_string()],
             source_output: "_source".to_string(),
-
-            // Per-table overrides (deprecated — use table_capture_modes)
-            disable_json_tables: vec![],
-            disable_raw_tables: vec![],
 
             // Routing field removal defaults
             remove_routing_fields: true,
@@ -1302,9 +1292,6 @@ pub enum CaptureMode {
 /// 1. DDL: `@capture_mode: raw_only` in table COMMENT
 /// 2. Config: `table_capture_modes` map
 /// 3. Config: global `capture_mode`
-///
-/// Legacy fields (`disable_json_tables`, `@no_capture_json`) are deprecated
-/// but still supported for one release cycle.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct TableCaptureConfig {
     pub mode: CaptureMode,
