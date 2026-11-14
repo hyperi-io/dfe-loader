@@ -372,8 +372,7 @@ metadata:
 ```
 
 `capture_mode` controls `_json` and `_raw` population -- see the Capture Modes
-section below. Legacy booleans `capture_json` / `capture_raw` are still accepted
-for backwards compatibility and mapped onto `capture_mode`.
+section below.
 
 ### `_tags`
 
