@@ -10,20 +10,20 @@
 
 # The dynamic insert
 
-The official `clickhouse` crate keeps insertion typed (`T: Row`). dfe-loader inserts runtime-shaped `Map<String,Value>` rows whose columns come from `system.columns`, so it takes the dynamic layer from `dfe-clickhouse`'s `dynamic` module (feature `dynamic`). The loader holds no encoder of its own.
+The official `clickhouse` crate keeps insertion typed (`T: Row`). dfe-loader inserts `Map<String,Value>` rows whose columns come from `system.columns`, so it takes the dynamic layer from `dfe-clickhouse`'s `dynamic` module (feature `dynamic`). The loader holds no encoder of its own.
 
 ## What the crate does
 
 | Piece | Does |
 |-------|------|
-| `ParsedType` | Parses a `system.columns` type string (Nullable, LowCardinality, Array, Map, DateTime64, Decimal, Enum, the geo shapes, SimpleAggregateFunction) |
+| `ParsedType` | Parses a `system.columns` type string (Nullable, LowCardinality, Array, Map, DateTime64, Decimal, Enum, the geo types, SimpleAggregateFunction) |
 | `DynamicRow` | Encodes one `Map<String,Value>` against its `ColumnDef`s to RowBinary |
 | `DynamicSchema`, `DynamicSchemaCache` | A table's columns, cached with a TTL and capped at 10,000 tables |
 | `fetch_dynamic_schema`, `fetch_dynamic_schema_tcp` | Read a schema over HTTP or the native protocol |
 | `DynamicInsert` | `write_map` / `write_map_with_raw`, then `end` |
 | `shape_for_type` | The same value rules applied to a row map, for the JSONEachRow path |
 
-Over HTTP an insert is one `INSERT ... FORMAT RowBinaryWithDefaults`: a row that omits a defaulted column takes the server's default, so one INSERT carries rows of any shape, and rows go out in 1 MiB chunks as they are written. Over the native protocol rows go out as `FORMAT Native` blocks, and a row that supplies a different set of defaulted columns starts a new INSERT. JSON columns are written as text with `input_format_binary_read_json_as_string=1`.
+Over HTTP an insert is one `INSERT ... FORMAT RowBinaryWithDefaults`: a row that omits a defaulted column takes the server's default, so one INSERT carries rows with differing columns, and rows go out in 1 MiB chunks as they are written. Over the native protocol rows go out as `FORMAT Native` blocks, and a row that supplies a different set of defaulted columns starts a new INSERT. JSON columns are written as text with `input_format_binary_read_json_as_string=1`.
 
 The coercions a source value gets on the way: a zoned timestamp lands at the instant it names, a numeric DateTime64 epoch is read by magnitude and rescaled to the column's precision, an IPv4 literal lands in an IPv6 column as `::ffff:a.b.c.d`, a JSON column wraps a root array under `list` and a scalar or non-JSON text under `value`, a `Point` takes every Elasticsearch geo_point form inside its coordinate ranges, and one value lands in an `Array` as a one-element array. A value the column cannot hold (an integer past its width, a decimal past its backing, an undeclared enum value) fails the row rather than being written wrong. `tests/integration/insert_coercions.rs` runs each case through the loader's `Inserter` on every protocol the shared ClickHouse offers.
 

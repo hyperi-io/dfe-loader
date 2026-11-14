@@ -34,7 +34,7 @@ parsing entirely. Missing columns take their server-side default; extra columns
 are dropped.
 
 JSONEachRow is retained as a fallback, not a throughput choice. It is
-self-describing and forgiving -- the server coerces types and tolerates shape
+self-describing and forgiving -- the server coerces types and tolerates schema
 drift -- which makes it the right tool for diagnostics ("does the row land at
 all if the server does the typing?") and for the rare table whose types the
 dynamic encoder does not yet cover.
@@ -125,7 +125,7 @@ Key observations:
 ## Durable design decisions
 
 The choices below predate the current module layout but remain the reasons the
-hot path is shaped the way it is.
+hot path is built the way it is.
 
 ### Per-table buffering
 

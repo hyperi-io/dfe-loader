@@ -61,7 +61,7 @@ inference -- it reads the column values straight off the wire in
 between ClickHouse spending CPU on ingest formatting and spending it on merges.
 
 JSONEachRow is kept because it is self-describing and forgiving: the server
-coerces types and tolerates shape drift. That makes it the right tool for
+coerces types and tolerates schema drift. That makes it the right tool for
 diagnostics ("does the row land at all if the server does the typing?") and for
 the rare table whose types the dynamic encoder does not yet cover. It is never
 the throughput choice.
@@ -73,7 +73,7 @@ The dynamic encoder in `dfe-clickhouse`'s `dynamic` module turns one
 in 1 MiB chunks as one `INSERT INTO db.table (cols) FORMAT
 RowBinaryWithDefaults` per batch. The INSERT names every column the server takes
 a value for. A row that leaves out a defaulted column flags it, and the server
-fills its default (`_uuid`, `_timestamp_load`), so rows of any shape share one
+fills its default (`_uuid`, `_timestamp_load`), so rows with differing columns share one
 INSERT. Over native a row that supplies a different set of defaulted columns
 starts a new INSERT.
 

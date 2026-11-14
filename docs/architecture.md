@@ -12,7 +12,7 @@
 
 dfe-loader is a per-message hot path with a per-table batching tail. A message arrives as bytes, gets routed and promoted into a typed row, accumulates in a per-table buffer, and flushes to ClickHouse as a batch. Kafka offsets commit once per flush cycle, never past a row not placed yet -- at-least-once.
 
-Everything on the hot path is shaped by one rule: do the cheap thing per
+Everything on the hot path follows one rule: do the cheap thing per
 message, defer the expensive thing to flush. Parse once (SIMD, zero-copy),
 promote only schema columns, keep the full payload as a reference-counted
 `Arc<[u8]>`, and splice it as `_json` only at serialise time.
@@ -60,7 +60,7 @@ server's exception code out of an HTTP rejection so the inserter can classify it
 ## The dynamic insert
 
 The `clickhouse` crate keeps insertion typed (`T: Row`, compile-time schema) --
-that is the right upstream default. dfe-loader inserts runtime-shaped
+that is the right upstream default. dfe-loader inserts
 `Map<String,Value>` rows whose columns come from `system.columns` at runtime.
 That dynamic layer comes from `dfe-clickhouse`'s `dynamic` module, on top of the upstream
 `Client`:
