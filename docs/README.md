@@ -78,7 +78,7 @@ flowchart TB
 
 | Area | Doc | Covers |
 |------|-----|--------|
-| System shape | [architecture.md](architecture.md) | Layers, the dynamic insert, the client crates |
+| Architecture | [architecture.md](architecture.md) | Layers, the dynamic insert, the client crates |
 | Configuration | [configuration.md](configuration.md) | The cascade and the settings that change behaviour |
 | Operations | [operations.md](operations.md) | Running, config-check, metrics/top, hot-reload, DLQ |
 | Build features | [feature-flags.md](feature-flags.md) | Cargo features and the ClickHouse client crates |

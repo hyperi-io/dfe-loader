@@ -73,11 +73,11 @@ A row the server can never accept draws the same signals: an integer no ClickHou
 This is the fix trail for the schema-cache-miss class of bug: a column added by
 an out-of-band `ALTER` no longer fails every insert to that table until a restart -- the first
 rejected insert clears the stale entry and the retry succeeds against the new
-shape.
+schema.
 
 `schema.refresh_on_error` (default `true`) switches this recovery. With `false`
 a drift error leaves both the encoder's entry and the loader's cached schema in
-place until they expire, so the retries run against the stale shape. A schema
+place until they expire, so the retries run against the stale schema. A schema
 fetch that failed is still discarded either way.
 
 ## Where it lives

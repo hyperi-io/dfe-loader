@@ -367,7 +367,7 @@ schema contains a JSON column -- no configuration needed. See
 
 **RowBinary (default):** encoded by `dfe_clickhouse::dynamic::DynamicInsert` from the reflected schema. It covers the integer, float, decimal, bool, string, date and time, UUID, IP, enum, `Array`, `Map`, JSON and geo types, inside `Nullable` and `LowCardinality`. `Decimal(P, S)` resolves to the concrete Decimal32/64/128/256 at encode time based on precision. A value bound for a type the encoder has no arm for (`Tuple`, `Variant`, `Dynamic`, `Nested`, ...) is refused with `UnsupportedType`, which holds the batch for retry rather than writing wrong bytes.
 
-**JSONEachRow (fallback):** the server parses each type itself. Before it does, the loader shapes the values it would refuse by the same rules as RowBinary: a JSON column's non-object, every geo_point form (sent as `[lon, lat]`), and a single value bound for an `Array`. Set `insert_format = "json_each_row"` to opt in (HTTP transport only -- see the config guard in [insert-formats.md](insert-formats.md)).
+**JSONEachRow (fallback):** the server parses each type itself. Before it does, the loader rewrites the values it would refuse by the same rules as RowBinary: a JSON column's non-object, every geo_point form (sent as `[lon, lat]`), and a single value bound for an `Array`. Set `insert_format = "json_each_row"` to opt in (HTTP transport only -- see the config guard in [insert-formats.md](insert-formats.md)).
 
 ### Geo points
 

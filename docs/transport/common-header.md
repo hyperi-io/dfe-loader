@@ -401,8 +401,8 @@ for backwards compatibility and mapped onto `capture_mode`.
 3. `meta` field.
 4. `metadata.tags` nested path.
 
-**Shape:** the column is a ClickHouse `JSON`, which only accepts an object at
-the top level, and the loader shapes every value it writes into any JSON column
+**Value format:** the column is a ClickHouse `JSON`, which only accepts an object at
+the top level, and the loader converts every value it writes into any JSON column
 to match -- whichever rule filled it (the `tags_fields` hoist or an
 `@source`/`@renamed` column comment) and on both insert formats, `RowBinary`
 and `JSONEachRow`. An object is stored as-is. An array -- ECS ships `tags` as an

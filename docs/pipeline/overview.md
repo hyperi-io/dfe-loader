@@ -36,10 +36,10 @@ per-message entry point):
 
 Every stage below this takes one message to be one record, so a message
 carrying several is split into one message per record before anything else
-runs. Two wire shapes are batches, counted apart so a dashboard says which
+runs. Two wire formats are batches, counted apart so a dashboard says which
 producer is batching:
 
-| Shape | Producer it came from | Counters |
+| Format | Producer it came from | Counters |
 |-------|----------------------|----------|
 | a non-empty JSON array of objects | dfe-receiver forwarding a batched POST | `dfe_loader_batched_array_messages_total` / `dfe_loader_batched_array_records_total` |
 | newline-separated JSON objects | dfe-transform-elastic emitting its output | `dfe_loader_batched_ndjson_messages_total` / `dfe_loader_batched_ndjson_records_total` |
@@ -52,8 +52,8 @@ tail, and any body whose elements are not all objects.
 
 The split belongs at the consumer rather than at each producer in turn. #128
 taught dfe-receiver not to forward an array; dfe-transform-elastic then lost
-five records a message to the same defect in the other wire shape (#184). A
-batch that reaches the next stage unsplit is refused by shape and named as
+five records a message to the same defect in the other wire format (#184). A
+batch that reaches the next stage unsplit is refused as an unsplit batch and named as
 such, rather than coming back as a ClickHouse encode error on an empty column
 or as a parse error about trailing characters.
 
