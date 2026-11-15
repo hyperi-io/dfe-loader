@@ -52,8 +52,7 @@ impl std::fmt::Display for Transport {
 ///
 /// Controls how rows are encoded and sent to `ClickHouse`. `RowBinary` is the
 /// default — it uses schema reflection to encode `Map<String, Value>` directly
-/// to binary, so `ClickHouse` skips JSON parsing entirely. This significantly
-/// reduces CPU load on the `ClickHouse` cluster at scale.
+/// to binary, so `ClickHouse` parses only `JSON` columns, which travel as text.
 ///
 /// `JsonEachRow` is the fallback — simpler, self-describing, but the `ClickHouse`
 /// server pays the cost of parsing every JSON row on ingest.
@@ -135,7 +134,7 @@ pub struct ClickHouseConfig {
     /// Insert format — how rows are encoded for INSERT.
     ///
     /// `RowBinary` (default): schema-reflected binary encoding. `ClickHouse`
-    /// skips JSON parsing. Lower total CPU across client + cluster.
+    /// parses only `JSON` columns, which travel as text.
     ///
     /// `JsonEachRow`: JSON text via HTTP. Self-describing, `ClickHouse` coerces
     /// types server-side. Higher cluster CPU but simpler.
@@ -352,7 +351,7 @@ impl ClickHouseConfig {
         // JSONEachRow is HTTP-only: the dynamic insert path sends JSONEachRow
         // through `Client::insert_formatted_with` (HTTP). A native-transport
         // client has no HTTP endpoint, so this combination fails at insert
-        // time. Reject it at config time so `config-check` catches it.
+        // time. Rejected here, when the pipeline starts and before readiness.
         if self.transport == Transport::Native && self.insert_format == InsertFormat::JsonEachRow {
             return Err(
                 "insert_format 'json_each_row' requires protocol 'http' (JSONEachRow is \

@@ -89,14 +89,14 @@ pub struct Config {
     pub batch_processing: BatchProcessingConfig,
     /// Kafka DLQ topics loaded into a table of their own. **Restart required.**
     pub dlq_load: DlqLoadConfig,
+    /// Memory limits. **Restart required.**
+    pub memory: MemoryConfig,
 
     // --- Hot-reloaded (takes effect on next batch) ---
     /// Table and tenant routing. **Hot-reloaded**, `routing.dlq` aside.
     pub routing: RoutingConfig,
     /// Buffer flush thresholds. **Hot-reloaded.**
     pub buffer: BufferConfig,
-    /// Memory limits. **Hot-reloaded.**
-    pub memory: MemoryConfig,
     /// Timestamp data quality validation. **Hot-reloaded.**
     pub timestamp_dq: TimestampDqConfig,
     /// Field name sanitisation. **Hot-reloaded.**

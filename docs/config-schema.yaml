@@ -190,6 +190,12 @@ properties:
       - dfe_fetcher_dlq
       - dfe_transform_dlq
       table: dlq
+  memory:
+    description: Memory limits. **Restart required.**
+    $ref: "#/$defs/MemoryConfig"
+    default:
+      limit_bytes: 0
+      pressure_threshold: 0.8
   routing:
     description: Table and tenant routing. **Hot-reloaded**, `routing.dlq` aside.
     $ref: "#/$defs/RoutingConfig"
@@ -221,12 +227,6 @@ properties:
       flush_bytes: 67108864
       flush_rows: 20000
       flush_age_secs: 5
-  memory:
-    description: Memory limits. **Hot-reloaded.**
-    $ref: "#/$defs/MemoryConfig"
-    default:
-      limit_bytes: 0
-      pressure_threshold: 0.8
   timestamp_dq:
     description: Timestamp data quality validation. **Hot-reloaded.**
     $ref: "#/$defs/TimestampDqConfig"
@@ -727,8 +727,7 @@ $defs:
 
       Controls how rows are encoded and sent to `ClickHouse`. `RowBinary` is the
       default — it uses schema reflection to encode `Map<String, Value>` directly
-      to binary, so `ClickHouse` skips JSON parsing entirely. This significantly
-      reduces CPU load on the `ClickHouse` cluster at scale.
+      to binary, so `ClickHouse` parses only `JSON` columns, which travel as text.
 
       `JsonEachRow` is the fallback — simpler, self-describing, but the `ClickHouse`
       server pays the cost of parsing every JSON row on ingest.
@@ -1238,6 +1237,20 @@ $defs:
           picks for its tenant.
         type: string
         default: dlq
+  MemoryConfig:
+    type: object
+    properties:
+      limit_bytes:
+        description: Maximum memory for buffers in bytes. 0 = auto-detect (67% of available)
+        type: integer
+        format: uint
+        minimum: 0
+        default: 0
+      pressure_threshold:
+        description: Pressure threshold (0.0-1.0) - pause consumption above this
+        type: number
+        format: double
+        default: 0.8
   RoutingConfig:
     type: object
     properties:
@@ -1446,20 +1459,6 @@ $defs:
         format: uint64
         minimum: 0
         default: 5
-  MemoryConfig:
-    type: object
-    properties:
-      limit_bytes:
-        description: Maximum memory for buffers in bytes. 0 = auto-detect (67% of available)
-        type: integer
-        format: uint
-        minimum: 0
-        default: 0
-      pressure_threshold:
-        description: Pressure threshold (0.0-1.0) - pause consumption above this
-        type: number
-        format: double
-        default: 0.8
   TimestampDqConfig:
     type: object
     properties:

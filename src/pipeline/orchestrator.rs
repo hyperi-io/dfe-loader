@@ -2348,42 +2348,11 @@ fn memory_guard_config(config: &Config) -> MemoryGuardConfig {
     }
 }
 
-// Enrichment helpers moved to super::enrichment (enrichment.rs)
-
-// =============================================================================
-// Hot-Reload Safety: restart-required change detection
-// =============================================================================
-//
-// Hot-reloaded (takes effect on next batch):
-//   routing.*             -- router, extractor, default table and pre-warm rebuilt
-//   timestamp_dq.*        -- transformer rebuilt on reload
-//   metadata.*            -- router, extractor, transformer + capture overrides rebuilt
-//   field_sanitization.*  -- transformer rebuilt on reload
-//   buffer.flush_rows / flush_bytes / flush_age_secs -- buffer thresholds updated
-//
-// Requires pod restart (connections/state established at startup):
-//   kafka.*               — Kafka consumer created at startup
-//   grpc.*                — gRPC server binds at startup
-//   transport             — transport type bound at startup
-//   clickhouse.*          — HTTP client + clickhouse::Client created at startup
-//   payload.pipeline_mode — pipeline path chosen at startup
-//   metrics.*             — HTTP metrics server binds at startup
-//   logging.*             — tracing subscriber installed at startup
-//   scaling.*             — scaling pressure built at startup
-//   hot_reload.*          — watcher config set at startup
-//   schema.*              — schema cache created at startup
-//   geoip.*               — MMDB readers opened at startup
-//   computed_columns.*    — computed column cache built at startup
-//   column_directives.*   — column directive cache built at startup
-//   routing.dlq           -- DLQ backends opened at startup
-//   field_mapping.*       -- mapping rules built at startup
-//   enrichment.*          -- enrichment pipeline built at startup
-
 /// Log warnings for config fields that changed but require a pod restart.
 ///
 /// These fields are bound to connections or state created at startup. Changing
 /// them via hot-reload has no effect — the old values remain active until the
-/// pod is restarted.
+/// pod is restarted. Each `Config` field in `config/loader.rs` says which it is.
 fn warn_restart_required(old: &Config, new: &Config) {
     if old.transport != new.transport {
         warn!("transport changed — requires restart to take effect");
@@ -2436,6 +2405,9 @@ fn warn_restart_required(old: &Config, new: &Config) {
     }
     if old.enrichment != new.enrichment {
         warn!("enrichment config changed -- requires restart to take effect");
+    }
+    if old.memory != new.memory {
+        warn!("memory config changed -- requires restart to take effect");
     }
 }
 
@@ -2722,7 +2694,7 @@ async fn pre_warm_schemas(
 /// Whether a pre-warm answer goes to the event loop. An absent source table is
 /// held back, because the engine writes a source's routing and creates its
 /// table together, and an absence recorded in that gap sends the source's rows
-/// to the default table until `ABSENT_TABLE_TTL` runs out. Its first batch
+/// to the default table until the next live recheck. Its first batch
 /// resolves it instead. The default table is never recorded absent, so its
 /// answer goes through and a missing one is warned about at once.
 fn pre_warm_forwards(table: &str, schema: &SchemaResolution, default_table: &str) -> bool {

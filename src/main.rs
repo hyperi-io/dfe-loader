@@ -73,8 +73,8 @@ impl ServiceApp for App {
     }
 
     fn load_config(&self, path: Option<&str>) -> Result<Self::Config, CliError> {
-        // run_app has set the cascade up from --config, which also reads
-        // ./.env into the environment Config::load reads.
+        // run_app has set the cascade up from --config. Without --config it
+        // also reads ./.env into the environment Config::load reads.
         let config = Config::load(path).map_err(|e| CliError::Config(e.to_string()))?;
         config
             .validate()
@@ -128,9 +128,8 @@ impl ServiceApp for App {
                 .clone()
                 .unwrap_or_else(|| Arc::new(config.scaling.build_pressure()));
 
-            // The engine KEDA reads takes its gates from scalo's cascade, which
-            // reads neither the `--config` file nor the `DFE_LOADER__` env form,
-            // so a gate set either way is reported here and ignored there (#160).
+            // The engine KEDA reads takes its gates from scalo's cascade, so a
+            // gate it did not pick up is reported here.
             if scaling.is_enabled() != config.scaling.enabled {
                 warn!(
                     configured = config.scaling.enabled,
