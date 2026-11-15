@@ -901,7 +901,7 @@ $defs:
         anonymous, ASN only, CC BY 4.0.
       type: string
       const: sapics
-    - description: Caller supplies the MMDB paths directly; nothing is downloaded.
+    - description: Caller supplies the MMDB paths directly. Nothing is downloaded.
       type: string
       const: custom
   AutoDownloadConfig:
