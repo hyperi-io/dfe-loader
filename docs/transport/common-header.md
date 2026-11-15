@@ -10,7 +10,7 @@
 
 # Common header
 
-Every record in every DFE table starts with the common header: events, context and metrics alike. The loader fills it before insert, whichever transport the record arrived on (a Kafka topic or a gRPC push). The rest of the stack keys on it: row-level security on `_org_id`, time windows and partitions on its timestamps, and the console's time and organisation filters on the same columns. A change to a header field reaches every table the engine's schema phase creates and every query that filters on it, which is why the header moves only with its schema version.
+Every record in every DFE table starts with the common header, whatever the source sends. The loader fills it before insert, whichever transport the record arrived on (a Kafka topic or a gRPC push). The rest of the stack keys on it: row-level security on `_org_id`, time windows and partitions on its timestamps, and the console's time and organisation filters on the same columns. A change to a header field reaches every table the engine's schema phase creates and every query that filters on it, which is why the header moves only with its schema version.
 
 The header's DDL belongs to dfe-schemas: its column types, ORDER BY, partitioning, codecs, indexes and TTL come from the `timeseries`, `minimal` and `passthrough` profiles under [`common-header/`](https://github.com/hyperi-io/dfe-schemas/tree/main/common-header), rendered by dfe-schemas and applied by dfe-engine's schema phase. dfe-schemas' [profile reference](https://github.com/hyperi-io/dfe-schemas/blob/main/docs/meta-schema.md#common-header-profiles) describes them, and `make render` in a dfe-schemas clone prints the DDL a deployment gets. This page covers what the loader writes into each column.
 
@@ -67,7 +67,7 @@ A table with a `_json` column keeps the whole payload, so a field no column hold
 
 | Profile | Columns | Use case |
 |---|---|---|
-| `timeseries` (default) | 9 | Full event ingestion |
+| `timeseries` (default) | 9 | Full record ingestion |
 | `minimal` | 5: no `_timestamp_received`, `_source`, `_raw` or `_tags` | High-volume structured data |
 | `passthrough` | 4: `_timestamp_load`, `_uuid`, `_org_id`, `_json` | A transparent bridge, no `_timestamp` |
 
