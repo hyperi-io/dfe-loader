@@ -3,6 +3,12 @@
 Rendered by CI and committed back at the end of a release -- do not edit by
 hand. Release notes also appear on the GitHub Releases page, one per tag.
 
+## [1.18.73](https://github.com/hyperi-io/dfe-loader/compare/v1.18.72...v1.18.73) (2026-11-15)
+
+### Bug Fixes
+
+* **pipeline:** skip absent source tables during pre-warm ([#349](https://github.com/hyperi-io/dfe-loader/issues/349)) ([e3f487d](https://github.com/hyperi-io/dfe-loader/commit/e3f487db2a9b49cd1bc93ef92aa37569512d271b))
+
 ## [1.18.72](https://github.com/hyperi-io/dfe-loader/compare/v1.18.71...v1.18.72) (2026-11-15)
 
 ### Bug Fixes
