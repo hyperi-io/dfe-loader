@@ -572,6 +572,7 @@ impl Orchestrator {
         let mut pre_warm = tokio::spawn(pre_warm_schemas(
             Arc::clone(&http_client),
             collect_pre_warm_tables(&self.config.routing),
+            stages.default_table.clone(),
             Duration::from_secs(self.config.schema.pre_warm_retry_secs),
             schema_result_tx.clone(),
             self.shutdown.clone(),
@@ -654,6 +655,7 @@ impl Orchestrator {
                             pre_warm = tokio::spawn(pre_warm_schemas(
                                 Arc::clone(&http_client),
                                 to_warm,
+                                stages.default_table.clone(),
                                 Duration::from_secs(new_config.schema.pre_warm_retry_secs),
                                 schema_result_tx.clone(),
                                 self.shutdown.clone(),
@@ -2678,6 +2680,7 @@ fn directives_from<E>(
 async fn pre_warm_schemas(
     client: Arc<ClickHouseQueryClient>,
     tables: Vec<String>,
+    default_table: String,
     budget: Duration,
     results: mpsc::Sender<TableResolutionResult>,
     shutdown: CancellationToken,
@@ -2686,8 +2689,9 @@ async fn pre_warm_schemas(
     let report = {
         let client = client.as_ref();
         let results = &results;
+        let default_table = default_table.as_str();
         pre_warm_with_retry(
-            move |t| warm_tables_once(t, client, results),
+            move |t| warm_tables_once(t, client, results, default_table),
             tables,
             budget,
             &shutdown,
@@ -2715,16 +2719,27 @@ async fn pre_warm_schemas(
     }
 }
 
-/// One pre-warm round: resolve each of `tables` and send every answer to
-/// `results`. A table `ClickHouse` answered for is done, absent included, and
-/// only a failed fetch is tried again.
+/// Whether a pre-warm answer goes to the event loop. An absent source table is
+/// held back, because the engine writes a source's routing and creates its
+/// table together, and an absence recorded in that gap sends the source's rows
+/// to the default table until `ABSENT_TABLE_TTL` runs out. Its first batch
+/// resolves it instead. The default table is never recorded absent, so its
+/// answer goes through and a missing one is warned about at once.
+fn pre_warm_forwards(table: &str, schema: &SchemaResolution, default_table: &str) -> bool {
+    table == default_table || !matches!(schema, SchemaResolution::TableNotFound)
+}
+
+/// One pre-warm round: resolve each of `tables` and send every answer
+/// [`pre_warm_forwards`] passes to `results`. A table `ClickHouse` answered
+/// for is done, absent included, and only a failed fetch is tried again.
 ///
-/// Both references come from the caller's scope, not a closure environment,
+/// The references come from the caller's scope, not a closure environment,
 /// which keeps `pre_warm_with_retry`'s closure bound satisfiable.
 async fn warm_tables_once(
     tables: Vec<String>,
     client: &ClickHouseQueryClient,
     results: &mpsc::Sender<TableResolutionResult>,
+    default_table: &str,
 ) -> Vec<(String, bool)> {
     use futures::future::join_all;
 
@@ -2737,8 +2752,12 @@ async fn warm_tables_once(
             // wrong-protocol config behind a bare failed-count (#115).
             warn!(table = %table, error = %e, "Schema pre-warm fetch failed");
         }
-        // A closed channel means the event loop has stopped, and the task is aborted with it.
-        let _ = results.send(result).await;
+        if pre_warm_forwards(&table, &result.schema, default_table) {
+            // A closed channel means the event loop has stopped, and the task is aborted with it.
+            let _ = results.send(result).await;
+        } else {
+            debug!(table = %table, "Pre-warm found no table yet, its first batch resolves it");
+        }
         out.push((table, fault.is_none()));
     }
     out
@@ -4193,6 +4212,27 @@ mod tests {
         );
         shutdown.cancel();
         resolver.await.unwrap();
+    }
+
+    /// A pre-warm records no absence for a source table: one the engine
+    /// creates just after the routing reload would otherwise lose its rows to
+    /// the default table. A failed fetch, and a missing default table, still
+    /// reach the event loop.
+    #[test]
+    fn pre_warm_holds_back_only_an_absent_source_table() {
+        let default = "dfe.main";
+        for (table, schema, forwarded) in [
+            ("dfe.bgp-updates", SchemaResolution::TableNotFound, false),
+            ("dfe.bgp-updates", SchemaResolution::Unavailable, true),
+            (default, SchemaResolution::TableNotFound, true),
+            (default, SchemaResolution::Unavailable, true),
+        ] {
+            assert_eq!(
+                pre_warm_forwards(table, &schema, default),
+                forwarded,
+                "{table} forwarded should be {forwarded}"
+            );
+        }
     }
 
     /// A table that does not exist leaves no directive or computed-column
