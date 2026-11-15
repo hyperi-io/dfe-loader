@@ -2715,9 +2715,18 @@ async fn pre_warm_schemas(
     }
 }
 
-/// One pre-warm round: resolve each of `tables` and send every answer to
-/// `results`. A table `ClickHouse` answered for is done, absent included, and
-/// only a failed fetch is tried again.
+/// Whether a pre-warm answer goes to the event loop. An absent table is held
+/// back, because the engine writes a source's routing and creates its table
+/// together, and an absence recorded in that gap sends the source's rows to
+/// the default table until `ABSENT_TABLE_TTL` runs out. Its first batch
+/// resolves it instead.
+fn pre_warm_forwards(schema: &SchemaResolution) -> bool {
+    !matches!(schema, SchemaResolution::TableNotFound)
+}
+
+/// One pre-warm round: resolve each of `tables` and send every answer
+/// [`pre_warm_forwards`] passes to `results`. A table `ClickHouse` answered
+/// for is done, absent included, and only a failed fetch is tried again.
 ///
 /// Both references come from the caller's scope, not a closure environment,
 /// which keeps `pre_warm_with_retry`'s closure bound satisfiable.
@@ -2737,8 +2746,12 @@ async fn warm_tables_once(
             // wrong-protocol config behind a bare failed-count (#115).
             warn!(table = %table, error = %e, "Schema pre-warm fetch failed");
         }
-        // A closed channel means the event loop has stopped, and the task is aborted with it.
-        let _ = results.send(result).await;
+        if pre_warm_forwards(&result.schema) {
+            // A closed channel means the event loop has stopped, and the task is aborted with it.
+            let _ = results.send(result).await;
+        } else {
+            debug!(table = %table, "Pre-warm found no table yet, its first batch resolves it");
+        }
         out.push((table, fault.is_none()));
     }
     out
@@ -4193,6 +4206,15 @@ mod tests {
         );
         shutdown.cancel();
         resolver.await.unwrap();
+    }
+
+    /// A pre-warm records no absence: a source table the engine creates just
+    /// after the routing reload would otherwise lose its rows to the default
+    /// table. A failed fetch still reaches the event loop.
+    #[test]
+    fn pre_warm_holds_back_only_an_absent_table() {
+        assert!(!pre_warm_forwards(&SchemaResolution::TableNotFound));
+        assert!(pre_warm_forwards(&SchemaResolution::Unavailable));
     }
 
     /// A table that does not exist leaves no directive or computed-column
