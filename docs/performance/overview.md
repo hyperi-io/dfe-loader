@@ -67,7 +67,7 @@ strings target/release/dfe-loader | grep -ciE 'jemalloc|je_mallctl'
 | `buffer.flush_bytes` | 64 MiB | A ceiling for oversized rows: at 1-2 KB rows the 20,000-row trigger fires first |
 | `buffer.flush_age_secs` | 5 | Lower for real-time, higher for batch |
 
-Insert concurrency is not a setting: at most 8 inserts run at once. RowBinary over HTTP (`FORMAT RowBinaryWithNamesAndTypes`) is the default, and `clickhouse.protocol: native` sends `FORMAT Native` blocks instead. dfe-clickhouse's `docs/insert-formats.md` measures the two against each other. `insert_format: json_each_row` falls back to `FORMAT JSONEachRow` over HTTP.
+Insert concurrency is not a setting: at most 8 inserts run at once. RowBinary over HTTP (`FORMAT RowBinaryWithNamesAndTypes`) is the default, and `clickhouse.protocol: native` sends `FORMAT Native` blocks instead. dfe-clickhouse's [insert-formats.md](https://github.com/hyperi-io/dfe-clickhouse-rs/blob/main/docs/insert-formats.md) measures the two against each other. `insert_format: json_each_row` falls back to `FORMAT JSONEachRow` over HTTP.
 
 ## Profiling
 
