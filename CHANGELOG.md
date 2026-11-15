@@ -3,6 +3,13 @@
 Rendered by CI and committed back at the end of a release -- do not edit by
 hand. Release notes also appear on the GitHub Releases page, one per tag.
 
+## [1.18.72](https://github.com/hyperi-io/dfe-loader/compare/v1.18.71...v1.18.72) (2026-11-15)
+
+### Bug Fixes
+
+* **capture:** drop the disable lists and no_capture tags ([#347](https://github.com/hyperi-io/dfe-loader/issues/347)) ([412f65d](https://github.com/hyperi-io/dfe-loader/commit/412f65d82d393b0fde0e0c92deca90d7ce3ff818))
+* **scalo:** rebuild on 2.14.30 ([#348](https://github.com/hyperi-io/dfe-loader/issues/348)) ([37c22a2](https://github.com/hyperi-io/dfe-loader/commit/37c22a2db2cfa958179807b437a7f2c5aa3e119b))
+
 ## [1.18.71](https://github.com/hyperi-io/dfe-loader/compare/v1.18.70...v1.18.71) (2026-11-12)
 
 ### Bug Fixes
