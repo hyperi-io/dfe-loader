@@ -28,7 +28,7 @@ flowchart LR
 
 | Setting | Effect |
 |---------|--------|
-| `clickhouse.tls.enabled` | HTTPS for the connection |
+| `clickhouse.tls.enabled` | TLS for the connection: HTTPS, or native TLS |
 | `clickhouse.tls` absent | TLS turns on for a host on 8443 or 9440, or under `clickhouse.cloud` |
 
 The SNI name and the name checked against the certificate are the host in `clickhouse.hosts`, so connect by a name (or IP) the certificate lists.
@@ -39,9 +39,7 @@ A private CA is trusted the way the system trusts it: add it to the image's trus
 
 A trust store with no readable CA certificate fails the client at startup instead of connecting unverified.
 
-## What is deliberately not offered
-
-`clickhouse.tls.ca_cert_file`, `cert_file`, `key_file` and `skip_verify` are refused at startup: no client reads them. There is no skip-verify mode, and client-certificate (mTLS) auth is out of scope today.
+`clickhouse.tls.ca_cert_file`, `cert_file`, `key_file` and `skip_verify` are refused by `config-check` and at startup: no client reads them. There is no skip-verify mode and no client-certificate (mTLS) auth.
 
 ## Example: private-CA cluster
 
@@ -58,4 +56,4 @@ clickhouse:
 SSL_CERT_FILE=/etc/dfe/ca-bundle.pem   # the private CA plus any public roots still needed
 ```
 
-The CA bundle is non-secret and is distributed with the deployment. Keep the cluster password in a Secret, never in committed config. See [../configuration.md](../configuration.md) for the cascade and [../deployment/](../deployment/README.md) for how secrets are supplied at runtime.
+The CA bundle is non-secret and is distributed with the deployment. Keep the cluster password in a Secret, never in committed config: the chart fills `DFE_LOADER__CLICKHOUSE__PASSWORD` from the `clickhouse-password` key the deployment contract declares (`Config::secrets` in `src/config/loader.rs`). See [../configuration.md](../configuration.md) for the cascade.

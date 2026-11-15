@@ -6,8 +6,10 @@ The general rules are hyperi-ai's testing standard (`standards/universal/testing
 
 | Level | Runs | Command |
 |---|---|---|
-| core | locally, every push and PR | `cargo nextest run --all-features` |
-| full | nightly (`schedule` in `.github/workflows/ci.yml`) and before every release (`test.full.required_for_release: true`) | `cargo nextest run --all-features --run-ignored all --ignore-default-filter` |
+| core | locally, every push and PR | `cargo nextest run --features testcontainers` |
+| full | nightly (`schedule` in `.github/workflows/ci.yml`) and before every release (`test.full.required_for_release: true`) | `cargo nextest run --features testcontainers --run-ignored all --ignore-default-filter` |
+
+CI runs each tier once per feature set `.hyperi-ci.yaml` lists under `quality.rust.features`, so `jemalloc` and `transport-memory` are covered as well as `testcontainers`.
 | stack | dfe-infra's post-deploy acceptance, not this repo | - |
 
 Core is nextest's default selection. The `default-filter` in `.config/nextest.toml` holds every test that needs a real ClickHouse or Kafka out of it, bar the two in `tests/integration/shared_services.rs`. The `#[ignore]` tests in `tests/e2e/` run only under full, against the shared ClickHouse and Kafka (`require_e2e_services`). A missing service fails them, it never skips them. hyperi-ci runs core on push and PR, and full on the schedule, on a release, or on a dispatch with `test-tier: full`.
@@ -31,6 +33,8 @@ Full adds every other real-server test: the inserter, readiness, data type, DLQ,
 The ClickHouse pin lives in `tests/common/containers.rs` and follows dfe-infra `versions.yaml`. The Kafka pin is scalo's `transport::kafka::test_support::KAFKA_IMAGE`, the line the DFE stack deploys.
 
 Each ClickHouse container gets a random password for `default`, never logged, which tests read with `clickhouse_password()`. `default` may create users and grant to them. An embedded single-node Keeper backs the `dfe_replicated` database (`Replicated` engine) that the `ReplicatedMergeTree()` tests in `inserter.rs` and `rls.rs` write to. Those tests fail, not skip, when it is missing (`require_replicated!`). Its certificate names `localhost` and the Docker host, signed by a CA made for the run, which tests read back with `shared_clickhouse_ca()`. Kafka is one KRaft broker advertising the host port Docker published.
+
+## How a run shares its containers
 
 scalo's `deployment::test_support::shared_service` gives every test process in a run the same container per service:
 
@@ -59,7 +63,7 @@ Each `HYPERI_TEST_*` setting is read from the process environment, then the proj
 - ClickHouse: `HYPERI_TEST_CLICKHOUSE_HOST`, `_HTTP_PORT`, `_HTTPS_PORT`, `_NATIVE_PORT`, `_NATIVE_TLS_PORT`, `_USER`, `_PASSWORD`, `_CA_FILE`, `_CLUSTER`, `_DB_PREFIX`
 - Kafka: `HYPERI_TEST_KAFKA_BOOTSTRAP`, `_SECURITY_PROTOCOL`, `_SASL_MECHANISM`, `_USER`, `_PASSWORD`, `_CA_FILE`, `_TOPIC_PREFIX`
 
-On HyperI dev machines `hyperi-ai secrets devex-env` (hyperi-ai 4.1.30 or later) writes them to `~/.config/hyperi-ai/devex-test.env`, mode 0600, and prints only the path and the key count. Point `HYPERI_TEST_ENV_FILE` at that file. No host, port or credential belongs in this repo.
+On HyperI dev machines `hyperi-ai secrets devex-env` writes them to `~/.config/hyperi-ai/devex-test.env`, mode 0600, and prints only the path and the key count. Point `HYPERI_TEST_ENV_FILE` at that file. No host, port or credential belongs in this repo.
 
 A run on a pet creates what it needs and drops it:
 

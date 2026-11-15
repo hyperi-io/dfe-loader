@@ -10,9 +10,7 @@
 
 # Performance
 
-Where the time goes and how to get it back. dfe-loader splits performance work
-into build-time optimisations (allocator, LTO, PGO, BOLT -- now CI-automated)
-and runtime tuning (batch sizes, concurrent inserts), with profiling tools for
-finding the hot spots in between.
+Where the time goes and how to get it back. dfe-loader splits performance work into build-time optimisations (allocator, LTO, PGO, BOLT), which hyperi-ci applies, and runtime tuning (batch sizes), with profiling tools for finding the hot spots in between.
 
-- [overview.md](overview.md) -- the optimisation guide: jemalloc, LTO, PGO and BOLT build optimisations, insert-throughput and batch tuning, and CPU/memory/flame-graph profiling.
+- [overview.md](overview.md) -- what CI builds, the allocator, batch tuning, and CPU, heap and flame-graph profiling.
+- [history.md](history.md) -- why the loader's parser and insert encoding are the ones it uses.

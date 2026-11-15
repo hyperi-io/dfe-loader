@@ -12,10 +12,7 @@
 
 dfe-loader reads the schema from ClickHouse, not from a config file -- but a
 plain `CREATE TABLE` does not say where each column's value comes from. That is
-what these `@`-comment directives do. You write them as comments above (or
-beside, in CSV) each column, and the data-prep stage reads the ones it acts on
-to decide whether a column is read from a source field path or computed from a
-CEL expression.
+what these `@`-comment directives do. They live in each column's `COMMENT`, which the loader reads from `system.columns`: a SQL `--` line comment never reaches the server. dfe-schemas renders a column's `expr` into that `COMMENT`, and the data-prep stage reads the directives it acts on to decide whether a column is read from a source field path or computed from a CEL expression.
 
 Five directives change loader behaviour: `@skip`, `@default`, `@source`,
 `@renamed` and `@computed` (`DIRECTIVE_NAMES` in
@@ -31,7 +28,7 @@ elsewhere.
 This page is the full reference -- grammar, the directive list, what a
 `@computed` expression may use, and table-level tags.
 
-For the column types these directives target, see [types.md](types.md); for how
+For the column types these directives target, see [types.md](types.md). For how
 capture interacts with `_json` and `_raw`, see capture modes in
 [../architecture.md](../architecture.md).
 
@@ -42,7 +39,7 @@ flowchart TB
     COL["Column in reflected schema<br/>+ @-comment directive"]
     K{"Which directive?"}
     SRC["@source: field<br/>read input, optional fallback"]
-    REN["@renamed: field<br/>same source-path mapping as @source<br/>no-op if destination exists"]
+    REN["@renamed: field<br/>same source-path mapping as @source<br/>read in place of the column name"]
     CMP["@computed: expression<br/>evaluate one CEL expression"]
     OUT["Value written to output column"]
     GEN["@generated: expr<br/>(descriptive label only)"]
@@ -50,18 +47,18 @@ flowchart TB
     DEF["ClickHouse DEFAULT/MATERIALIZED/ALIAS<br/>on the column itself"]
 
     COL --> K
-    K -->|"@source"| SRC
-    K -->|"@renamed"| REN
-    K -->|"@computed"| CMP
+    K -->|source| SRC
+    K -->|renamed| REN
+    K -->|computed| CMP
     SRC --> OUT
     REN --> OUT
     CMP --> OUT
-    GEN -. describes .-> DEF
+    GEN -.->|describes| DEF
     DEF -.-> SKIP["field omitted from insert"]
 ```
 
 `@generated` and `@config` sit outside the loader's directive dispatch: the
-loader parses neither. They are notes an author leaves in the comment; the
+loader parses neither. They are notes an author leaves in the comment, and the
 real mechanism sits elsewhere, covered under each heading below.
 
 ## Overview
@@ -88,21 +85,16 @@ Map the column to a source field path during data prep.
 | Syntax | Description |
 |--------|-------------|
 | `@source: field` | Read from source field, NULL if missing |
-| `@source: field \| now()` | Read from source, use `now()` if missing/invalid |
-| `@source: field \| default_value` | Read from source with custom fallback |
+| `@source: field \| now()` | Read from source, use `now()` if missing or null |
+| `@source: field \| "value"` | Read from source with a literal fallback |
 | `@source: first(a/b/c)` | First non-null from ordered list (/ separator) |
 
 **Examples:**
 
 ```sql
--- @source: timestamp | now()
-`event_time` DateTime64(3),
-
--- @source: first(user_id/uid/id)
-`user_id` String,
-
--- @source: status_code
-`http_status` UInt16,
+`event_time` DateTime64(3) COMMENT '@source: timestamp | now()',
+`user_id` String COMMENT '@source: first(user_id/uid/id)',
+`http_status` UInt16 COMMENT '@source: status_code',
 ```
 
 ### @generated
@@ -116,8 +108,7 @@ The loader still omits the field from the insert, but by a different route: it
 reads `default_kind` for the column from `system.columns`, and any column
 whose kind is `DEFAULT`, `MATERIALIZED`, `ALIAS` or `EPHEMERAL` is marked
 `has_default` and can be left out of the row it sends (the dynamic insert in
-`dfe-clickhouse`'s `dynamic` module). The
-applier (dfe-engine's schema module) writes that DEFAULT/MATERIALIZED/ALIAS
+`dfe-clickhouse`'s `dynamic` module). dfe-schemas' renderer, whose DDL dfe-engine applies, writes that DEFAULT/MATERIALIZED/ALIAS
 clause from the schema's own `default:` and `attribute:` fields -- not by
 reading the `@generated:` text -- so keep the two in agreement by hand.
 
@@ -134,11 +125,8 @@ reading the `@generated:` text -- so keep the two in agreement by hand.
 **Examples:**
 
 ```sql
--- @generated: now64(3)
-`inserted_at` DateTime64(3) DEFAULT now64(3),
-
--- @generated: generateUUIDv7()
-`id` UUID DEFAULT generateUUIDv7(),
+`inserted_at` DateTime64(3) DEFAULT now64(3) COMMENT '@generated: now64(3)',
+`id` UUID DEFAULT generateUUIDv7() COMMENT '@generated: generateUUIDv7()',
 ```
 
 ### Capture is not a column directive
@@ -156,13 +144,12 @@ writes to `_raw` and `_json`.
 Not a directive the loader parses either -- same drop-as-unknown path as
 `@generated`. It is a note that the field beside it is not hardcoded: some
 loader config key decides the actual mapping. Nothing reads the comment text
-to resolve that path; the config key is wired up separately, by the column's
+to resolve that path: the config key is wired up separately, by the column's
 special-cased name. `_org_id`, for example, is filled from whichever field
-`routing.org_id_field` names, and `_tags` from the first field in
-`metadata.tags_fields` -- both real, live config
+`routing.org_id_field` names, whatever its directive says, and `_tags` from its own `@source` directive, else the first field in `metadata.tags_fields`
 (dfe-loader `src/config/pipeline.rs`, `src/routing/router.rs`,
 `src/transform/extractor.rs`, `src/transform/transformer.rs`). Change the
-config path and the mapping changes; change the `@config:` comment on its own
+config path and the mapping changes. Change the `@config:` comment on its own
 and nothing does.
 
 ```text
@@ -173,16 +160,11 @@ and nothing does.
 **Examples:**
 
 ```sql
--- @source: _org_id
--- @config: routing.org_id_field (default: "_org_id")
-`_org_id` String,
-
--- @source: first(tags/_tags/meta)
--- @config: metadata.tags_fields
-`_tags` JSON,
+`_org_id` String COMMENT '@source: _org_id @config: routing.org_id_field (default: "_org_id")',
+`_tags` JSON COMMENT '@source: first(_tags/tags/meta) @config: metadata.tags_fields',
 ```
 
-### @computed
+## @computed
 
 A value computed from the record's other fields during data prep, as one CEL
 expression.
@@ -219,14 +201,9 @@ risk come from the loader's `geoip` and `enrichment` config, not from
 **Examples:**
 
 ```sql
--- @computed: risk_score > 80 ? "high" : risk_score > 40 ? "medium" : "low"
-`risk_label` LowCardinality(String),
-
--- @computed: src_ip.startsWith("10.") || src_ip.startsWith("192.168.")
-`is_private_src` Bool,
-
--- @computed: bytes_in + bytes_out
-`bytes_total` UInt64,
+`risk_label` LowCardinality(String) COMMENT '@computed: risk_score > 80 ? "high" : risk_score > 40 ? "medium" : "low"',
+`is_private_src` Bool COMMENT '@computed: src_ip.startsWith("10.") || src_ip.startsWith("192.168.")',
+`bytes_total` UInt64 COMMENT '@computed: bytes_in + bytes_out',
 ```
 
 **Semantics:**
@@ -247,7 +224,7 @@ The `computed_columns` config section sets or overrides the same expressions:
 one. A per-table override beats the global entry, which beats the column
 comment.
 
-### @renamed
+## @renamed
 
 The hand-written form of `@source`: the same source-path mapping, resolved into
 the same `renamed` list, with no transformation of the value.
@@ -264,31 +241,23 @@ the same `renamed` list, with no transformation of the value.
 
 **Semantics:**
 
-- **No-op if destination exists**: If the destination field is already
-  present in the data, the mapping is skipped. This prevents overwriting
-  upstream-populated fields.
-- **First-match wins**: With `first()`, fields are tried in order and the first
-  present one is used.
-- **Not on `_org_id` or `_timestamp`**: both read fixed fields and ignore the directive, so no column comment can point the tenant at a field a sender writes.
+- The listed paths are read in place of the column's own name, so a record field named like the column is not read while the directive names others. Only the field-mapping step, which runs after, skips a destination already present.
+- With `first()`, fields are tried in order and the first present, non-null one is used.
+- `_org_id` and `_timestamp` read fixed fields and ignore the directive, so no column comment can point the tenant at a field a sender writes.
 
 **Examples:**
 
 ```sql
--- @renamed: timestamp
-`event_time` DateTime64(3),
-
--- @renamed: org
-`org_name` String,
-
--- @renamed: first(logoriginal/_raw/raw/raw_log/message)
-`_raw` Nullable(String) CODEC(ZSTD(3)),
+`event_time` DateTime64(3) COMMENT '@renamed: timestamp',
+`org_name` String COMMENT '@renamed: org',
+`_raw` Nullable(String) CODEC(ZSTD(3)) COMMENT '@renamed: first(logoriginal/_raw/raw/raw_log/message)',
 ```
 
 ## Operators
 
 ### Fallback operator (`|`)
 
-Provides a fallback when the source is missing or invalid:
+Provides a fallback when every source path is missing or null:
 
 ```text
 @source: field | fallback_expression
@@ -331,145 +300,51 @@ Separates alternatives in `first()`:
 - Uses first non-null value
 - Returns NULL if all missing
 
-## CSV schema format
+## Data prep behaviour
 
-```csv
-column,type,default,nullable,codec,source,comment
-```
-
-The `source` column contains the expression:
-
-```csv
-column,type,default,nullable,codec,source,comment
-event_time,DateTime64(3),,false,Delta/ZSTD(1),@source: timestamp | now(),When event occurred
-id,UUID,generateUUIDv7(),false,,@generated: generateUUIDv7(),Unique identifier
-tags,JSON,,true,ZSTD(3),@source: first(tags/_tags/meta),Event metadata
-```
-
-## SQL DDL format
-
-Expressions appear as comments above the column definition:
+dfe-schemas renders the directives into the column `COMMENT`, with the human description after ` - `, which the parser trims:
 
 ```sql
-CREATE TABLE events (
-    -- @generated: now64(3)
-    `inserted_at` DateTime64(3) DEFAULT now64(3),
-
-    -- @source: timestamp | now()
-    `event_time` DateTime64(3),
-
-    -- @source: user_id
-    -- @config: routing.user_id_field
-    `user_id` String,
-
-    -- @source: first(tags/_tags/metadata.tags)
-    -- @config: metadata.tags_fields
-    `tags` JSON
+CREATE TABLE dfe.main (
+    `_timestamp_load` DateTime64(3,'UTC') DEFAULT now64(3) COMMENT '@generated: now64(3) - Insertion timestamp (ms precision)',
+    `_timestamp` DateTime64(3,'UTC') COMMENT '@source: timestamp | now() - Event timestamp from source data',
+    `_source` LowCardinality(Nullable(String)) COMMENT '@source: first(_source) | topic_name - Data source label (e.g. beats, syslog, crowdstrike-edr)',
+    ...
 )
 ```
 
-## Data prep behaviour
-
-### Field extraction
-
-1. **@source** fields are read from input, optionally transformed, written to
-   output
-2. **@generated** fields are omitted, but not because data prep reads the
-   directive -- the column carries a ClickHouse DEFAULT/MATERIALIZED/ALIAS and
-   the loader reads that from `system.columns` instead. See the @generated
-   section above.
-3. **@computed** fields are calculated during transformation
-4. **@renamed** fields are read the same way as **@source** (no-op if the
-   destination is already present)
-
-### Input vs output names
-
-Expressions document the **input** field name. The column name is the **output**:
-
-```sql
--- @source: timestamp       <- reads "timestamp" from input
-`_timestamp` DateTime64(3)  <- writes to "_timestamp" in output
-```
-
-### Field removal
-
-By default, routing/extracted fields can be removed after extraction to avoid
-duplication. This is configurable per deployment.
-
-## Implementation reference
-
-The data prep stage (transformer) implements these expressions:
+On the default `json_primary` path the header extractor (`src/transform/extractor.rs`) resolves them, and on `legacy_flatten` the transformer and the field mapping do:
 
 | Expression | Implementation |
 |------------|----------------|
 | `@source: field`, `@renamed: field` | One entry in the column's `renamed` source-path list |
-| `@source: field \| now()` | Fallback to `Utc::now()` if missing/invalid |
+| `@source: field \| now()` | Fallback to `Utc::now()` when every path is missing or null |
 | `@source: first(a/b)`, `@renamed: first(a/b)` | Try each path in order, first non-null wins |
 | `@computed: expr` | Compiled once with `scalo::expression::compile`, evaluated per record |
 
-`@generated: expr` is not in this table because the transformer does not
-implement it -- it is dropped as an unknown directive. The column is still
-omitted from the insert, by the `system.columns` `default_kind` route
-described under @generated above. `@config: path` is absent for the same
-reason: the transformer never reads it.
+`@generated` and `@config` are dropped as unknown directives. A `@generated` column is still left out of the insert, by the `system.columns` `default_kind` route described under @generated above. A directive names the input field, and the column name is the output: `@source: timestamp` on `_timestamp` reads `timestamp`. With `metadata.remove_routing_fields` (default `true`) the routing fields are removed after extraction.
 
 ## Table-level tags
 
-Tables support metadata tags stored in the ClickHouse `COMMENT` field, using the
-same `@tag: key=value` syntax as column expressions.
-
-### Syntax
-
-Tags are stored in the table COMMENT, separated by ` | `:
+A table `COMMENT` carries tags in the same `@tag: value` syntax, separated by ` | `. The loader reads one, `@capture_mode`, which overrides the configured capture mode for that table (see [capture-modes.md](../pipeline/capture-modes.md)) and ignores the rest. dfe-schemas writes `@profile` and `@profile_version`, naming the common-header profile the table was built from:
 
 ```sql
-CREATE TABLE common.events (...)
-ENGINE = MergeTree()
+CREATE TABLE dfe.main (...)
 ...
-COMMENT '@schema_source: core | @schema_version: 2 | @created_by: dfe-loader'
+COMMENT '@profile: timeseries | @profile_version: <version> | @capture_mode: json_only'
 ```
-
-### Standard tags
-
-| Tag | Values | Description |
-|-----|--------|-------------|
-| `@schema_source` | `core`, `user` | `core` = pre-supplied by dfe-loader, absent/`user` = user-created |
-| `@schema_version` | `1`, `2`, ... | Schema version for migrations |
-| `@created_by` | string | Tool/user that created the table |
-
-### Querying by tag
 
 ```sql
--- Find all core schemas
 SELECT database, name, comment
 FROM system.tables
-WHERE comment LIKE '%@schema_source: core%';
-
--- Find tables by version
-SELECT database, name, comment
-FROM system.tables
-WHERE comment LIKE '%@schema_version: 2%';
-
--- Extract tag value using regex
-SELECT
-    database,
-    name,
-    extractAll(comment, '@schema_source: ([^|]+)')[1] AS schema_source
-FROM system.tables
-WHERE comment LIKE '%@schema_source:%';
+WHERE comment LIKE '%@capture_mode:%';
 ```
 
-### Rust API
+`TableTags` (`src/schema/mod.rs`) parses and builds them:
 
 ```rust
 use dfe_loader::schema::TableTags;
 
-// Build a tag set
-let tags = TableTags::new()
-    .with("schema_source", "core")
-    .with("schema_version", "2");
-
-// Parse tags from an existing table comment
-let tags = TableTags::from_comment("@schema_source: core | @schema_version: 2");
-assert_eq!(tags.get("schema_source"), Some("core"));
+let tags = TableTags::from_comment("@profile: timeseries | @capture_mode: json_only");
+assert_eq!(tags.get("capture_mode"), Some("json_only"));
 ```

@@ -10,10 +10,7 @@
 
 # dfe-loader docs
 
-High-performance loader from message transports (Kafka, gRPC, Memory) into
-ClickHouse. Point it at a topic, give it a routing rule, and it parses, routes,
-promotes schema columns, enriches, buffers per table, and inserts -- RowBinary
-by default so ClickHouse skips JSON parsing, with at-least-once Kafka delivery.
+Loads records from Kafka or a gRPC push into ClickHouse. Point it at a topic, give it a routing rule, and it parses, routes, promotes schema columns, enriches, buffers per table, and inserts -- RowBinary by default so ClickHouse parses no row text, with at-least-once Kafka delivery.
 
 This is the index. Read [architecture.md](architecture.md) for the 10,000-foot
 view, [clickhouse/](clickhouse/) for the insert layer, and
@@ -25,11 +22,11 @@ view, [clickhouse/](clickhouse/) for the insert layer, and
 
 | You give it | It handles | You don't write |
 |-------------|------------|-----------------|
-| A Kafka topic or a gRPC push | JSON parse (sonic-rs, SIMD), zero-copy `Arc<[u8]>`, anything not JSON dead-lettered | A consumer, a parser, an input gate |
+| A Kafka topic or a gRPC push | JSON parse (sonic-rs, SIMD), the payload kept once as `Arc<[u8]>`, anything not JSON dead-lettered | A consumer, a parser, an input gate |
 | The routing fields (`table_fields`, `org_routes`) | Pre-flatten routing to `db.table`, dot-notation nested access, the default table on a miss | A router, a dispatch table |
 | A ClickHouse table | Schema reflected from `system.columns`, fields promoted to typed columns, the rest kept in `_json` | A schema mapping, an ORM, a migration |
-| `insert_format` (default RowBinary) | Dynamic `Map<String,Value>` -> RowBinary over the HTTP `Client`; JSONEachRow fallback | A serialiser, a type encoder, a wire format |
-| `capture_mode` (full/raw_only/json_only/extracted_only) | `_json` and `_raw` population per table, overridable per-table and per-DDL | Conditional capture plumbing |
+| `insert_format` (default RowBinary) | Dynamic `Map<String,Value>` -> RowBinary over HTTP, or Native blocks over the native protocol, with a JSONEachRow fallback over HTTP | A serialiser, a type encoder, a wire format |
+| `capture_mode` (full/raw_only/json_only/extracted_only) | `_json` and `_raw` population per table, overridable per-table and per-DDL | Per-table capture logic |
 | Enrichment toggles (geoip/reputation/risk) | Flat enriched columns injected on the promoted row only | Lookup, caching, CIDR matching |
 | Nothing extra | Per-table buffering, batch salvage, held-batch retry, schema-cache recovery, one offset commit per flush cycle | The resilience layer |
 
@@ -44,7 +41,6 @@ flowchart TB
     subgraph Ingress["Transport (scalo)"]
         K["Kafka"]
         G["gRPC"]
-        M["Memory"]
     end
 
     subgraph Hot["Hot path (per message)"]
@@ -57,19 +53,21 @@ flowchart TB
 
     subgraph Sink["ClickHouse insert (dfe_clickhouse::dynamic::DynamicInsert)"]
         CE["DynamicRow encoder<br/>Map + schema -> binary"]
-        HTTP["HTTP: insert_formatted_with<br/>FORMAT RowBinaryWithDefaults"]
+        HTTP["HTTP: insert_formatted_with<br/>FORMAT RowBinaryWithNamesAndTypes"]
+        NAT["native: insert_native<br/>FORMAT Native"]
         JF["HTTP: insert_formatted_with<br/>FORMAT JSONEachRow (fallback)"]
     end
 
-    CH[("ClickHouse")]
+    CH[(ClickHouse)]
     DLQ["DLQ (Kafka primary, file fallback)"]
 
-    K & G & M --> P --> R --> X --> E --> B
+    K & G --> P --> R --> X --> E --> B
     B -->|RowBinary default| CE
     CE --> HTTP --> CH
+    CE --> NAT --> CH
     B -->|insert_format=json_each_row| JF --> CH
-    B -.salvaged bad rows.-> DLQ
-    CH -.success.-> Commit["One Kafka commit per flush cycle"]
+    B -.->|salvaged bad rows| DLQ
+    CH -.->|success| Commit["One Kafka commit per flush cycle"]
 ```
 
 ---
@@ -84,7 +82,7 @@ flowchart TB
 | Build features | [feature-flags.md](feature-flags.md) | Cargo features and the ClickHouse client crates |
 | Insert layer | [clickhouse/](clickhouse/) | RowBinary vs JSONEachRow, the dynamic insert, schema cache, type handling, TLS, DDL directives |
 | Hot path | [pipeline/](pipeline/) | Routing, extraction, enrichment, capture modes, buffering |
-| Transports | [transport/](transport/) | Kafka / gRPC / Memory, the common header |
+| Transports | [transport/](transport/) | The gRPC listener, the common header |
 | Deployment | [deployment/](deployment/) | Container + chart publishing, schemas |
 | Performance | [performance/](performance/) | Hot-path optimisations, parser-selection history, PGO/BOLT |
 

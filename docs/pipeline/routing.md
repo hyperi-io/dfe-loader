@@ -19,7 +19,7 @@ flowchart TB
     PIN{"read from a dlq_load topic?"}
     DLQTBL["dlq_load.table"]
     TBF{"a table_fields value?"}
-    TOPIC{"topic is {source}_land / {source}_load?"}
+    TOPIC{"topic is &#123;source&#125;_land / &#123;source&#125;_load?"}
     DEFDB["default_db"]
     ORGDB["the org's database"]
     DEFTBL["default_table"]
@@ -44,7 +44,7 @@ flowchart TB
 |---------|--------|
 | `routing.table_fields` | fields whose value selects the table, first one carrying a value wins. Dot-notation reaches nested fields (`event.category`). Default `["_source"]` |
 | `routing.default_db` | database for every org `org_routes` does not list -- default `dfe` |
-| `routing.default_table` | table used when neither a `table_fields` value nor the topic names one -- default `main`, so an unrouted message lands in `dfe.main` |
+| `routing.default_table` | table used when neither a `table_fields` value nor the topic names one, or the table named does not exist -- default `main`, so an unrouted message lands in `dfe.main` |
 | `routing.source_to_table` | maps a source value to the table its records land in, `{cisco-ios: network}` say -- default `{}`, so a source lands in the table of its own name |
 | `routing.topic_suffixes` | suffixes that mark a topic as one source's own -- default `_land` / `_load`, so `cisco-ios_load` names the source `cisco-ios`. With `kafka.topics` and `kafka.topic_regex` unset, auto-discovery subscribes to the topics ending in one, so an empty list or an empty suffix is refused |
 | `routing.org_id_field` | field the tenant is read from -- default `_org_id`, the common-header field the first hop stamps |
@@ -89,7 +89,7 @@ The tenant is replaced at `org_id_field`. The source is replaced in `_source` an
 
 ## A routing edit applies without a restart
 
-The loader watches its config file (`hot_reload.enabled`, on unless set false). On a change it rebuilds the router, the header extractor and the default table from the new `routing` and `metadata`, and pre-warms the schemas of any table the new routing names. Rows already buffered keep the table they were routed to, and no offset is committed for them until they land. `routing.dlq` is the exception: the DLQ is opened at startup, so a change there logs a restart warning. The deployment contract lists `routing` in `hot_paths`, so on Kubernetes an edit there reaches the running pods without rolling them.
+The loader watches its config file (`hot_reload.enabled`, on unless set false). On a change it rebuilds the router, the header extractor and the default table from the new `routing` and `metadata`. Startup pre-warms the schemas of the default table and every `source_to_table` target. A reload pre-warms the ones it holds no fresh schema for, and leaves a table already held absent to the recheck described below. A source table the pre-warm finds absent is not recorded absent: the engine writes a source's routing and creates its table together, so the source's first batch resolves the table from the pending-schema buffer instead. An absent default table is reported at once. Rows already buffered keep the table they were routed to, and no offset is committed for them until they land. `routing.dlq` is the exception: the DLQ is opened at startup, so a change there logs a restart warning. The deployment contract lists `routing` in `hot_paths`, so on Kubernetes an edit there reaches the running pods without rolling them.
 
 ## The topic names the source when the record does not
 
@@ -101,7 +101,7 @@ a record arriving there with no `table_fields` value routes to `dfe.cisco-ios`.
 A topic names a source only when one of `routing.topic_suffixes` strips off it
 AND what is left does not resolve to `default_table`. Both halves matter:
 `main_land` strips to the landing table, so its records have no
-source of their own and keep the default fallback; a topic with no suffix to
+source of their own and keep the default fallback. A topic with no suffix to
 strip is not `{source}_land` or `{source}_load` and names no source at all.
 `source_to_table` is applied before the comparison, so a source mapped onto the
 landing table is landing traffic too.
@@ -111,11 +111,7 @@ named no table, so `dfe_loader_routing_field_absent_total` increments and a
 warning names the topic, the table and how many records it stands for, once a
 minute per topic.
 
-A table ClickHouse confirms does not exist is held for 60 seconds, then
-re-resolved, so a table created later starts receiving its own data without a
-pod restart. The warning names the move into absence and not the state: the
-re-resolved answer is the one already held, so a dead source name is announced
-once rather than once a minute for the life of the deployment.
+A record whose table ClickHouse confirms does not exist lands in `default_table` instead, counted in `dfe_loader_unknown_table_fallback_total{table}`. The answer is held, then the table is resolved again, so a table created later starts receiving its own data without a pod restart: after 60 seconds, or for a `source_to_table` target the routing names, after 1 second doubling up to 30. The warning names the move into absence and not the state, so a dead source name is announced once rather than once a minute for the life of the deployment.
 
 The default table is never held absent, because nothing falls back from it. A record routed to it while it does not exist waits in the pending-schema buffer and is resolved again while it waits, until the table exists or the record reaches `schema.pending_max_age_secs` and is retired like any record whose schema never arrived.
 

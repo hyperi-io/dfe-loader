@@ -10,7 +10,7 @@
 
 # Enrichment
 
-Enrichment adds derived columns to a row from its IP fields: geographic data,
+Enrichment adds derived columns to a row from its IP fields (`enrichment.ip_fields`, first match wins): geographic data,
 reputation flags, and a composite risk score. Each provider is an independent
 toggle, off by default. Enriched values are written as flat columns on the
 promoted row only -- never folded into `_json`, so the payload stays the payload
@@ -72,15 +72,13 @@ The credentials are redacted in logs and config dumps. Supply them through the s
 
 Enrichment runs after extraction and before buffering, on the promoted row. The
 lookups are cached, so a hot IP is resolved once and reused. Because the columns
-are flat and additive, a table opts in simply by declaring the enrichment
+are flat and additive, a table opts in by declaring the enrichment
 columns in its schema -- an enriched value is written only where the target
 table has a column for it, the same promotion rule the rest of the pipeline
 follows.
 
-## The setting drives the action
-
 Like every config-cascade switch in the loader, an enrichment toggle is only
 meaningful if the row that lands reflects it: enable GeoIP and the geo columns
-on the written row are populated; leave it off and they are not. See
+on the written row are populated, leave it off and they are not. See
 [../configuration.md](../configuration.md) and the hot-path context in
 [overview.md](overview.md).
