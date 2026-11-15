@@ -989,7 +989,7 @@
           "const": "sapics"
         },
         {
-          "description": "Caller supplies the MMDB paths directly; nothing is downloaded.",
+          "description": "Caller supplies the MMDB paths directly. Nothing is downloaded.",
           "type": "string",
           "const": "custom"
         }
