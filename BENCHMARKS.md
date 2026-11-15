@@ -6,7 +6,7 @@ The criterion benches in `benches/` measure the hot path's CPU cost. Run them on
 |---|---|
 | `json_parsing` | sonic-rs parsing and field lookups |
 | `pipeline` | every per-message stage from parse to transform, with no ClickHouse |
-| `bakeoff` | hot-path throughput across payload shapes |
+| `bakeoff` | hot-path throughput on flat 10-field and 30-field events and a two-level nested event |
 | `extractor` | `HeaderExtractor::extract` per row |
 | `transform` | the legacy flatten and transform path |
 | `enrichment` | GeoIP, reputation and risk scoring lookups |

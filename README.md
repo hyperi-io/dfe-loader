@@ -60,7 +60,7 @@ Failures degrade rather than stall: a batch with a bad row is binary-split so on
 
 ## Configuration essentials
 
-One YAML file, named by `--config`. The chart mounts it at `/etc/dfe/loader.yaml`. `config.example.yaml` is an annotated example, `docs/config-schema.yaml` lists every key with its default, and every setting has a default, so an empty config boots.
+One YAML file, named by `--config` or `DFE_LOADER_CONFIG`. With neither set the loader reads `./config.yaml` or `./config.yml` if one exists, but only a named file is hot-reloaded. The chart mounts it at `/etc/dfe/loader.yaml`. `config.example.yaml` is an annotated example, `docs/config-schema.yaml` lists every key with its default, and every setting has a default, so an empty config boots.
 
 Environment overrides use the `DFE_LOADER` prefix in two forms, and the difference matters: `DFE_LOADER_KAFKA_GROUP_ID` is the flat single-underscore set, a fixed contract with dfe-engine, while `DFE_LOADER__CLICKHOUSE__DATABASE` uses double underscores to nest into any config key.
 
