@@ -408,7 +408,7 @@ impl Inserter {
     /// Set the insert format.
     ///
     /// - `RowBinary` (default): schema-reflected binary via `DynamicInsert`.
-    ///   `ClickHouse` skips JSON parsing — lower cluster CPU at scale.
+    ///   `ClickHouse` parses only `JSON` columns, which travel as text.
     /// - `JsonEachRow`: NDJSON via `InsertFormatted`. Self-describing fallback.
     #[must_use]
     pub fn with_insert_format(mut self, format: InsertFormat) -> Self {

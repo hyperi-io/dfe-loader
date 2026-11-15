@@ -4,15 +4,8 @@
 //! Schema-guided SIMD field extractor for the `json_primary` pipeline mode.
 //!
 //! Parses the raw payload **once** with `sonic_rs::from_slice`, then performs
-//! O(1) hash lookups for each schema column.
-//!
-//! Benchmarks (`benches/simdjson_spike.rs`, batch=10K) confirm the full-parse
-//! approach outperforms `get_from_slice × N` in all realistic cases:
-//! - 2.7× faster at N=30 flat payload (196 ms → 72 ms)
-//! - 4.2× faster at N=15 nested payload (each miss still scans the full doc)
-//! - Tied at N=15 flat payload with high field hit-rate
-//!   Misses are free with the DOM approach (O(1) hash lookup returns None)
-//!   but cost a full document scan with `get_from_slice`.
+//! O(1) hash lookups for each schema column. A missing column costs one lookup
+//! here, where `get_from_slice` per column rescans the whole document.
 //!
 //! ## What this does NOT do
 //!
