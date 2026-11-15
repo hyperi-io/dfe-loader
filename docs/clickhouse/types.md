@@ -16,8 +16,7 @@ types (possibly wrapped in `Nullable` or `LowCardinality`), and the encoder in
 `dfe-clickhouse`'s `dynamic` module has to turn a `Value` into the right bytes for it. Use
 this page when you are designing a schema.
 
-Nothing here is loader-invented: it is the ClickHouse type system as of the
-24.8+ line, annotated with how each type lands on the native wire. For how those
+Nothing here is loader-invented: it is the ClickHouse type system, annotated with how each type lands on the native wire. For how those
 bytes are actually shipped (HTTP RowBinary or native blocks), see
 [insert-formats.md](insert-formats.md). For where the encoder hands its bytes to the client's insert calls, see
 [clickhouse-ext.md](clickhouse-ext.md).
@@ -29,7 +28,7 @@ Sources:
 - [clickhouse-cpp GitHub](https://github.com/ClickHouse/clickhouse-cpp)
 - [JSON Type Blog Post](https://clickhouse.com/blog/a-new-powerful-json-data-type-for-clickhouse)
 - [ClickHouse 24.8 Release](https://clickhouse.com/blog/clickhouse-release-24-08)
-- [JSON/Dynamic/Variant Production Ready PR](https://github.com/ClickHouse/ClickHouse/pull/77785)
+- [ClickHouse PR 77785: JSON, Dynamic and Variant out of experimental](https://github.com/ClickHouse/ClickHouse/pull/77785)
 
 ---
 
@@ -209,7 +208,7 @@ types discovered at runtime.
 
 - No need to declare types upfront
 - `max_types` limits separate storage columns (default 32)
-- Types beyond limit stored as String
+- Types beyond the limit share one variant in binary form (`SharedVariant`)
 
 **Native protocol:**
 
@@ -302,11 +301,11 @@ The loader writes in one of two formats, dispatched by `clickhouse.insert_format
 `DynamicInsert` reflects the target schema from `system.columns`, encodes a
 `Map<String, Value>` against that schema column-by-column, and sets
 `input_format_binary_read_json_as_string=1` for JSON-typed columns. The loader
-never calls `clickhouse::Row` -- everything is dynamic. DDL and schema queries go
+never calls `clickhouse::Row` -- everything is dynamic. Schema and comment queries go
 through the same client via `ClickHouseQueryClient`. The full transport x format
 matrix is in [insert-formats.md](insert-formats.md).
 
-Type support comes from the loader's own encoder, not the client crate. A column
+Type support comes from `dfe-clickhouse`'s encoder, not the `clickhouse` crate. A column
 type the encoder does not cover (a `Variant` column, for one) fails the write
 with `DynamicError::UnsupportedType`, and the rows are held rather than
 dead-lettered.
@@ -389,7 +388,6 @@ A third coordinate is read and ignored. A geohash, a latitude outside -90 to 90,
 
 Elasticsearch lets any field carry one value or many, so a scalar bound for an `Array(T)` column is written as a one-element array, and T's own rules then decide whether it is valid. `"related_ip": "52.108.0.3"` lands in an `Array(IPv6)` column as `['::ffff:52.108.0.3']`. An object is wrapped only where the element is read from one (`JSON`, `Map`, `Point`). Bound for an array of scalars, it stays an encoding error. A null or absent array is the empty array. For an `Array(Point)` column, a bare `[lon, lat]` is one point, as Elasticsearch reads it.
 
-The rationale for RowBinary as the default: schema-reflected RowBinary skips the
-server-side JSON parse, cuts ClickHouse CPU, and gives full type support without
-requiring compile-time schemas. Records stay a `Map<String, Value>` from
+The rationale for RowBinary as the default: schema-reflected RowBinary leaves the server no row text to parse, cuts ClickHouse CPU, and gives full type support without
+requiring compile-time schemas. A JSON column's value is still JSON text the server parses. Records stay a `Map<String, Value>` from
 intake to insert -- encoding happens against `system.columns` at runtime.

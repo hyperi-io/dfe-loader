@@ -21,12 +21,12 @@ flowchart LR
 
 ## Docs
 
-- [overview.md](overview.md) -- the six stages, in order.
+- [overview.md](overview.md) -- the stages, in order.
 - [routing.md](routing.md) -- choosing `db.table` from message fields.
 - [capture-modes.md](capture-modes.md) -- what is stored as `_json` / `_raw`,
   and the three-level precedence.
 - [enrichment.md](enrichment.md) -- GeoIP, reputation, risk scoring.
-- [parallelism.md](parallelism.md) -- the parallelisation playbook.
+- [parallelism.md](parallelism.md) -- the parallel and sequential phases of a batch.
 
 For the buffer-and-insert tail see
 [../clickhouse/insert-formats.md](../clickhouse/insert-formats.md) and the

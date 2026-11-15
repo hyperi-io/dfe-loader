@@ -25,6 +25,8 @@ scalo). The default subcommand is `run`.
 | `version` | print version and build metadata |
 | `top` | live TUI dashboard polling the running loader's `/metrics` |
 | `metrics-manifest` | print the metric catalogue as JSON without starting the loader |
+| `config-schema` | write `config-schema.{json,yaml}` and `capability-catalog.{json,yaml}` (`--dir`, default `docs`) |
+| `generate-artefacts` | write the metrics manifest, the deployment contract and the container spec (`--output-dir`, default `docs`) |
 
 Loader settings take `DFE_LOADER_*` environment variables: flat
 (`DFE_LOADER_CLICKHOUSE_HOSTS`) or nested on a double underscore
@@ -34,72 +36,38 @@ env names (`LOG_LEVEL`, `METRICS_ADDR`). See
 
 ## Check before you boot
 
-`config-check` runs the same validation the orchestrator runs at startup, so a
-bad config fails fast and visibly rather than at first insert. The guards
-include the transport/format matrix:
+`config-check` loads the cascade and runs `Config::validate`, so an empty broker or host list, an unknown protocol, an unread TLS key, a zero flush trigger or a default table that is `dlq_load.table` fails before boot. Two checks run only when the pipeline starts, before the readiness probe, so `config-check` passes them:
 
 - `clickhouse.insert_format: jsoneachrow` with `clickhouse.protocol: native`
   is refused -- JSONEachRow needs HTTP. Use `protocol: http`, or the
   `rowbinary` default (which works on both).
-- Port/transport mismatches (native on 8123, HTTP on 9000/9440) are flagged.
+- HTTP on a native port (9000, 9440) is refused, and native on 8123 is logged as a warning.
 
 See [clickhouse/insert-formats.md](clickhouse/insert-formats.md).
 
 ## Observe
 
-- **Metrics** -- Prometheus text on `/metrics`. The loader emits the DFE metric
-  groups (dual-emit: the older names such as `buffer_rows` and
-  `batches_flushed_total` alongside the standard group names), plus rdkafka consumer stats and config-reload counters. On the direct
-  gRPC transport there are no broker offsets, so `kafka_offsets_committed_total`
-  and the consumer offset counters stay flat while the transport counters move.
-- **Computed columns** -- a CEL expression that fails leaves its column unset and the record goes on. `dfe_loader_computed_eval_failures_total{table, column, stage}` counts each failure, and the first runtime failure per table and column logs a warning with the error. See [clickhouse/ddl-directives.md](clickhouse/ddl-directives.md).
-- **Catalogue** -- `dfe-loader metrics-manifest` prints every metric the loader
-  registers, so a dashboard or scaling rule can be written against the
-  catalogue rather than a running pod.
-- **Counted in records** -- a message carrying several records is split into one
-  record per element before anything counts it, so `messages_received_total` and
-  `events_per_second` read in records, matching `rows_inserted_total`. The two
-  wire formats are counted apart, so the pair that moves says which producer is
-  batching: `dfe_loader_batched_array_messages_total` /
-  `..._batched_array_records_total` for a JSON array, and
-  `dfe_loader_batched_ndjson_messages_total` / `..._batched_ndjson_records_total`
-  for newline-separated records.
-- **`top`** -- `dfe-loader top` renders those metrics as a TUI. `--once`,
-  `--json`, and `--filter` make it scriptable; the JSON/TSV output pipes into
-  shell tooling.
-- **Health** -- the probes (`/livez`, `/readyz`) from the scalo health pillar, for Kubernetes liveness/readiness/startup. `/readyz` stays 503 until ClickHouse accepts the configured user and answers reads of `system.tables` and `system.columns` for the configured database. Each refusal is logged with ClickHouse's error code (516 for a wrong password) and retried on the `sink_stack` backoff, a wait that doubles from `sink_stack.min_backoff_ms` (100 ms) to `sink_stack.max_backoff_ms` (30 s), plus up to as much again in jitter. `pipeline_ready` reads 1 once it passes. A ClickHouse config that can never work, such as `http` on port 9000 or 9440, is refused before the probe and the loader exits. Intake waits on the same check: until it passes the loader joins no consumer group and opens no gRPC listener, so a pod with a wrong password takes no partitions from the pods that can write, and a shutdown before then exits without starting the pipeline. Kafka and the gRPC peer play no part in readiness.
-- **Broker not up yet** -- a transport that cannot start, such as Kafka auto-discovery with no broker reachable, is retried on the same backoff instead of ending the process. Each failure is logged at `warn` with the error and counted in `pipeline_retries_total{stage="transport_start"}`. A config the transport refuses still exits, since no retry fixes it, and a shutdown during the retries exits cleanly. One attempt can take the 10 s Kafka metadata timeout, so a shutdown may wait that long.
+- Prometheus text on `/metrics`: scalo's DFE metric groups, the older names such as `buffer_rows` and `batches_flushed_total` emitted beside them, consumer stats and config-reload counters. On the gRPC transport there are no broker offsets, so `kafka_offsets_committed_total` and the consumer offset counters stay flat while the transport counters move.
+- `dfe-loader metrics-manifest` prints every metric the loader registers, so a dashboard or scaling rule can be written against it rather than a running pod. The per-table series appear on first use and are not in it: `dfe_loader_unknown_table_fallback_total`, `dfe_loader_permanent_reject_total`, `loader_messages_by_table_total`, `loader_json_max_paths_exceeded_total`, `loader_buffer_rows_by_table` and `loader_buffer_bytes_by_table`.
+- A message carrying several records is split before anything counts it, so `messages_received_total` and `events_per_second` read in records, like `rows_inserted_total`. `dfe_loader_batched_array_*` counts JSON arrays and `dfe_loader_batched_ndjson_*` newline-separated records, so the pair that moves names the producer that batches.
+- A failing CEL expression leaves its column unset and the record goes on, counted in `dfe_loader_computed_eval_failures_total{table, column, stage}`. See [clickhouse/ddl-directives.md](clickhouse/ddl-directives.md).
+- `dfe-loader top` renders the metrics as a TUI. `--once` prints one scrape to stdout, `--json` prints it as JSON, and `--filter` takes a name regex.
+- `/livez` and `/readyz` come from scalo's health pillar. `/readyz` stays 503 until ClickHouse accepts the configured user and answers reads of `system.tables` and `system.columns` for the configured database, and `pipeline_ready` reads 1 once it passes. Each refusal is logged with ClickHouse's code (516 for a wrong password) and retried on the `sink_stack` backoff, doubling from `sink_stack.min_backoff_ms` (100 ms) to `sink_stack.max_backoff_ms` (30 s) plus up to as much again in jitter. Until it passes the loader joins no consumer group and opens no gRPC listener, so a pod with a wrong password takes no partitions from the pods that can write. Kafka and the gRPC peer play no part in readiness.
+- A transport that cannot start, such as Kafka with no broker reachable, is retried on the same backoff, logged at `warn` and counted in `pipeline_retries_total{stage="transport_start"}`. A config the transport refuses exits, and one attempt can take the 10 s Kafka metadata timeout, so a shutdown may wait that long.
 
-## Hot-reload
-
-Config changes are picked up live. Fields that only affect the running pipeline
-(buffer thresholds, capture modes, routing) apply on the next batch. Fields baked into a connection or client at build time
-(`clickhouse.protocol`, ClickHouse URL/hosts, `insert_format`, TLS settings,
-Kafka connection, `routing.dlq`, `field_mapping`, `enrichment`) are restart-required: the reloader logs a warning naming the
-field and keeps the running value rather than applying a half-change. See
-[configuration.md](configuration.md#hot-reload).
+Hot-reload rules are in [configuration.md](configuration.md#hot-reload).
 
 ## When inserts fail
 
-The insert tail is built to degrade, not stall:
+The insert tail degrades rather than stalls:
 
-- **Batch salvage** -- a data error binary-splits the batch to isolate the bad
-  row(s); only those go to the DLQ, the good rows still land.
-- **Sink-down gate** -- a flush cycle in which every insert failed opens the
-  circuit gate on the scaling signal (`scaling_circuit_open`), which
-  zeroes the pressure KEDA reads: more pods cannot relieve a dead ClickHouse.
-  The next successful insert closes it. A failed insert never sends its batch to
-  the DLQ. The batch is held and retried (below).
-- **Schema-cache recovery** -- a drift error (a column added by an out-of-band
-  `ALTER`) invalidates the cached schema and the retry re-fetches and
-  re-encodes. Any server code outside the retry list (a busy server, the network, Keeper, the disk or object store under the table, or an operator fix such as a missing table or grant) is a refusal of the rows: against a table that has not changed it is the row's own data, never drift, so salvage dead-letters that row and the rest of the batch lands. See [clickhouse/schema-cache.md](clickhouse/schema-cache.md).
-- **One commit per flush cycle** -- Kafka offsets commit once per cycle, after the inserts and the DLQ hand-over. On each partition the commit stops below the lowest offset not placed yet: a buffered row, a row waiting on its schema, a failed batch, or a dead letter the DLQ refused. The loader holds a failed batch or refused dead letter and retries it with jittered backoff until it lands. A dead letter no DLQ backend can ever hold -- one over a Kafka-only DLQ's `message.max.bytes` as the DLQ writes it -- is dropped and counted in `pipeline_dead_letters_dropped_total{reason="too_large"}` instead, so it never holds a commit for good. A held batch whose table ClickHouse has since reported absent is retried against the default table, where new records for that table already go, and counted in `dfe_loader_unknown_table_fallback_total`. When a routing reload removes the source a batch is held for, the loader asks ClickHouse about its table at once, so the batch moves on the next retry, within about `buffer.flush_age_secs`. A table the routing still names is expected back and is not asked about. For any other dropped table the loader only learns it is gone when it next re-reads that table's schema, so until then the affected partition's commit stays below the held batch -- up to about `schema.cache_ttl_secs` (default 300 s) plus the 60 s schema refresh interval. Rows above the floor re-deliver as duplicates after a restart (at-least-once).
+- A data error binary-splits the batch down to the bad rows, which go to the DLQ, and the rest land.
+- A flush cycle in which every insert failed opens the circuit gate on the scaling signal (`scaling_circuit_open`), which zeroes the pressure KEDA reads, since more pods cannot relieve a dead ClickHouse. The next successful insert closes it. A failed insert never sends its batch to the DLQ.
+- A column dropped or retyped by an out-of-band `ALTER` is drift: the cached schema is dropped and the retry re-encodes against a fresh read. A server code on the retry list (a busy server, the network, Keeper, the disk or object store under the table, or an operator fix such as a missing table or grant) holds the batch. Any other code against a table that has not changed is the row's own data, so salvage dead-letters that row. See [clickhouse/schema-cache.md](clickhouse/schema-cache.md).
+- Kafka offsets commit once per cycle, after the inserts and the DLQ hand-over. On each partition the commit stops below the lowest offset not placed yet: a buffered row, a row waiting on its schema, a failed batch, or a dead letter the DLQ refused. The loader holds a failed batch or refused dead letter and retries it with jittered backoff until it lands. A dead letter over a Kafka-only DLQ's `message.max.bytes` is dropped and counted in `pipeline_dead_letters_dropped_total{reason="too_large"}`, so it never holds a commit for good. Rows above the floor re-deliver as duplicates after a restart.
+- A held batch whose table ClickHouse has since reported absent is retried against the default table and counted in `dfe_loader_unknown_table_fallback_total`. A routing reload that removes the batch's source makes the loader ask about its table at once. Any other dropped table is found gone at its next schema read, up to about `schema.cache_ttl_secs` plus the 60 s refresh interval, and the partition's commit stays below the held batch until then.
 
-## ClickHouse outages
-
-Readiness ignores an outage, since flipping it would pull every loader out of its Service at once. `clickhouse_connected` reports it: 1 once ClickHouse answered the startup probe or the latest insert, 0 once an insert went unanswered. An idle loader keeps its last reading.
-
-Failed batches are held. On Kafka their reservations grow until the memory governor pauses the assigned partitions. On gRPC a held Push is answered `UNAVAILABLE` and its sender retries.
+Readiness ignores an outage, since flipping it would pull every loader out of its Service at once. `clickhouse_connected` reports it: 1 once ClickHouse answered the startup probe or the latest insert, 0 once an insert went unanswered. On Kafka the held batches' reservations grow until the memory governor pauses the assigned partitions, and on gRPC a held Push is answered `UNAVAILABLE`.
 
 ## Rebalances
 
@@ -109,10 +77,7 @@ With `kafka.acknowledgements.enabled: false` offsets commit at receipt, so the b
 
 ## DLQ
 
-Dead-lettered messages go to the DLQ (Kafka primary, file fallback). Routing
-misses, unparseable payloads, and salvaged bad rows all land there with enough
-context to replay or inspect. DLQ and consumer errors are debounced in the logs
-so a burst does not flood.
+Dead-lettered messages go to the DLQ (Kafka first, file fallback, file only on gRPC). Payloads that are not JSON or fail processing, records whose schema never arrived within `schema.pending_max_age_secs`, and salvaged bad rows land there with their reason. A routing miss does not: it lands in the default table. DLQ and consumer errors are debounced in the logs so a burst does not flood.
 
 A JSON record nested deeper than 64 levels is dead-lettered as it arrives, before any stage parses it, with the reason `payload nesting exceeds the maximum parse depth of 64`, and counted on `validation_failures_total{reason="out_of_range"}`. A batch too deep to split goes to the DLQ whole. The bound is the one scalo's parse path uses.
 
@@ -130,4 +95,4 @@ The figure it checks is what the kernel charges the loader. That is the cgroup's
 
 ## Scaling
 
-The contract's ScaledObject scales on CPU and carries a disabled Kafka lag trigger, so raw consumer lag never scales the loader. In a DFE deployment, dfe-infra's values set the CPU target to 70%, add the scaling-pressure trigger (target 70, read through dfe-keda-shim) and a 120 s cooldown. The slim profile clears the pressure trigger, so slim scales on CPU alone. The engine's [KEDA scaling page](https://github.com/hyperi-io/dfe-engine/blob/main/docs/deployment/keda-scaling.md) covers the triggers for every app.
+The contract's ScaledObject scales on CPU and carries a disabled Kafka lag trigger, so raw consumer lag never scales the loader. In a DFE deployment, dfe-infra's values set the CPU target to 70% and add the scaling-pressure trigger (target 70, read through dfe-keda-shim). The cooldown is the contract's 300 s. The slim profile clears the pressure trigger, so slim scales on CPU alone. The engine's [KEDA scaling page](https://github.com/hyperi-io/dfe-engine/blob/main/docs/deployment/keda-scaling.md) covers the triggers for every app.

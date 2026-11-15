@@ -12,7 +12,7 @@
 
 dfe-loader has two knobs for how rows reach ClickHouse: `clickhouse.protocol`
 (how the bytes travel) and `clickhouse.insert_format` (how the rows are
-encoded). The default `http + row_binary` is the fast path; `json_each_row` is
+encoded). The default `http + row_binary` is the fast path, and `json_each_row` is
 a deliberate fallback. `protocol: native` runs the schema fetch, the queries and
 `row_binary` inserts over the native protocol through `dfe_clickhouse::TcpClient`.
 
@@ -21,11 +21,11 @@ flowchart TB
     ROW["Buffered rows<br/>Map&lt;String,Value&gt; + raw _json"]
     F{"insert_format"}
     T{"protocol"}
-    RBH["insert_formatted_with<br/>FORMAT RowBinaryWithDefaults (HTTP)"]
+    RBH["insert_formatted_with<br/>FORMAT RowBinaryWithNamesAndTypes (HTTP)"]
     RBT["TcpClient::insert_native<br/>FORMAT Native blocks (TCP)"]
     JE["insert_formatted_with<br/>FORMAT JSONEachRow (HTTP)"]
-    REJ["rejected at startup"]
-    CH[("ClickHouse")]
+    REJ["refused when the pipeline starts"]
+    CH[(ClickHouse)]
 
     ROW --> F
     F -->|row_binary| T
@@ -39,26 +39,16 @@ flowchart TB
 
 | `insert_format` | `protocol = http` | `protocol = native` |
 |-----------------|--------------------|----------------------|
-| `row_binary` (default) | `FORMAT RowBinaryWithDefaults` via `insert_formatted_with` | `FORMAT Native` blocks via `TcpClient::insert_native` |
-| `json_each_row` | `FORMAT JSONEachRow` via `insert_formatted_with` | rejected at `config-check` |
+| `row_binary` (default) | `FORMAT RowBinaryWithNamesAndTypes` via `insert_formatted_with` | `FORMAT Native` blocks via `TcpClient::insert_native` |
+| `json_each_row` | `FORMAT JSONEachRow` via `insert_formatted_with` | refused when the pipeline starts, not by `config-check` |
 
-The rejection is deliberate and surfaced early: JSONEachRow is an HTTP body
-format, and a native client has no HTTP insert endpoint for it. The guard lives
-in `ClickHouseConfig::validate()` and runs at orchestrator startup, so a bad
-combination fails the boot with a clear message rather than at first insert.
+The rejection is deliberate: JSONEachRow is an HTTP body format, and a native client has no HTTP insert endpoint for it. The guard lives in `ClickHouseConfig::validate()`, which the orchestrator runs before the readiness probe, so a bad combination stops the loader with a clear message rather than at first insert. `config-check` runs `Config::validate` only and passes it.
 
-A native block declares each column's type, so the server casts a value to a
-changed column type instead of refusing the batch the way the HTTP header check
-does (code 117). A column whose type `dfe_clickhouse` cannot declare in a block
-fails the insert and the batch is held. As of `dfe-clickhouse` 0.1.5 that
-includes a parameterised `JSON(max_dynamic_paths = N)` column.
+Both protocols check the cached schema against the table. Over HTTP the header declares each column's type and the server refuses a type the column no longer has (code 117). Over native the server answers the INSERT with the table's types, and the insert refuses a difference before sending a row. Either refusal reads as drift. A column whose type `dfe_clickhouse` cannot write fails the insert and the batch is held.
 
 ## Why RowBinary is the default
 
-RowBinary ships pre-typed bytes. The server does no JSON parse, no type
-inference -- it reads the column values straight off the wire in
-`system.columns` order. For a high-throughput loader that is the difference
-between ClickHouse spending CPU on ingest formatting and spending it on merges.
+RowBinary ships pre-typed bytes. The server parses no row text and infers no types for the typed columns, reading their values off the wire in the order the INSERT names them. A JSON column is the exception: its value travels as JSON text the server parses. For a high-throughput loader that is the difference between ClickHouse spending CPU on ingest formatting and spending it on merges.
 
 JSONEachRow is kept because it is self-describing and forgiving: the server
 coerces types and tolerates schema drift. That makes it the right tool for
@@ -68,16 +58,7 @@ the throughput choice.
 
 ## How RowBinary is produced
 
-The dynamic encoder in `dfe-clickhouse`'s `dynamic` module turns one
-`Map<String, Value>` plus its reflected `ColumnDef` schema into RowBinary, sent
-in 1 MiB chunks as one `INSERT INTO db.table (cols) FORMAT
-RowBinaryWithDefaults` per batch. The INSERT names every column the server takes
-a value for. A row that leaves out a defaulted column flags it, and the server
-fills its default (`_uuid`, `_timestamp_load`), so rows with differing columns share one
-INSERT. Over native a row that supplies a different set of defaulted columns
-starts a new INSERT.
-
-## JSON columns on the wire
+The dynamic encoder in `dfe-clickhouse`'s `dynamic` module turns one `Map<String, Value>` plus its reflected `ColumnDef` schema into RowBinary, sent in 1 MiB chunks as `INSERT INTO db.table (cols) FORMAT RowBinaryWithNamesAndTypes`. An INSERT names the required columns and the defaulted ones its rows supply, and the server fills the rest from their DEFAULT expressions (`_uuid`, `_timestamp_load`). Rows that supply a different set of defaulted columns go to an INSERT of their own: HTTP keeps up to four open at once, and over native a new set commits the rows before it. A row that supplies no column at all goes as `RowBinaryWithDefaults`.
 
 A JSON-typed column (including `_json`) is written as a length-prefixed string.
 On the RowBinary path the loader sets
@@ -89,9 +70,8 @@ and [types.md](types.md) for per-type encoding.
 
 ## When the schema drifts
 
-An insert can fail because the cached schema no longer matches the table (an
-`ALTER ... ADD COLUMN`, a type change). The crate classifies the server
-error: a drift signal (`TYPE_MISMATCH`, `NO_SUCH_COLUMN`, `CANNOT_PARSE`, code
+An insert can fail because the cached schema no longer matches the table: a column dropped or retyped by `ALTER`. An added column fails nothing, since the INSERT names its columns. The crate classifies the server
+error: a drift code (`TYPE_MISMATCH`, `NO_SUCH_COLUMN_IN_TABLE`, `CANNOT_PARSE_TEXT`, code
 117, and friends) surfaces as `DynamicError::SchemaMismatch`, and the cache is
 invalidated so the next attempt re-fetches from `system.columns` and re-encodes.
 A non-drift error (network, auth) is returned as-is. See
@@ -108,11 +88,7 @@ RowBinary is positional, so bytes encoded for a column's old type could parse as
 | `clickhouse.protocol` | `http`, `native` | `http` |
 | `clickhouse.insert_format` | `rowbinary` (aliases `row_binary`, `binary`), `jsoneachrow` (aliases `json_each_row`, `json`) | `rowbinary` |
 
-The canonical spellings are the ones `docs/config-schema.json` carries, and the
-aliases parse identically -- `row_binary` and `json_each_row` are the spellings
-this page used before the key was wired, so both keep working. `native` is not
-among them: it names a protocol this config rejects at boot, so accepting it as
-a format spelling would have one word mean two opposite things on one page.
+The canonical spellings are the ones `docs/config-schema.json` carries, and the aliases parse identically. `native` is refused as a format, because it names a protocol.
 
 Env form: `DFE_LOADER_CLICKHOUSE__INSERT_FORMAT=json_each_row`. The startup log
 line `Insert format configured format=...` reports the value that was applied.

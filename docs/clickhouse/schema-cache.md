@@ -48,15 +48,17 @@ required one. See [types.md](types.md).
 `DynamicSchemaCache` is a TTL map keyed by `database.table`, shared across
 insert tasks behind an `Arc`. It is lazy, not background-refreshed:
 
-- `get` returns the schema only if it was fetched within the TTL; an expired
+- `get` returns the schema only if it was fetched within the TTL, so an expired
   entry reads as a miss.
 - A miss triggers a fetch, and the result is inserted under the key.
-- `invalidate(table)` drops one entry; `invalidate_all` clears the map.
+- `invalidate(table)` drops one entry, and `invalidate_all` clears the map.
 
 Lazy TTL keeps the steady state cheap (no timer threads, no work for idle
 tables) while bounding how long a stale schema can persist after a benign
 `ALTER`. The TTL is set once when the cache is constructed, from
 `schema.cache_ttl_secs` (default 300 s).
+
+The loader keeps a second cache of the same read, `SchemaCache` in `src/clickhouse/schema.rs`, which decides the fields the header extractor promotes. Its entries live for `schema.cache_ttl_secs` too, and every 60 s a background task hands each entry within 30 s of expiry to the schema resolver, which re-reads its columns and comments together.
 
 ## Mismatch recovery
 
@@ -66,14 +68,11 @@ signal -- a code name such as `TYPE_MISMATCH`, `NO_SUCH_COLUMN` or
 `INCORRECT_DATA`, or a drift phrase such as "no such column" or "cannot
 parse" -- the table's cache entry is invalidated. The retry re-fetches from
 `system.columns` and re-encodes against the current schema. A non-drift error (network, auth, server down) is
-returned unchanged, so genuine outages are not mistaken for schema drift.
+returned unchanged, so an outage is not mistaken for schema drift.
 
-A row the server can never accept draws the same signals: an integer no ClickHouse integer type holds, in a JSON column, comes back as code 117 whatever the schema. So the server's code decides, never the words beside it, which echo the row. A code on the retry list in `src/clickhouse/error.rs` (`RETRY_CODES`: a busy or overloaded server, the network, replication and Keeper, the disk or object store under the table, and operator fixes such as a missing table or a refused login) holds the batch for another attempt. Any other code re-reads `system.columns`. A table unchanged since the rows were encoded makes the refusal the rows' own: the insert returns it as permanent, salvage isolates the bad row for the DLQ, and the rest land. A changed table is drift, recovered as above. `TOO_MANY_PARTS` for one INSERT over `max_partitions_per_insert_block` is a refusal, not a retry, because salvage's split is what lands it. A failure with no server code at all never reaches the DLQ.
+A row the server can never accept draws the same signals: an integer no ClickHouse integer type holds, in a JSON column, comes back as code 117 whatever the schema. So the server's code decides, never the words beside it, which echo the row. A code on the retry list in `src/clickhouse/error.rs` (`RETRY_CODES`: a busy or overloaded server, the network, replication and Keeper, the disk or object store under the table, and operator fixes such as a missing table or a refused login) holds the batch for another attempt. Any other code re-reads `system.columns`. A table unchanged since the rows were encoded makes the refusal the rows' own: the insert returns it as permanent, salvage isolates the bad row for the DLQ, and the rest land. A changed table is drift, recovered as above. `TOO_MANY_PARTS` for one INSERT over `max_partitions_per_insert_block` is a refusal, not a retry, because salvage's split is what lands it. A server failure with no code never reaches the DLQ. Only the encoder's own refusal of a value does, since it holds the schema it read the value against.
 
-This is the fix trail for the schema-cache-miss class of bug: a column added by
-an out-of-band `ALTER` no longer fails every insert to that table until a restart -- the first
-rejected insert clears the stale entry and the retry succeeds against the new
-schema.
+A column dropped or retyped by an out-of-band `ALTER` fails one attempt: the rejection clears the stale entry and the retry succeeds against the new schema. An added column fails nothing, since the INSERT names its columns, and it fills once the cached schema refreshes.
 
 `schema.refresh_on_error` (default `true`) switches this recovery. With `false`
 a drift error leaves both the encoder's entry and the loader's cached schema in

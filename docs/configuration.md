@@ -15,7 +15,7 @@ dfe-loader reads its config in four layers. Higher layers win. Every setting has
 ```mermaid
 flowchart TB
     FLAT["1. Flat ENV (DFE_LOADER_CLICKHOUSE_HOSTS=a:8123,b:8123)"]
-    ENV["2. Nested ENV (DFE_LOADER_CLICKHOUSE__PROTOCOL=http), ./.env included"]
+    ENV["2. Nested ENV (DFE_LOADER_CLICKHOUSE__PROTOCOL=http)"]
     YAML["3. The YAML file --config or DFE_LOADER_CONFIG names, else ./config.yaml"]
     HARD["4. hard-coded defaults"]
     FLAT --> ENV --> YAML --> HARD
@@ -25,13 +25,9 @@ Nested ENV names are derived from the key: `clickhouse.protocol` -> `DFE_LOADER_
 
 A file that `--config` or `DFE_LOADER_CONFIG` names must exist. A missing one refuses startup rather than running on the defaults.
 
-Only the `.env` in the working directory is read. A `.env` in a parent directory belongs to another project and is never loaded.
+A `.env` is read only when `--config` names no file, and then only the one in the working directory, into the environment the two ENV layers read. A `.env` in a parent directory belongs to another project and is never loaded.
 
-The scaling gate (`scaling.enabled`, `scaling.memory_gate_threshold`) is read by
-scalo's own cascade, which discovers `defaults.yaml` / `settings.yaml` but never
-the file named by `--config`, so set it with `DFE_LOADER_SCALING__ENABLED` and
-`DFE_LOADER_SCALING__MEMORY_GATE_THRESHOLD`. A value for it in the `--config`
-file drives the loader's own weights and is reported as a mismatch at startup.
+scalo's own cascade, which builds the scaling engine KEDA reads, takes the `--config` file and the nested ENV form too (`DFE_LOADER_SCALING__ENABLED` or `DFE_LOADER__SCALING__ENABLED`), so `scaling.enabled` and `scaling.memory_gate_threshold` set either way reach it.
 
 > A config value is only useful if the ACTION matches it. The integration tests
 > assert the observable outcome (the row written, the transport used), not just
@@ -44,9 +40,9 @@ file drives the loader's own weights and is reported as a mismatch at startup.
 | Setting | Values | Effect |
 |---------|--------|--------|
 | `clickhouse.protocol` | `http` (default), `native` | HTTP (8123), HTTPS (8443), or the native protocol (9000, 9440 with TLS) through `dfe_clickhouse::TcpClient` |
-| `clickhouse.insert_format` | `row_binary` (default), `json_each_row` | binary (server skips JSON parsing) vs self-describing JSON |
-| `clickhouse.hosts` | list | `native` fails over across every host, round-robin. `http` uses the first host only. With TLS, `native` verifies every host against the first one's name |
-| `clickhouse.database` | string, `dfe` (default) | database the connection targets -- DDL, schema reflection, and any table name that arrives without a `db.` prefix |
+| `clickhouse.insert_format` | `row_binary` (default), `json_each_row` | binary, so the server parses no row text, vs self-describing JSON |
+| `clickhouse.hosts` | list | `native` fails over across every host, round-robin. `http` uses the first host only. With TLS, `native` verifies each host against its own name |
+| `clickhouse.database` | string, `dfe` (default) | database the connection opens on, and the one the readiness probe reads `system.tables` and `system.columns` for |
 
 `clickhouse.database` is the CONNECTION database and is separate from
 `routing.default_db` (also `dfe`), which is the database a routed row lands in.
@@ -54,12 +50,12 @@ Both are cascade-overridable like any other setting -- `DFE_LOADER_CLICKHOUSE__D
 or `clickhouse.database` in yaml.
 
 The protocol and format compose. The default `http + row_binary` is the fast
-path; `json_each_row` is the diagnostic fallback:
+path, and `json_each_row` is the diagnostic fallback:
 
 | `insert_format` | `protocol = http` | `protocol = native` |
 |-----------------|-------------------|---------------------|
-| `row_binary` (default) | `insert_formatted_with` FORMAT RowBinaryWithDefaults | `FORMAT Native` blocks over the native protocol |
-| `json_each_row` | `insert_formatted_with` FORMAT JSONEachRow | refused at startup |
+| `row_binary` (default) | `insert_formatted_with` FORMAT RowBinaryWithNamesAndTypes | `FORMAT Native` blocks over the native protocol |
+| `json_each_row` | `insert_formatted_with` FORMAT JSONEachRow | refused when the pipeline starts, not by `config-check` |
 
 See [clickhouse/insert-formats.md](clickhouse/insert-formats.md).
 
@@ -69,7 +65,7 @@ HTTPS verifies the server's certificate and host name against the container's sy
 
 | Setting | Values | Effect |
 |---------|--------|--------|
-| `clickhouse.tls.enabled` | bool | HTTPS for the connection. When `clickhouse.tls` is absent, a host on 8443/9440 or under `clickhouse.cloud` turns it on |
+| `clickhouse.tls.enabled` | bool | TLS for the connection: HTTPS, or native TLS. When `clickhouse.tls` is absent, a host on 8443/9440 or under `clickhouse.cloud` turns it on |
 | `clickhouse.tls.ca_cert_file`, `cert_file`, `key_file`, `skip_verify` | -- | refused at startup: no client reads them |
 
 See [clickhouse/tls.md](clickhouse/tls.md).
@@ -79,12 +75,12 @@ See [clickhouse/tls.md](clickhouse/tls.md).
 | Setting | Default | Bounds |
 |---------|---------|--------|
 | `clickhouse.connect_timeout_ms` | `5000` | opening a TCP connection |
-| `clickhouse.request_timeout_ms` | `60000` | the first try of every query (schema reads, health), and an insert waiting to hand over its next chunk. A query that times out doubles the bound for the next one, up to 300 s, so a slow but working ClickHouse still answers; a quick answer narrows it again |
+| `clickhouse.request_timeout_ms` | `60000` | the first try of every query (schema reads, health), and an insert waiting to hand over its next chunk. A query that times out doubles the bound for the next one, up to 300 s, so a slow but working ClickHouse still answers. A quick answer narrows it again |
 | `clickhouse.insert_timeout_ms` | `60000` | an insert waiting for the server's answer once its rows are sent |
 
-A timed-out insert is held and sent again on a later flush, and its Kafka offset stays uncommitted until it lands. 60 s is about 270x the ClickHouse CPU cost of the largest default flush (20,000 rows at a measured 91,000 rows per CPU-second), and two rounds of timed-out concurrent inserts still fit Kafka's 300 s `max.poll.interval.ms`, which a blocked flush cycle counts against. Through a full outage the query bound widens, so an insert that first has to read its table's schema can hold one flush cycle past that limit; the consumer then rejoins with the batch's offsets still uncommitted.
+A timed-out insert is held and sent again on a later flush, and its Kafka offset stays uncommitted until it lands. Two rounds of timed-out concurrent inserts still fit the 300 s `max.poll.interval.ms` scalo's Kafka transport sets by default, which a blocked flush cycle counts against. Through a full outage the query bound widens, so an insert that first has to read its table's schema can hold one flush cycle past that limit, and the consumer then rejoins with the batch's offsets still uncommitted.
 
-Idle connections close on the client side after 2 s.
+Idle HTTP connections close on the client side after 2 s.
 
 ### Capture (what gets stored)
 
@@ -93,6 +89,8 @@ Idle connections close on the client side after 2 s.
 | `metadata.capture_mode` | `full` (default), `json_only`, `raw_only`, `extracted_only` | `_json` + `_raw` population -- see [architecture.md](architecture.md#capture-modes) |
 | `metadata.table_capture_modes` | map | per-table override of `capture_mode` |
 | DDL `@capture_mode: <mode>` | comment tag | highest-priority override, per table |
+| `metadata.capture_raw` | `true` (default), `false` | whether `metadata.raw_source_fields` may fill `_raw` |
+| `metadata.capture_json` | -- | read by nothing: `capture_mode` decides `_json`, unless a directive on the column fills it ([pipeline/capture-modes.md](pipeline/capture-modes.md)) |
 
 Precedence, highest wins: **DDL tag > per-table > global**.
 
@@ -101,7 +99,7 @@ Precedence, highest wins: **DDL tag > per-table > global**.
 | Setting | Effect |
 |---------|--------|
 | `routing.table_fields` | fields whose value sets the table (dot-notation for nested). A null or empty value counts as absent |
-| `routing.default_db` / `default_table` | fallbacks when no field matches |
+| `routing.default_db` / `default_table` | where a record lands when neither a field nor its topic names a table, or the table it names does not exist |
 | `routing.org_id_field` / `default_org_id` | where the `_org_id` tenant is read from, and the tenant a record with none lands in (`default`) |
 | `routing.org_routes` | per-org database routing, keyed on the tenant |
 | `routing.external_topics` | topics an external pipeline writes directly. A record there keeps its `_org_id` and `_source` only when they are the source's own or on the topic's allow-list ([routing](pipeline/routing.md#external-pipeline-topics)) |
@@ -132,19 +130,17 @@ The gRPC transport reads no Kafka topic, so a gRPC loader loads no dead letters 
 | `geoip`, `enrichment.reputation` / `risk_scoring` | inject enriched columns on the promoted row -- see [pipeline/enrichment.md](pipeline/enrichment.md) |
 | `buffer.flush_rows` / `flush_bytes` / `flush_age_secs` | per-table flush triggers: 20000 rows, the rows' input bytes reaching 64 MiB, or 5 s since the last flush, whichever comes first |
 
-Insert retry, batch salvage and insert concurrency are not settings. Every build retries a transient insert failure up to 5 times with jittered backoff, binary-splits a batch with a data error down to the bad rows, and runs at most 8 inserts at once. A batch that still fails is held and retried as described in [operations.md](operations.md).
+Insert retry, batch salvage and insert concurrency are not settings. Every build binary-splits a batch with a data error down to the bad rows and runs at most 8 inserts at once. Inside one flush a RowBinary insert retries up to 5 times with jittered backoff only to re-read a stale, missing or unreadable schema, and a JSONEachRow insert retries a transient failure the same way. A timeout, a dropped connection or a retryable server code returns the batch at once, and the held batch is retried as described in [operations.md](operations.md).
 
 `schema.refresh_on_error` (default `true`) decides whether a RowBinary insert that fails on schema drift drops the table's cached schema. With `false` the stale schema is kept until it expires -- see [clickhouse/schema-cache.md](clickhouse/schema-cache.md#mismatch-recovery).
 
 ## Hot-reload
 
-Config hot-reloads on change: `hot_reload.enabled` is on unless set false, and the loader watches the file `--config` names. Some fields are safe to apply live. The rest require a restart and are logged as a warning rather than silently applied:
+Config hot-reloads on change: `hot_reload.enabled` is on unless set false, and the loader watches the file `--config` or `DFE_LOADER_CONFIG` names. Some fields are safe to apply live. A change to most others is logged as a restart warning and the running value kept:
 
-- **Restart-required:** `clickhouse.protocol`, ClickHouse URL/hosts,
-  `clickhouse.insert_format`, `clickhouse.tls.enabled`, the
-  `clickhouse.*_timeout_ms` bounds, Kafka connection -- all of these are baked
-  into the `Client` at build time. Also `routing.dlq`, `dlq_load`, `field_mapping` and `enrichment`, which are built once at startup.
-- **Safe to reload:** buffer thresholds, `metadata` (capture modes included), `timestamp_dq`, `field_sanitization`, and `routing` other than `routing.dlq`.
+- Safe to reload: buffer thresholds, `metadata` (capture modes included), `timestamp_dq`, `field_sanitization`, and `routing` other than `routing.dlq`.
+- Restart-required, with a warning: `transport`, `kafka`, `grpc`, `clickhouse` (protocol, hosts, `insert_format`, TLS and the timeouts are built into the client), `payload`, `metrics`, `logging`, `scaling`, `hot_reload`, `schema`, `geoip`, `computed_columns`, `column_directives`, `routing.dlq`, `dlq_load`, `field_mapping` and `enrichment`.
+- Restart-required, with no warning: `memory` and `batch_processing`. scalo's runtime builds the memory guard and the batch engine from them once, at startup (`ServiceRuntime` in scalo-rs `src/cli/runtime.rs`).
 
 On Kubernetes the deployment contract lists `routing` in `hot_paths`, so the chart leaves it out of the pod's config checksum. A `routing` edit reaches the running pods through the refreshed ConfigMap, and an edit anywhere else still rolls them.
 

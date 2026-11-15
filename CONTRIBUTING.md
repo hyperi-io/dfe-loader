@@ -31,7 +31,7 @@ versioning and changelog generation. All commits must follow this format:
 | `build` | Changes to build system or dependencies | None |
 | `ci` | Changes to CI configuration | None |
 | `chore` | Other changes that don't modify src or test files | None |
-| `revert` | Reverts a previous commit | Varies |
+| `revert` | Reverts a previous commit | Patch (0.0.X) |
 
 ### Breaking Changes
 
@@ -67,17 +67,16 @@ affected (e.g., `api`, `auth`, `core`, `cli`, `docs`).
 
 This project follows [Semantic Versioning 2.0.0](https://semver.org/):
 
-- **MAJOR** (X.0.0): Breaking changes that require users to modify their code
-- **MINOR** (0.X.0): New features that are backwards-compatible
-- **PATCH** (0.0.X): Bug fixes and minor improvements
+- MAJOR (X.0.0): breaking changes that require users to modify their code
+- MINOR (0.X.0): new features that are backwards-compatible
+- PATCH (0.0.X): bug fixes and minor improvements
 
 Versions are automatically determined by semantic-release based on commit
 messages. Do not manually update version numbers.
 
 ## Developer Certificate of Origin
 
-This project uses the Developer Certificate of Origin (DCO) to ensure that
-contributors have the right to submit their contributions.
+This project uses the Developer Certificate of Origin (DCO), in which each contributor certifies the right to submit their contribution.
 
 By making a contribution to this project, you certify that:
 
@@ -133,11 +132,13 @@ anniversary of its release.
 
 ## How to Contribute
 
-1. **Fork the repository** and create your branch from `main`
-2. **Make your changes** following the commit message format above
-3. **Sign off your commits** with the DCO
-4. **Test your changes** to ensure they work as expected
-5. **Submit a pull request** with a clear description of what you've done
+1. Fork the repository and create your branch from `main`
+2. Make your changes following the commit message format above
+3. Sign off your commits with the DCO
+4. Test your changes to ensure they work as expected
+5. Submit a pull request with a clear description of what you've done
+
+If you have questions about contributing, please open an issue or contact us.
 
 ### Pull Request Checklist
 
@@ -165,25 +166,18 @@ surviving CI.
 
 ## CI/CD Workflow
 
-When your pull request is merged to `main`:
+A merge to `main` releases nothing on its own. CI validates the merge, and publishes only when the merge commit carries a `Release: true` trailer (`hyperi-ci push --release` adds it) or someone dispatches a release of `main` (`hyperi-ci release`). A release then runs in order:
 
-1. **semantic-release** analyses commit messages since the last release
-2. Determines the next version number based on commit types
-3. Generates/updates the CHANGELOG
-4. Creates a new GitHub release with release notes
-5. Publishes the package (if applicable)
-
-This happens automatically - no manual intervention required.
-
-## Questions
-
-If you have questions about contributing, please open an issue or contact us.
+1. semantic-release analyses the commit messages since the last release
+2. It picks the next version from the commit types
+3. It renders CHANGELOG.md and tags HEAD
+4. hyperi-ci creates the GitHub release and publishes the image and chart
 
 ## Context
 
 ### What this is
 
-dfe-loader writes rows into ClickHouse -- the last hop of the DFE core data path and the only component that writes there.
+dfe-loader writes the data path's records into ClickHouse, the last hop of the DFE core data path.
 
 NOT a transform stage, NOT a schema manager. Its only outbound topic is the DLQ. dfe-engine creates the destination tables, and the loader holds records pending schema rather than issuing DDL. The dynamic insert comes from `dfe-clickhouse`'s `dynamic` module, because the `clickhouse` crate keeps insertion compile-time typed.
 
@@ -193,9 +187,10 @@ NOT a transform stage, NOT a schema manager. Its only outbound topic is the DLQ.
 |------|-------|
 | `src/main.rs`, `src/config/` | CLI entry, config structs, `Config::validate()`, flat env |
 | `src/pipeline/` | Orchestrator and per-message processor -- the hot path |
-| `src/routing/`, `src/transform/`, `src/enrich/` | Routing, coercion and capture, enrichment |
+| `src/routing/`, `src/transform/`, `src/enrich/` | Routing, the header extractor, field mapping, computed columns and timestamp checks, and the enrichment lookups |
+| `src/payload/`, `src/kafka/`, `src/column_meta/`, `src/schema/`, `src/metrics/` | The JSON gate and batch split, the transport adapters, column directives, table tags, metrics |
 | `src/buffer/`, `src/clickhouse/` | Per-table buffers, and the query client, schema cache and inserter |
-| `tests/` | `smoke.rs`, `integration/`, `e2e/` -- see `tests/TESTING.md` |
+| `tests/` | `smoke.rs`, `integration_tests.rs` (`integration/`, `e2e/`, `unit/`) -- see `tests/TESTING.md` |
 
 ### Commands that prove a change
 
@@ -203,11 +198,11 @@ NOT a transform stage, NOT a schema manager. Its only outbound topic is the DLQ.
 make check                                  # hyperi-ci check -- the full local gate
 cargo nextest run --lib                     # unit, no infra
 cargo nextest run --test smoke              # startup smoke, no infra
-cargo nextest run --test integration_tests  # integration, some cases need ClickHouse
-cargo nextest run -- --ignored              # e2e, needs Kafka AND ClickHouse
+cargo nextest run --features testcontainers # core, Docker for the shared ClickHouse and Kafka
+cargo nextest run --features testcontainers --run-ignored all --ignore-default-filter  # full
 ```
 
-Green lies three ways: `skip_if_no_clickhouse!()` and `skip_if_no_kafka!()` return early and PASS when the datastore or broker is absent, the e2e suite is `#[ignore]` so a plain run never touches the real insert path, and `default = []` compiles a feature-gated test out while CI still reports green. `ci.yml` sets `paths-ignore` for `docs/**` and `**.md`, so a docs-only push runs no jobs.
+Green lies three ways. `require_clickhouse!()` returns early, and the test passes, when no ClickHouse is named and the build lacks `--features testcontainers`, or when a named one does not answer outside CI. The e2e and other real-server tests run only in the full tier. And `default = []` compiles a feature-gated test out while the run still reports green. `ci.yml` sets `paths-ignore` for `docs/**` and `**.md`, so a docs-only push runs no jobs, though its pull request still runs CI.
 
 ### What tends to bite
 
@@ -215,22 +210,23 @@ Green lies three ways: `skip_if_no_clickhouse!()` and `skip_if_no_kafka!()` retu
 |-------|----|-----|
 | Bump scalo and leave `release.helm.library` behind | Move `release.helm.library` in `.hyperi-ci.yaml` to the same scalo version | The release assembles the chart from the emitted contract on that scalo-service version, and a scalo-service release ships the schema for only the contract version its scalo release writes |
 | Gate a test behind a cargo feature without adding it to `.hyperi-ci.yaml` | Add `default,<feature>` to the feature-set list | `default = []` (`Cargo.toml`), so it compiles out of every CI run and CI still reports green. `helm_contract.rs:64` asserts `transport-memory` and `testcontainers` stay listed |
-| Inject a nested config key as `DFE_LOADER_SECTION_FIELD` | `DFE_LOADER__SECTION__FIELD` | figment strips exactly `DFE_LOADER_` and the double underscore separates nested keys. A single-underscore nested name matches no field and is dropped, which `tests/integration/config_reachability.rs` checks |
-| Set `clickhouse.protocol: native` with `insert_format: json_each_row` | `rowbinary` over native, or `http` for JSONEachRow | JSONEachRow is an HTTP body format. `validate()` rejects the pair by name |
+| Inject a nested config key as `DFE_LOADER_SECTION_FIELD` | `DFE_LOADER__SECTION__FIELD` or `DFE_LOADER_SECTION__FIELD` | `__` separates nested keys. A name with single underscores reaches only a key the flat list names (`apply_flat_env` in `src/config/loader.rs`), and anything else matches no field and is dropped. `tests/integration/config_reachability.rs` checks both nested spellings |
+| Set `clickhouse.protocol: native` with `insert_format: json_each_row` | `rowbinary` over native, or `http` for JSONEachRow | JSONEachRow is an HTTP body format. `ClickHouseConfig::validate()` refuses the pair by name when the pipeline starts, and `config-check` does not catch it |
 | Name `clickhouse.tls.ca_cert_file`, `cert_file`, `key_file` or `skip_verify` | Set `tls.enabled`, mount the CA into the trust store | Only `enabled` reaches a client, and `validate()` rejects the certificate-file and `skip_verify` keys by name |
-| Widen the `cel` range past scalo's | Keep it on `>=0.14.5, <0.15` | `cel::Program` crosses the scalo boundary. Wider resolves two semver-incompatible `cel` crates and `Program` stops being the same type (`Cargo.toml:46-51`) |
+| Widen the `cel` range past scalo's | Keep it on scalo's range, beside the `cel` entry in `Cargo.toml` | `cel::Program` crosses the scalo boundary. Wider resolves two semver-incompatible `cel` crates and `Program` stops being the same type |
 | Take `clickhouse` from git or a `[patch]` | The crates.io release | `deny.toml` allows no git source, and `dfe-clickhouse` builds against the published `clickhouse` only |
-| Mechanically sync dfe-engine's loader validation to `Config::validate()` | Read both, keep the divergence | dfe-engine scopes the broker check to the Kafka transport and adds a `grpc.listen` check this side lacks. A blind sync rejects valid gRPC-only configs at author time |
+| Change a config key and leave `docs/config-schema.*` behind | `dfe-loader config-schema --dir docs` | `test_config_artifacts_do_not_drift` fails on a stale schema, and dfe-engine authors loader configs from the schema the contract carries |
 
 ### Where this sits
 
 Inbound, declared in `dfe-infra/suite.yaml`:
 
-- **scalo-rs -> dfe-loader** (`cargo-dep`) -- `Cargo.toml:37` takes `scalo` by range for transports, config cascade, CLI, metrics, deployment contract and DLQ. A scalo release reaches this repo here.
-- **scalo-rs -> dfe-loader** (`generated-file`, lockstep) -- `Dockerfile` is emitted by `scalo::deployment::generate_dockerfile()` at schema version 4. Regenerate and commit the diff.
+- scalo-rs -> dfe-loader (`cargo-dep`): `Cargo.toml` takes `scalo` by range for transports, config cascade, CLI, metrics, deployment contract and DLQ. A scalo release reaches this repo here.
+- scalo-rs -> dfe-loader (`generated-file`, lockstep): `Dockerfile` is emitted by `scalo::deployment::generate_dockerfile()` at the schema version its header names. Regenerate with `dfe-loader --emit-dockerfile` and commit the diff.
+
 Outbound, so what a change here can break:
 
-- **dfe-loader -> dfe-infra** (`image-pin`, lockstep) -- `dfe-infra/versions.yaml` pins this image and the thin chart released here, and Argo deploys that published chart.
-- **dfe-loader -> dfe-engine** (`mirrored-logic`) -- dfe-engine hand-reimplements this repo's config validation in `plugins_builtin/loader.py` to catch errors when it authors a config. Nothing is copied, so no script compares them.
+- dfe-loader -> dfe-infra (`image-pin`, lockstep): `dfe-infra/versions.yaml` pins this image and the thin chart released here, and Argo deploys that published chart.
+- dfe-loader -> dfe-engine: dfe-engine takes a loader config's defaults, types and descriptions from the `config-schema.json` this repo's contract carries (dfe-engine `src/dfe_engine/appmgmt/contract.py`).
 
-Runtime, not build edges: dfe-engine's `dfe-schema` entry point creates every destination table before the loader can insert, and producers reach the loader over Kafka (`*_land` / `*_load` topics) or direct gRPC (default topic `main_land`) -- in the suite that producer is dfe-receiver.
+Runtime, not build edges: dfe-engine applies the dfe-schemas manifest at boot, creating every destination table before the loader can insert. Producers reach the loader over Kafka or direct gRPC (default topic `main_land`): in the suite dfe-receiver and dfe-fetcher produce `*_land` topics, the transforms produce `*_load`, and dfe-receiver and the transforms push over gRPC.

@@ -21,13 +21,13 @@ flowchart LR
     R["dfe-receiver<br/>(gRPC client)"]
     T["transform<br/>(client and server)"]
     L["dfe-loader<br/>(gRPC server)"]
-    CH[("ClickHouse")]
+    CH[(ClickHouse)]
 
     R -->|Push| L
     R -->|Push| T
     T -->|Push| L
     L --> CH
-    L -.PushResponse = answer.-> R
+    L -.->|PushResponse is the answer| R
 ```
 
 ## How the loader answers a Push
