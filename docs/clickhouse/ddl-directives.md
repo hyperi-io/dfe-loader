@@ -59,13 +59,15 @@ flowchart LR
     class skip,found decision
 ```
 
-*Figure 1. L4 Detail -- Column directive resolution. `_org_id`, `_timestamp` and `_timestamp_received` read fixed fields first and skip this path.* Up: [ClickHouse insert layer](README.md).
+*Figure 1. L4 Detail -- Column directive resolution. `_org_id` and `_timestamp` read fixed fields and skip this path.* Up: [ClickHouse insert layer](README.md).
+
+`_timestamp_received` reads the first hop's edge stamp, then falls back to the paths its `@source` lists.
 
 `@generated` and `@config` sit outside the loader's directive dispatch: the loader parses neither. They are notes an author leaves in the comment, and the mechanism sits elsewhere, covered under each heading below. A column ClickHouse fills itself, through a DEFAULT, MATERIALIZED or ALIAS clause, can be left out of the row whatever its comment says.
 
 ### @skip and @default
 
-`@skip` leaves the column out of every row the loader builds, the three header columns above aside. `@default: value` fills a column when every path it reads is absent or null: a scalar literal, or `now()`, `uuid()` or `topic_name` resolved per row. Each directive has a config twin in `column_directives`: `global.<column>` for every table and `tables."<db>.<table>".<column>` for one. Config wins over the column comment.
+`@skip` leaves the column out of every row the loader builds, `_org_id`, `_timestamp` and `_timestamp_received` aside. `@default: value` fills a column when every path it reads is absent or null: a scalar literal, or `now()`, `uuid()` or `topic_name` resolved per row. Each directive has a config twin in `column_directives`: `global.<column>` for every table and `tables."<db>.<table>".<column>` for one. Config wins over the column comment.
 
 ```yaml
 column_directives:

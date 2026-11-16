@@ -93,7 +93,7 @@ An object source passes through untouched, so `_tags` holding `{"list": [...]}` 
 
 A payload the header pass cannot read -- not JSON, not a JSON object, or a valid object matching no column in the table -- goes to the DLQ rather than landing as a row of type defaults with no `_source` and no `_tags`. Each rejection is counted in `dfe_loader_header_pass_skipped_total`, and an ERROR names the table and the reason at most once a minute. The table name stays out of the metric's labels: it comes from a payload field with no allowlist, so labelling it would let untrusted input grow the label set without bound.
 
-Under `full` or `json_only`, a table with a `_json` column and no directive on it keeps the whole payload, so a field no column holds is still stored. A table without one, such as dfe-hyperdx's tables, keeps its columns and nothing else. Each top-level field that lands nowhere counts `dfe_loader_fields_unstored_total`, and a WARN names the table and the fields at most once a minute. DFE's `_` header fields are not counted.
+Under `full` or `json_only`, a table with a `_json` column and no directive on it keeps the whole payload, so a field no column holds is still stored. A table without one, such as dfe-hyperdx's tables, keeps its columns and nothing else. Each top-level field that lands nowhere counts `dfe_loader_fields_unstored_total`, and a WARN names the table and the fields at most once a minute. DFE's `_` header fields are not counted. A `raw_only` or `extracted_only` table with a `_json` column counts nothing either, because the check asks whether the table has the column, though `_json` is not written there.
 
 ## The profiles
 
