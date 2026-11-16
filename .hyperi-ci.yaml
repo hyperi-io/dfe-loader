@@ -8,7 +8,6 @@ classification: product
 
 language: rust
 
-# Quality checks
 quality:
   enabled: true
   # osv-scanner does not read deny.toml, so its ignores repeat here.
@@ -29,7 +28,6 @@ quality:
       # Without it the transport-adapter suite is compiled out. helm_contract.rs asserts it stays.
       - "default,transport-memory"
 
-# Testing
 test:
   enabled: true
   coverage: true
@@ -41,7 +39,6 @@ test:
   full:
     required_for_release: true
 
-# Building
 build:
   enabled: true
   strategies:
@@ -59,8 +56,7 @@ build:
       - x86_64-unknown-linux-gnu
       - aarch64-unknown-linux-gnu
 
-# Release (where the artefacts go). The thin chart is assembled from the
-# emitted contract and ships beside the image.
+# docs/deployment/publishing.md describes the release artefacts.
 release:
   enabled: true
   # Keep `library` at the scalo version in Cargo.toml: the library renders only the contract version its scalo release writes.

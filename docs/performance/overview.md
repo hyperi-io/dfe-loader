@@ -12,22 +12,32 @@
 
 Performance work splits in two: build-time optimisations (allocator, LTO, PGO, BOLT) that hyperi-ci applies, and runtime tuning (batch sizes) that lives in config. This page covers both, plus the tools for finding where the time goes.
 
+The build-time choices go into the binary once, and the batch settings tune the running loader without a rebuild.
+
 ```mermaid
-flowchart TB
-    subgraph Build["Build-time (hyperi-ci)"]
-        ALLOC["jemalloc allocator"]
-        LTO["LTO (thin/fat)"]
-        PGO["PGO"]
-        BOLT["BOLT (after PGO)"]
+flowchart LR
+    accTitle: L4 Detail -- Where performance is set
+    accDescr: hyperi-ci builds the binary with jemalloc, LTO, and on release PGO then BOLT. The batch flush settings in config tune the running loader.
+
+    subgraph build["Build-time, hyperi-ci"]
+        direction LR
+        jemalloc["jemalloc"] ~~~ lto["LTO"] ~~~ pgo["PGO"] ~~~ bolt["BOLT"]
     end
-    subgraph Runtime["Runtime (config)"]
-        BATCH["Batch sizes<br/>flush_rows / flush_bytes / flush_age_secs"]
-    end
-    BIN["Optimised binary"]
-    ALLOC & LTO & PGO & BOLT --> BIN
-    BIN --> RUN["Running loader"]
-    BATCH --> RUN
+
+    binary["Optimised binary"]
+    batch["Batch settings<br/>in config"]
+    loader(["Running loader"])
+
+    build --> binary
+    binary --> loader
+    batch --> loader
+
+    classDef default fill:#F8FAFC,stroke:#64748B,stroke-width:1px,color:#0F172A
+    classDef group fill:none,stroke:#64748B,stroke-width:1px,stroke-dasharray:2 4
+    class build group
 ```
+
+*Figure 1. L4 Detail -- Where performance is set. BOLT runs on the PGO build.* Up: [Performance](README.md).
 
 ## What CI builds
 
@@ -39,11 +49,9 @@ hyperi-ci picks the optimisations by release channel (`src/hyperi_ci/languages/r
 | beta | jemalloc | fat | no |
 | release | jemalloc | fat | PGO when the repo has a workload, BOLT with it unless `build.rust.optimize.bolt.enabled: false` |
 
-This repo's workload is `scripts/pgo-workload.sh`, and `.hyperi-ci.yaml` builds its `pgo-driver` before the workload clock starts. The workload must exercise the real hot path: parse, transform, serialise and insert. Port checks, health probes and startup paths mislead the compiler and can make PGO a net loss. Confirm what shipped from the published artefact, not from the build log. hyperi-ci's guide is `docs/runtime/pgo-bolt.md` in its repo.
+This repo's workload is `scripts/pgo-workload.sh`, and `.hyperi-ci.yaml` builds its `pgo-driver` before the workload clock starts. The workload must exercise the hot path a running loader takes: parse, transform, serialise and insert. Port checks, health probes and startup paths mislead the compiler and can make PGO a net loss. Confirm what shipped from the published artefact, not from the build log. hyperi-ci's guide is `docs/runtime/pgo-bolt.md` in its repo.
 
 `Cargo.toml` sets `lto = "thin"` and `codegen-units = 1` for `release`, and CI overrides the LTO mode per channel through `CARGO_PROFILE_RELEASE_LTO`, leaving `Cargo.toml` untouched.
-
-## The allocator
 
 The `jemalloc` feature installs `tikv-jemallocator` as the `#[global_allocator]` in `src/main.rs`. `default = []`, so a local build opts in:
 
@@ -69,7 +77,7 @@ strings target/release/dfe-loader | grep -ciE 'jemalloc|je_mallctl'
 
 Insert concurrency is not a setting: at most 8 inserts run at once. RowBinary over HTTP (`FORMAT RowBinaryWithNamesAndTypes`) is the default, and `clickhouse.protocol: native` sends `FORMAT Native` blocks instead. dfe-clickhouse's [insert-formats.md](https://github.com/hyperi-io/dfe-clickhouse-rs/blob/main/docs/insert-formats.md) measures the two against each other. `insert_format: json_each_row` falls back to `FORMAT JSONEachRow` over HTTP.
 
-## Profiling
+To find where the time goes:
 
 ```bash
 # CPU, with perf

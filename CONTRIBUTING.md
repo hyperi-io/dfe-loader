@@ -101,8 +101,8 @@ If you have questions about contributing, please open an issue or contact us.
 ## Run the checks locally before you push
 
 HyperI projects gate every push through CI (lint, format, tests, secret scan,
-dependency audit, build). Run the SAME checks locally first so your change lands
-green instead of bouncing:
+dependency audit, build). Run the SAME checks locally first so your change passes CI
+instead of bouncing:
 
 ```bash
 hyperi-ci check
@@ -117,7 +117,7 @@ surviving CI.
 
 ## CI/CD Workflow
 
-A merge to `main` releases nothing on its own. CI validates the merge, and publishes only when the merge commit carries a `Release: true` trailer (`hyperi-ci push --release` adds it) or someone dispatches a release of `main` (`hyperi-ci release`). A release then runs in order:
+A merge to `main` releases nothing by itself. CI validates the merge, and publishes only when the merge commit has a `Release: true` trailer (`hyperi-ci push --release` adds it) or someone dispatches a release of `main` (`hyperi-ci release`). A release then runs in order:
 
 1. semantic-release analyses the commit messages since the last release
 2. It picks the next version from the commit types
@@ -153,20 +153,20 @@ cargo nextest run --features testcontainers # core, Docker for the shared ClickH
 cargo nextest run --features testcontainers --run-ignored all --ignore-default-filter  # full
 ```
 
-Green lies three ways. `require_clickhouse!()` returns early, and the test passes, when no ClickHouse is named and the build lacks `--features testcontainers`, or when a named one does not answer outside CI. The e2e and other real-server tests run only in the full tier. And `default = []` compiles a feature-gated test out while the run still reports green. `ci.yml` sets `paths-ignore` for `docs/**` and `**.md`, so a docs-only push runs no jobs, though its pull request still runs CI.
+A passing run lies three ways. `require_clickhouse!()` returns early, and the test passes, when no ClickHouse is set and the build lacks `--features testcontainers`, or when a configured one does not answer outside CI. The e2e and other tests that need a server run only in the full tier. And `default = []` compiles a feature-gated test out and the run still reports a pass. `ci.yml` sets `paths-ignore` for `docs/**` and `**.md`, so a docs-only push runs no jobs, though its pull request still runs CI.
 
 ### What tends to bite
 
 | Don't | Do | Why |
 |-------|----|-----|
 | Bump scalo and leave `release.helm.library` behind | Move `release.helm.library` in `.hyperi-ci.yaml` to the same scalo version | The release assembles the chart from the emitted contract on that scalo-service version, and a scalo-service release ships the schema for only the contract version its scalo release writes |
-| Gate a test behind a cargo feature without adding it to `.hyperi-ci.yaml` | Add `default,<feature>` to the feature-set list | `default = []` (`Cargo.toml`), so it compiles out of every CI run and CI still reports green. `helm_contract.rs:64` asserts `transport-memory` and `testcontainers` stay listed |
+| Gate a test behind a cargo feature without adding it to `.hyperi-ci.yaml` | Add `default,<feature>` to the feature-set list | `default = []` (`Cargo.toml`), so it compiles out of every CI run and CI still reports a pass. `helm_contract.rs` asserts `transport-memory` and `testcontainers` stay listed |
 | Inject a nested config key as `DFE_LOADER_SECTION_FIELD` | `DFE_LOADER__SECTION__FIELD` or `DFE_LOADER_SECTION__FIELD` | `__` separates nested keys. A name with single underscores reaches only a key the flat list names (`apply_flat_env` in `src/config/loader.rs`), and anything else matches no field and is dropped. `tests/integration/config_reachability.rs` checks both nested spellings |
-| Set `clickhouse.protocol: native` with `insert_format: json_each_row` | `rowbinary` over native, or `http` for JSONEachRow | JSONEachRow is an HTTP body format. `ClickHouseConfig::validate()` refuses the pair by name when the pipeline starts, and `config-check` does not catch it |
+| Set `clickhouse.protocol: native` with `insert_format: json_each_row` | `rowbinary` over native, or `http` for JSONEachRow | JSONEachRow is an HTTP body format. `ClickHouseConfig::validate()` rejects the pair by name when the pipeline starts, and `config-check` does not catch it |
 | Name `clickhouse.tls.ca_cert_file`, `cert_file`, `key_file` or `skip_verify` | Set `tls.enabled`, mount the CA into the trust store | Only `enabled` reaches a client, and `validate()` rejects the certificate-file and `skip_verify` keys by name |
 | Widen the `cel` range past scalo's | Keep it on scalo's range, beside the `cel` entry in `Cargo.toml` | `cel::Program` crosses the scalo boundary. Wider resolves two semver-incompatible `cel` crates and `Program` stops being the same type |
 | Take `clickhouse` from git or a `[patch]` | The crates.io release | `deny.toml` allows no git source, and `dfe-clickhouse` builds against the published `clickhouse` only |
-| Change a config key and leave `docs/config-schema.*` behind | `dfe-loader config-schema --dir docs` | `test_config_artifacts_do_not_drift` fails on a stale schema, and dfe-engine authors loader configs from the schema the contract carries |
+| Change a config key and leave `docs/config-schema.*` behind | `dfe-loader config-schema --dir docs` | `test_config_artifacts_do_not_drift` fails on a stale schema, and dfe-engine authors loader configs from the schema in the contract |
 
 ### Where this sits
 
@@ -178,6 +178,6 @@ Inbound, declared in `dfe-infra/suite.yaml`:
 Outbound, so what a change here can break:
 
 - dfe-loader -> dfe-infra (`image-pin`, lockstep): `dfe-infra/versions.yaml` pins this image and the thin chart released here, and Argo deploys that published chart.
-- dfe-loader -> dfe-engine: dfe-engine takes a loader config's defaults, types and descriptions from the `config-schema.json` this repo's contract carries (dfe-engine `src/dfe_engine/appmgmt/contract.py`).
+- dfe-loader -> dfe-engine: dfe-engine takes a loader config's defaults, types and descriptions from the `config-schema.json` in this repo's contract (dfe-engine `src/dfe_engine/appmgmt/contract.py`).
 
 Runtime, not build edges: dfe-engine applies the dfe-schemas manifest at boot, creating every destination table before the loader can insert. Producers reach the loader over Kafka or direct gRPC (default topic `main_land`): in the suite dfe-receiver and dfe-fetcher produce `*_land` topics, the transforms produce `*_load`, and dfe-receiver and the transforms push over gRPC.

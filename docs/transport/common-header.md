@@ -1,7 +1,7 @@
 <!--
   Project:      dfe-loader
   File:         docs/transport/common-header.md
-  Purpose:      The common header every record in every DFE table carries
+  Purpose:      The common header every record in every DFE table starts with
   Language:     Markdown
 
   License:      BUSL-1.1
@@ -16,8 +16,40 @@ The header's DDL belongs to dfe-schemas: its column types, ORDER BY, partitionin
 
 ## The header is the base of every table
 
-- The landing table (`dfe.main` by default, another with `routing.default_table`) has the header and nothing else. It is the catch-all for unrouted records.
-- Every other table (`dfe.auth`, say) is the header plus its own data columns.
+In the `timeseries` profile the landing table holds the common header and nothing else, and every other table holds the same header plus data columns.
+
+```mermaid
+flowchart LR
+    accTitle: L4 Detail -- Common header against a complete table schema
+    accDescr: The landing table dfe.main holds the common header alone. Every other table, such as dfe.auth, holds the same common header plus its data columns.
+
+    subgraph landing["Landing table dfe.main"]
+        h1["Common header<br/>_timestamp, _org_id, ..."]
+    end
+
+    subgraph other["Non-default table dfe.auth"]
+        direction LR
+        h2["Common header<br/>_timestamp, _org_id, ..."]
+        d2["Data columns<br/>user_id, action, ip, ..."]
+        h2 ~~~ d2
+    end
+
+    landing ~~~ other
+
+    classDef default fill:#F8FAFC,stroke:#64748B,stroke-width:1px,color:#0F172A
+    classDef core fill:#DCEBF7,stroke:#0072B2,stroke-width:2px,color:#0B2A3F
+    classDef store fill:#DDF3EC,stroke:#00785A,stroke-width:1px,color:#0B3327
+    classDef group fill:none,stroke:#64748B,stroke-width:1px,stroke-dasharray:2 4
+    class h1,h2 core
+    class d2 store
+    class landing,other group
+```
+
+*Figure 1. L4 Detail -- Common header against a complete table schema. The `timeseries` header (blue) is the same in each table, and non-default tables add data columns (green).* Up: [Transport](README.md).
+
+- The landing table is `dfe.main` by default, another with `routing.default_table`. It is the catch-all for unrouted records.
+- A profile decides which header columns a table gets. It never defines the data columns, which come from the table's schema in dfe-schemas.
+- Every header column starts with `_`, so it cannot collide with a `timestamp`, `id` or `tags` field the source sends.
 
 The loader creates no table, the landing table included. It reads the schema the deployment created and holds records for a table that does not exist yet in its pending-schema buffer.
 
@@ -33,7 +65,7 @@ Types are the `timeseries` profile's as dfe-schemas renders them. The loader rea
 | `_uuid` | `Nullable(UUID) DEFAULT generateUUIDv7()` | Nothing: ClickHouse generates a time-ordered UUID |
 | `_org_id` | `LowCardinality(String)` | The `routing.org_id_field` value (default `_org_id`), else `routing.default_org_id`. No directive or sender field can change where it is read |
 | `_source` | `LowCardinality(Nullable(String))` | The column's directive, `first(_source) \| topic_name`: the record's `_source`, else the source its topic names |
-| `_raw` | `Nullable(String)` | A raw field the record carries (`raw` or `_raw`) under `full`, the whole payload under `raw_only`, else NULL |
+| `_raw` | `Nullable(String)` | A raw field the record sent (`raw` or `_raw`) under `full`, the whole payload under `raw_only`, else NULL |
 | `_json` | `JSON(max_dynamic_paths=2048)` | The received payload under `full` and `json_only`, spliced from the bytes as they arrived. A directive on the column, as on the DLQ table's `@source: _json`, fills it from the field it names under every mode |
 | `_tags` | `JSON` | The column's directive, `first(_tags/tags/meta/metadata.tags)`, wrapped in an object (below) |
 
@@ -61,7 +93,7 @@ An object source passes through untouched, so `_tags` holding `{"list": [...]}` 
 
 A payload the header pass cannot read -- not JSON, not a JSON object, or a valid object matching no column in the table -- goes to the DLQ rather than landing as a row of type defaults with no `_source` and no `_tags`. Each rejection is counted in `dfe_loader_header_pass_skipped_total`, and an ERROR names the table and the reason at most once a minute. The table name stays out of the metric's labels: it comes from a payload field with no allowlist, so labelling it would let untrusted input grow the label set without bound.
 
-A table with a `_json` column keeps the whole payload, so a field no column holds is still stored. A table without one, such as dfe-hyperdx's own tables, keeps only its columns. Each top-level field that lands nowhere counts `dfe_loader_fields_unstored_total`, and a WARN names the table and the fields at most once a minute. DFE's own `_` fields are not counted.
+Under `full` or `json_only`, a table with a `_json` column and no directive on it keeps the whole payload, so a field no column holds is still stored. A table without one, such as dfe-hyperdx's tables, keeps its columns and nothing else. Each top-level field that lands nowhere counts `dfe_loader_fields_unstored_total`, and a WARN names the table and the fields at most once a minute. DFE's `_` header fields are not counted.
 
 ## The profiles
 

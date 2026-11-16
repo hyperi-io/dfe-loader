@@ -10,21 +10,34 @@
 
 # TLS and private CAs
 
-With TLS on the loader speaks HTTPS (`clickhouse.protocol: http`, usually 8443) or native TLS (`native`, usually 9440), and either verifies the server's certificate and host name against the container's system trust store. Native TLS trusts the system store only, not a compiled-in root bundle, so both protocols accept the same servers.
+With TLS on the loader speaks HTTPS (`clickhouse.protocol: http`, usually 8443) or native TLS (`native`, usually 9440), and either verifies the server's certificate and host name against the container's system trust store. Native TLS trusts the system store alone, not a compiled-in root bundle, so both protocols accept the same servers.
+
+Turning TLS on is one key, and trust comes from the system store alone, so a private CA is added there rather than set in config.
 
 ```mermaid
 flowchart LR
-    CFG["clickhouse.tls.enabled"]
-    STORE["System trust store<br/>(image bundle, or SSL_CERT_FILE / SSL_CERT_DIR)"]
-    VERIFY["Certificate chain + host name check"]
-    HTTPS["HTTPS to ClickHouse"]
+    accTitle: L4 Detail -- TLS trust
+    accDescr: clickhouse.tls.enabled turns TLS on. The system trust store, the image bundle or the file SSL_CERT_FILE or SSL_CERT_DIR names, supplies the CA certificates. The loader verifies the server's certificate chain and host name against them before it opens HTTPS or native TLS to ClickHouse.
 
-    CFG --> HTTPS
-    STORE --> VERIFY
-    VERIFY --> HTTPS
+    enabled["clickhouse.tls.enabled"]
+    store["System trust store"]
+    verify["Verify chain<br/>and host name"]
+    conn["HTTPS or<br/>native TLS"]
+    clickhouse[("ClickHouse")]
+
+    enabled -->|on| verify
+    store -->|CA certs| verify
+    verify -->|verified| conn
+    conn --> clickhouse
+
+    classDef default fill:#F8FAFC,stroke:#64748B,stroke-width:1px,color:#0F172A
+    classDef core fill:#DCEBF7,stroke:#0072B2,stroke-width:2px,color:#0B2A3F
+    classDef store fill:#DDF3EC,stroke:#00785A,stroke-width:1px,color:#0B3327
+    class verify core
+    class clickhouse store
 ```
 
-## Turning TLS on
+*Figure 1. L4 Detail -- TLS trust. The store is the image bundle, or what `SSL_CERT_FILE` or `SSL_CERT_DIR` names.* Up: [ClickHouse insert layer](README.md).
 
 | Setting | Effect |
 |---------|--------|
@@ -35,13 +48,13 @@ The SNI name and the name checked against the certificate are the host in `click
 
 ## Private / internal CAs
 
-A private CA is trusted the way the system trusts it: add it to the image's trust store, or point `SSL_CERT_FILE` at a PEM bundle that holds it (`SSL_CERT_DIR` at a directory of them). Either variable replaces the platform store rather than adding to it, so a bundle that must also trust public CAs has to carry them too.
+A private CA is trusted the way the system trusts it: add it to the image's trust store, or point `SSL_CERT_FILE` at a PEM bundle that holds it (`SSL_CERT_DIR` at a directory of them). Either variable replaces the platform store rather than adding to it, so a bundle that must trust public CAs as well has to hold them.
 
 A trust store with no readable CA certificate fails the client at startup instead of connecting unverified.
 
 `clickhouse.tls.ca_cert_file`, `cert_file`, `key_file` and `skip_verify` are refused by `config-check` and at startup: no client reads them. There is no skip-verify mode and no client-certificate (mTLS) auth.
 
-## Example: private-CA cluster
+A private-CA cluster:
 
 ```yaml
 clickhouse:

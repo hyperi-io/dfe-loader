@@ -25,15 +25,11 @@ clickhouse:
     - api_events
 
 routing:
-  # Fields to extract table name (first match wins, dot notation for nested)
   table_fields:
     - event_category
     - tags.event_category
-  # Database for every org org_routes does not list
   default_db: common
-  # Default table if no table_field matches
   default_table: common
-  # Optional: map extracted _source values to destination table names
   source_to_table:
     auth: auth_events
     api: api_events
@@ -43,21 +39,18 @@ routing:
 
 buffer:
   flush_bytes: 67108864  # 64 MiB, a ceiling for oversized rows: rows trigger first
-  flush_rows: 1000       # Fewer rows for faster flushes
-  flush_age_secs: 2      # Faster flushes for dev
+  flush_rows: 1000
+  flush_age_secs: 2
 
-# LOW MEMORY settings for development
 memory:
-  limit_bytes: 67108864    # 64MB fixed cap
+  limit_bytes: 67108864
   pressure_threshold: 0.8
 
-# Batch processing engine (SIMD parse, pre-route, parallelism)
-# Defaults are sensible — only override if tuning.
 batch_processing:
   routing_field: "_table"        # SIMD pre-route: extract _table before full parse
-  max_chunk_size: 10000          # Messages per rayon chunk
+  max_chunk_size: 10000
   parse_error_action: dlq        # dlq | skip | fail_batch
-  known_fields:                  # Fields to pre-extract for fast routing
+  known_fields:
     - "_table"
     - "_timestamp"
     - "host"
@@ -68,8 +61,8 @@ metrics:
   address: "0.0.0.0:9090"
 
 logging:
-  level: debug    # Verbose for dev
-  format: text    # Human-readable for dev
+  level: debug
+  format: text
 
 timestamp_dq:
   enabled: true
@@ -78,5 +71,5 @@ timestamp_dq:
   correct_known_bad: true
 
 schema:
-  cache_ttl_secs: 60   # Shorter cache for dev iteration
+  cache_ttl_secs: 60
   refresh_on_error: true

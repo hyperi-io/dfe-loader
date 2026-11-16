@@ -24,7 +24,6 @@ path = "src/bin/pgo_driver.rs"
 required-features = ["pgo-driver"]
 
 [dependencies]
-# Async runtime
 tokio = { version = ">=1.54.1, <2", features = ["full"] }
 tokio-util = { version = ">=0.7.20, <0.8", features = ["rt"] }
 
@@ -42,20 +41,16 @@ schemars = { version = ">=1.2.3, <2", default-features = false, features = ["std
 # semver-incompatible cels make it two types. In ignoreDeps, so it moves with scalo.
 cel = { version = ">=0.14.5, <0.15", features = ["json"] }
 
-# JSON parsing (SIMD-accelerated)
 sonic-rs = ">=0.5.10, <0.6"
 serde = { version = ">=1.0.229, <2", features = ["derive"] }
-serde_json = ">=1.0.154, <2"  # Fallback for complex cases
-csv = ">=1.4.0, <2"  # CSV remap file parsing (ecs-mapper format compatible)
+serde_json = ">=1.0.154, <2"
+csv = ">=1.4.0, <2"
 
-# Configuration
 figment = { version = ">=0.10.19, <0.11", features = ["env"] }
 clap = { version = ">=4.6.7, <5", features = ["derive", "env"] }
 
-# Error handling
 thiserror = ">=2.0.21, <3"
 
-# Logging & metrics
 tracing = ">=0.1.44, <0.2"
 metrics = ">=0.24.6, <0.25"
 
@@ -80,14 +75,13 @@ hyper-util = { version = ">=0.1.21, <0.2", features = ["client-legacy", "http1",
 hyper-rustls = { version = ">=0.27.10, <0.28", default-features = false, features = ["http1", "tls12", "native-tokio", "aws-lc-rs"] }
 rustls = { version = ">=0.23.46, <0.24", default-features = false, features = ["std", "tls12", "aws_lc_rs"] }
 
-# Utilities
 uuid = { version = ">=1.29.2, <2", features = ["v4", "v7"] }
-rustc-hash = ">=2.1.3, <3"  # FxHashMap - faster hashing for internal maps
-memchr = ">=2.8.3, <3"     # SIMD byte scanning for directive parser
+rustc-hash = ">=2.1.3, <3"
+memchr = ">=2.8.3, <3"
 # Kafka auto-discovery filters are regexes in scalo; escape() keeps a DLQ topic
 # name literal. Same crate scalo resolves, so cargo unifies to one regex.
 regex = ">=1.13.1, <2"
-compact_str = ">=0.10.0, <0.11"  # Stack-allocated strings for short keys (≤23 bytes)
+compact_str = ">=0.10.0, <0.11"
 chrono = { version = ">=0.4.45, <0.5", features = ["serde"] }
 bytes = ">=1.12.1, <2"
 futures = ">=0.3.34, <0.4"
@@ -99,7 +93,6 @@ indexmap = { version = ">=2.14.2, <3", features = ["serde"] }
 rdkafka = { version = ">=0.39.0, <0.40", features = ["dynamic-linking"], optional = true }
 
 [dev-dependencies]
-# Testing
 criterion = { version = ">=0.8.2, <0.9", features = ["html_reports"] }
 proptest = ">=1.12.0, <2"
 test-case = ">=3.4.1, <4"
@@ -115,17 +108,13 @@ scalo = { version = ">=2.14.30, <3", features = ["transport-kafka-test-support"]
 # client. Same range as the copy scalo resolves, so cargo unifies to one.
 tonic = { version = ">=0.14.9, <0.15", default-features = false }
 
-# Kafka producer for e2e tests (test message injection)
 rdkafka = { version = ">=0.39.0, <0.40", features = ["dynamic-linking"] }
 
-# ClickHouse crate -- integration tests need all features
 clickhouse = { version = ">=0.15.3, <0.16", features = ["lz4", "time", "rustls-tls", "rustls-tls-native-roots", "inserter"] }
 time = ">=0.3.55, <0.4"
 
-# Private CA and server certificates for the TLS ClickHouse tests
 rcgen = ">=0.14.10, <0.15"
 
-# Async test utilities
 tokio-test = ">=0.4.6, <0.5"
 
 # Sends the loader's tracing output through the test harness's capture. Same
@@ -244,12 +233,9 @@ duration_suboptimal_units = "allow"
 map_unwrap_or = "allow"
 
 [features]
+# docs/feature-flags.md describes each feature.
 default = []
-# Allocator
 jemalloc = ["dep:tikv-jemallocator", "dep:tikv-jemalloc-ctl"]
-# Transport backends
-transport-memory = ["scalo/transport-memory"]  # Memory transport for unit tests
-# Testing
-testcontainers = []  # The tests that run real ClickHouse and Kafka containers (Docker required)
-# PGO workload driver (scripts/pgo-workload.sh). Only that binary links rdkafka.
+transport-memory = ["scalo/transport-memory"]
+testcontainers = []
 pgo-driver = ["dep:rdkafka"]
