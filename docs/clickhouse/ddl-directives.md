@@ -42,7 +42,7 @@ flowchart LR
     accDescr: A column marked skip is left out of the insert. Any other column reads the paths its source or renamed directive lists, else the field named like the column. A field found is written. A column with no field found takes its computed or default value.
 
     skip{"@skip?"}
-    read["Read listed paths<br/>or the column's name"]
+    read["Listed paths<br/>or column name"]
     left(["Left out"])
     found{"Field<br/>found?"}
     value(["Field's value"])
