@@ -69,7 +69,7 @@ services:
 
   # Redpanda Console (Kafka UI)
   console:
-    image: redpandadata/console:v3.13.1@sha256:d72608f64c65a5631adca6c99b44d157cefb9edb0473ed58451f91affcfcfa1b
+    image: redpandadata/console:v3.14.0@sha256:5deb20e3ec84781d137231a23ebc3520e012e8e83d59bee25355f7fba1010a12
     container_name: redpanda-console-dev
     ports:
       - "8080:8080"
