@@ -12,13 +12,7 @@
 
 Loads records from Kafka or a gRPC push into ClickHouse. Point it at a topic, give it a routing rule, and it parses, routes, promotes schema columns, enriches, buffers per table, and inserts -- RowBinary by default so ClickHouse parses no row text, with at-least-once Kafka delivery.
 
-This is the index. Read [architecture.md](architecture.md) for the 10,000-foot
-view, [clickhouse/](clickhouse/) for the insert layer, and
-[pipeline/](pipeline/) for the hot path.
-
----
-
-## What dfe-loader does for you
+[architecture.md](architecture.md) covers the loader's layers, [clickhouse/](clickhouse/) the insert layer and [pipeline/](pipeline/) the hot path.
 
 | You give it | It handles | You don't write |
 |-------------|------------|-----------------|
@@ -27,52 +21,52 @@ view, [clickhouse/](clickhouse/) for the insert layer, and
 | A ClickHouse table | Schema reflected from `system.columns`, fields promoted to typed columns, the rest kept in `_json` | A schema mapping, an ORM, a migration |
 | `insert_format` (default RowBinary) | Dynamic `Map<String,Value>` -> RowBinary over HTTP, or Native blocks over the native protocol, with a JSONEachRow fallback over HTTP | A serialiser, a type encoder, a wire format |
 | `capture_mode` (full/raw_only/json_only/extracted_only) | `_json` and `_raw` population per table, overridable per-table and per-DDL | Per-table capture logic |
-| Enrichment toggles (geoip/reputation/risk) | Flat enriched columns injected on the promoted row only | Lookup, caching, CIDR matching |
+| Enrichment toggles (geoip/reputation/risk) | Flat enriched columns on the promoted row, never in `_json` | Lookup, caching, CIDR matching |
 | Nothing extra | Per-table buffering, batch salvage, held-batch retry, schema-cache recovery, one offset commit per flush cycle | The resilience layer |
-
-Everything else in these docs is "and here is how the pieces work".
-
----
 
 ## 10,000-foot view
 
+Every record takes the same six steps whichever transport brought it, and normally leaves as a row in a batched ClickHouse insert or as a dead letter.
+
 ```mermaid
 flowchart TB
-    subgraph Ingress["Transport (scalo)"]
-        K["Kafka"]
-        G["gRPC"]
+    accTitle: L3 Components -- dfe-loader
+    accDescr: Records arrive from Kafka topics or gRPC senders. Inside the loader each record is parsed, routed to a table, has its columns extracted, is enriched and is buffered per table, and the buffers are inserted into ClickHouse in batches. Rows ClickHouse refuses for good and records that fail processing go to the DLQ.
+
+    kafka[("Kafka topics")]
+    grpc["gRPC senders"]
+
+    subgraph loader["dfe-loader"]
+        direction LR
+        parse["Parse JSON"] --> route[["Route"]] --> extract["Extract columns"] --> enrich[["Enrich"]] --> buffer["Buffer per table"] --> insert[["Insert"]]
     end
 
-    subgraph Hot["Hot path (per message)"]
-        P["JSON parse<br/>sonic-rs -> Arc[u8]"]
-        R["Route (pre-flatten)<br/>db.table"]
-        X["Extract<br/>header + schema-promoted cols"]
-        E["Enrich<br/>GeoIP / reputation / risk"]
-        B["Per-table buffer<br/>rows + raw + offsets"]
-    end
+    clickhouse[("ClickHouse")]
+    dlq[("DLQ")]
 
-    subgraph Sink["ClickHouse insert (dfe_clickhouse::dynamic::DynamicInsert)"]
-        CE["DynamicRow encoder<br/>Map + schema -> binary"]
-        HTTP["HTTP: insert_formatted_with<br/>FORMAT RowBinaryWithNamesAndTypes"]
-        NAT["native: insert_native<br/>FORMAT Native"]
-        JF["HTTP: insert_formatted_with<br/>FORMAT JSONEachRow (fallback)"]
-    end
+    kafka -->|records| loader
+    grpc -->|records| loader
+    loader -->|rows| clickhouse
+    loader -.->|dead letters| dlq
 
-    CH[(ClickHouse)]
-    DLQ["DLQ (Kafka primary, file fallback)"]
-
-    K & G --> P --> R --> X --> E --> B
-    B -->|RowBinary default| CE
-    CE --> HTTP --> CH
-    CE --> NAT --> CH
-    B -->|insert_format=json_each_row| JF --> CH
-    B -.->|salvaged bad rows| DLQ
-    CH -.->|success| Commit["One Kafka commit per flush cycle"]
+    classDef default fill:#F8FAFC,stroke:#64748B,stroke-width:1px,color:#0F172A
+    classDef store fill:#DDF3EC,stroke:#00785A,stroke-width:1px,color:#0B3327
+    classDef async fill:#F6E6EF,stroke:#A8517F,stroke-width:1px,color:#3D1529
+    classDef error fill:#FBE3D6,stroke:#C2410C,stroke-width:1px,color:#4A1A05
+    classDef ext fill:#EEF0F2,stroke:#6B7280,stroke-width:1px,stroke-dasharray:4 3,color:#1F2937
+    classDef group fill:none,stroke:#64748B,stroke-width:1px,stroke-dasharray:2 4
+    class kafka async
+    class grpc ext
+    class clickhouse store
+    class dlq error
+    class loader group
 ```
 
----
+*Figure 1. L3 Components -- dfe-loader. Double-bordered steps have a diagram each.* Up: top of dfe-loader. Down: [L4 Detail -- Loader table choice](pipeline/routing.md), [L4 Detail -- Enrichment](pipeline/enrichment.md), [L4 Detail -- Insert layer](clickhouse/README.md).
 
-## Where things live
+With `kafka.acknowledgements.enabled` (the default) Kafka offsets commit once per flush cycle, never past a row not yet placed. A pre-route filter, a dead letter no DLQ can hold and a revoked partition's rows are the exceptions, each counted, and [operations.md](operations.md) covers them.
+
+The docs, by area:
 
 | Area | Doc | Covers |
 |------|-----|--------|
@@ -85,9 +79,5 @@ flowchart TB
 | Transports | [transport/](transport/) | The gRPC listener, the common header |
 | Deployment | [deployment/](deployment/) | Container + chart publishing, schemas |
 | Performance | [performance/](performance/) | Hot-path optimisations, parser-selection history, PGO/BOLT |
-
----
-
-## The client dependency, in one line
 
 dfe-loader inserts through the official `clickhouse` crate from crates.io, with `dfe-clickhouse` reading the server's exception code out of a rejection. The dynamic RowBinary layer the `clickhouse` crate keeps out of scope -- runtime `Map<String,Value>` encoding -- comes from `dfe-clickhouse`'s `dynamic` module. See [clickhouse/clickhouse-ext.md](clickhouse/clickhouse-ext.md).

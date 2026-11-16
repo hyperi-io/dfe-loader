@@ -10,48 +10,58 @@
 
 # Enrichment
 
-Enrichment adds derived columns to a row from its IP fields (`enrichment.ip_fields`, first match wins): geographic data,
-reputation flags, and a composite risk score. Each provider is an independent
-toggle, off by default. Enriched values are written as flat columns on the
-promoted row only -- never folded into `_json`, so the payload stays the payload
-and the enrichment stays queryable.
+Status: each provider is off by default and turned on by its setting, `geoip.enabled`, `enrichment.reputation.enabled` or `enrichment.risk_scoring.enabled`. Reputation reads operator blocklists alone, so of its flags only `rep_is_malicious` is ever set ([#342](https://github.com/hyperi-io/dfe-loader/issues/342)).
+
+Enrichment adds columns to a row from the first IP field it has (`enrichment.ip_fields`, default `src_ip`, `client_ip`, `ip`, `source_ip`): GeoIP columns `geo_*`, reputation columns `rep_*` and a risk score in `risk_*`. They are written as flat columns on the promoted row, never folded into `_json`, so the payload stays as it arrived and the enrichment is queryable.
+
+The lookups key on the first IP field present, and risk scoring weighs what GeoIP and reputation found, so it adds nothing by itself.
 
 ```mermaid
 flowchart LR
-    IP["IP field(s) on the row"]
-    GEO["GeoIP<br/>country, city, ASN"]
-    REP["Reputation<br/>VPN / Tor / proxy / botnet"]
-    RISK["Risk scoring<br/>weighted composite"]
-    ROW["promoted row (flat columns)"]
-    IP --> GEO --> ROW
-    IP --> REP --> ROW
-    GEO --> RISK
-    REP --> RISK --> ROW
+    accTitle: L4 Detail -- Enrichment
+    accDescr: The row from column extraction is looked up by its first IP field in GeoIP and in the reputation blocklists. Risk scoring weighs both results. The row goes on to its table's buffer with the geo, rep and risk columns added.
+
+    extract["Extract columns"]
+
+    subgraph lookups["Enrich"]
+        direction LR
+        geo["GeoIP"] --> risk["Risk scoring"]
+        rep["Reputation<br/>blocklists"] --> risk
+    end
+
+    buffer["Buffer per table"]
+
+    extract -->|row| lookups
+    lookups -->|row| buffer
+
+    classDef default fill:#F8FAFC,stroke:#64748B,stroke-width:1px,color:#0F172A
+    classDef group fill:none,stroke:#64748B,stroke-width:1px,stroke-dasharray:2 4
+    class lookups group
 ```
+
+*Figure 1. L4 Detail -- Enrichment. Each provider is off until its setting turns it on.* Up: [L3 Components -- dfe-loader](../README.md).
 
 ## Providers
 
 | Provider | Config | What it adds |
 |----------|--------|--------------|
 | GeoIP | `geoip` | geographic lookup (country, city, ASN) from a local database under `geoip.auto_download.data_dir` |
-| Reputation | `enrichment.reputation` | flags for VPN, Tor, proxy, and botnet membership |
+| Reputation | `enrichment.reputation` | `rep_is_malicious` for an address on a file `blocklist_files` names, one IP or CIDR a line. No feed is loaded for the VPN, Tor, proxy and botnet flags, so nothing derives them, and a value the record sent is kept |
 | Risk scoring | `enrichment.risk_scoring` | weighted composite score from geo + reputation, with a selectable country-risk preset |
 
-Risk scoring is a composite: it needs at least GeoIP or reputation enabled to
-have anything to weigh. Enabling it alone does nothing useful, which the config
-documents at the field.
+Risk scoring runs only when GeoIP or reputation returned a result for the row, so enabling it alone writes nothing.
 
 Every value the scorer uses is config under `enrichment.risk_scoring`, with the shipped values as defaults. `config.example.yaml` lists them all.
 
 | Key | What it sets | Default |
 |-----|--------------|---------|
-| `preset` | the entry in `presets` whose country lists apply | `global` |
+| `preset` | the entry in `presets` with the country lists that apply | `global` |
 | `presets` | `high` and `medium` country lists by name | `global`, `us_enterprise`, `eu_enterprise`, `apac_enterprise`, `high_security` |
 | `weights` | `geo`, `reputation`, `privacy`, `threat` share of the composite | 15, 25, 25, 35 |
 | `scores` | what each signal adds to its component: country class, VPN, proxy, Tor, datacenter, relay, anonymiser count, botnet, malicious, spam, scanner, and the `high_abuse_score` threshold | `config.example.yaml` |
 | `levels` | lowest composite score of `low`, `medium`, `high`, `critical` | 20, 40, 60, 80 |
 
-A `presets` entry in config replaces the shipped preset of that name, or adds a new one, and the rest stay as shipped. Startup and a reload refuse a `preset` that `presets` does not hold, naming the valid ones, as well as a score over 100 and level bands that do not rise strictly within 1-100.
+A `presets` entry in config replaces the shipped preset of that name, or adds one, and the rest stay as shipped. Startup and a reload refuse a `preset` that `presets` does not hold, naming the valid ones, as well as a score over 100 and level bands that do not rise strictly within 1-100.
 
 ## Where the GeoIP databases come from
 
@@ -68,17 +78,9 @@ With `geoip.enabled` on, startup provisions the MMDB files through scalo's `geoi
 
 The credentials are redacted in logs and config dumps. Supply them through the secrets layer, never as literals.
 
-## Cost and placement
-
 Enrichment runs after extraction and before buffering, on the promoted row. The
 lookups are cached, so a hot IP is resolved once and reused. Because the columns
 are flat and additive, a table opts in by declaring the enrichment
 columns in its schema -- an enriched value is written only where the target
 table has a column for it, the same promotion rule the rest of the pipeline
 follows.
-
-Like every config-cascade switch in the loader, an enrichment toggle is only
-meaningful if the row that lands reflects it: enable GeoIP and the geo columns
-on the written row are populated, leave it off and they are not. See
-[../configuration.md](../configuration.md) and the hot-path context in
-[overview.md](overview.md).

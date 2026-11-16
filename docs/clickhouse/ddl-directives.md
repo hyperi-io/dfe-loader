@@ -34,41 +34,51 @@ capture interacts with `_json` and `_raw`, see capture modes in
 
 ## Directive resolution
 
-```mermaid
-flowchart TB
-    COL["Column in reflected schema<br/>+ @-comment directive"]
-    K{"Which directive?"}
-    SRC["@source: field<br/>read input, optional fallback"]
-    REN["@renamed: field<br/>same source-path mapping as @source<br/>read in place of the column name"]
-    CMP["@computed: expression<br/>evaluate one CEL expression"]
-    OUT["Value written to output column"]
-    GEN["@generated: expr<br/>(descriptive label only)"]
-    CFG["@config: path<br/>(descriptive label only)"]
-    DEF["ClickHouse DEFAULT/MATERIALIZED/ALIAS<br/>on the column itself"]
+A column reads the paths its `@source` or `@renamed` directive lists, else the field with the column's name, and `@computed` or `@default` fills it when no field is found.
 
-    COL --> K
-    K -->|source| SRC
-    K -->|renamed| REN
-    K -->|computed| CMP
-    SRC --> OUT
-    REN --> OUT
-    CMP --> OUT
-    GEN -.->|describes| DEF
-    DEF -.-> SKIP["field omitted from insert"]
+```mermaid
+flowchart LR
+    accTitle: L4 Detail -- Column directive resolution
+    accDescr: A column marked skip is left out of the insert. Any other column reads the paths its source or renamed directive lists, else the field named like the column. A field found is written. A column with no field found takes its computed or default value.
+
+    skip{"@skip?"}
+    read["Listed paths<br/>or column name"]
+    left(["Left out"])
+    found{"Field<br/>found?"}
+    value(["Field's value"])
+    fill(["@computed or<br/>@default value"])
+
+    skip -->|no| read
+    skip -->|yes| left
+    read --> found
+    found -->|yes| value
+    found -->|no| fill
+
+    classDef default fill:#F8FAFC,stroke:#64748B,stroke-width:1px,color:#0F172A
+    classDef decision fill:#FCF1D6,stroke:#9A6700,stroke-width:1px,color:#3D2A00
+    class skip,found decision
 ```
 
-`@generated` and `@config` sit outside the loader's directive dispatch: the
-loader parses neither. They are notes an author leaves in the comment, and the
-real mechanism sits elsewhere, covered under each heading below.
+*Figure 1. L4 Detail -- Column directive resolution. `_org_id` and `_timestamp` read fixed fields and skip this path.* Up: [ClickHouse insert layer](README.md).
 
-## Overview
+`_timestamp_received` reads the first hop's edge stamp, then falls back to the paths its `@source` lists.
 
-This expression language describes how source data fields map to destination
-columns during the **data preparation stage** of the pipeline. It is used in:
+`@generated` and `@config` sit outside the loader's directive dispatch: the loader parses neither. They are notes an author leaves in the comment, and the mechanism sits elsewhere, covered under each heading below. A column ClickHouse fills itself, through a DEFAULT, MATERIALIZED or ALIAS clause, can be left out of the row whatever its comment says.
 
-- dfe-schemas YAML definitions, in a column's `expr` field
-- The column COMMENTs those become in the deployed DDL
-- Any table definition that needs field mapping documentation
+### @skip and @default
+
+`@skip` leaves the column out of every row the loader builds, `_org_id`, `_timestamp` and `_timestamp_received` aside. `@default: value` fills a column when every path it reads is absent or null: a scalar literal, or `now()`, `uuid()` or `topic_name` resolved per row. Each directive has a config twin in `column_directives`: `global.<column>` for every table and `tables."<db>.<table>".<column>` for one. Config wins over the column comment.
+
+```yaml
+column_directives:
+  global:
+    severity:
+      default: unknown
+  tables:
+    "dfe.events":
+      debug_info:
+        skip: true
+```
 
 ## Expression types
 
@@ -106,10 +116,10 @@ the DDL clause that actually does the filling.
 
 The loader still omits the field from the insert, but by a different route: it
 reads `default_kind` for the column from `system.columns`, and any column
-whose kind is `DEFAULT`, `MATERIALIZED`, `ALIAS` or `EPHEMERAL` is marked
+with a kind of `DEFAULT`, `MATERIALIZED`, `ALIAS` or `EPHEMERAL` is marked
 `has_default` and can be left out of the row it sends (the dynamic insert in
-`dfe-clickhouse`'s `dynamic` module). dfe-schemas' renderer, whose DDL dfe-engine applies, writes that DEFAULT/MATERIALIZED/ALIAS
-clause from the schema's own `default:` and `attribute:` fields -- not by
+`dfe-clickhouse`'s `dynamic` module). dfe-schemas' renderer writes the DDL dfe-engine applies, and it writes that DEFAULT/MATERIALIZED/ALIAS
+clause from the schema's `default:` and `attribute:` fields -- not by
 reading the `@generated:` text -- so keep the two in agreement by hand.
 
 ```text
@@ -129,10 +139,8 @@ reading the `@generated:` text -- so keep the two in agreement by hand.
 `id` UUID DEFAULT generateUUIDv7() COMMENT '@generated: generateUUIDv7()',
 ```
 
-### Capture is not a column directive
-
 `_raw` and `_json` are populated by the loader's capture mode, not by a
-per-column `@`-comment directive. Capture mode has its own tag, but it is a
+per-column `@`-comment directive. Capture mode has a tag, but it is a
 **table**-level DDL comment -- `@capture_mode: <mode>` on the `CREATE TABLE`
 itself, resolved ahead of any per-table or global config (see
 [capture-modes.md](../pipeline/capture-modes.md)). See
@@ -146,10 +154,10 @@ Not a directive the loader parses either -- same drop-as-unknown path as
 loader config key decides the actual mapping. Nothing reads the comment text
 to resolve that path: the config key is wired up separately, by the column's
 special-cased name. `_org_id`, for example, is filled from whichever field
-`routing.org_id_field` names, whatever its directive says, and `_tags` from its own `@source` directive, else the first field in `metadata.tags_fields`
+`routing.org_id_field` names, whatever its directive says, and `_tags` from its `@source` directive, else the first field in `metadata.tags_fields`
 (dfe-loader `src/config/pipeline.rs`, `src/routing/router.rs`,
 `src/transform/extractor.rs`, `src/transform/transformer.rs`). Change the
-config path and the mapping changes. Change the `@config:` comment on its own
+config path and the mapping changes. Change the `@config:` comment alone
 and nothing does.
 
 ```text
@@ -208,7 +216,7 @@ risk come from the loader's `geoip` and `enrichment` config, not from
 
 **Semantics:**
 
-- A field the record already carries under the column's name is kept, and the
+- A field the record holds under the column's name is kept, and the
   expression is not run for it.
 - An expression that does not compile, a function outside the profile
   included, is logged as a warning and the column is skipped.
@@ -217,7 +225,7 @@ risk come from the loader's `geoip` and `enrichment` config, not from
   column logs one warning with the error.
 - `dfe_loader_computed_eval_failures_total{table, column, stage}` counts every
   failure, `stage` being `compile`, `context` or `eval`.
-- A `null` result leaves the column empty too.
+- A `null` result leaves the column empty as well.
 
 The `computed_columns` config section sets or overrides the same expressions:
 `columns.<column>` for every table, and `overrides."<db>.<table>".<column>` for
@@ -241,7 +249,7 @@ the same `renamed` list, with no transformation of the value.
 
 **Semantics:**
 
-- The listed paths are read in place of the column's own name, so a record field named like the column is not read while the directive names others. Only the field-mapping step, which runs after, skips a destination already present.
+- The listed paths are read in place of the column's name, so a record field with the column's name is not read when the directive lists others. The field-mapping step, which runs after, is the one that skips a destination the row holds.
 - With `first()`, fields are tried in order and the first present, non-null one is used.
 - `_org_id` and `_timestamp` read fixed fields and ignore the directive, so no column comment can point the tenant at a field a sender writes.
 
@@ -285,7 +293,7 @@ host_name` leaves `_source` absent, it does not write the string `host_name`.
 The loader logs the ignored fallback once per five minutes.
 
 `now()`, `uuid()` and `topic_name` are resolved per row in the extractor rather
-than at parse time, so they are the three forms `@default:` also accepts as a
+than at parse time, so they are the three forms `@default:` accepts as a
 bare word.
 
 ### List operator (`/`)
@@ -322,11 +330,11 @@ On the default `json_primary` path the header extractor (`src/transform/extracto
 | `@source: first(a/b)`, `@renamed: first(a/b)` | Try each path in order, first non-null wins |
 | `@computed: expr` | Compiled once with `scalo::expression::compile`, evaluated per record |
 
-`@generated` and `@config` are dropped as unknown directives. A `@generated` column is still left out of the insert, by the `system.columns` `default_kind` route described under @generated above. A directive names the input field, and the column name is the output: `@source: timestamp` on `_timestamp` reads `timestamp`. With `metadata.remove_routing_fields` (default `true`) the routing fields are removed after extraction.
+`@generated` and `@config` are dropped as unknown directives. A `@generated` column is still left out of the insert, by the `system.columns` `default_kind` route described under @generated above. A directive names the input field, and the column name is the output: `@source: status_code` on `http_status` reads `status_code`. On `legacy_flatten`, `metadata.remove_routing_fields` (default `true`) removes the routing fields after extraction. The default path leaves the payload as it arrived.
 
 ## Table-level tags
 
-A table `COMMENT` carries tags in the same `@tag: value` syntax, separated by ` | `. The loader reads one, `@capture_mode`, which overrides the configured capture mode for that table (see [capture-modes.md](../pipeline/capture-modes.md)) and ignores the rest. dfe-schemas writes `@profile` and `@profile_version`, naming the common-header profile the table was built from:
+A table `COMMENT` holds tags in the same `@tag: value` syntax, separated by ` | `. The loader reads one, `@capture_mode`, which overrides the configured capture mode for that table (see [capture-modes.md](../pipeline/capture-modes.md)) and ignores the rest. dfe-schemas writes `@profile` and `@profile_version`, naming the common-header profile the table was built from:
 
 ```sql
 CREATE TABLE dfe.main (...)

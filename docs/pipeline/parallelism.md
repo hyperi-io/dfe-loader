@@ -10,26 +10,40 @@
 
 # Pipeline parallelism
 
-Each received batch goes through two phases in `src/pipeline/orchestrator.rs`. Per-message work with no shared mutable state runs in parallel. Everything that mutates state runs after it, in one thread.
+Each received batch goes through two phases in `src/pipeline/orchestrator.rs`: per-message work with no shared mutable state runs in parallel, and everything that mutates state runs after it, in one thread.
 
 ```mermaid
-flowchart TB
-    RECV["transport recv (batch)"]
-    PRE["pre-route (BatchEngine, when routing_field is set)"]
-    subgraph PAR["PARALLEL -- scalo worker pool"]
-        MP["MessageProcessor::process(&self, msg)"]
-    end
-    RES["Vec&lt;Result&lt;ProcessedMessage&gt;&gt;"]
-    subgraph SEQ["SEQUENTIAL -- BatchCoordinator"]
-        OK["Ok: cache entry, mark_pending, buffer push"]
-        ERR["Err: dead letter, memory release"]
+flowchart LR
+    accTitle: L4 Detail -- Batch phases
+    accDescr: A received batch passes the BatchEngine's pre-route filters when a routing field is set. The worker pool runs MessageProcessor process on each message in parallel. The BatchCoordinator then walks the results in one thread, pushing each Ok row into its table's buffer, parking a message that waits on its schema and turning any other error into a dead letter.
+
+    recv(["Received batch"])
+    preroute["Pre-route filters"]
+
+    subgraph parallel["Parallel"]
+        process["MessageProcessor<br/>process"]
     end
 
-    RECV --> PRE --> MP --> RES --> OK
-    RES --> ERR
+    subgraph sequential["Sequential"]
+        push["Buffer push"]
+        dead["Dead letter"]
+    end
+
+    recv --> preroute
+    preroute --> process
+    process -->|Ok| push
+    process -.->|Err| dead
+
+    classDef default fill:#F8FAFC,stroke:#64748B,stroke-width:1px,color:#0F172A
+    classDef error fill:#FBE3D6,stroke:#C2410C,stroke-width:1px,color:#4A1A05
+    classDef group fill:none,stroke:#64748B,stroke-width:1px,stroke-dasharray:2 4
+    class dead error
+    class parallel,sequential group
 ```
 
-`MessageProcessor` (`src/pipeline/processor.rs`) holds only shared references, and its `process` method does no I/O and no `.await`. For one message it refuses a payload that does not open a JSON object or array, parses it with sonic-rs, holds an external topic's record to its own tenant, routes it to a table, then extracts and transforms the fields. It goes on to derive the capture settings, apply the field mapping, evaluate computed columns and CEL expressions, and run enrichment. The result is a `ProcessedMessage` (`src/pipeline/types.rs`) or an error.
+*Figure 1. L4 Detail -- Batch phases. Pre-route runs only when the BatchEngine has a `routing_field`.* Up: [Pipeline](README.md).
+
+`MessageProcessor` (`src/pipeline/processor.rs`) holds only shared references, and its `process` method does no I/O and no `.await`. For one message it rejects a payload that does not open a JSON object or array, parses it with sonic-rs, holds an external topic's record to its source's tenant, routes it to a table, then extracts and transforms the fields. It goes on to derive the capture settings, apply the field mapping, evaluate computed columns and CEL expressions, and run enrichment. The result is a `ProcessedMessage` (`src/pipeline/types.rs`) or an error.
 
 What it reads is safe to share. `CaptureOverrides::derive_config` (`src/pipeline/capture.rs`) is a pure `&self` method. Enrichment (`src/pipeline/enrichment.rs`) is in-memory GeoIP, reputation and risk lookups, with the GeoIP cache behind a `parking_lot::RwLock`.
 
@@ -41,4 +55,4 @@ The orchestrator runs `process` over the batch on the first pool it has: the `Ba
 
 The coordinator is built only after the processor is dropped, so the borrow checker keeps the two phases apart.
 
-The pool and the engine are scalo's `AdaptiveWorkerPool` and `BatchEngine` (scalo-rs `src/worker/`, the `worker-batch` feature). The runtime builds both, and `src/main.rs` hands them to the orchestrator and gives the pool the orchestrator's memory guard. The pool reads the cascade's `worker_pool` section, whose keys and defaults are `WorkerPoolConfig` in scalo-rs `src/worker/config.rs`: thread bounds, the CPU thresholds it grows and shrinks at, a memory pressure cap, the scale interval and the async concurrency limit. [../architecture.md](../architecture.md) covers the layers around this hot path.
+The pool and the engine are scalo's `AdaptiveWorkerPool` and `BatchEngine` (scalo-rs `src/worker/`, the `worker-batch` feature). The runtime builds both, and `src/main.rs` hands them to the orchestrator and gives the pool the orchestrator's memory guard. The pool reads the cascade's `worker_pool` section, with keys and defaults in `WorkerPoolConfig` in scalo-rs `src/worker/config.rs`: thread bounds, the CPU thresholds it grows and shrinks at, a memory pressure cap, the scale interval and the async concurrency limit. [../architecture.md](../architecture.md) covers the layers around this hot path.

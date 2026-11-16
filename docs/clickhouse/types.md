@@ -38,8 +38,8 @@ Sources:
 |--------|---------|
 | GA | Generally Available |
 | Beta | Beta, stable but may change |
-| Experimental | Experimental, requires setting flag |
-| Deprecated | Deprecated, avoid in new code |
+| Experimental | Experimental, needs a setting flag |
+| Deprecated | Deprecated, avoid in a schema |
 
 ---
 
@@ -103,8 +103,8 @@ Sources:
 | `DateTime(tz)` | Same + timezone | 1 second | UInt32 + timezone metadata |
 | `DateTime64(P)` | Wide range | 10^-P seconds | Int64 (scaled) |
 | `DateTime64(P, tz)` | Same + timezone | 10^-P seconds | Int64 + timezone metadata |
-| `Time` | 00:00:00 to 23:59:59 | 1 second | UInt32 |
-| `Time64(P)` | High precision time | 10^-P seconds | Int64 |
+| `Time` | -999:59:59 to 999:59:59 | 1 second | Int32 (seconds) |
+| `Time64(P)` | -999:59:59 to 999:59:59 | 10^-P seconds | Decimal64 (Int64 ticks) |
 
 **DateTime64 precision:**
 
@@ -374,19 +374,19 @@ A `Point` is written as two little-endian `Float64`, x then y, where x is the lo
 
 | Form | Example | Coordinate order |
 |------|---------|------------------|
-| Object | `{"lat": 41.12, "lon": -71.34}` | named |
+| Object | `{"lat": 41.12, "lon": -71.34}` | by key |
 | GeoJSON | `{"type": "Point", "coordinates": [-71.34, 41.12]}` | lon, lat |
 | String | `"41.12,-71.34"` | lat, lon |
 | Array | `[-71.34, 41.12]` | lon, lat |
 | WKT | `"POINT (-71.34 41.12)"` | lon, lat |
 
-A third coordinate is read and ignored. A geohash, a latitude outside -90 to 90, a longitude outside -180 to 180, or a value no form reads is an encoding error for that row alone: salvage isolates it and it goes to the DLQ with the reason. An absent `Point` is `(0, 0)`, the type's own default. ClickHouse refuses `Nullable(Point)`, so there is no null to write instead.
+A third coordinate is read and ignored. A geohash, a latitude outside -90 to 90, a longitude outside -180 to 180, or a value no form reads is an encoding error for that row alone: salvage isolates it and it goes to the DLQ with the reason. An absent `Point` is `(0, 0)`, the type's default. ClickHouse rejects `Nullable(Point)`, so there is no null to write instead.
 
-`Ring`, `LineString`, `Polygon`, `MultiLineString` and `MultiPolygon` are arrays of points on the wire, written from nested arrays whose innermost elements take any form above. An absent one is the empty array.
+`Ring`, `LineString`, `Polygon`, `MultiLineString` and `MultiPolygon` are arrays of points on the wire, written from nested arrays with innermost elements in any form above. An absent one is the empty array.
 
 ### A single value bound for an Array
 
-Elasticsearch lets any field carry one value or many, so a scalar bound for an `Array(T)` column is written as a one-element array, and T's own rules then decide whether it is valid. `"related_ip": "52.108.0.3"` lands in an `Array(IPv6)` column as `['::ffff:52.108.0.3']`. An object is wrapped only where the element is read from one (`JSON`, `Map`, `Point`). Bound for an array of scalars, it stays an encoding error. A null or absent array is the empty array. For an `Array(Point)` column, a bare `[lon, lat]` is one point, as Elasticsearch reads it.
+Elasticsearch lets any field hold one value or many, so a scalar bound for an `Array(T)` column is written as a one-element array, and T's rules then decide whether it is valid. `"related_ip": "52.108.0.3"` lands in an `Array(IPv6)` column as `['::ffff:52.108.0.3']`. An object is wrapped only where the element is read from one (`JSON`, `Map`, `Point`). Bound for an array of scalars, it stays an encoding error. A null or absent array is the empty array. For an `Array(Point)` column, a bare `[lon, lat]` is one point, as Elasticsearch reads it.
 
 The rationale for RowBinary as the default: schema-reflected RowBinary leaves the server no row text to parse, cuts ClickHouse CPU, and gives full type support without
 requiring compile-time schemas. A JSON column's value is still JSON text the server parses. Records stay a `Map<String, Value>` from

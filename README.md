@@ -23,7 +23,7 @@ In a DFE deployment it is the last hop of the core data path, taking what dfe-re
 - Columns read from the live table's `system.columns`: matching fields become typed columns and the rest stays in `_json`, with no schema compiled in.
 - RowBinary inserts by default, so ClickHouse parses no row text and infers no types. A JSON column's value, `_json` included, still arrives as JSON text for the server to parse.
 - Per-table buffers flushed on row count, byte size or age, whichever comes first.
-- At-least-once delivery by default: Kafka offsets commit once per flush, never past a row not yet in ClickHouse or the DLQ. `kafka.acknowledgements.enabled: false` commits at receipt instead, and a row only a DLQ could take is dropped and counted in `dfe_loader_rows_lost_total` when no DLQ is working.
+- At-least-once delivery by default: Kafka offsets commit once per flush, never past a row not yet in ClickHouse or the DLQ. `kafka.acknowledgements.enabled: false` commits at receipt instead, and a row the DLQ alone could take is dropped and counted in `dfe_loader_rows_lost_total` when no DLQ is working.
 - A batch with a bad row is split until only the bad rows are dead-lettered, and a schema drift error refreshes the cached schema and retries.
 - Optional GeoIP, reputation and risk columns at load time.
 
@@ -38,7 +38,7 @@ cargo build
 
 That prints `[ok] configuration is valid` and the resolved config, and opens no connections. `--config` is a global option, so it goes BEFORE the subcommand -- `config-check --config ...` is rejected by the argument parser.
 
-Moving real data needs a broker or a gRPC sender, and the DFE tables, which the loader never creates. [dfe-docker](https://github.com/hyperi-io/dfe-docker) brings up the whole stack with the tables in place. A running loader serves metrics on `http://localhost:9090/metrics`, with `/livez` and `/readyz` alongside.
+Moving data needs a broker or a gRPC sender, and the DFE tables, which the loader never creates. [dfe-docker](https://github.com/hyperi-io/dfe-docker) brings up the whole stack with the tables in place. A running loader serves metrics on `http://localhost:9090/metrics`, with `/livez` and `/readyz` alongside.
 
 ## What it does
 
@@ -56,18 +56,18 @@ dfe-loader reads records off Kafka or a direct gRPC listener, works out which Cl
 
 JSON is the only payload format. MessagePack, which DFE/XDR 2.0 and 2.1 accepted, was removed in DFE 2.2, and a MessagePack record is dead-lettered as not JSON: the JSON path (SIMD parsing with sonic-rs, zstd on the wire) is fast enough that MessagePack gave no CPU saving.
 
-Failures degrade rather than stall: a batch with a bad row is binary-split so only the bad rows are dead-lettered, a batch whose insert fails is held and retried with backoff while the commit stays below it, and a schema drift error invalidates the cached schema and retries.
+A batch with a bad row is binary-split so only the bad rows are dead-lettered. A failed insert's batch is held and retried with backoff, with its offsets uncommitted. A schema drift error invalidates the cached schema before the retry.
 
 ## Configuration essentials
 
-One YAML file, named by `--config` or `DFE_LOADER_CONFIG`. With neither set the loader reads `./config.yaml` or `./config.yml` if one exists, but only a named file is hot-reloaded. The chart mounts it at `/etc/dfe/loader.yaml`. `config.example.yaml` is an annotated example, `docs/config-schema.yaml` lists every key with its default, and every setting has a default, so an empty config boots.
+One YAML file, from `--config` or `DFE_LOADER_CONFIG`. With neither set the loader reads `./config.yaml` or `./config.yml` if one exists, but only a file given that way is hot-reloaded. The chart mounts it at `/etc/dfe/loader.yaml`. `config.example.yaml` is an annotated example, `docs/config-schema.yaml` lists every key with its default, and every setting has a default, so an empty config boots.
 
-Environment overrides use the `DFE_LOADER` prefix in two forms, and the difference matters: `DFE_LOADER_KAFKA_GROUP_ID` is the flat single-underscore set, a fixed contract with dfe-engine, while `DFE_LOADER__CLICKHOUSE__DATABASE` uses double underscores to nest into any config key.
+Environment overrides use the `DFE_LOADER` prefix in two forms, and the difference matters: `DFE_LOADER_KAFKA_GROUP_ID` is the flat single-underscore set, a fixed contract with dfe-engine, and `DFE_LOADER__CLICKHOUSE__DATABASE` uses double underscores to nest into any config key.
 
 | Setting | Default | Note |
 |---------|---------|------|
 | `clickhouse.hosts` | `localhost:8123` | HTTP port family |
-| `clickhouse.protocol` | `http` | `native` (9000, 9440 with TLS) also works, for `rowbinary` inserts |
+| `clickhouse.protocol` | `http` | `native` (9000, 9440 with TLS) works for `rowbinary` inserts |
 | `clickhouse.database` | `dfe` | The connection database, separate from `routing.default_db` |
 | `clickhouse.insert_format` | `rowbinary` | `jsoneachrow` is the fallback |
 | `clickhouse.tls.enabled` | unset | The ONLY honoured TLS key. Mount a private CA into the container trust store rather than naming cert files |
@@ -99,7 +99,7 @@ The suite's published docs are at <https://dfe.docs.hyperi.io>, and this reposit
 
 ## Help and contributing
 
-How to work in this repo, the commands that prove a change and what tends to bite are in [CONTRIBUTING.md](CONTRIBUTING.md). A question that is not a bug goes in a new issue.
+How to work in this repo, the commands that prove a change and what tends to bite are in [CONTRIBUTING.md](CONTRIBUTING.md). A question that is not a bug goes in an issue.
 
 Open bugs: [this repo](https://github.com/hyperi-io/dfe-loader/issues?q=is%3Aopen+is%3Aissue+type%3ABug+-label%3Abacklog+-label%3Anext-minor) | [whole DFE suite](https://github.com/search?type=issues&q=is%3Aopen+is%3Aissue+type%3ABug+-label%3Abacklog+-label%3Anext-minor+repo%3Ahyperi-io%2Fdfe-infra+repo%3Ahyperi-io%2Fdfe-docker+repo%3Ahyperi-io%2Fdfe-deploy+repo%3Ahyperi-io%2Fdfe-engine+repo%3Ahyperi-io%2Fdfe-loader+repo%3Ahyperi-io%2Fdfe-receiver+repo%3Ahyperi-io%2Fdfe-fetcher+repo%3Ahyperi-io%2Fdfe-archiver+repo%3Ahyperi-io%2Fdfe-transform-vrl+repo%3Ahyperi-io%2Fdfe-transform-vector+repo%3Ahyperi-io%2Fdfe-transform-elastic+repo%3Ahyperi-io%2Fdfe-ui+repo%3Ahyperi-io%2Fdfe-hyperdx+repo%3Ahyperi-io%2Fscalo-rs+repo%3Ahyperi-io%2Fscalo-py+repo%3Ahyperi-io%2Flogreducer+repo%3Ahyperi-io%2Fdfe-schemas+repo%3Ahyperi-io%2Fvector-vrl+repo%3Ahyperi-io%2Fculvert+repo%3Ahyperi-io%2Fdfe-clickhouse-rs+repo%3Ahyperi-io%2Ffactbook-rs)
 

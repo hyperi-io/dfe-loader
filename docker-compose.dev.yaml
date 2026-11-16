@@ -9,15 +9,14 @@
 #   docker-compose -f docker-compose.dev.yaml down -v
 
 services:
-  # ClickHouse for testing inserts
   clickhouse:
     # Matches CLICKHOUSE_TAG in tests/common/containers.rs and dfe-infra's
     # services.clickhouse-version.
     image: clickhouse/clickhouse-server:26.3.42.3@sha256:21d572843e59539c7d100286b6f5a6053c341fe4b33c2d7b74b1ff7cb24c5399
     container_name: clickhouse-dev
     ports:
-      - "9000:9000"   # Native protocol
-      - "8123:8123"   # HTTP protocol
+      - "9000:9000"
+      - "8123:8123"
     environment:
       CLICKHOUSE_DB: default
       CLICKHOUSE_USER: default

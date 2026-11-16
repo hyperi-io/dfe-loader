@@ -1,10 +1,7 @@
 # SPDX-License-Identifier: BUSL-1.1
 # Copyright (c) 2026 HYPERI PTY LIMITED
 
-# Core is the default selection: unit tests, captured-fixture tests and one
-# shared-instance table test per heavy service (integration::shared_services).
-# Every other test that needs a real ClickHouse or Kafka is full, which runs
-# with `--run-ignored all --ignore-default-filter`. tests/TESTING.md lists both.
+# tests/TESTING.md describes the core and full selections.
 [profile.default]
 default-filter = '''
 not (
@@ -19,8 +16,7 @@ not (
 '''
 # No retries: a retry keeps a real defect green.
 retries = 0
-# These tests are legitimately slower than unit tests; warn rather than kill,
-# but do not let a hung container run forever.
+# Warn every 60 s, and end the test after five periods.
 slow-timeout = { period = "60s", terminate-after = 5 }
 
 # Tests that start their own container get a concurrency budget, or cold starts
