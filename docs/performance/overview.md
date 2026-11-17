@@ -60,22 +60,39 @@ config:
     .ui .label-icon{color:#D9480F}
     .ext .label-icon{color:#64748B}
 ---
-flowchart LR
+flowchart TB
     accTitle: L4 Detail -- Where performance is set
     accDescr: hyperi-ci builds the binary with jemalloc, LTO, and on release PGO then BOLT. The batch flush settings in config tune the running loader.
 
     subgraph build["Build-time, hyperi-ci"]
-        direction LR
-        jemalloc["<b>jemalloc</b>"] ~~~ lto["<b>LTO</b>"] ~~~ pgo["<b>PGO</b>"] ~~~ bolt["<b>BOLT</b>"]
+        direction TB
+        subgraph B1["Allocator and linking"]
+            direction LR
+            jemalloc("<b>jemalloc</b>")
+            lto("<b>LTO</b>")
+            jemalloc ~~~ lto
+        end
+        subgraph B2["Profile-guided"]
+            direction LR
+            pgo("<b>PGO</b>")
+            bolt("<b>BOLT</b>")
+            pgo ~~~ bolt
+        end
+        B1 ~~~ B2
     end
-
-    binary["<b>Optimised binary</b>"]
-    batch["<b>Batch settings<br/>in config</b>"]
-    loader(["<b>Running loader</b>"])
-
-    build --> binary
-    binary --> loader
-    batch --> loader
+    subgraph run["Run time"]
+        direction LR
+        binary("<b>Optimised binary</b>")
+        batch("<b>Batch settings<br/>in config</b>")
+        loader(["<b>Running loader</b>"])
+        binary --> loader
+        batch --> loader
+    end
+    build -->|compiles| run
+  class jemalloc,lto,pgo,bolt,binary,batch part
+  class loader load
+  class jemalloc,lto,pgo,bolt,binary,batch part
+  class loader load
   classDef ext fill:#F4F6F8,stroke:#94A3B8,stroke-width:1.5px,stroke-dasharray:5 4,color:#0F172A
   classDef ingest fill:#FFFFFF,stroke:#0E8A7D,stroke-width:3px,color:#0F172A
   classDef xform fill:#FFFFFF,stroke:#7B4FB0,stroke-width:3px,color:#0F172A
@@ -87,9 +104,10 @@ flowchart LR
   classDef error fill:#FFFFFF,stroke:#C2410C,stroke-width:3px,color:#0F172A
   classDef control fill:#FFFFFF,stroke:#334155,stroke-width:3px,color:#0F172A
   classDef part fill:#FFFFFF,stroke:#94A3B8,stroke-width:1.5px,color:#0F172A
-  class jemalloc,lto,pgo,bolt,binary,batch part
-  class loader load
   style build fill:none,stroke:#0072B2,stroke-width:1.5px,stroke-dasharray:6 4
+  style B1 fill:none,stroke:#0072B2,stroke-width:1.5px,stroke-dasharray:6 4
+  style B2 fill:none,stroke:#0072B2,stroke-width:1.5px,stroke-dasharray:6 4
+  style run fill:none,stroke:#0072B2,stroke-width:1.5px,stroke-dasharray:6 4
 ```
 
 *Figure 1. L4 Detail -- Where performance is set. BOLT runs on the PGO build.* Up: [Performance](README.md).

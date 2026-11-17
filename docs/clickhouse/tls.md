@@ -60,20 +60,32 @@ config:
     .ui .label-icon{color:#D9480F}
     .ext .label-icon{color:#64748B}
 ---
-flowchart LR
+flowchart TB
     accTitle: L4 Detail -- TLS trust
     accDescr: clickhouse.tls.enabled turns TLS on. The system trust store, the image bundle or the file SSL_CERT_FILE or SSL_CERT_DIR names, supplies the CA certificates. The loader verifies the server's certificate chain and host name against them before it opens HTTPS or native TLS to ClickHouse.
 
-    enabled["<b>clickhouse.tls.enabled</b>"]
-    store["<b>System trust store</b>"]
-    verify["<b>Verify chain<br/>and host name</b>"]
-    conn["<b>HTTPS or<br/>native TLS</b>"]
-    clickhouse[("<b>ClickHouse</b>")]
-
-    enabled -->|on| verify
-    store -->|CA certs| verify
-    verify -->|verified| conn
-    conn --> clickhouse
+    subgraph tls["TLS to ClickHouse"]
+        direction TB
+        subgraph R1["1 Verify"]
+            direction LR
+            enabled("<b>clickhouse.tls.enabled</b>")
+            store("<b>System trust store</b>")
+            verify("<b>Verify chain<br/>and host name</b>")
+            enabled -->|on| verify
+            store -->|CA certs| verify
+        end
+        subgraph R2["2 Connect"]
+            direction LR
+            conn("<b>HTTPS or<br/>native TLS</b>")
+            clickhouse[("<b>ClickHouse</b>")]
+            conn --> clickhouse
+        end
+        R1 -->|verified| R2
+    end
+  class enabled,verify,conn part
+  class store,clickhouse store
+  class enabled,verify,conn part
+  class store,clickhouse store
   classDef ext fill:#F4F6F8,stroke:#94A3B8,stroke-width:1.5px,stroke-dasharray:5 4,color:#0F172A
   classDef ingest fill:#FFFFFF,stroke:#0E8A7D,stroke-width:3px,color:#0F172A
   classDef xform fill:#FFFFFF,stroke:#7B4FB0,stroke-width:3px,color:#0F172A
@@ -85,8 +97,9 @@ flowchart LR
   classDef error fill:#FFFFFF,stroke:#C2410C,stroke-width:3px,color:#0F172A
   classDef control fill:#FFFFFF,stroke:#334155,stroke-width:3px,color:#0F172A
   classDef part fill:#FFFFFF,stroke:#94A3B8,stroke-width:1.5px,color:#0F172A
-  class enabled,verify,conn part
-  class store,clickhouse store
+  style tls fill:none,stroke:#0072B2,stroke-width:1.5px,stroke-dasharray:6 4
+  style R1 fill:none,stroke:#0072B2,stroke-width:1.5px,stroke-dasharray:6 4
+  style R2 fill:none,stroke:#0072B2,stroke-width:1.5px,stroke-dasharray:6 4
 ```
 
 *Figure 1. L4 Detail -- TLS trust. The store is the image bundle, or what `SSL_CERT_FILE` or `SSL_CERT_DIR` names.* Up: [ClickHouse insert layer](README.md).

@@ -58,17 +58,30 @@ config:
     .ui .label-icon{color:#D9480F}
     .ext .label-icon{color:#64748B}
 ---
-flowchart LR
+flowchart TB
     accTitle: L4 Detail -- Config cascade
     accDescr: The loader starts from its hard-coded defaults, applies the YAML file over them, then the nested ENV variables, then the flat ENV variables, and validates the result.
 
-    defaults["<b>Hard-coded<br/>defaults</b>"]
-    file["<b>YAML file</b>"]
-    nested["<b>Nested ENV</b>"]
-    flat["<b>Flat ENV</b>"]
+    subgraph cascade["Config cascade, lowest first"]
+        direction TB
+        subgraph R1["1 Built in and file"]
+            direction LR
+            defaults("<b>Hard-coded<br/>defaults</b>")
+            file("<b>YAML file</b>")
+            defaults --> file
+        end
+        subgraph R2["2 Environment"]
+            direction LR
+            nested("<b>Nested ENV</b>")
+            flat("<b>Flat ENV</b>")
+            nested --> flat
+        end
+        R1 --> R2
+    end
     config(["<b>Validated config</b>"])
-
-    defaults --> file --> nested --> flat --> config
+    cascade --> config
+  class defaults,file,nested,flat,config part
+  class defaults,file,nested,flat,config part
   classDef ext fill:#F4F6F8,stroke:#94A3B8,stroke-width:1.5px,stroke-dasharray:5 4,color:#0F172A
   classDef ingest fill:#FFFFFF,stroke:#0E8A7D,stroke-width:3px,color:#0F172A
   classDef xform fill:#FFFFFF,stroke:#7B4FB0,stroke-width:3px,color:#0F172A
@@ -80,7 +93,9 @@ flowchart LR
   classDef error fill:#FFFFFF,stroke:#C2410C,stroke-width:3px,color:#0F172A
   classDef control fill:#FFFFFF,stroke:#334155,stroke-width:3px,color:#0F172A
   classDef part fill:#FFFFFF,stroke:#94A3B8,stroke-width:1.5px,color:#0F172A
-  class defaults,file,nested,flat,config part
+  style cascade fill:none,stroke:#0072B2,stroke-width:1.5px,stroke-dasharray:6 4
+  style R1 fill:none,stroke:#0072B2,stroke-width:1.5px,stroke-dasharray:6 4
+  style R2 fill:none,stroke:#0072B2,stroke-width:1.5px,stroke-dasharray:6 4
 ```
 
 *Figure 1. L4 Detail -- Config cascade. Each layer overrides the one to its left.* Up: [dfe-loader docs](README.md).

@@ -83,20 +83,32 @@ config:
     .ui .label-icon{color:#D9480F}
     .ext .label-icon{color:#64748B}
 ---
-flowchart LR
+flowchart TB
     accTitle: L4 Detail -- Capture mode precedence
     accDescr: A table whose COMMENT carries a capture_mode tag uses that mode. Otherwise a metadata.table_capture_modes entry for the table decides. Otherwise metadata.capture_mode applies.
 
-    tag{"<b>@capture_mode<br/>tag?</b>"}
-    entry{"<b>table_capture_modes<br/>entry?</b>"}
-    tagmode(["<b>The tag's mode</b>"])
-    entrymode(["<b>The entry's mode</b>"])
-    global(["<b>metadata.capture_mode</b>"])
-
-    tag -->|no| entry
-    tag -->|yes| tagmode
-    entry -->|yes| entrymode
-    entry -->|no| global
+    subgraph prec["Capture mode precedence"]
+        direction TB
+        subgraph R1["1 Table tag"]
+            direction LR
+            tag{"<b>@capture_mode<br/>tag?</b>"}
+            tagmode(["<b>The tag's mode</b>"])
+            tag -->|yes| tagmode
+        end
+        subgraph R2["2 Config"]
+            direction LR
+            entry{"<b>table_capture_modes<br/>entry?</b>"}
+            entrymode(["<b>The entry's mode</b>"])
+            global(["<b>metadata.capture_mode</b>"])
+            entry -->|yes| entrymode
+            entry -->|no| global
+        end
+        R1 -->|no| R2
+    end
+  class tag,entry decision
+  class tagmode,entrymode,global part
+  class tag,entry decision
+  class tagmode,entrymode,global part
   classDef ext fill:#F4F6F8,stroke:#94A3B8,stroke-width:1.5px,stroke-dasharray:5 4,color:#0F172A
   classDef ingest fill:#FFFFFF,stroke:#0E8A7D,stroke-width:3px,color:#0F172A
   classDef xform fill:#FFFFFF,stroke:#7B4FB0,stroke-width:3px,color:#0F172A
@@ -108,8 +120,9 @@ flowchart LR
   classDef error fill:#FFFFFF,stroke:#C2410C,stroke-width:3px,color:#0F172A
   classDef control fill:#FFFFFF,stroke:#334155,stroke-width:3px,color:#0F172A
   classDef part fill:#FFFFFF,stroke:#94A3B8,stroke-width:1.5px,color:#0F172A
-  class tag,entry decision
-  class tagmode,entrymode,global part
+  style prec fill:none,stroke:#0072B2,stroke-width:1.5px,stroke-dasharray:6 4
+  style R1 fill:none,stroke:#0072B2,stroke-width:1.5px,stroke-dasharray:6 4
+  style R2 fill:none,stroke:#0072B2,stroke-width:1.5px,stroke-dasharray:6 4
 ```
 
 *Figure 1. L4 Detail -- Capture mode precedence. The first question answered yes decides.* Up: [Pipeline](README.md).

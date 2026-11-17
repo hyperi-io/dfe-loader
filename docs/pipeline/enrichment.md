@@ -62,22 +62,24 @@ config:
     .ui .label-icon{color:#D9480F}
     .ext .label-icon{color:#64748B}
 ---
-flowchart LR
+flowchart TB
     accTitle: L4 Detail -- Enrichment
     accDescr: The row from column extraction is looked up by its first IP field in GeoIP and in the reputation blocklists. Risk scoring weighs both results. The row goes on to its table's buffer with the geo, rep and risk columns added.
 
-    extract["<b>Extract columns</b>"]
-
+    extract("<b>Extract columns</b>")
     subgraph lookups["Enrich"]
         direction LR
-        rep["<b>Reputation<br/>blocklists</b>"] --> risk["<b>Risk scoring</b>"]
-        geo["<b>GeoIP</b>"] --> risk
+        rep("<b>Reputation<br/>blocklists</b>")
+        geo("<b>GeoIP</b>")
+        risk("<b>Risk scoring</b>")
+        rep --> risk
+        geo --> risk
     end
-
-    buffer["<b>Buffer per table</b>"]
-
+    buffer("<b>Buffer per table</b>")
     extract -->|row| lookups
     lookups -->|row| buffer
+  class extract,geo,rep,risk,buffer part
+  class extract,geo,rep,risk,buffer part
   classDef ext fill:#F4F6F8,stroke:#94A3B8,stroke-width:1.5px,stroke-dasharray:5 4,color:#0F172A
   classDef ingest fill:#FFFFFF,stroke:#0E8A7D,stroke-width:3px,color:#0F172A
   classDef xform fill:#FFFFFF,stroke:#7B4FB0,stroke-width:3px,color:#0F172A
@@ -89,11 +91,10 @@ flowchart LR
   classDef error fill:#FFFFFF,stroke:#C2410C,stroke-width:3px,color:#0F172A
   classDef control fill:#FFFFFF,stroke:#334155,stroke-width:3px,color:#0F172A
   classDef part fill:#FFFFFF,stroke:#94A3B8,stroke-width:1.5px,color:#0F172A
-  class extract,geo,rep,risk,buffer part
   style lookups fill:none,stroke:#0072B2,stroke-width:1.5px,stroke-dasharray:6 4
 ```
 
-*Figure 1. L4 Detail -- Enrichment. Each provider is off until its setting turns it on.* Up: [L3 Components -- dfe-loader](../README.md).
+*Figure 1. L4 Detail -- Enrichment. Each provider is off until its setting turns it on.* Up: [L3 Components -- dfe-loader](../architecture.md).
 
 ## Providers
 

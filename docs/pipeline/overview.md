@@ -64,15 +64,36 @@ flowchart TB
     accTitle: L4 Detail -- Loader pipeline
     accDescr: Two stages run in order. Read and route takes message bytes, splits batched messages, parses JSON and routes each record to a table. Extract and write extracts the header and schema columns, enriches, buffers per table, then inserts and commits offsets.
 
-    subgraph s1["1 Read and route"]
-        direction LR
-        bytes(["<b>Message bytes</b>"]) --> split["<b>Split batches</b>"] --> parse["<b>Parse JSON</b>"] --> route["<b>Route to table</b>"]
+    subgraph pass["Loader pipeline"]
+        direction TB
+        subgraph s1["1 Read and route"]
+            direction TB
+            subgraph s1a["Read"]
+                direction LR
+                bytes(["<b>Message bytes</b>"]) --> split("<b>Split batches</b>") --> parse("<b>Parse JSON</b>")
+            end
+            subgraph s1b["Route"]
+                direction LR
+                route("<b>Route to table</b>")
+            end
+            s1a --> s1b
+        end
+        subgraph s2["2 Extract and write"]
+            direction TB
+            subgraph s2a["Extract"]
+                direction LR
+                extract("<b>Extract columns</b>") --> enrich("<b>Enrich</b>")
+            end
+            subgraph s2b["Write"]
+                direction LR
+                buffer("<b>Buffer per table</b>") --> insert(["<b>Insert and commit</b>"])
+            end
+            s2a --> s2b
+        end
+        s1 --> s2
     end
-    subgraph s2["2 Extract and write"]
-        direction LR
-        extract["<b>Extract columns</b>"] --> enrich["<b>Enrich</b>"] --> buffer["<b>Buffer per table</b>"] --> insert(["<b>Insert and commit</b>"])
-    end
-    s1 --> s2
+  class bytes,split,parse,route,extract,enrich,buffer,insert part
+  class bytes,split,parse,route,extract,enrich,buffer,insert part
   classDef ext fill:#F4F6F8,stroke:#94A3B8,stroke-width:1.5px,stroke-dasharray:5 4,color:#0F172A
   classDef ingest fill:#FFFFFF,stroke:#0E8A7D,stroke-width:3px,color:#0F172A
   classDef xform fill:#FFFFFF,stroke:#7B4FB0,stroke-width:3px,color:#0F172A
@@ -84,9 +105,13 @@ flowchart TB
   classDef error fill:#FFFFFF,stroke:#C2410C,stroke-width:3px,color:#0F172A
   classDef control fill:#FFFFFF,stroke:#334155,stroke-width:3px,color:#0F172A
   classDef part fill:#FFFFFF,stroke:#94A3B8,stroke-width:1.5px,color:#0F172A
-  class bytes,split,parse,route,extract,enrich,buffer,insert part
+  style pass fill:none,stroke:#0072B2,stroke-width:1.5px,stroke-dasharray:6 4
   style s1 fill:none,stroke:#0072B2,stroke-width:1.5px,stroke-dasharray:6 4
+  style s1a fill:none,stroke:#0072B2,stroke-width:1.5px,stroke-dasharray:6 4
+  style s1b fill:none,stroke:#0072B2,stroke-width:1.5px,stroke-dasharray:6 4
   style s2 fill:none,stroke:#0072B2,stroke-width:1.5px,stroke-dasharray:6 4
+  style s2a fill:none,stroke:#0072B2,stroke-width:1.5px,stroke-dasharray:6 4
+  style s2b fill:none,stroke:#0072B2,stroke-width:1.5px,stroke-dasharray:6 4
 ```
 
 *Figure 1. L4 Detail -- Loader pipeline. Read each stage left to right, then down.* Up: [Pipeline](README.md).
@@ -148,7 +173,7 @@ per-table config > global). See [capture-modes.md](capture-modes.md).
 
 ## 6. Insert and commit
 
-The encoder reshapes only the values ClickHouse cannot take as sent: epoch vs ISO timestamps, hyphen-less UUIDs, integer IPv4, every geo_point form for a `Point`, and a single value for an `Array` (see [../clickhouse/types.md](../clickhouse/types.md)). Each table's buffer flushes on its triggers (`flush_rows` / `flush_bytes` / `flush_age_secs`). The batch is encoded and inserted through `dfe-clickhouse`'s `dynamic` module (RowBinary by default). Kafka offsets commit once per flush cycle, and on each partition stop below the lowest offset not placed yet -- at-least-once. Batch salvage isolates a row ClickHouse rejects for good and sends it to the DLQ. A batch that fails for any other reason is held and retried with jittered backoff until it lands. See [../architecture.md](../architecture.md#resilience) and [../clickhouse/insert-formats.md](../clickhouse/insert-formats.md).
+The encoder reshapes only the values ClickHouse cannot take as sent: epoch vs ISO timestamps, hyphen-less UUIDs, integer IPv4, every geo_point form for a `Point`, and a single value for an `Array` (see [../clickhouse/types.md](../clickhouse/types.md)). Each table's buffer flushes on its triggers (`flush_rows` / `flush_bytes` / `flush_age_secs`). The batch is encoded and inserted through `dfe-clickhouse`'s `dynamic` module (RowBinary by default). Kafka offsets commit once per flush cycle, and on each partition stop below the lowest offset not placed yet -- at-least-once. Batch salvage isolates a row ClickHouse rejects for good and sends it to the DLQ. A batch that fails for any other reason is held and retried with jittered backoff until it lands. See [../operations.md](../operations.md#when-inserts-fail) and [../clickhouse/insert-formats.md](../clickhouse/insert-formats.md).
 
 ## Parallelism
 

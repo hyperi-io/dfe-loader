@@ -10,9 +10,17 @@
 
 # Transport
 
-The transports, Kafka and gRPC, are scalo's. The loader does not implement them: it takes what scalo's `Transport` receives and feeds it into its parse stage, then on through routing, extraction and the per-table insert path. Whichever transport delivers a message, the bytes converge on the same hot path: refuse anything not JSON, parse, route to `db.table`, promote schema columns, and buffer for insert. A Memory transport exists behind the `transport-memory` cargo feature for unit tests only.
+The transport is how records reach [dfe-loader](../architecture.md): scalo's Kafka or gRPC transport, adapted so the pipeline sees one message type.
 
-Each transport has an adapter, and both adapters hand the pipeline the same `KafkaMessage`, so nothing after them knows which transport a record came on.
+| | |
+|---|---|
+| Repo | [hyperi-io/dfe-loader](https://github.com/hyperi-io/dfe-loader) |
+| Image and chart | `ghcr.io/hyperi-io/dfe-loader`, and the thin chart released beside it |
+| Config reference | `transport`, `kafka` and `grpc` in [config-schema.yaml](../config-schema.yaml) |
+| Endpoints | gRPC Push on port 6000 with `transport: grpc`. `/metrics`, `/livez` and `/readyz` on 9090 |
+| Metrics | `messages_received_total`, `kafka_offsets_committed_total`, `pipeline_retries_total`, in [operations.md](../operations.md#observe) |
+
+The loader doesn't implement either transport. A Memory transport exists behind the `transport-memory` cargo feature for unit tests only.
 
 ```mermaid
 ---
@@ -60,25 +68,31 @@ config:
     .ui .label-icon{color:#D9480F}
     .ext .label-icon{color:#64748B}
 ---
-flowchart LR
+flowchart TB
     accTitle: L4 Detail -- Transport adapters
     accDescr: scalo's KafkaTransport feeds the loader's TransportAdapter and scalo's GrpcTransport feeds the GrpcTransportAdapter. Both adapters turn each record into a KafkaMessage, which goes to the JSON parse step.
 
     subgraph scalo["scalo transports"]
-        kafka["<b>KafkaTransport</b>"]
-        grpc["<b>GrpcTransport</b>"]
+        direction LR
+        kafka("<b>KafkaTransport</b>")
+        grpc("<b>GrpcTransport</b>")
+        kafka ~~~ grpc
     end
-
-    kafkaadapter["<b>TransportAdapter</b>"]
-    grpcadapter["<b>GrpcTransportAdapter</b>"]
-    message["<b>KafkaMessage</b>"]
-    parse["<b>Parse JSON</b>"]
-
-    kafka --> kafkaadapter
-    grpc --> grpcadapter
-    kafkaadapter --> message
-    grpcadapter --> message
-    message --> parse
+    subgraph transport["Transport"]
+        direction LR
+        kafkaadapter("<b>TransportAdapter</b><br/><span>from KafkaTransport</span>")
+        grpcadapter("<b>GrpcTransportAdapter</b><br/><span>from GrpcTransport</span>")
+        message("<b>KafkaMessage</b>")
+        kafkaadapter --> message
+        grpcadapter --> message
+    end
+    parse("<b>Parse JSON</b><br/><span>the pipeline</span>")
+    scalo -->|each to its adapter| transport
+    transport --> parse
+  class kafka,grpc ext
+  class kafkaadapter,grpcadapter,message,parse part
+  class kafka,grpc ext
+  class kafkaadapter,grpcadapter,message,parse part
   classDef ext fill:#F4F6F8,stroke:#94A3B8,stroke-width:1.5px,stroke-dasharray:5 4,color:#0F172A
   classDef ingest fill:#FFFFFF,stroke:#0E8A7D,stroke-width:3px,color:#0F172A
   classDef xform fill:#FFFFFF,stroke:#7B4FB0,stroke-width:3px,color:#0F172A
@@ -90,14 +104,33 @@ flowchart LR
   classDef error fill:#FFFFFF,stroke:#C2410C,stroke-width:3px,color:#0F172A
   classDef control fill:#FFFFFF,stroke:#334155,stroke-width:3px,color:#0F172A
   classDef part fill:#FFFFFF,stroke:#94A3B8,stroke-width:1.5px,color:#0F172A
-  class kafka,grpc ext
-  class kafkaadapter,grpcadapter,message,parse part
   style scalo fill:none,stroke:#0072B2,stroke-width:1.5px,stroke-dasharray:6 4
+  style transport fill:none,stroke:#0072B2,stroke-width:1.5px,stroke-dasharray:6 4
 ```
 
-*Figure 1. L4 Detail -- Transport adapters. Dashed boxes are scalo's.* Up: [L3 Components -- dfe-loader](../README.md).
+*Figure 1. L4 Detail -- Transport adapters. Dashed boxes are scalo's.* Up: [L3 Components -- dfe-loader](../architecture.md).
 
-## In this section
+## How it works
+
+1. scalo's `KafkaTransport` consumes the configured topics, or its `GrpcTransport` serves Push on `grpc.listen`, port 6000 by default.
+2. Each transport's adapter turns every record into the same `KafkaMessage`, with its topic, partition and offset.
+3. The pipeline's parse step takes it from there, and nothing after it knows which transport a record came on.
+
+## Interfaces
+
+Kafka: the topics in `kafka.topics` or `kafka.topic_regex`, read as consumer group `kafka.group`. gRPC: scalo's Push on port 6000, which the deployment contract declares only when `transport: grpc`. The loader is a gRPC server only and never sends.
+
+## Scaling and failure
+
+A transport that can't start, such as Kafka with no broker reachable, is retried with backoff and counted in `pipeline_retries_total{stage="transport_start"}`. Until ClickHouse answers, the loader joins no consumer group and opens no gRPC listener. On gRPC a held batch is answered `UNAVAILABLE`, and the sender retries it.
+
+## Key metrics
+
+- `messages_received_total`: records in, on either transport.
+- `kafka_offsets_committed_total`: flat on gRPC, which has no broker offsets.
+- `pipeline_retries_total{stage="transport_start"}`: a transport that won't start.
+
+## Related
 
 - [grpc.md](grpc.md) -- the gRPC listener: how it answers a Push, the proto, its config and the deployment contract's port.
 - [common-header.md](common-header.md) -- the header columns every table starts with, and what the loader writes into each.
