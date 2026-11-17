@@ -58,26 +58,33 @@ config:
     .ui .label-icon{color:#D9480F}
     .ext .label-icon{color:#64748B}
 ---
-flowchart LR
+flowchart TB
     accTitle: L4 Detail -- Batch phases
     accDescr: A received batch passes the BatchEngine's pre-route filters when a routing field is set. The worker pool runs MessageProcessor process on each message in parallel. The BatchCoordinator then walks the results in one thread, pushing each Ok row into its table's buffer, parking a message that waits on its schema and turning any other error into a dead letter.
 
-    recv(["<b>Received batch</b>"])
-    preroute["<b>Pre-route filters</b>"]
-
-    subgraph parallel["Parallel"]
-        process["<b>MessageProcessor<br/>process</b>"]
+    subgraph before["Before the batch splits"]
+        direction LR
+        recv(["<b>Received batch</b>"])
+        preroute("<b>Pre-route filters</b>")
+        recv --> preroute
     end
-
-    subgraph sequential["Sequential"]
-        push["<b>Buffer push</b>"]
-        dead["<b>Dead letter</b>"]
+    subgraph phases["Per message"]
+        direction LR
+        subgraph parallel["Parallel"]
+            process("<b>MessageProcessor<br/>process</b>")
+        end
+        subgraph sequential["Sequential"]
+            push("<b>Buffer push</b>")
+            dead("<b>Dead letter</b>")
+        end
+        process -->|Ok| push
+        process -.->|Err| dead
     end
-
-    recv --> preroute
-    preroute --> process
-    process -->|Ok| push
-    process -.->|Err| dead
+    before --> phases
+  class recv,preroute,process,push part
+  class dead error
+  class recv,preroute,process,push part
+  class dead error
   classDef ext fill:#F4F6F8,stroke:#94A3B8,stroke-width:1.5px,stroke-dasharray:5 4,color:#0F172A
   classDef ingest fill:#FFFFFF,stroke:#0E8A7D,stroke-width:3px,color:#0F172A
   classDef xform fill:#FFFFFF,stroke:#7B4FB0,stroke-width:3px,color:#0F172A
@@ -89,8 +96,8 @@ flowchart LR
   classDef error fill:#FFFFFF,stroke:#C2410C,stroke-width:3px,color:#0F172A
   classDef control fill:#FFFFFF,stroke:#334155,stroke-width:3px,color:#0F172A
   classDef part fill:#FFFFFF,stroke:#94A3B8,stroke-width:1.5px,color:#0F172A
-  class recv,preroute,process,push part
-  class dead error
+  style before fill:none,stroke:#0072B2,stroke-width:1.5px,stroke-dasharray:6 4
+  style phases fill:none,stroke:#0072B2,stroke-width:1.5px,stroke-dasharray:6 4
   style parallel fill:none,stroke:#0072B2,stroke-width:1.5px,stroke-dasharray:6 4
   style sequential fill:none,stroke:#0072B2,stroke-width:1.5px,stroke-dasharray:6 4
 ```

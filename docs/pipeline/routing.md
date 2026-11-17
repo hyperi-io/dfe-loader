@@ -60,24 +60,39 @@ config:
     .ui .label-icon{color:#D9480F}
     .ext .label-icon{color:#64748B}
 ---
-flowchart LR
+flowchart TB
     accTitle: L4 Detail -- Loader table choice
     accDescr: A message read from a dlq_load topic goes to dlq_load.table. Otherwise a table_fields value names the table. Otherwise a topic named for a source gives that source's table. Otherwise the message goes to default_table.
 
-    pin{"<b>dlq_load<br/>topic?</b>"}
-    field{"<b>table_fields<br/>value?</b>"}
-    topic{"<b>Source<br/>topic?</b>"}
-    replay(["<b>dlq_load.table</b>"])
-    value(["<b>Value's table</b>"])
-    source(["<b>Source's table</b>"])
-    fallback(["<b>default_table</b>"])
-
-    pin -->|no| field
-    pin -->|yes| replay
-    field -->|no| topic
-    field -->|yes| value
-    topic -->|yes| source
-    topic -->|no| fallback
+    subgraph choice["Table choice"]
+        direction TB
+        subgraph R1["1 DLQ replay"]
+            direction LR
+            pin{"<b>dlq_load<br/>topic?</b>"}
+            replay(["<b>dlq_load.table</b>"])
+            pin -->|yes| replay
+        end
+        subgraph R2["2 Routing field"]
+            direction LR
+            field{"<b>table_fields<br/>value?</b>"}
+            value(["<b>Value's table</b>"])
+            field -->|yes| value
+        end
+        subgraph R3["3 Source"]
+            direction LR
+            topic{"<b>Source<br/>topic?</b>"}
+            source(["<b>Source's table</b>"])
+            fallback(["<b>default_table</b>"])
+            topic -->|yes| source
+            topic -->|no| fallback
+        end
+        R1 -->|no| R2
+        R2 -->|no| R3
+    end
+  class pin,field,topic decision
+  class replay,value,source,fallback store
+  class pin,field,topic decision
+  class replay,value,source,fallback store
   classDef ext fill:#F4F6F8,stroke:#94A3B8,stroke-width:1.5px,stroke-dasharray:5 4,color:#0F172A
   classDef ingest fill:#FFFFFF,stroke:#0E8A7D,stroke-width:3px,color:#0F172A
   classDef xform fill:#FFFFFF,stroke:#7B4FB0,stroke-width:3px,color:#0F172A
@@ -89,11 +104,13 @@ flowchart LR
   classDef error fill:#FFFFFF,stroke:#C2410C,stroke-width:3px,color:#0F172A
   classDef control fill:#FFFFFF,stroke:#334155,stroke-width:3px,color:#0F172A
   classDef part fill:#FFFFFF,stroke:#94A3B8,stroke-width:1.5px,color:#0F172A
-  class pin,field,topic decision
-  class replay,value,source,fallback store
+  style choice fill:none,stroke:#0072B2,stroke-width:1.5px,stroke-dasharray:6 4
+  style R1 fill:none,stroke:#0072B2,stroke-width:1.5px,stroke-dasharray:6 4
+  style R2 fill:none,stroke:#0072B2,stroke-width:1.5px,stroke-dasharray:6 4
+  style R3 fill:none,stroke:#0072B2,stroke-width:1.5px,stroke-dasharray:6 4
 ```
 
-*Figure 1. L4 Detail -- Loader table choice. Green ends are tables.* Up: [L3 Components -- dfe-loader](../README.md).
+*Figure 1. L4 Detail -- Loader table choice. Green ends are tables.* Up: [L3 Components -- dfe-loader](../architecture.md).
 
 The database is the org's database when `org_routes` lists the tenant, else `default_db`. `source_to_table` then maps whichever table was chosen, a `dlq_load` one aside, and a table ClickHouse reports absent falls back to `default_table` as well.
 

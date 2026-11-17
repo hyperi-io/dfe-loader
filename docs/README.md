@@ -12,7 +12,7 @@
 
 Loads records from Kafka or a gRPC push into ClickHouse. Point it at a topic, give it a routing rule, and it parses, routes, promotes schema columns, enriches, buffers per table, and inserts -- RowBinary by default so ClickHouse parses no row text, with at-least-once Kafka delivery.
 
-[architecture.md](architecture.md) covers the loader's layers, [clickhouse/](clickhouse/) the insert layer and [pipeline/](pipeline/) the hot path.
+[architecture.md](architecture.md) covers the loader's parts, [clickhouse/](clickhouse/) the insert layer and [pipeline/](pipeline/) the hot path.
 
 | You give it | It handles | You don't write |
 |-------------|------------|-----------------|
@@ -24,94 +24,9 @@ Loads records from Kafka or a gRPC push into ClickHouse. Point it at a topic, gi
 | Enrichment toggles (geoip/reputation/risk) | Flat enriched columns on the promoted row, never in `_json` | Lookup, caching, CIDR matching |
 | Nothing extra | Per-table buffering, batch salvage, held-batch retry, schema-cache recovery, one offset commit per flush cycle | The resilience layer |
 
-## 10,000-foot view
+## How it fits together
 
-Every record takes the same six steps whichever transport brought it, and normally leaves as a row in a batched ClickHouse insert or as a dead letter.
-
-```mermaid
----
-config:
-  theme: base
-  look: neo
-  fontFamily: Inter, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif
-  flowchart:
-    curve: linear
-    nodeSpacing: 40
-    rankSpacing: 64
-    padding: 18
-    wrappingWidth: 280
-    htmlLabels: true
-  elk:
-    preset: modelOrder
-  themeVariables:
-    fontSize: 15px
-    lineColor: "#64748B"
-    primaryTextColor: "#0F172A"
-    clusterBorder: "#0072B2"
-    edgeLabelBackground: "#FFFFFF"
-  themeCSS: >-
-    p{margin:0}
-    .node[data-look] rect,.node[data-look] path,.node[data-look] polygon,.node[data-look] .outer-path{filter:drop-shadow(0 1px 2px rgba(15,23,42,.10)) drop-shadow(0 6px 14px rgba(15,23,42,.10))}
-    .node rect{rx:10px;ry:10px}
-    .cluster rect{rx:16px;ry:16px}
-    .node .label div{min-width:150px}
-    .node.decision .label div{min-width:0}
-    .cluster[data-look] rect{filter:none}
-    .nodeLabel{line-height:1.35}
-    .nodeLabel b{font-weight:600;font-size:15px;letter-spacing:-0.01em}
-    .nodeLabel span{font-size:12.5px;font-weight:400;color:#334155}
-    .cluster-label span.nodeLabel{display:inline-block;background:#FFFFFF;color:#0B2A3F;border:1.5px solid #0072B2;border-radius:999px;padding:2px 12px;font-size:11.5px;font-weight:700;letter-spacing:.09em;text-transform:uppercase}
-    .flowchart-link{stroke-width:1.75px}
-    .labelBkg{background:transparent!important}
-    span.edgeLabel{display:inline-block;background:#FFFFFF!important;color:#1E293B;border:1px solid #94A3B8;border-radius:999px;padding:2px 10px;font-size:12px;font-weight:500}
-    span.edgeLabel p{background:transparent!important}
-    .label-icon{width:20px;height:20px;vertical-align:-4px;margin-right:6px}
-    .ingest .label-icon{color:#0E8A7D}
-    .xform .label-icon{color:#7B4FB0}
-    .load .label-icon{color:#0072B2}
-    .bus .label-icon{color:#A8517F}
-    .store .label-icon{color:#00785A}
-    .ui .label-icon{color:#D9480F}
-    .ext .label-icon{color:#64748B}
----
-flowchart TB
-    accTitle: L3 Components -- dfe-loader
-    accDescr: Records arrive from Kafka topics or gRPC senders. Inside the loader each record is parsed, routed to a table, has its columns extracted, is enriched and is buffered per table, and the buffers are inserted into ClickHouse in batches. Rows ClickHouse refuses for good and records that fail processing go to the DLQ.
-
-    kafka[("<b>Kafka topics</b>")]
-    grpc["<b>gRPC senders</b>"]
-
-    subgraph loader["dfe-loader"]
-        direction LR
-        parse["<b>Parse JSON</b>"] --> route[["<b>Route</b>"]] --> extract["<b>Extract columns</b>"] --> enrich[["<b>Enrich</b>"]] --> buffer["<b>Buffer per table</b>"] --> insert[["<b>Insert</b>"]]
-    end
-
-    clickhouse[("<b>ClickHouse</b>")]
-    dlq[("<b>DLQ</b>")]
-
-    kafka -->|records| loader
-    grpc -->|records| loader
-    loader -->|rows| clickhouse
-    loader -.->|dead letters| dlq
-  classDef ext fill:#F4F6F8,stroke:#94A3B8,stroke-width:1.5px,stroke-dasharray:5 4,color:#0F172A
-  classDef ingest fill:#FFFFFF,stroke:#0E8A7D,stroke-width:3px,color:#0F172A
-  classDef xform fill:#FFFFFF,stroke:#7B4FB0,stroke-width:3px,color:#0F172A
-  classDef load fill:#FFFFFF,stroke:#0072B2,stroke-width:3px,color:#0F172A
-  classDef bus fill:#FFFFFF,stroke:#A8517F,stroke-width:3px,color:#0F172A
-  classDef store fill:#FFFFFF,stroke:#00785A,stroke-width:3px,color:#0F172A
-  classDef ui fill:#FFFFFF,stroke:#D9480F,stroke-width:3px,color:#0F172A
-  classDef decision fill:#FFFFFF,stroke:#9A6700,stroke-width:3px,color:#0F172A
-  classDef error fill:#FFFFFF,stroke:#C2410C,stroke-width:3px,color:#0F172A
-  classDef control fill:#FFFFFF,stroke:#334155,stroke-width:3px,color:#0F172A
-  classDef part fill:#FFFFFF,stroke:#94A3B8,stroke-width:1.5px,color:#0F172A
-  class kafka,dlq bus
-  class grpc ext
-  class parse,route,extract,enrich,buffer,insert part
-  class clickhouse store
-  style loader fill:none,stroke:#0072B2,stroke-width:1.5px,stroke-dasharray:6 4
-```
-
-*Figure 1. L3 Components -- dfe-loader. Double-bordered steps have a diagram each.* Up: top of dfe-loader. Down: [L4 Detail -- Loader table choice](pipeline/routing.md), [L4 Detail -- Enrichment](pipeline/enrichment.md), [L4 Detail -- Insert layer](clickhouse/README.md).
+[architecture.md](architecture.md) has the loader's parts, its dependencies and the diagram of how a record flows through it.
 
 With `kafka.acknowledgements.enabled` (the default) Kafka offsets commit once per flush cycle, never past a row not yet placed. A pre-route filter, a dead letter no DLQ can hold and a revoked partition's rows are the exceptions, each counted, and [operations.md](operations.md) covers them.
 
@@ -119,7 +34,7 @@ The docs, by area:
 
 | Area | Doc | Covers |
 |------|-----|--------|
-| Architecture | [architecture.md](architecture.md) | Layers, the dynamic insert, the client crates |
+| Architecture | [architecture.md](architecture.md) | The parts, the dependencies and why it is built this way |
 | Configuration | [configuration.md](configuration.md) | The cascade and the settings that change behaviour |
 | Operations | [operations.md](operations.md) | Running, config-check, metrics/top, hot-reload, DLQ |
 | Build features | [feature-flags.md](feature-flags.md) | Cargo features and the ClickHouse client crates |

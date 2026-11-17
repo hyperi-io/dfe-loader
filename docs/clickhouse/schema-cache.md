@@ -60,25 +60,38 @@ config:
     .ui .label-icon{color:#D9480F}
     .ext .label-icon{color:#64748B}
 ---
-flowchart LR
+flowchart TB
     accTitle: L4 Detail -- Schema cache read and recovery
     accDescr: An insert uses the cached schema when it is fresh, else reads system.columns. The rows are encoded and inserted. A drift error invalidates the table's entry so the retry reads the schema again, and any other answer ends the attempt.
 
-    fresh{"<b>Cached and<br/>fresh?</b>"}
-    cached["<b>Cached schema</b>"]
-    fetch["<b>Read columns</b>"]
-    insert["<b>Encode, insert</b>"]
-    drift{"<b>Drift<br/>error?</b>"}
-    done(["<b>Attempt ends</b>"])
-    invalidate(["<b>Invalidate</b>"])
-
-    fresh -->|yes| cached
-    fresh -->|no| fetch
-    cached --> insert
-    fetch --> insert
-    insert --> drift
-    drift -->|no| done
-    drift -->|yes| invalidate
+    subgraph cache["Schema cache"]
+        direction TB
+        subgraph R1["1 Schema"]
+            direction LR
+            fresh{"<b>Cached and<br/>fresh?</b>"}
+            cached("<b>Cached schema</b>")
+            fetch("<b>Read columns</b>")
+            fresh -->|yes| cached
+            fresh -->|no| fetch
+        end
+        subgraph R2["2 Insert"]
+            direction LR
+            insert("<b>Encode, insert</b>")
+            drift{"<b>Drift<br/>error?</b>"}
+            done(["<b>Attempt ends</b>"])
+            invalidate(["<b>Invalidate</b>"])
+            insert --> drift
+            drift -->|no| done
+            drift -->|yes| invalidate
+        end
+        R1 -->|schema| R2
+    end
+  class fresh,drift decision
+  class cached store
+  class fetch,insert,done,invalidate part
+  class fresh,drift decision
+  class cached store
+  class fetch,insert,done,invalidate part
   classDef ext fill:#F4F6F8,stroke:#94A3B8,stroke-width:1.5px,stroke-dasharray:5 4,color:#0F172A
   classDef ingest fill:#FFFFFF,stroke:#0E8A7D,stroke-width:3px,color:#0F172A
   classDef xform fill:#FFFFFF,stroke:#7B4FB0,stroke-width:3px,color:#0F172A
@@ -90,9 +103,9 @@ flowchart LR
   classDef error fill:#FFFFFF,stroke:#C2410C,stroke-width:3px,color:#0F172A
   classDef control fill:#FFFFFF,stroke:#334155,stroke-width:3px,color:#0F172A
   classDef part fill:#FFFFFF,stroke:#94A3B8,stroke-width:1.5px,color:#0F172A
-  class fresh,drift decision
-  class cached store
-  class fetch,insert,done,invalidate part
+  style cache fill:none,stroke:#0072B2,stroke-width:1.5px,stroke-dasharray:6 4
+  style R1 fill:none,stroke:#0072B2,stroke-width:1.5px,stroke-dasharray:6 4
+  style R2 fill:none,stroke:#0072B2,stroke-width:1.5px,stroke-dasharray:6 4
 ```
 
 *Figure 1. L4 Detail -- Schema cache read and recovery, with `schema.refresh_on_error` on.* Up: [ClickHouse insert layer](README.md).
