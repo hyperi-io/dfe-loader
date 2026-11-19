@@ -1078,6 +1078,17 @@ mod tests {
         assert_eq!(config.kafka.group, "dfe-loader");
         assert_eq!(config.clickhouse.hosts, vec!["localhost:8123"]);
         assert_eq!(config.buffer.flush_bytes, 64 * 1024 * 1024);
+        // The hold comes from the ladder and stays under a transform's send deadline.
+        let transform = scalo::transport::hold::HoldLadder::DEFAULT
+            .rung(crate::config::kafka::HOLD_LADDER_DEPTH - 1)
+            .expect("the default hold ladder has four depths");
+        assert_eq!(config.grpc.max_hold_ms, 13_500);
+        assert!(
+            u128::from(config.grpc.max_hold_ms) < transform.next_hop_deadline.as_millis(),
+            "a {} ms hold outlasts the {:?} a transform waits",
+            config.grpc.max_hold_ms,
+            transform.next_hop_deadline
+        );
     }
 
     #[test]

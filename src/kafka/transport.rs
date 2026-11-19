@@ -1170,7 +1170,7 @@ mod backend_tests {
         let deadline = backend
             .hold_deadline(&seqs)
             .expect("a held record has a deadline");
-        let budget = Duration::from_millis(crate::config::kafka::DEFAULT_MAX_HOLD_MS);
+        let budget = Duration::from_millis(crate::config::kafka::default_max_hold_ms());
         assert!(
             deadline <= std::time::Instant::now() + budget,
             "the deadline lies past the {budget:?} hold"

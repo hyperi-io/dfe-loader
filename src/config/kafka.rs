@@ -7,6 +7,7 @@ use std::collections::HashMap;
 
 use scalo::config::sensitive::SensitiveString;
 use scalo::transport::AcknowledgementsConfig;
+use scalo::transport::hold::HoldLadder;
 use serde::{Deserialize, Serialize};
 
 // ============================================================================
@@ -125,9 +126,19 @@ pub struct GrpcConfig {
     pub max_hold_ms: u64,
 }
 
-/// Hold budget under the 15 s send deadline a transform gives the loader, the
-/// shortest upstream hop.
-pub const DEFAULT_MAX_HOLD_MS: u64 = 13_500;
+/// The loader's depth on scalo's hold ladder: receiver 0, transform 1, loader 2.
+pub const HOLD_LADDER_DEPTH: usize = 2;
+
+/// The default `max_hold_ms`: the hold of the loader's rung on the default
+/// ladder, below the next-hop deadline a transform gives it.
+#[must_use]
+#[allow(clippy::expect_used)]
+pub fn default_max_hold_ms() -> u64 {
+    let rung = HoldLadder::DEFAULT
+        .rung(HOLD_LADDER_DEPTH)
+        .expect("the default hold ladder has four depths");
+    u64::try_from(rung.hold.as_millis()).unwrap_or(u64::MAX)
+}
 
 impl Default for GrpcConfig {
     fn default() -> Self {
@@ -139,7 +150,7 @@ impl Default for GrpcConfig {
             compression: false,
             default_topic: "main_land".to_string(),
             acknowledgements: AcknowledgementsConfig::default(),
-            max_hold_ms: DEFAULT_MAX_HOLD_MS,
+            max_hold_ms: default_max_hold_ms(),
         }
     }
 }
