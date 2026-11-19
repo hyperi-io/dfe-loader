@@ -3,6 +3,16 @@
 Rendered by CI and committed back at the end of a release -- do not edit by
 hand. Release notes also appear on the GitHub Releases page, one per tag.
 
+## [1.18.74](https://github.com/hyperi-io/dfe-loader/compare/v1.18.73...v1.18.74) (2026-11-19)
+
+### Bug Fixes
+
+* **config:** mark memory restart-required and fix stale comments ([#351](https://github.com/hyperi-io/dfe-loader/issues/351)) ([9387e65](https://github.com/hyperi-io/dfe-loader/commit/9387e654eece5a2525cf1fb9fe75721e796c9c49))
+* **deps:** update redpandadata/console Docker tag to v3.14.0 ([7d47c07](https://github.com/hyperi-io/dfe-loader/commit/7d47c07efb8028cd75fbb1d407ca982ed065dda1))
+* **deps:** update Rust crate uuid to >=1.29.2, <2 ([a6615f1](https://github.com/hyperi-io/dfe-loader/commit/a6615f1eb6edfedab363e6cf6c114e667be2bd8e))
+* **loader:** rebuild on scalo 2.14.32 ([7187fe7](https://github.com/hyperi-io/dfe-loader/commit/7187fe7864e9e713f21878ae05cc0f7c9792b7b5)), closes [#328](https://github.com/hyperi-io/dfe-loader/issues/328)
+* **security:** bump libz-sys to 1.1.33 ([bc43ca5](https://github.com/hyperi-io/dfe-loader/commit/bc43ca5fc306fbadc44b32e631adae5577418e2d))
+
 ## [1.18.73](https://github.com/hyperi-io/dfe-loader/compare/v1.18.72...v1.18.73) (2026-11-15)
 
 ### Bug Fixes
