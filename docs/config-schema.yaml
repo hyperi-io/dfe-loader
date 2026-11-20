@@ -1474,11 +1474,17 @@ $defs:
         format: int64
         default: 0
       invalid_action:
-        type: string
+        $ref: "#/$defs/InvalidTimestampAction"
         default: replace_with_now
       correct_known_bad:
         type: boolean
         default: true
+  InvalidTimestampAction:
+    description: What the loader does with a timestamp that fails the data-quality checks.
+    oneOf:
+    - description: Replace the timestamp with the ingest time.
+      type: string
+      const: replace_with_now
   FieldSanitizationConfig:
     type: object
     properties:
