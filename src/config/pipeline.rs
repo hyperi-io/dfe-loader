@@ -954,7 +954,7 @@ pub struct TimestampDqConfig {
     pub enabled: bool,
     pub max_future_seconds: i64,
     pub max_past_seconds: i64,
-    pub invalid_action: String,
+    pub invalid_action: InvalidTimestampAction,
     pub correct_known_bad: bool,
 }
 
@@ -964,10 +964,21 @@ impl Default for TimestampDqConfig {
             enabled: true,
             max_future_seconds: 600,
             max_past_seconds: 0, // 0 = no limit
-            invalid_action: "replace_with_now".to_string(),
+            invalid_action: InvalidTimestampAction::default(),
             correct_known_bad: true,
         }
     }
+}
+
+/// What the loader does with a timestamp that fails the data-quality checks.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum InvalidTimestampAction {
+    /// Replace the timestamp with the ingest time.
+    #[default]
+    ReplaceWithNow,
 }
 
 // ============================================================================

@@ -826,8 +826,7 @@ impl Config {
     ///
     /// The dynamic insert applies fixed coercion rules
     /// (`docs/clickhouse/clickhouse-ext.md`), so the `coerce` column directive
-    /// stays unset, and an invalid timestamp is always replaced with the ingest
-    /// time.
+    /// stays unset.
     fn refuse_unread_settings(&self) -> Result<()> {
         let directives = &self.column_directives;
         if let Some(column) = directives
@@ -839,13 +838,6 @@ impl Config {
             return Err(crate::Error::Config(format!(
                 "column_directives: the coerce directive on {column} reaches no encoder -- \
                  the dynamic insert applies fixed coercion rules"
-            )));
-        }
-        if self.timestamp_dq.invalid_action != TimestampDqConfig::default().invalid_action {
-            return Err(crate::Error::Config(format!(
-                "timestamp_dq.invalid_action '{}' is not supported -- an invalid \
-                 timestamp is replaced with the ingest time (replace_with_now)",
-                self.timestamp_dq.invalid_action
             )));
         }
         Ok(())
@@ -1279,11 +1271,10 @@ mod tests {
     /// A setting no code reads, or a value the loader cannot use, is refused
     /// rather than accepted and ignored: an empty or missing topic suffix under
     /// discovery, an unknown risk preset, a risk score past 100, risk level
-    /// bands out of order, a `coerce` column directive, and any
-    /// `timestamp_dq.invalid_action` but the one the loader takes.
+    /// bands out of order, and a `coerce` column directive.
     #[test]
     fn a_setting_nothing_honours_is_refused() {
-        let cases: [(&str, fn(&mut Config)); 7] = [
+        let cases: [(&str, fn(&mut Config)); 6] = [
             ("routing.topic_suffixes must not hold an empty value", |c| {
                 c.routing.topic_suffixes.push(String::new());
             }),
@@ -1300,9 +1291,6 @@ mod tests {
             }),
             ("enrichment.risk_scoring.levels", |c| {
                 c.enrichment.risk_scoring.levels.high = 30;
-            }),
-            ("timestamp_dq.invalid_action", |c| {
-                c.timestamp_dq.invalid_action = "drop".into();
             }),
             ("coerce", |c| {
                 c.column_directives.global.insert(
@@ -2358,6 +2346,36 @@ kafka:
 
         let err = parse_config_file(config_path.to_str().unwrap()).unwrap_err();
         assert!(err.to_string().contains("line 2"), "{err}");
+    }
+
+    /// `timestamp_dq.invalid_action` takes `replace_with_now` only, and any
+    /// other value fails the parse rather than the later validation.
+    #[test]
+    fn an_invalid_action_other_than_replace_with_now_fails_the_parse() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let config_path = dir.path().join("timestamp_dq.yaml");
+        let path = config_path.to_str().unwrap();
+
+        std::fs::write(
+            &config_path,
+            "timestamp_dq:\n  invalid_action: replace_with_now\n",
+        )
+        .unwrap();
+        let config = parse_config_file(path).unwrap();
+        assert_eq!(
+            config.timestamp_dq.invalid_action,
+            crate::config::InvalidTimestampAction::ReplaceWithNow
+        );
+
+        for value in ["drop", "reject", "ReplaceWithNow", "\"\""] {
+            std::fs::write(
+                &config_path,
+                format!("timestamp_dq:\n  invalid_action: {value}\n"),
+            )
+            .unwrap();
+            let err = parse_config_file(path).expect_err(value).to_string();
+            assert!(err.contains("replace_with_now"), "{value}: {err}");
+        }
     }
 
     // ========================================================================
