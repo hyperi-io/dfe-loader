@@ -19,7 +19,7 @@ use crate::transform::{ComputedColumnCache, FieldMappingCache};
 
 use super::capture::CaptureOverrides;
 use super::pending_schema::{EnqueueOutcome, PendingOverflow, PendingSchemaBuffer};
-use super::types::ProcessedMessage;
+use super::types::{AbsentTables, ProcessedMessage};
 
 /// Emit the `data.dlq_routed` security event, naming what was dead-lettered.
 ///
@@ -72,6 +72,8 @@ pub(crate) struct BatchCoordinator<'a> {
     pub metrics: &'a Option<Metrics>,
     pub memory_guard: &'a MemoryGuard,
     pub pending_schema: &'a mut PendingSchemaBuffer,
+    /// A table answered absent before is capped from its first held message.
+    pub absent_tables: &'a AbsentTables,
 }
 
 impl BatchCoordinator<'_> {
@@ -147,6 +149,9 @@ impl BatchCoordinator<'_> {
                             outcome.pending += 1;
                         }
                         Ok(EnqueueOutcome::NeedsResolution) => {
+                            if self.absent_tables.answered_absent(&table) {
+                                self.pending_schema.record_answer(&table);
+                            }
                             outcome.pending += 1;
                             outcome.needs_resolution.push(table);
                         }
@@ -200,7 +205,7 @@ mod tests {
     use crate::config::{BufferConfig, ComputedColumnsConfig, MetadataConfig};
     use crate::kafka::KafkaMessage;
     use crate::pipeline::capture::CaptureOverrides;
-    use crate::pipeline::types::ProcessedMessage;
+    use crate::pipeline::types::{AbsentTables, ProcessedMessage};
     use crate::transform::ComputedColumnCache;
 
     use super::{BatchCoordinator, BatchOutcome};
@@ -246,6 +251,9 @@ mod tests {
         }
     }
 
+    static NO_ABSENT_TABLES: std::sync::LazyLock<AbsentTables> =
+        std::sync::LazyLock::new(|| AbsentTables::new(std::time::Duration::from_secs(60), 16));
+
     fn make_coordinator<'a>(
         buffer_manager: &'a mut BufferManager,
         capture_overrides: &'a mut CaptureOverrides,
@@ -263,6 +271,7 @@ mod tests {
             metrics,
             memory_guard,
             pending_schema,
+            absent_tables: &NO_ABSENT_TABLES,
         }
     }
 
@@ -810,55 +819,150 @@ mod tests {
         assert!(outcome.dead_letters.is_empty(), "nothing should go to DLQ");
     }
 
+    /// What ClickHouse said about `dfe.t1` before a poll batch for it arrives.
+    enum Before {
+        Nothing,
+        FetchFailed,
+        AnsweredAbsent,
+    }
+
     #[test]
-    fn schema_pending_per_table_overflow_goes_to_dlq() {
-        let mut buffer_manager = BufferManager::new(&BufferConfig::default());
-        let mut capture_overrides = CaptureOverrides::new(&MetadataConfig::default());
-        let mut fmc: Option<crate::transform::FieldMappingCache> = None;
-        let mut ccc = ComputedColumnCache::new(ComputedColumnsConfig::default());
-        let metrics: Option<crate::metrics::Metrics> = None;
-        let guard = MemoryGuard::new(MemoryGuardConfig {
-            limit_bytes: 64 * 1024 * 1024,
-            ..Default::default()
-        });
-        let mut pending = crate::pipeline::pending_schema::PendingSchemaBuffer::new(
-            crate::pipeline::pending_schema::PendingSchemaConfig {
-                max_per_table: 1, // second message for the table overflows
+    fn a_poll_batch_over_the_per_table_cap_waits_only_for_its_first_fetch() {
+        use crate::clickhouse::{SchemaCache, TableSchema};
+        use crate::pipeline::pending_schema::{OnFull, PendingSchemaBuffer, PendingSchemaConfig};
+
+        // (case, before the batch, records held, offsets dead-lettered)
+        let cases = [
+            (
+                "new table, first fetch not back",
+                Before::Nothing,
+                5,
+                vec![],
+            ),
+            (
+                "fetch failed, still held",
+                Before::FetchFailed,
+                2,
+                vec![11, 12, 13, 14],
+            ),
+            (
+                "answered absent, being re-checked",
+                Before::AnsweredAbsent,
+                2,
+                vec![12, 13, 14],
+            ),
+        ];
+        for (case, before, held, dead_lettered) in cases {
+            let mut buffer_manager = BufferManager::new(&BufferConfig::default());
+            let mut capture_overrides = CaptureOverrides::new(&MetadataConfig::default());
+            let mut fmc: Option<crate::transform::FieldMappingCache> = None;
+            let mut ccc = ComputedColumnCache::new(ComputedColumnsConfig::default());
+            let guard = MemoryGuard::new(MemoryGuardConfig {
+                limit_bytes: 64 * 1024 * 1024,
+                ..Default::default()
+            });
+            let mut pending = PendingSchemaBuffer::new(PendingSchemaConfig {
+                max_per_table: 2,
                 max_total: 1000,
                 max_age: std::time::Duration::from_secs(30),
-                on_full: crate::pipeline::pending_schema::OnFull::DeadLetter,
-            },
-        );
+                on_full: OnFull::DeadLetter,
+            });
+            let mut absent = AbsentTables::new(std::time::Duration::ZERO, 16);
+            let pending_for = |offsets: std::ops::Range<i64>| {
+                let messages: Vec<KafkaMessage> = offsets
+                    .map(|n| make_kafka_message(b"r", "t", 0, n))
+                    .collect();
+                let results: Vec<crate::Result<ProcessedMessage>> = messages
+                    .iter()
+                    .map(|_| {
+                        Err(crate::Error::SchemaPending {
+                            table: "dfe.t1".into(),
+                        })
+                    })
+                    .collect();
+                (messages, results)
+            };
 
-        let outcome = {
-            let mut coord = make_coordinator(
+            match before {
+                Before::Nothing => {}
+                Before::FetchFailed => {
+                    let (messages, results) = pending_for(0..1);
+                    make_coordinator(
+                        &mut buffer_manager,
+                        &mut capture_overrides,
+                        &mut fmc,
+                        &mut ccc,
+                        &None,
+                        &guard,
+                        &mut pending,
+                    )
+                    .apply_results(results, &messages);
+                    pending.record_answer("dfe.t1");
+                }
+                Before::AnsweredAbsent => {
+                    let now = std::time::Instant::now();
+                    absent.insert("dfe.t1", now);
+                    assert_eq!(absent.expired(now), vec!["dfe.t1".to_string()], "{case}");
+                }
+            }
+
+            // One poll batch of five records for the table.
+            let (messages, results) = pending_for(10..15);
+            let outcome = BatchCoordinator {
+                buffer_manager: &mut buffer_manager,
+                capture_overrides: &mut capture_overrides,
+                field_mapping_cache: &mut fmc,
+                computed_column_cache: &mut ccc,
+                metrics: &None,
+                memory_guard: &guard,
+                pending_schema: &mut pending,
+                absent_tables: &absent,
+            }
+            .apply_results(results, &messages);
+
+            assert_eq!(pending.len_per_table("dfe.t1"), held, "{case}");
+            let offsets: Vec<i64> = outcome
+                .dead_letters
+                .iter()
+                .filter_map(|e| e.source.as_ref().and_then(|s| s.offset))
+                .collect();
+            assert_eq!(offsets, dead_lettered, "{case}");
+            assert!(
+                outcome
+                    .dead_letters
+                    .iter()
+                    .all(|e| e.reason.contains("pending_schema_per_table_overflow")),
+                "{case}"
+            );
+
+            // The schema resolves, and every held record loads into the table.
+            let schema_cache = SchemaCache::new(300);
+            schema_cache.insert(
+                "dfe.t1".into(),
+                TableSchema {
+                    database: "dfe".into(),
+                    table: "t1".into(),
+                    columns: vec![],
+                    comment: String::new(),
+                },
+            );
+            let ready = pending.take_ready(&schema_cache, &absent);
+            assert_eq!(ready.len(), held, "{case}");
+            let results: Vec<crate::Result<ProcessedMessage>> =
+                ready.iter().map(|_| Ok(make_processed("dfe.t1"))).collect();
+            let loaded = make_coordinator(
                 &mut buffer_manager,
                 &mut capture_overrides,
                 &mut fmc,
                 &mut ccc,
-                &metrics,
+                &None,
                 &guard,
                 &mut pending,
-            );
-            let messages = [
-                make_kafka_message(b"a", "t", 0, 0),
-                make_kafka_message(b"b", "t", 0, 1),
-            ];
-            let results: Vec<crate::Result<ProcessedMessage>> = vec![
-                Err(crate::Error::SchemaPending {
-                    table: "dfe.t1".into(),
-                }),
-                Err(crate::Error::SchemaPending {
-                    table: "dfe.t1".into(),
-                }),
-            ];
-            coord.apply_results(results, &messages)
-        };
-
-        assert_eq!(outcome.pending, 1, "first fits");
-        assert_eq!(outcome.dead_letters.len(), 1, "second overflows to DLQ");
-        let entry = &outcome.dead_letters[0];
-        assert!(entry.reason.contains("pending_schema"));
-        assert_eq!(entry.source.as_ref().and_then(|s| s.offset), Some(1));
+            )
+            .apply_results(results, &ready);
+            assert_eq!(loaded.processed, held as u64, "{case}");
+            assert!(loaded.dead_letters.is_empty(), "{case}");
+            assert_eq!(buffer_manager.stats().pending_rows, held, "{case}");
+        }
     }
 }

@@ -1313,8 +1313,10 @@ pub struct SchemaConfig {
     /// fetches each table once.
     pub pre_warm_retry_secs: u64,
     /// Max messages buffered per table while waiting for schema resolution.
-    /// On Kafka, excess messages route to DLQ with a security event. On gRPC,
-    /// a table at this cap stops intake until its schema resolves.
+    /// On Kafka, the cap starts once the table's first schema fetch answers,
+    /// and past it messages route to DLQ with a security event. Until then
+    /// they use free space under `pending_max_total`. On gRPC, a table at this cap stops
+    /// intake until its schema resolves.
     pub pending_max_per_table: usize,
     /// Max messages buffered across all tables.
     /// On Kafka, hitting this cap evicts the oldest entry FIFO across tables.

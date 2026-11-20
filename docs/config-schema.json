@@ -886,7 +886,7 @@
           "default": 60
         },
         "pending_max_per_table": {
-          "description": "Max messages buffered per table while waiting for schema resolution.\nOn Kafka, excess messages route to DLQ with a security event. On gRPC,\na table at this cap stops intake until its schema resolves.",
+          "description": "Max messages buffered per table while waiting for schema resolution.\nOn Kafka, the cap starts once the table's first schema fetch answers,\nand past it messages route to DLQ with a security event. Until then\nthey use free space under `pending_max_total`. On gRPC, a table at this cap stops\nintake until its schema resolves.",
           "type": "integer",
           "format": "uint",
           "minimum": 0,
