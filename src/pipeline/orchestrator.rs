@@ -740,6 +740,8 @@ impl Orchestrator {
                 //   - SchemaCache: full schema for HeaderExtractor (Change A)
                 Some(result) = schema_result_rx.recv() => {
                     let table = &result.table;
+                    // Any answer, a failure included, starts the table's per-table cap.
+                    pending_schema_buffer.record_answer(table);
 
                     // A comment or directives read that failed keeps what the
                     // table had, so a transient failure erases nothing.
@@ -1118,6 +1120,7 @@ impl Orchestrator {
                                 metrics: &self.metrics,
                                 memory_guard: &self.memory_guard,
                                 pending_schema: &mut pending_schema_buffer,
+                                absent_tables: &absent_tables,
                             };
                             // When pre-route is active, results only contain passing
                             // messages — build the matching message slice.

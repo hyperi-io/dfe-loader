@@ -9,11 +9,12 @@
 //! its overflow to the DLQ or admits it and reports itself full, so the caller
 //! stops intake -- see [`OnFull`].
 //!
-//! `last_requested_at` drives two things: the first-request signal
+//! `last_requested_at` drives three things: the first-request signal
 //! (`EnqueueOutcome::NeedsResolution`) so the caller kicks off resolution,
-//! and periodic re-requests (added in a later task) so a table whose
-//! resolution failed — e.g. a transient ClickHouse outage — is retried
-//! instead of silently ageing out to the DLQ.
+//! periodic re-requests so a table whose resolution failed — e.g. a transient
+//! ClickHouse outage — is retried instead of silently ageing out to the DLQ,
+//! and the per-table cap, which overflows to the DLQ only once a resolution
+//! has answered, so a new table's first poll batch waits for its schema.
 
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -91,15 +92,21 @@ struct PendingMsg {
     enqueued_at: Instant,
 }
 
+/// A table's resolution request, and whether any resolution has answered it.
+struct Request {
+    at: Instant,
+    answered: bool,
+}
+
 pub(crate) struct PendingSchemaBuffer {
     per_table: FxHashMap<String, VecDeque<PendingMsg>>,
-    /// Last time resolution was requested for a table. Drives the
-    /// first-request signal AND periodic re-requests. Cleared for a table
-    /// when `take_ready` drains it.
-    last_requested_at: FxHashMap<String, Instant>,
+    /// Each held table's resolution request. Drives the first-request signal,
+    /// periodic re-requests and the per-table cap. Cleared for a table when
+    /// `take_ready` drains it.
+    last_requested_at: FxHashMap<String, Request>,
     total_count: usize,
     /// Messages evicted by global-cap overflow, drained on the next
-    /// `expire()` call (added in a later task).
+    /// `expire()` call.
     evicted: VecDeque<(KafkaMessage, ExpireReason)>,
     config: PendingSchemaConfig,
     /// The table dead letters load into, whose messages wait for it even once
@@ -189,10 +196,13 @@ impl PendingSchemaBuffer {
     /// Returns `NeedsResolution` the first time a table is seen (caller must
     /// push the table to the resolver channel); `Enqueued` otherwise.
     ///
-    /// Under [`OnFull::DeadLetter`], the per-table cap returns `Err(PerTable)`
-    /// and does NOT enqueue -- the caller routes the current message to DLQ --
-    /// and the global cap evicts the oldest message across all tables (queued
-    /// in `evicted`) before inserting. Under [`OnFull::Backpressure`] every
+    /// Under [`OnFull::DeadLetter`], once [`Self::record_answer`] has run for
+    /// the table, the per-table cap returns `Err(PerTable)` and does NOT
+    /// enqueue -- the caller routes the current message to DLQ. Before that,
+    /// a poll batch larger than the cap waits for its first fetch in the
+    /// buffer's free space, but never evicts another table's message. The
+    /// global cap evicts the oldest message across all tables (queued in
+    /// `evicted`) before inserting. Under [`OnFull::Backpressure`] every
     /// message is enqueued and neither cap drops anything.
     pub fn enqueue(
         &mut self,
@@ -200,7 +210,13 @@ impl PendingSchemaBuffer {
         msg: KafkaMessage,
     ) -> Result<EnqueueOutcome, PendingOverflow> {
         if self.config.on_full == OnFull::DeadLetter {
-            if self.len_per_table(&table) >= self.config.max_per_table {
+            if self.len_per_table(&table) >= self.config.max_per_table
+                && (self.total_count >= self.config.max_total
+                    || self
+                        .last_requested_at
+                        .get(&table)
+                        .is_some_and(|r| r.answered))
+            {
                 return Err(PendingOverflow::PerTable(table));
             }
             if self.total_count >= self.config.max_total {
@@ -220,9 +236,20 @@ impl PendingSchemaBuffer {
         match self.last_requested_at.entry(table) {
             std::collections::hash_map::Entry::Occupied(_) => Ok(EnqueueOutcome::Enqueued),
             std::collections::hash_map::Entry::Vacant(slot) => {
-                slot.insert(Instant::now());
+                slot.insert(Request {
+                    at: Instant::now(),
+                    answered: false,
+                });
                 Ok(EnqueueOutcome::NeedsResolution)
             }
+        }
+    }
+
+    /// Record that a resolution for `table` has finished, whatever it found,
+    /// so the per-table cap applies to it from here on.
+    pub fn record_answer(&mut self, table: &str) {
+        if let Some(request) = self.last_requested_at.get_mut(table) {
+            request.answered = true;
         }
     }
 
@@ -349,17 +376,19 @@ impl PendingSchemaBuffer {
         let due: Vec<String> = self
             .last_requested_at
             .iter()
-            .filter(|&(_, &ts)| now.saturating_duration_since(ts) >= interval)
+            .filter(|&(_, r)| now.saturating_duration_since(r.at) >= interval)
             .map(|(t, _)| t.clone())
             .collect();
         for t in &due {
-            self.last_requested_at.insert(t.clone(), now);
+            if let Some(request) = self.last_requested_at.get_mut(t) {
+                request.at = now;
+            }
         }
         due
     }
 
     /// Evict the oldest message across all tables into the eviction queue.
-    /// Drained by `expire()` (added in a later task).
+    /// Drained by `expire()`.
     fn evict_oldest(&mut self) {
         let oldest_table = self
             .per_table
@@ -576,14 +605,61 @@ mod tests {
     }
 
     #[test]
-    fn enqueue_per_table_overflow_returns_err() {
-        let mut buf = PendingSchemaBuffer::new(small_cfg()); // max_per_table = 3
-        buf.enqueue("dfe.t1".into(), make_msg(b"a")).unwrap();
-        buf.enqueue("dfe.t1".into(), make_msg(b"b")).unwrap();
-        buf.enqueue("dfe.t1".into(), make_msg(b"c")).unwrap();
-        let err = buf.enqueue("dfe.t1".into(), make_msg(b"d")).unwrap_err();
-        assert_eq!(err, PendingOverflow::PerTable("dfe.t1".into()));
-        assert_eq!(buf.len(), 3); // unchanged
+    fn the_per_table_cap_applies_once_a_resolution_has_answered() {
+        // (case, answer after the first message, messages, held, refused)
+        let cases = [
+            ("first fetch still running", false, 5, 5, 0),
+            ("fetch answered, table still missing", true, 5, 3, 2),
+        ];
+        for (case, answered, sent, held, refused) in cases {
+            let mut buf = PendingSchemaBuffer::new(small_cfg()); // max_per_table = 3
+            buf.enqueue("dfe.t1".into(), make_msg(b"0")).unwrap();
+            if answered {
+                buf.record_answer("dfe.t1");
+            }
+            let mut errs = Vec::new();
+            for n in 1..sent {
+                if let Err(e) = buf.enqueue("dfe.t1".into(), make_msg(&[n])) {
+                    errs.push(e);
+                }
+            }
+            assert_eq!(buf.len_per_table("dfe.t1"), held, "{case}");
+            assert_eq!(errs.len(), refused, "{case}");
+            assert!(
+                errs.iter()
+                    .all(|e| *e == PendingOverflow::PerTable("dfe.t1".into())),
+                "{case}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_table_over_its_cap_before_its_answer_never_evicts_another_table() {
+        let mut buf = PendingSchemaBuffer::new(small_cfg()); // max_per_table = 3, max_total = 10
+        for n in 0..3u8 {
+            buf.enqueue("dfe.other".into(), make_msg(&[n])).unwrap();
+        }
+        let mut refused = 0;
+        for n in 0..9u8 {
+            if buf.enqueue("dfe.t1".into(), make_msg(&[n])).is_err() {
+                refused += 1;
+            }
+        }
+        assert_eq!(buf.len_per_table("dfe.t1"), 7, "the free space is used");
+        assert_eq!(refused, 2, "past the free space the overflow is refused");
+        assert_eq!(buf.len_per_table("dfe.other"), 3);
+        assert!(buf.expire(Instant::now()).is_empty(), "nothing was evicted");
+    }
+
+    #[test]
+    fn an_answer_for_a_table_not_held_is_forgotten() {
+        let mut buf = PendingSchemaBuffer::new(small_cfg());
+        buf.record_answer("dfe.t1");
+        for n in 0..5u8 {
+            buf.enqueue("dfe.t1".into(), make_msg(&[n]))
+                .expect("an answer before the table was held does not cap it");
+        }
+        assert_eq!(buf.len_per_table("dfe.t1"), 5);
     }
 
     #[test]

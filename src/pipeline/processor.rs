@@ -802,6 +802,10 @@ mod tests {
             metrics: &None,
             memory_guard: &guard,
             pending_schema: &mut pending,
+            absent_tables: &crate::pipeline::types::AbsentTables::new(
+                std::time::Duration::from_secs(60),
+                16,
+            ),
         }
         .apply_results(vec![Err(err)], std::slice::from_ref(&msg));
 
