@@ -346,8 +346,28 @@ const ERROR_TEXT_CAP: usize = 1 << 20;
 pub fn error_text(err: &clickhouse::error::Error) -> String {
     capped(match ServerException::parse(err) {
         Some(exception) => server_text(exception.code, &exception.message),
-        None => err.to_string(),
+        None => with_causes(err),
     })
+}
+
+/// `err` and each cause beneath it, joined by `: `. The client wraps a failed
+/// connect as `network error: client error (Connect)` and keeps what the
+/// transport said -- a failed lookup, a refusal, a certificate fault -- only
+/// as the error's source, so `to_string()` alone drops it.
+fn with_causes(err: &(dyn std::error::Error + 'static)) -> String {
+    let mut text = err.to_string();
+    let mut cause = err.source();
+    while let Some(next) = cause {
+        let part = next.to_string();
+        // An error that spells its source into its own message (`{0}` beside
+        // `#[source]`) must not print it twice.
+        if !text.contains(&part) {
+            text.push_str(": ");
+            text.push_str(&part);
+        }
+        cause = next.source();
+    }
+    text
 }
 
 /// [`error_text`] for an error off the native protocol, which carries the
@@ -359,7 +379,7 @@ pub fn native_error_text(err: &dfe_clickhouse::Error) -> String {
         dfe_clickhouse::Error::BadResponse(body) => {
             return error_text(&clickhouse::error::Error::BadResponse(body.clone()));
         }
-        other => other.to_string(),
+        other => with_causes(other),
     })
 }
 
@@ -446,6 +466,37 @@ pub fn classify_from_message(msg: &str) -> ErrorCategory {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn error_text_keeps_a_cause_the_message_leaves_out_and_prints_one_it_repeats() {
+        // `Network` spells its source into its own message, so the chain
+        // must not print it twice.
+        let repeated = clickhouse::error::Error::Network("socket closed".into());
+        assert_eq!(error_text(&repeated), "network error: socket closed");
+
+        let layered = clickhouse::error::Error::Network(Box::new(std::io::Error::other("outer")));
+        assert_eq!(error_text(&layered), "network error: outer");
+
+        #[derive(Debug)]
+        struct Wrapper(std::io::Error);
+        impl std::fmt::Display for Wrapper {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("client error (Connect)")
+            }
+        }
+        impl std::error::Error for Wrapper {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                Some(&self.0)
+            }
+        }
+        let hidden = clickhouse::error::Error::Network(Box::new(Wrapper(std::io::Error::other(
+            "tcp connect error",
+        ))));
+        assert_eq!(
+            error_text(&hidden),
+            "network error: client error (Connect): tcp connect error"
+        );
+    }
 
     #[test]
     fn test_connection_error_is_transient() {
