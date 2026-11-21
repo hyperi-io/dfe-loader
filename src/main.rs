@@ -87,9 +87,9 @@ impl ServiceApp for App {
         config: Self::Config,
         mut runtime: ServiceRuntime,
     ) -> impl std::future::Future<Output = Result<(), CliError>> + Send {
-        // Same resolution Config::load() uses, so a config file named by
-        // DFE_LOADER_CONFIG is hot-reloaded like one named by --config.
-        let config_path = Config::resolve_config_path(self.common_args().config.as_deref());
+        // The file run_app loaded, so one named by DFE_LOADER_CONFIG is
+        // hot-reloaded like one named by --config.
+        let config_path = self.common_args().config_path(self.env_prefix());
 
         async move {
             let mut config = config;

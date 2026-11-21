@@ -328,8 +328,7 @@ fn clickhouse_tls_fields_with_no_reader_are_rejected() {
 // Env-var cascade
 // ============================================================================
 
-/// Both separator forms after the prefix must reach the same key, and
-/// `DFE_LOADER_CONFIG` must name the config file the cascade docs say it does.
+/// Both separator forms after the prefix must reach the same key.
 ///
 /// One test because env vars are process-global.
 #[test]
@@ -361,38 +360,6 @@ fn env_cascade_forms_reach_the_config() {
         unsafe { std::env::remove_var("DFE_LOADER__SCALING__WEIGHT_KAFKA_LAG") };
         assert!((config.scaling.weight_kafka_lag - 0.45).abs() < f64::EPSILON);
     }
-
-    // DFE_LOADER_CONFIG names the config file when --config is absent.
-    {
-        let dir = tempfile::TempDir::new().expect("tempdir");
-        let path = write_config(&dir, "routing:\n  default_table: from_env_named_file\n");
-        unsafe { std::env::set_var("DFE_LOADER_CONFIG", &path) };
-        let config = Config::load(None).expect("config loads");
-        unsafe { std::env::remove_var("DFE_LOADER_CONFIG") };
-        assert_eq!(config.routing.default_table, "from_env_named_file");
-
-        // A file it names that is not there is refused, never swapped for defaults.
-        let missing = dir.path().join("absent.yaml");
-        unsafe { std::env::set_var("DFE_LOADER_CONFIG", &missing) };
-        let refused = Config::load(None);
-        unsafe { std::env::remove_var("DFE_LOADER_CONFIG") };
-        assert!(
-            refused.is_err(),
-            "DFE_LOADER_CONFIG named a missing file and the loader ran on defaults"
-        );
-    }
-
-    // --config still wins over DFE_LOADER_CONFIG.
-    {
-        let dir = tempfile::TempDir::new().expect("tempdir");
-        let env_path = write_config(&dir, "routing:\n  default_table: from_env\n");
-        let flag_dir = tempfile::TempDir::new().expect("tempdir");
-        let flag_path = write_config(&flag_dir, "routing:\n  default_table: from_flag\n");
-        unsafe { std::env::set_var("DFE_LOADER_CONFIG", &env_path) };
-        let config = Config::load(Some(&flag_path)).expect("config loads");
-        unsafe { std::env::remove_var("DFE_LOADER_CONFIG") };
-        assert_eq!(config.routing.default_table, "from_flag");
-    }
 }
 
 /// `config-check` run by the binary from `dir`, returning what it printed.
@@ -408,6 +375,74 @@ fn config_check_in(dir: &std::path::Path) -> String {
     let printed = String::from_utf8_lossy(&out.stderr).into_owned();
     assert!(out.status.success(), "config-check failed:\n{printed}");
     printed
+}
+
+/// `config-check` run by the binary from `dir` with `args` and `config_env` as
+/// `DFE_LOADER_CONFIG` (unset when `None`).
+fn config_check_with(
+    dir: &std::path::Path,
+    args: &[&str],
+    config_env: Option<&str>,
+) -> std::process::Output {
+    let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_dfe-loader"));
+    cmd.args(args)
+        .arg("config-check")
+        .current_dir(dir)
+        .env_remove("DFE_LOADER_ROUTING_DEFAULT_DB")
+        .env_remove("DFE_LOADER_ROUTING_DEFAULT_TABLE");
+    match config_env {
+        Some(value) => cmd.env("DFE_LOADER_CONFIG", value),
+        None => cmd.env_remove("DFE_LOADER_CONFIG"),
+    };
+    cmd.output().expect("the binary runs")
+}
+
+/// `DFE_LOADER_CONFIG` names the config file when `--config` is absent, a
+/// missing file it names is refused, `--config` wins over it and a blank value
+/// is ignored. Runs the binary, because scalo's `run_app` resolves the path.
+#[test]
+fn the_config_env_var_names_the_config_file() {
+    let work = tempfile::TempDir::new().expect("tempdir");
+    let env_dir = tempfile::TempDir::new().expect("tempdir");
+    let env_path = write_config(&env_dir, "routing:\n  default_table: from_env_named_file\n");
+    let flag_dir = tempfile::TempDir::new().expect("tempdir");
+    let flag_path = write_config(&flag_dir, "routing:\n  default_table: from_flag\n");
+    let printed = |out: &std::process::Output| String::from_utf8_lossy(&out.stderr).into_owned();
+
+    let out = config_check_with(work.path(), &[], Some(&env_path));
+    assert!(
+        out.status.success(),
+        "config-check failed:\n{}",
+        printed(&out)
+    );
+    assert!(printed(&out).contains("from_env_named_file"));
+
+    let missing = env_dir.path().join("absent.yaml");
+    let out = config_check_with(
+        work.path(),
+        &[],
+        Some(missing.to_str().expect("utf-8 path")),
+    );
+    assert!(
+        !out.status.success(),
+        "DFE_LOADER_CONFIG named a missing file and the loader ran on defaults"
+    );
+
+    let out = config_check_with(work.path(), &["--config", &flag_path], Some(&env_path));
+    assert!(
+        out.status.success(),
+        "config-check failed:\n{}",
+        printed(&out)
+    );
+    assert!(printed(&out).contains("from_flag"));
+    assert!(!printed(&out).contains("from_env_named_file"));
+
+    let out = config_check_with(work.path(), &[], Some(""));
+    assert!(
+        out.status.success(),
+        "a blank value must be ignored:\n{}",
+        printed(&out)
+    );
 }
 
 /// The binary reads the `.env` in its working directory and no other.
