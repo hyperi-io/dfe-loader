@@ -59,6 +59,7 @@ build:
 # docs/deployment/publishing.md describes the release artefacts.
 release:
   enabled: true
+  candidates: true
   # Keep `library` at the scalo version in Cargo.toml: the library renders only the contract version its scalo release writes.
   helm:
     enabled: true
