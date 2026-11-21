@@ -28,7 +28,7 @@ tokio = { version = ">=1.54.1, <2", features = ["full"] }
 tokio-util = { version = ">=0.7.20, <0.8", features = ["rt"] }
 
 # The floor moves with `release.helm.library` in .hyperi-ci.yaml.
-scalo = { version = ">=2.14.32, <3", features = ["config-schema", "transport-kafka", "transport-grpc", "dlq-kafka", "config", "config-reload", "deployment", "version-check", "scaling", "cli-service", "top", "logger", "metrics", "service-metrics", "expression", "memory", "worker-batch", "governor", "secrets", "sink-stack", "geoip-download"] }
+scalo = { version = ">=2.14.33, <3", features = ["config-schema", "transport-kafka", "transport-grpc", "dlq-kafka", "config", "config-reload", "deployment", "version-check", "scaling", "cli-service", "top", "logger", "metrics", "service-metrics", "expression", "memory", "worker-batch", "governor", "secrets", "sink-stack", "geoip-download"] }
 
 # Steps scalo's jittered retry schedule (sink_stack backoff). Range MUST track
 # scalo's: BackoffBuilder only applies to the ExponentialBuilder scalo returns.
@@ -105,7 +105,7 @@ test-case = ">=3.4.1, <4"
 reqwest = { version = ">=0.12, <0.13", default-features = false, features = ["blocking", "rustls-tls-native-roots"] }
 
 # The Kafka tests' broker image pin and TLS/SASL broker fixture.
-scalo = { version = ">=2.14.32, <3", features = ["transport-kafka-test-support"] }
+scalo = { version = ">=2.14.33, <3", features = ["transport-kafka-test-support"] }
 
 # The status code a raw Push is refused with, through scalo's generated gRPC
 # client. Same range as the copy scalo resolves, so cargo unifies to one.

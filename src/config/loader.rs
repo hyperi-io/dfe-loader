@@ -9,7 +9,7 @@
 //!   3. Figment env vars, `__` nesting, either separator after the prefix
 //!      (`DFE_LOADER__KAFKA__BROKERS` or `DFE_LOADER_KAFKA__BROKERS`)
 //!   4. `./.env` in the working directory, read by scalo's cascade at startup
-//!   5. Config file specified by --config or `DFE_LOADER_CONFIG`
+//!   5. Config file specified by --config or `DFE_LOADER_CONFIG`, resolved by scalo's `run_app`
 //!   6. Hard-coded defaults
 
 use std::path::Path;
@@ -556,15 +556,14 @@ impl Config {
     ///    (chart / deployment-contract form) or `DFE_LOADER_KAFKA__SASL__USERNAME`
     /// 4. `.env` file: the binary's `load_config` seeds scalo's cascade first,
     ///    which reads `./.env` and no parent directory's
-    /// 5. Config file (YAML, specified by `--config` or auto-detected)
+    /// 5. Config file (YAML): `config_path` is what scalo's `run_app` resolved from
+    ///    `--config` or `DFE_LOADER_CONFIG`, else auto-detected
     /// 6. Hard-coded defaults
     pub fn load(config_path: Option<&str>) -> Result<Self> {
         // 1. Start with hard-coded defaults
         let mut config = Config::default();
 
         // 2. Load YAML config file (overrides defaults).
-        let resolved = Self::resolve_config_path(config_path);
-        let config_path = resolved.as_deref();
         if let Some(path) = config_path {
             // A named file must be read: running on defaults instead hides a
             // missing mount, and a SIGHUP reload would swap them in live.
@@ -593,19 +592,6 @@ impl Config {
         config.register_sections();
 
         Ok(config)
-    }
-
-    /// Resolve the config file: `--config`, else `DFE_LOADER_CONFIG`.
-    ///
-    /// The env var is step 5 of this module's cascade and nothing read it --
-    /// scalo's `--config` arg carries no `env =`. The watcher resolves here too.
-    #[must_use]
-    pub fn resolve_config_path(cli_path: Option<&str>) -> Option<String> {
-        cli_path.map(String::from).or_else(|| {
-            std::env::var(format!("{ENV_PREFIX}_CONFIG"))
-                .ok()
-                .filter(|p| !p.is_empty())
-        })
     }
 
     /// Register all config sections in the global config registry.

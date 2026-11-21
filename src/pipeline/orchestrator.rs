@@ -1731,6 +1731,12 @@ impl Orchestrator {
                 self.count_placed(&dead_letters);
                 self.dlq_placed.extend(placed_offsets(&dead_letters));
             }
+            Placement::Refused { dropped, placed } => {
+                self.drop_broker_refused(&dropped);
+                self.count_placed(&placed);
+                self.dlq_placed.extend(placed_offsets(&dropped));
+                self.dlq_placed.extend(placed_offsets(&placed));
+            }
             Placement::Closed => {
                 warn!(
                     rows = dead_letters.len(),
@@ -2134,6 +2140,16 @@ impl Orchestrator {
         }
     }
 
+    /// Drop dead letters the DLQ's broker refused for their size once every
+    /// delivery report was in, so no retry can land them.
+    fn drop_broker_refused(&mut self, dropped: &[DlqEntry]) {
+        warn!(
+            rows = dropped.len(),
+            "The DLQ's broker refused dead letters for their size -- dropped, counted in pipeline_dead_letters_dropped_total and dfe_loader_rows_lost_total"
+        );
+        self.drop_dead_letters(dropped, DROPPED_TOO_LARGE);
+    }
+
     /// Drop every dead letter read from a `dlq_load` topic, and return the rest.
     ///
     /// Dead-lettering one again would feed it back to the topic it was read
@@ -2256,6 +2272,11 @@ impl Orchestrator {
             Placement::Written => {
                 self.count_placed(&dead_letters);
                 self.settle_dead_letters_as(&dead_letters, DeliveryStatus::Rejected);
+            }
+            Placement::Refused { dropped, placed } => {
+                self.drop_broker_refused(&dropped);
+                self.count_placed(&placed);
+                self.settle_dead_letters_as(&placed, DeliveryStatus::Rejected);
             }
             Placement::Closed => {
                 warn!(
@@ -2817,6 +2838,10 @@ const DROPPED_NO_PAYLOAD: &str = "no_payload";
 /// `reason` for dead letters read from a `dlq_load` topic that failed to load.
 const DROPPED_DLQ_LOAD: &str = "dlq_load";
 
+/// The `pipeline_dead_letters_dropped_total` reason for a dead letter the DLQ's
+/// broker refused for its size, as scalo's pipeline labels it.
+const DROPPED_TOO_LARGE: &str = "too_large";
+
 /// The record sequence number a gRPC offset carries: the adapter stores each
 /// token's `seq` as the message offset.
 fn seq_of(offset: i64) -> u64 {
@@ -3153,10 +3178,16 @@ fn queue_rejected<'a>(
 }
 
 /// How handing a set of dead letters to the DLQ ended.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug)]
 enum Placement {
     /// A backend holds every one.
     Written,
+    /// The Kafka-only DLQ's broker holds `placed` and refused `dropped` for
+    /// their size: no retry can land those, so they are dropped.
+    Refused {
+        dropped: Vec<DlqEntry>,
+        placed: Vec<DlqEntry>,
+    },
     /// The DLQ's drain has exited, so no retry can land them.
     Closed,
     /// The DLQ still refused when the retry's expiry passed, or at shutdown.
@@ -3209,6 +3240,16 @@ async fn place_dead_letters(
                     return Placement::Written;
                 }
                 Ok(Err(scalo::dlq::DlqError::Closed)) => return Placement::Closed,
+                Ok(Err(scalo::dlq::DlqError::Refused(refused))) => {
+                    let (dropped, placed) = split_refused(dead_letters, |entry| {
+                        refused.contains(&dlq.cap(entry.clone()))
+                    });
+                    return if dropped.is_empty() {
+                        Placement::Written
+                    } else {
+                        Placement::Refused { dropped, placed }
+                    };
+                }
                 Ok(Err(e)) => e.to_string(),
                 Err(_elapsed) => {
                     return Placement::GaveUp(
@@ -3232,6 +3273,17 @@ async fn place_dead_letters(
             () = tokio::time::sleep(wait) => {}
         }
     }
+}
+
+/// Split `dead_letters` into those `is_refused` names and the rest.
+fn split_refused(
+    dead_letters: &[DlqEntry],
+    is_refused: impl Fn(&DlqEntry) -> bool,
+) -> (Vec<DlqEntry>, Vec<DlqEntry>) {
+    dead_letters
+        .iter()
+        .cloned()
+        .partition(|entry| is_refused(entry))
 }
 
 /// The `stage` label a DLQ write retry is counted under, as scalo's pipeline
@@ -4024,9 +4076,11 @@ mod tests {
         let dead_letters =
             rejected_entries(&payloads, &rejected_rows(rows, "server error code 117"));
 
-        assert_eq!(
-            place(&dlq, &dead_letters, in_30s()).await,
-            Placement::Written,
+        assert!(
+            matches!(
+                place(&dlq, &dead_letters, in_30s()).await,
+                Placement::Written
+            ),
             "a working DLQ takes every rejected row"
         );
 
@@ -4345,9 +4399,11 @@ mod tests {
 
         let payloads: Vec<Arc<[u8]>> = vec![Arc::from(&b"{\"n\":1}"[..])];
         let dead_letters = rejected_entries(&payloads, &rejected_rows(1, "code 117"));
-        assert_eq!(
-            place(&dlq, &dead_letters, in_30s()).await,
-            Placement::Written,
+        assert!(
+            matches!(
+                place(&dlq, &dead_letters, in_30s()).await,
+                Placement::Written
+            ),
             "the gRPC DLQ refused a dead letter"
         );
 
@@ -4425,9 +4481,11 @@ mod tests {
             (source.topic.as_deref(), source.partition, source.offset),
             (Some("dfe-events"), Some(3), Some(77))
         );
-        assert_eq!(
-            place(&dlq, &dead_letters, in_30s()).await,
-            Placement::Written,
+        assert!(
+            matches!(
+                place(&dlq, &dead_letters, in_30s()).await,
+                Placement::Written
+            ),
             "a working DLQ takes the row"
         );
 
@@ -4454,9 +4512,11 @@ mod tests {
             row_json: Some(br#"{"_raw":"{\"user\":\"kaz\"}"}"#.to_vec()),
         }];
 
-        assert_eq!(
-            place(&dlq, &rejected_entries(&payloads, &failed), in_30s()).await,
-            Placement::Written,
+        assert!(
+            matches!(
+                place(&dlq, &rejected_entries(&payloads, &failed), in_30s()).await,
+                Placement::Written
+            ),
             "a working DLQ takes the row"
         );
 
@@ -4541,9 +4601,11 @@ mod tests {
             "clickhouse_permanent_reject",
             b"{\"kept\":1}".to_vec(),
         )];
-        assert_eq!(
-            place(&dlq, &dead_letters, in_30s()).await,
-            Placement::Written,
+        assert!(
+            matches!(
+                place(&dlq, &dead_letters, in_30s()).await,
+                Placement::Written
+            ),
             "a working DLQ takes rows written after an earlier loss"
         );
         assert!(
@@ -4569,10 +4631,10 @@ mod tests {
             })
             .collect();
 
-        assert_eq!(
+        assert!(matches!(
             place(&dlq, &dead_letters, in_30s()).await,
             Placement::Written
-        );
+        ));
         assert_eq!(spooled_lines(&dir).len(), 3);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -4589,9 +4651,11 @@ mod tests {
         )];
 
         let started = std::time::Instant::now();
-        assert_eq!(
-            place(&dlq, &dead_letters, in_30s()).await,
-            Placement::Closed,
+        assert!(
+            matches!(
+                place(&dlq, &dead_letters, in_30s()).await,
+                Placement::Closed
+            ),
             "a stopped DLQ was taken as a home for the rows"
         );
         assert!(
@@ -4708,6 +4772,58 @@ mod tests {
             }
         }
         dlq.shutdown().await.expect("stop the DLQ");
+    }
+
+    /// `RefusedEntries` cannot be built outside scalo, so the broker's answer is
+    /// stood in for by the predicate `split_refused` takes.
+    #[test]
+    fn the_entries_a_refusal_names_split_from_the_rest() {
+        let entries: Vec<DlqEntry> = (1..=4).map(|seq| dead_letter_for(seq, 8)).collect();
+        let named = |entry: &DlqEntry| {
+            entry
+                .source
+                .as_ref()
+                .and_then(|s| s.offset)
+                .is_some_and(|offset| offset % 2 == 0)
+        };
+
+        let (dropped, placed) = split_refused(&entries, named);
+        assert_eq!(dropped.len(), 2);
+        assert_eq!(placed.len(), 2);
+        assert!(dropped.iter().all(named) && !placed.iter().any(named));
+
+        let (dropped, placed) = split_refused(&entries, |_| false);
+        assert!(dropped.is_empty() && placed.len() == 4);
+    }
+
+    #[test]
+    fn a_dead_letter_the_broker_refused_is_counted_lost_and_answered_dropped() {
+        for holds_answers in [false, true] {
+            let mut orchestrator = Orchestrator::new(Config::default());
+            orchestrator.holds_answers = holds_answers;
+            orchestrator.acks.admit(41);
+            let recorder = crate::metrics::counting::CountingRecorder::default();
+            let _local = metrics::set_default_local_recorder(&recorder);
+
+            orchestrator.drop_broker_refused(&[dead_letter_for(41, 8)]);
+
+            assert_eq!(
+                recorder.labelled(
+                    crate::metrics::DEAD_LETTERS_DROPPED_TOTAL,
+                    "reason",
+                    "too_large"
+                ),
+                1,
+                "the refused row was not counted (holds_answers {holds_answers})"
+            );
+            assert_eq!(recorder.total(crate::metrics::RETRIES_TOTAL), 0);
+            let released = orchestrator.acks.take_settled();
+            if holds_answers {
+                assert_eq!(released, vec![(DeliveryStatus::Dropped, vec![41])]);
+            } else {
+                assert_eq!(released.len(), 0);
+            }
+        }
     }
 
     /// A dead letter of the record read from `topic` at `offset`.
