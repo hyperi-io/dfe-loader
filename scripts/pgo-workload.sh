@@ -126,6 +126,18 @@ KAFKA_CID=""
 CH_CID=""
 CONFIG_DIR=""
 
+# A loader killed before it exits writes no .profraw, so it gets the
+# shutdown grace its deployment contract asks for.
+# The binary is instrumented, so these calls send their profile to /dev/null.
+CONTRACT_DIR="$(mktemp -d -t pgo-contract-XXXXXX)"
+env LLVM_PROFILE_FILE=/dev/null "${LOADER_BIN}" generate-artefacts --output-dir "${CONTRACT_DIR}" >/dev/null 2>&1 || true
+LOADER_GRACE="$(python3 -I -c 'import json, sys; print(json.load(open(sys.argv[1]))["termination_grace_seconds"])' "${CONTRACT_DIR}/deployment-contract.json" 2>/dev/null || true)"
+rm -rf "${CONTRACT_DIR}"
+if [[ ! "${LOADER_GRACE}" =~ ^[0-9]+$ ]]; then
+    echo "error: no termination_grace_seconds from the deployment contract that ${LOADER_BIN} generate-artefacts wrote (got '${LOADER_GRACE}')" >&2
+    exit 1
+fi
+
 cleanup() {
     local rc=$?
     if [[ "$KEEP" == "1" ]]; then
@@ -139,13 +151,24 @@ cleanup() {
     echo "pgo-workload: cleanup" >&2
     if [[ -n "$LOADER_PID" ]] && kill -0 "$LOADER_PID" 2>/dev/null; then
         kill -TERM "$LOADER_PID" 2>/dev/null || true
-        for _ in 1 2 3 4 5 6 7 8 9 10; do
-            if ! kill -0 "$LOADER_PID" 2>/dev/null; then
-                break
-            fi
+        local waited=0
+        while kill -0 "$LOADER_PID" 2>/dev/null && [[ "${waited}" -lt "${LOADER_GRACE}" ]]; do
             sleep 1
+            waited=$((waited + 1))
         done
-        kill -KILL "$LOADER_PID" 2>/dev/null || true
+        if kill -0 "$LOADER_PID" 2>/dev/null; then
+            echo "pgo-workload: loader still running ${LOADER_GRACE}s after SIGTERM, killing it; it writes no profile" >&2
+            tail -100 "$CONFIG_DIR/loader.log" >&2 || true
+            kill -KILL "$LOADER_PID" 2>/dev/null || true
+            rc=1
+        else
+            echo "pgo-workload: loader exited ${waited}s after SIGTERM" >&2
+        fi
+    fi
+    if [[ -n "$LOADER_PID" && -n "${LLVM_PROFILE_FILE:-}" ]] \
+        && ! compgen -G "$(dirname "${LLVM_PROFILE_FILE}")/pgo-${LOADER_PID}_*.profraw" >/dev/null; then
+        echo "pgo-workload: loader ${LOADER_PID} left no .profraw under $(dirname "${LLVM_PROFILE_FILE}")" >&2
+        rc=1
     fi
     if [[ -n "$KAFKA_CID" ]]; then
         docker rm -f "$KAFKA_CID" >/dev/null 2>&1 || true
