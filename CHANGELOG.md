@@ -3,6 +3,17 @@
 Rendered by CI and committed back at the end of a release -- do not edit by
 hand. Release notes also appear on the GitHub Releases page, one per tag.
 
+## [1.18.75](https://github.com/hyperi-io/dfe-loader/compare/v1.18.74...v1.18.75) (2026-11-23)
+
+### What's Changed
+* fix(config): make timestamp_dq.invalid_action an enum by @catinspace-au in https://github.com/hyperi-io/dfe-loader/pull/364
+* fix(pipeline): hold first batch for table schema by @catinspace-au in https://github.com/hyperi-io/dfe-loader/pull/363
+* fix(ci): default main releases to candidates by @catinspace-au in https://github.com/hyperi-io/dfe-loader/pull/366
+* fix(clickhouse): log why connections fail by @catinspace-au in https://github.com/hyperi-io/dfe-loader/pull/367
+* fix: rebuild on scalo 2.14.33 by @catinspace-au in https://github.com/hyperi-io/dfe-loader/pull/368
+* fix: read config through scalo and drop refused DLQ entries by @catinspace-au in https://github.com/hyperi-io/dfe-loader/pull/369
+* fix(deps): url 2.5.9 for RUSTSEC-2026-0592 by @catinspace-au in https://github.com/hyperi-io/dfe-loader/pull/370
+
 ## [1.18.74](https://github.com/hyperi-io/dfe-loader/compare/v1.18.73...v1.18.74) (2026-11-19)
 
 ### Bug Fixes
