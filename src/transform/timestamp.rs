@@ -13,7 +13,11 @@
 //!
 //! Timestamps outside this range will cause insert errors.
 
-use chrono::{DateTime, NaiveDateTime, TimeZone, Utc};
+use jiff::Timestamp;
+use jiff::fmt::strtime;
+use jiff::tz::Offset;
+
+use crate::datetime::utc_fields;
 
 /// Minimum timestamp for `ClickHouse` `DateTime64` (1900-01-01 00:00:00 UTC)
 pub const MIN_DATETIME64_MS: i64 = -2_208_988_800_000;
@@ -50,9 +54,9 @@ use crate::config::TimestampDqConfig;
 #[derive(Debug, Clone, PartialEq)]
 pub enum TimestampResult {
     /// Valid timestamp
-    Valid(DateTime<Utc>),
+    Valid(Timestamp),
     /// Invalid but corrected
-    Corrected(DateTime<Utc>, String),
+    Corrected(Timestamp, String),
     /// Invalid and rejected
     Invalid(String),
 }
@@ -75,12 +79,12 @@ impl TimestampValidator {
 
     /// Validate and potentially correct a timestamp string
     pub fn validate(&self, ts: &str) -> TimestampResult {
-        self.validate_with_now(ts, Utc::now())
+        self.validate_with_now(ts, Timestamp::now())
     }
 
     /// Validate with a pre-cached current time (avoids syscall in hot path)
     #[inline]
-    pub fn validate_with_now(&self, ts: &str, now: DateTime<Utc>) -> TimestampResult {
+    pub fn validate_with_now(&self, ts: &str, now: Timestamp) -> TimestampResult {
         // Try to parse as various formats
         let parsed = self.parse_timestamp(ts);
 
@@ -99,19 +103,19 @@ impl TimestampValidator {
 
     /// Validate a Unix timestamp (seconds or milliseconds)
     pub fn validate_unix(&self, ts: i64) -> TimestampResult {
-        self.validate_unix_with_now(ts, Utc::now())
+        self.validate_unix_with_now(ts, Timestamp::now())
     }
 
     /// Validate Unix timestamp with a pre-cached current time (avoids syscall in hot path)
     #[inline]
-    pub fn validate_unix_with_now(&self, ts: i64, now: DateTime<Utc>) -> TimestampResult {
+    pub fn validate_unix_with_now(&self, ts: i64, now: Timestamp) -> TimestampResult {
         // Determine if seconds or milliseconds based on magnitude
         let dt = if ts > 1_000_000_000_000 {
             // Milliseconds
-            Utc.timestamp_millis_opt(ts).single()
+            Timestamp::from_millisecond(ts).ok()
         } else {
             // Seconds
-            Utc.timestamp_opt(ts, 0).single()
+            Timestamp::from_second(ts).ok()
         };
 
         match dt {
@@ -120,41 +124,31 @@ impl TimestampValidator {
         }
     }
 
-    fn parse_timestamp(&self, ts: &str) -> Option<DateTime<Utc>> {
-        // Try RFC3339/ISO8601 first (most common)
-        if let Ok(dt) = DateTime::parse_from_rfc3339(ts) {
-            return Some(dt.with_timezone(&Utc));
+    /// Text with a `Z` or a numeric offset, as jiff reads it, else zone-less
+    /// `YYYY-MM-DD HH:MM:SS[.f]` read as UTC.
+    fn parse_timestamp(&self, ts: &str) -> Option<Timestamp> {
+        if let Ok(at) = ts.parse::<Timestamp>() {
+            return Some(at);
         }
-
-        // Try common formats
-        let formats = [
-            "%Y-%m-%dT%H:%M:%S%.fZ",   // 2024-01-15T10:30:00.123Z
-            "%Y-%m-%dT%H:%M:%SZ",      // 2024-01-15T10:30:00Z
-            "%Y-%m-%d %H:%M:%S%.f",    // 2024-01-15 10:30:00.123
-            "%Y-%m-%d %H:%M:%S",       // 2024-01-15 10:30:00
-            "%Y-%m-%dT%H:%M:%S%.f%:z", // 2024-01-15T10:30:00.123+00:00
-            "%Y-%m-%dT%H:%M:%S%:z",    // 2024-01-15T10:30:00+00:00
-        ];
-
-        for fmt in &formats {
-            if let Ok(dt) = NaiveDateTime::parse_from_str(ts, fmt) {
-                return Some(Utc.from_utc_datetime(&dt));
-            }
-        }
-
-        None
+        let civil = strtime::parse("%Y-%m-%d %H:%M:%S%.f", ts)
+            .ok()?
+            .to_datetime()
+            .ok()?;
+        Offset::UTC.to_timestamp(civil).ok()
     }
 
     /// Check bounds with a pre-cached current time (avoids syscall in hot path)
     #[inline]
-    pub fn check_bounds_with_now(&self, dt: DateTime<Utc>, now: DateTime<Utc>) -> TimestampResult {
-        let diff_secs = (dt - now).num_seconds();
+    pub fn check_bounds_with_now(&self, dt: Timestamp, now: Timestamp) -> TimestampResult {
+        let diff_secs = dt.duration_since(now).as_secs();
 
         // Check future bound
         if self.max_future_seconds > 0 && diff_secs > self.max_future_seconds {
             return TimestampResult::Invalid(format!(
                 "Timestamp {} is {} seconds in the future (max: {})",
-                dt, diff_secs, self.max_future_seconds
+                utc_display(&dt),
+                diff_secs,
+                self.max_future_seconds
             ));
         }
 
@@ -162,33 +156,38 @@ impl TimestampValidator {
         if self.max_past_seconds > 0 && -diff_secs > self.max_past_seconds {
             return TimestampResult::Invalid(format!(
                 "Timestamp {} is {} seconds in the past (max: {})",
-                dt, -diff_secs, self.max_past_seconds
+                utc_display(&dt),
+                -diff_secs,
+                self.max_past_seconds
             ));
         }
 
         TimestampResult::Valid(dt)
     }
 
-    fn correct_known_bad_format(&self, ts: &str) -> Option<DateTime<Utc>> {
+    fn correct_known_bad_format(&self, ts: &str) -> Option<Timestamp> {
         // Known bad: milliseconds as string
         if let Ok(ms) = ts.parse::<i64>() {
             if ms > 1_000_000_000_000 {
-                return Utc.timestamp_millis_opt(ms).single();
+                return Timestamp::from_millisecond(ms).ok();
             } else if ms > 1_000_000_000 {
-                return Utc.timestamp_opt(ms, 0).single();
+                return Timestamp::from_second(ms).ok();
             }
         }
 
         // Known bad: space instead of T separator with timezone
         if ts.contains(' ') && !ts.contains('T') {
             let fixed = ts.replacen(' ', "T", 1);
-            if let Ok(dt) = DateTime::parse_from_rfc3339(&fixed) {
-                return Some(dt.with_timezone(&Utc));
-            }
+            return fixed.parse::<Timestamp>().ok();
         }
 
         None
     }
+}
+
+/// `YYYY-MM-DD HH:MM:SS[.f] UTC`, the fraction left out when zero.
+fn utc_display(ts: &Timestamp) -> String {
+    utc_fields(ts, ' ', false, " UTC")
 }
 
 impl Default for TimestampValidator {
@@ -202,7 +201,7 @@ impl Default for TimestampValidator {
 }
 
 /// Validate and correct timestamps (simple API)
-pub fn validate_timestamp(ts: &str) -> Option<DateTime<Utc>> {
+pub fn validate_timestamp(ts: &str) -> Option<Timestamp> {
     let validator = TimestampValidator::default();
     match validator.validate(ts) {
         TimestampResult::Valid(dt) | TimestampResult::Corrected(dt, _) => Some(dt),
@@ -213,7 +212,12 @@ pub fn validate_timestamp(ts: &str) -> Option<DateTime<Utc>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::Datelike;
+    use jiff::SignedDuration;
+
+    /// `ts` as RFC 3339 text with a `+00:00` offset.
+    fn rfc3339_text(ts: Timestamp) -> String {
+        ts.display_with_offset(Offset::UTC).to_string()
+    }
 
     #[test]
     fn test_valid_rfc3339() {
@@ -225,6 +229,7 @@ mod tests {
         };
         match validator.validate(ts) {
             TimestampResult::Valid(dt) => {
+                let dt = Offset::UTC.to_datetime(dt);
                 assert_eq!(dt.year(), 2024);
                 assert_eq!(dt.month(), 12);
             }
@@ -271,8 +276,8 @@ mod tests {
         };
 
         // 1 hour in future
-        let future = Utc::now() + chrono::Duration::hours(1);
-        let ts = future.to_rfc3339();
+        let future = Timestamp::now() + SignedDuration::from_hours(1);
+        let ts = rfc3339_text(future);
 
         match validator.validate(&ts) {
             TimestampResult::Invalid(_) => {} // Expected
@@ -369,6 +374,36 @@ mod tests {
         assert_eq!(clamp_timestamp_ms_nano(ts), MAX_DATETIME64_NANO_MS);
     }
 
+    /// The reason names the instant as `YYYY-MM-DD HH:MM:SS[.f] UTC`.
+    #[test]
+    fn out_of_bounds_reasons_keep_their_text() {
+        let validator = TimestampValidator {
+            max_future_seconds: 60,
+            max_past_seconds: 60,
+            correct_known_bad: false,
+        };
+        let now: Timestamp = "2026-04-07T07:03:00Z".parse().unwrap();
+        for (text, reason) in [
+            (
+                "2026-04-07T08:03:00.12Z",
+                "Timestamp 2026-04-07 08:03:00.120 UTC is 3600 seconds in the future (max: 60)",
+            ),
+            (
+                "2026-04-07 06:03:00",
+                "Timestamp 2026-04-07 06:03:00 UTC is 3600 seconds in the past (max: 60)",
+            ),
+            (
+                "2026-04-07T06:03:00.000001+00:00",
+                "Timestamp 2026-04-07 06:03:00.000001 UTC is 3599 seconds in the past (max: 60)",
+            ),
+        ] {
+            match validator.validate_with_now(text, now) {
+                TimestampResult::Invalid(got) => assert_eq!(got, reason, "{text}"),
+                other => panic!("{text}: expected Invalid, got {other:?}"),
+            }
+        }
+    }
+
     #[test]
     fn test_past_rejection_with_specific_max_past() {
         // max_past_seconds = 60 -- timestamps 1 hour in the past are rejected
@@ -377,8 +412,8 @@ mod tests {
             max_past_seconds: 60,
             correct_known_bad: false,
         };
-        let past = Utc::now() - chrono::Duration::hours(1);
-        let ts = past.to_rfc3339();
+        let past = Timestamp::now() - SignedDuration::from_hours(1);
+        let ts = rfc3339_text(past);
         match validator.validate(&ts) {
             TimestampResult::Invalid(reason) => {
                 assert!(reason.contains("past"));
@@ -487,9 +522,12 @@ mod tests {
         let validator = TimestampValidator::default();
         // Seconds epoch for 2024-01-01
         let r = validator.validate_unix(1704067200);
-        matches!(
-            r,
-            TimestampResult::Valid(_) | TimestampResult::Corrected(_, _)
+        assert!(
+            matches!(
+                r,
+                TimestampResult::Valid(_) | TimestampResult::Corrected(_, _)
+            ),
+            "{r:?}"
         );
     }
 
@@ -502,18 +540,18 @@ mod tests {
             correct_known_bad: false,
         };
         // Current time should be valid
-        let now = Utc::now();
-        let r = validator.validate(&now.to_rfc3339());
-        matches!(r, TimestampResult::Valid(_));
+        let now = Timestamp::now();
+        let r = validator.validate(&rfc3339_text(now));
+        assert!(matches!(r, TimestampResult::Valid(_)), "{r:?}");
 
         // 5 min future → invalid
-        let future = now + chrono::Duration::minutes(5);
-        let r = validator.validate(&future.to_rfc3339());
-        matches!(r, TimestampResult::Invalid(_));
+        let future = now + SignedDuration::from_mins(5);
+        let r = validator.validate(&rfc3339_text(future));
+        assert!(matches!(r, TimestampResult::Invalid(_)), "{r:?}");
 
         // 5 min past → invalid
-        let past = now - chrono::Duration::minutes(5);
-        let r = validator.validate(&past.to_rfc3339());
-        matches!(r, TimestampResult::Invalid(_));
+        let past = now - SignedDuration::from_mins(5);
+        let r = validator.validate(&rfc3339_text(past));
+        assert!(matches!(r, TimestampResult::Invalid(_)), "{r:?}");
     }
 }

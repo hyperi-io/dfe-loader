@@ -39,7 +39,7 @@
 
 use std::sync::Arc;
 
-use chrono::{SubsecRound, Utc};
+use jiff::Timestamp;
 use parking_lot::RwLock;
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde_json::{Map, Value};
@@ -308,7 +308,7 @@ impl HeaderExtractor {
         &self,
         validator: &TimestampValidator,
         value: &Value,
-        now: &chrono::DateTime<Utc>,
+        now: &Timestamp,
     ) -> String {
         let result = match value {
             Value::String(text) => match datetime::parse(text).ok().and_then(instant_time) {
@@ -459,7 +459,7 @@ impl HeaderExtractor {
         stage_inputs: impl IntoIterator<Item = &'s str>,
     ) -> HeaderExtraction {
         // Ingest time is stamped to the millisecond.
-        let now = Utc::now().trunc_subsecs(3);
+        let now = datetime::ingest_now();
         let mut map = Map::with_capacity(schema.columns.len());
         let plan = self.plan_for(table, schema, col_meta);
         let contended = &plan.contended;
@@ -613,14 +613,14 @@ fn is_generated(col: &crate::clickhouse::types::ColumnInfo) -> bool {
 }
 
 /// The instant parsed date-time text names.
-fn instant_time(instant: datetime::UtcInstant) -> Option<chrono::DateTime<Utc>> {
-    chrono::DateTime::from_timestamp(instant.secs, instant.nanos)
+fn instant_time(instant: datetime::UtcInstant) -> Option<Timestamp> {
+    Timestamp::new(instant.secs, i32::try_from(instant.nanos).ok()?).ok()
 }
 
 /// A numeric epoch as an instant, its unit told by magnitude as the encoder
 /// tells it: seconds, then milliseconds past 10^12, microseconds past 10^15 and
 /// nanoseconds past 10^18. A fractional number is seconds.
-fn epoch_time(n: &serde_json::Number) -> Option<chrono::DateTime<Utc>> {
+fn epoch_time(n: &serde_json::Number) -> Option<Timestamp> {
     if let Some(ts) = n.as_i64() {
         let per_second: i64 = match ts.unsigned_abs() {
             m if m > 1_000_000_000_000_000_000 => 1_000_000_000,
@@ -629,20 +629,16 @@ fn epoch_time(n: &serde_json::Number) -> Option<chrono::DateTime<Utc>> {
             _ => 1,
         };
         let nanos = ts.rem_euclid(per_second) * (1_000_000_000 / per_second);
-        return chrono::DateTime::from_timestamp(
-            ts.div_euclid(per_second),
-            u32::try_from(nanos).ok()?,
-        );
+        return Timestamp::new(ts.div_euclid(per_second), i32::try_from(nanos).ok()?).ok();
     }
     let secs = n.as_f64().filter(|f| f.is_finite())?;
     let whole = secs.floor();
     #[allow(
         clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        reason = "the whole part is range-checked by from_timestamp, the fraction is in [0, 1)"
+        reason = "the whole part is range-checked by Timestamp::new, the fraction is in [0, 1)"
     )]
-    let (whole_secs, nanos) = (whole as i64, ((secs - whole) * 1e9) as u32);
-    chrono::DateTime::from_timestamp(whole_secs, nanos)
+    let (whole_secs, nanos) = (whole as i64, ((secs - whole) * 1e9) as i32);
+    Timestamp::new(whole_secs, nanos).ok()
 }
 
 /// Whether a column takes a `ClickHouse` date-time text value.
@@ -677,11 +673,7 @@ fn normalise_datetime(map: &mut Map<String, Value>, name: &str) {
 /// `None` leaves the column absent: a `topic_name` with no topic to resolve
 /// against must stay NULL rather than stamp the marker text into a dimension.
 #[inline]
-fn resolve_default(
-    default: &Value,
-    now: &chrono::DateTime<Utc>,
-    topic_source: Option<&str>,
-) -> Option<Value> {
+fn resolve_default(default: &Value, now: &Timestamp, topic_source: Option<&str>) -> Option<Value> {
     match default.as_str() {
         Some("now()") => Some(Value::String(utc_text(now))),
         Some("uuid()") => Some(Value::String(uuid::Uuid::now_v7().to_string())),
@@ -992,12 +984,12 @@ mod tests {
 
     /// Whether `value` is the ingest-time fallback rather than a stamp the payload carried.
     fn is_ingest_time(value: Option<&Value>) -> bool {
-        let before = Utc::now() - chrono::Duration::seconds(5);
+        let before = Timestamp::now() - jiff::SignedDuration::from_secs(5);
         let Some(Value::String(ts)) = value else {
             return false;
         };
-        chrono::NaiveDateTime::parse_from_str(ts, "%Y-%m-%dT%H:%M:%S%.3fZ")
-            .is_ok_and(|parsed| parsed.and_utc() >= before)
+        ts.len() == "YYYY-MM-DDTHH:MM:SS.fffZ".len()
+            && ts.parse::<Timestamp>().is_ok_and(|parsed| parsed >= before)
     }
 
     #[test]

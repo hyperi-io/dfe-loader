@@ -6,7 +6,6 @@
 //! Pipeline: parse, extract tags, flatten, timestamp, `_raw` rename, remove routing fields, metadata, sanitize
 //! Note: _json is injected by the orchestrator, not by the transformer.
 
-use chrono::{SubsecRound, Utc};
 use serde_json::{Map, Value};
 
 use crate::Result;
@@ -189,7 +188,7 @@ impl Transformer {
     ) -> Result<TransformResult> {
         // Cache current time once per message to avoid multiple syscalls.
         // Ingest time is stamped to the millisecond.
-        let now = Utc::now().trunc_subsecs(3);
+        let now = datetime::ingest_now();
         // OPTIMIZATION: Lazy timestamp formatting - only format if we need to insert
         let mut now_str: Option<String> = None;
 
@@ -1040,6 +1039,11 @@ mod tests {
             ),
             ("2026-04-07T07:03:00.120Z", "2026-04-07T07:03:00.120Z"),
             ("2026-04-07T07:03:00Z", "2026-04-07T07:03:00.000Z"),
+            // An offset moves the instant to UTC, with or without its colon.
+            ("2024-01-15T10:30:00+1000", "2024-01-15T00:30:00.000Z"),
+            ("2024-01-15T10:30:00+10:00", "2024-01-15T00:30:00.000Z"),
+            ("2024-01-15T06:00:00-0530", "2024-01-15T11:30:00.000Z"),
+            ("2024-01-15T00:30:00Z", "2024-01-15T00:30:00.000Z"),
         ] {
             let value = serde_json::json!({"event": "x", "timestamp": input});
             let result = transformer.transform_with_raw(value, None, None).unwrap();

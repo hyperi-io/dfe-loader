@@ -188,7 +188,7 @@ fn logstash_json_messages(count: usize, org_id: &str, source: &str) -> Vec<Vec<u
         .map(|i| {
             let level = ["INFO", "WARN", "ERROR", "DEBUG"][i % 4];
             serde_json::to_vec(&json!({
-                "@timestamp": chrono::Utc::now().to_rfc3339(),
+                "@timestamp": crate::common::now_rfc3339(),
                 "@version": "1",
                 "message": format!("Event {} via logstash", i),
                 "level": level,
@@ -230,7 +230,7 @@ fn filebeat_winlogbeat_messages(count: usize, org_id: &str, source: &str) -> Vec
             };
             let os_family = if is_win { "windows" } else { "linux" };
             let mut base = json!({
-                "@timestamp": chrono::Utc::now().to_rfc3339(),
+                "@timestamp": crate::common::now_rfc3339(),
                 "agent": {
                     "name": agent_name,
                     "type": agent_type,
@@ -283,7 +283,7 @@ fn syslog_rfc_parsed_messages(count: usize, org_id: &str, source: &str) -> Vec<V
     (0..count)
         .map(|i| {
             serde_json::to_vec(&json!({
-                "@timestamp": chrono::Utc::now().to_rfc3339(),
+                "@timestamp": crate::common::now_rfc3339(),
                 "syslog5424_pri": (16 + i % 8) as u32,
                 "syslog5424_ver": 1u32,
                 "syslog5424_severity": SEVERITIES[i % SEVERITIES.len()],
@@ -321,7 +321,7 @@ async fn test_kafka_to_clickhouse_bulk_load() {
 
     let oc = crate::common::on_cluster_clause();
     let pid = std::process::id();
-    let ts = chrono::Utc::now().timestamp_millis();
+    let ts = crate::common::epoch_millis();
     let topic = format!("e2e_bulk_{pid}_{ts}_land");
     let table_name = format!("e2e_bulk_{pid}_{ts}");
 
@@ -503,7 +503,7 @@ async fn test_kafka_to_clickhouse_org_routing() {
 
     let oc = crate::common::on_cluster_clause();
     let pid = std::process::id();
-    let ts = chrono::Utc::now().timestamp_millis();
+    let ts = crate::common::epoch_millis();
     let topic = format!("e2e_org_{pid}_{ts}_land");
 
     // Per-org database and table (Atomic + MergeTree + ON CLUSTER)

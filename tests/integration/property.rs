@@ -263,14 +263,14 @@ proptest! {
         month in 1..13_u32,
         day in 1..29_u32,  // Use 28 to avoid month-specific logic
     ) {
-        use chrono::NaiveDate;
+        use jiff::civil::DateTime;
+        use jiff::tz::Offset;
 
         // Create a valid date
-        let date = NaiveDate::from_ymd_opt(year, month, day);
+        let datetime = DateTime::new(year as i16, month as i8, day as i8, 12, 0, 0, 0);
 
-        if let Some(d) = date {
-            let datetime = d.and_hms_opt(12, 0, 0).unwrap();
-            let timestamp = datetime.and_utc().timestamp_millis();
+        if let Ok(datetime) = datetime {
+            let timestamp = Offset::UTC.to_timestamp(datetime).unwrap().as_millisecond();
 
             let event = json!({
                 "timestamp": timestamp,
@@ -296,13 +296,17 @@ proptest! {
         month in 1..13_u32,
         day in 1..29_u32,
     ) {
-        use chrono::NaiveDate;
+        use jiff::civil::DateTime;
+        use jiff::tz::Offset;
 
-        let date = NaiveDate::from_ymd_opt(year, month, day);
+        let datetime = DateTime::new(year as i16, month as i8, day as i8, 12, 0, 0, 0);
 
-        if let Some(d) = date {
-            let datetime = d.and_hms_opt(12, 0, 0).unwrap();
-            let rfc3339 = datetime.and_utc().to_rfc3339();
+        if let Ok(datetime) = datetime {
+            let rfc3339 = Offset::UTC
+                .to_timestamp(datetime)
+                .unwrap()
+                .display_with_offset(Offset::UTC)
+                .to_string();
 
             let event = json!({
                 "timestamp": rfc3339,
