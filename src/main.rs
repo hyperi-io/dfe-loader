@@ -286,7 +286,8 @@ fn wants_heap_source(source: &scalo::memory::UsageSource) -> bool {
 
     match source {
         UsageSource::Reservations => true,
-        UsageSource::CgroupV2(_) | UsageSource::CgroupV1(_) | UsageSource::ProcStatus(_) => false,
+        // Every other source reads a kernel figure, including scalo's Windows working set.
+        _ => false,
     }
 }
 
