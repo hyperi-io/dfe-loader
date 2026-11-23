@@ -11,7 +11,8 @@
 //! `ClickHouse` reads zone-less text in the column's timezone, else the
 //! server's.
 
-use chrono::{DateTime, Utc};
+use jiff::tz::Offset;
+use jiff::{RoundMode, Timestamp, TimestampRound, Unit};
 use serde_json::Value;
 
 /// An instant read from date-time text.
@@ -123,26 +124,71 @@ pub fn parse(text: &str) -> Result<UtcInstant, &'static str> {
 }
 
 impl UtcInstant {
-    /// The instant as UTC text. `None` outside the dates chrono holds.
+    /// The instant as UTC text. `None` outside the instants `jiff::Timestamp` holds.
     #[must_use]
     pub fn utc_text(self) -> Option<String> {
-        DateTime::<Utc>::from_timestamp(self.secs, self.nanos).map(|dt| utc_text(&dt))
+        let nanos = i32::try_from(self.nanos).ok()?;
+        Timestamp::new(self.secs, nanos)
+            .ok()
+            .map(|ts| utc_text(&ts))
     }
+}
+
+/// The ingest time, cut to the millisecond.
+#[must_use]
+pub fn ingest_now() -> Timestamp {
+    let now = Timestamp::now();
+    let to_millis = TimestampRound::new()
+        .smallest(Unit::Millisecond)
+        .mode(RoundMode::Trunc);
+    // Truncation never leaves the range, so the fallback is never taken.
+    now.round(to_millis).unwrap_or(now)
 }
 
 /// `YYYY-MM-DDTHH:MM:SS.fffZ` in UTC, widened to six or nine fraction digits
 /// where the instant carries them.
 #[must_use]
-pub fn utc_text(dt: &DateTime<Utc>) -> String {
-    let nanos = dt.timestamp_subsec_nanos();
-    let format = if nanos.is_multiple_of(1_000_000) {
-        "%Y-%m-%dT%H:%M:%S%.3fZ"
-    } else if nanos.is_multiple_of(1_000) {
-        "%Y-%m-%dT%H:%M:%S%.6fZ"
+pub fn utc_text(ts: &Timestamp) -> String {
+    utc_fields(ts, 'T', true, "Z")
+}
+
+/// `YYYY-MM-DD{sep}HH:MM:SS` in UTC, the fraction three, six or nine digits
+/// wide, the fewest that hold it, left out when zero unless `always_fraction`,
+/// then `suffix`. A year outside 0..=9999 is signed (`-0001`).
+#[must_use]
+pub fn utc_fields(ts: &Timestamp, sep: char, always_fraction: bool, suffix: &str) -> String {
+    use std::fmt::Write as _;
+
+    let civil = Offset::UTC.to_datetime(*ts);
+    let year = civil.year();
+    let mut out = String::with_capacity(32);
+    // Writing to a String never fails.
+    let _ = if (0..=9999).contains(&year) {
+        write!(out, "{year:04}")
     } else {
-        "%Y-%m-%dT%H:%M:%S%.9fZ"
+        write!(out, "{year:+05}")
     };
-    dt.format(format).to_string()
+    let _ = write!(
+        out,
+        "-{:02}-{:02}{sep}{:02}:{:02}:{:02}",
+        civil.month(),
+        civil.day(),
+        civil.hour(),
+        civil.minute(),
+        civil.second()
+    );
+    let nanos = civil.subsec_nanosecond();
+    let _ = if nanos == 0 && !always_fraction {
+        Ok(())
+    } else if nanos % 1_000_000 == 0 {
+        write!(out, ".{:03}", nanos / 1_000_000)
+    } else if nanos % 1_000 == 0 {
+        write!(out, ".{:06}", nanos / 1_000)
+    } else {
+        write!(out, ".{nanos:09}")
+    };
+    out.push_str(suffix);
+    out
 }
 
 /// Whether text could end in a zone: a `Z`, or a sign in the last six bytes.
@@ -306,6 +352,7 @@ mod tests {
                 "2026-04-07T17:03:00.123456789+10:00",
                 "2026-04-07T07:03:00.123456789Z",
             ),
+            ("0000-01-01T00:00:00+01:00", "-0001-12-31T23:00:00.000Z"),
         ] {
             assert_eq!(instant(text).utc_text().as_deref(), Some(utc), "{text}");
         }

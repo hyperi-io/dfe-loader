@@ -86,7 +86,7 @@ impl MetricsSnapshot {
         }
 
         Self {
-            timestamp: chrono::Utc::now().timestamp_millis(),
+            timestamp: super::epoch_millis(),
             git_commit: get_git_commit(),
             test_name: test_name.to_string(),
             metrics,

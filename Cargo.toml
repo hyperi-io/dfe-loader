@@ -85,7 +85,7 @@ memchr = ">=2.8.3, <3"
 # name literal. Same crate scalo resolves, so cargo unifies to one regex.
 regex = ">=1.13.1, <2"
 compact_str = ">=0.10.0, <0.11"
-chrono = { version = ">=0.4.45, <0.5", features = ["serde"] }
+jiff = ">=1.0.0, <2"
 bytes = ">=1.12.1, <2"
 futures = ">=0.3.34, <0.4"
 parking_lot = ">=0.13.0, <0.14"
