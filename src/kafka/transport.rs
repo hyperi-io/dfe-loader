@@ -551,7 +551,6 @@ impl GrpcTransportAdapter {
             recv_buffer_size: config.recv_buffer_size,
             recv_timeout_ms: config.recv_timeout_ms,
             max_message_size: config.max_message_size,
-            compression: config.compression,
             ..Default::default()
         };
 
