@@ -123,8 +123,7 @@ pub struct Orchestrator {
     dlq_load: DlqLoadConfig,
 }
 
-/// A hold whose attempts are never further apart than the flush interval,
-/// before jitter.
+/// A hold whose attempts are never further apart than the flush interval.
 fn unsettled_for(config: &Config) -> Unsettled {
     Unsettled::new(Duration::from_secs(config.buffer.flush_age_secs.max(1)))
 }
@@ -3194,22 +3193,18 @@ enum Placement {
     GaveUp(String),
 }
 
-/// The waits between DLQ write attempts: 100 ms doubling to 1 s, before
-/// jitter.
-fn dlq_retry_schedule() -> <backon::ExponentialBuilder as backon::BackoffBuilder>::Backoff {
-    use backon::BackoffBuilder;
-
+/// The waits between DLQ write attempts: 100 ms doubling to 1 s, +/-20%.
+fn dlq_retry_schedule() -> scalo::backoff::Delays {
     scalo::sink_stack::SinkStackConfig {
         min_backoff_ms: 100,
         max_backoff_ms: DLQ_RETRY_MAX_MS,
         ..scalo::sink_stack::SinkStackConfig::default()
     }
     .backoff()
-    .without_max_times()
-    .build()
+    .delays()
 }
 
-/// Longest wait between DLQ write attempts, before jitter.
+/// Longest wait between DLQ write attempts.
 const DLQ_RETRY_MAX_MS: u64 = 1_000;
 
 /// Write every dead letter to the DLQ as one batch and prove it written,
@@ -3262,7 +3257,7 @@ async fn place_dead_letters(
         if failures == 1 {
             warn!(rows = dead_letters.len(), error = %error, "DLQ refused dead letters, retrying with backoff");
         }
-        // The schedule is endless (`without_max_times`), so the fallback never runs.
+        // `delays()` is endless, so the fallback never runs.
         let wait = schedule
             .next()
             .unwrap_or(Duration::from_millis(DLQ_RETRY_MAX_MS));

@@ -34,7 +34,6 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use backon::BackoffBuilder;
 use bytes::Bytes;
 use scalo::sink_stack::SinkStackConfig;
 use serde_json::{Map, Value};
@@ -83,9 +82,9 @@ enum DynamicVerdict {
 pub struct InserterConfig {
     /// Maximum retries for transient errors (geometric backoff)
     pub max_retries: u32,
-    /// Base delay for geometric backoff (doubles each retry), before jitter
+    /// Base delay for geometric backoff (doubles each retry), +/-20% jitter
     pub base_retry_delay_ms: u64,
-    /// Cap on the geometric backoff, before jitter adds up to the same again
+    /// Cap no geometric backoff wait passes
     pub max_retry_delay_ms: u64,
     /// Enable batch salvage on data errors
     pub enable_salvage: bool,
@@ -111,32 +110,25 @@ impl Default for InserterConfig {
 impl InserterConfig {
     /// Calculate backoff delay for a given attempt (jittered geometric backoff).
     ///
-    /// Delay = `min(base * 2^attempt, max_delay)`, plus a random share of that
-    /// again.
+    /// Delay = `min(base * 2^attempt, max_delay)`, +/-20%, never above
+    /// `max_delay`.
     #[must_use]
     pub fn backoff_delay(&self, attempt: u32) -> Duration {
         calc_backoff(self.base_retry_delay_ms, attempt, self.max_retry_delay_ms)
     }
 }
 
-/// Doublings past which the backoff stops growing, whatever `max_ms` allows.
-const MAX_BACKOFF_DOUBLINGS: u32 = 16;
-
 /// Jittered geometric backoff on scalo's sink schedule: `min(base_ms *
-/// 2^attempt, max_ms)` plus up to the same again, so loader pods retrying one
-/// recovering server do not all arrive at once.
+/// 2^attempt, max_ms)` +/-20%, never above `max_ms`, so loader pods retrying
+/// one recovering server do not all arrive at once.
 fn calc_backoff(base_ms: u64, attempt: u32, max_ms: u64) -> Duration {
     SinkStackConfig {
-        // backon takes its first step before it applies the cap.
-        min_backoff_ms: base_ms.min(max_ms),
+        min_backoff_ms: base_ms,
         max_backoff_ms: max_ms,
         ..SinkStackConfig::default()
     }
     .backoff()
-    .without_max_times()
-    .build()
-    .nth(attempt.min(MAX_BACKOFF_DOUBLINGS) as usize)
-    .unwrap_or(Duration::from_millis(max_ms))
+    .delay(attempt.saturating_add(1))
 }
 
 /// What the flush path must do with a batch's Kafka offsets.
@@ -1561,16 +1553,13 @@ mod tests {
         assert_eq!(unlimited.max_concurrent_inserts, 0);
     }
 
-    /// A jittered delay lies in `[step, 2 * step]`, give or take the
-    /// millisecond scalo's f32 schedule can round by.
+    /// A jittered delay lies within 20% of `step`.
     #[track_caller]
     fn assert_jittered(delay: Duration, step_ms: u64) {
-        let ms = delay.as_secs_f64() * 1000.0;
-        let step = step_ms as f64;
+        let (least, most) = (step_ms - step_ms / 5, step_ms + step_ms / 5);
         assert!(
-            ms >= step - 1.0 && ms <= 2.0 * step + 1.0,
-            "{delay:?} is outside the jittered step [{step_ms}ms, {}ms]",
-            2 * step_ms
+            delay >= Duration::from_millis(least) && delay <= Duration::from_millis(most),
+            "{delay:?} is outside the jittered step [{least}ms, {most}ms]"
         );
     }
 
@@ -1897,7 +1886,7 @@ mod tests {
 
     #[test]
     fn test_calc_backoff_attempt_clamped_to_16() {
-        // Attempts past MAX_BACKOFF_DOUBLINGS walk the schedule no further.
+        // scalo's schedule stops doubling after 16, so a huge attempt cannot overflow.
         assert_jittered(calc_backoff(100, 100, 10_000), 10_000);
         assert_jittered(calc_backoff(100, u32::MAX, 10_000), 10_000);
     }
