@@ -1215,7 +1215,6 @@ dependencies = [
 name = "dfe-loader"
 version = "1.18.2"
 dependencies = [
- "backon",
  "bytes",
  "cel",
  "clap",

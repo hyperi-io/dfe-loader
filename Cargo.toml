@@ -30,10 +30,6 @@ tokio-util = { version = ">=0.7.20, <0.8", features = ["rt"] }
 # The floor moves with `release.helm.library` in .hyperi-ci.yaml.
 scalo = { version = ">=2.14.33, <3", features = ["config-schema", "transport-kafka", "transport-grpc", "dlq-kafka", "config", "config-reload", "deployment", "version-check", "scaling", "cli-service", "top", "logger", "metrics", "service-metrics", "expression", "memory", "worker-batch", "governor", "secrets", "sink-stack", "geoip-download"] }
 
-# Steps scalo's jittered retry schedule (sink_stack backoff). Range MUST track
-# scalo's: BackoffBuilder only applies to the ExponentialBuilder scalo returns.
-backon = { version = ">=1.6.0, <2", default-features = false, features = ["std"] }
-
 # Config-schema derivation. Same range as scalo so cargo unifies to one schemars.
 schemars = { version = ">=1.2.3, <2", default-features = false, features = ["std", "derive", "preserve_order", "indexmap2"] }
 
