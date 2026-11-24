@@ -105,9 +105,6 @@ pub struct GrpcConfig {
     /// Maximum message size in bytes (both send and receive).
     pub max_message_size: usize,
 
-    /// Enable gzip compression for gRPC messages.
-    pub compression: bool,
-
     /// Default topic name for messages without a topic in gRPC metadata.
     /// Used as the routing key when the sender doesn't set a topic.
     pub default_topic: String,
@@ -147,7 +144,6 @@ impl Default for GrpcConfig {
             recv_buffer_size: 10_000,
             recv_timeout_ms: 100,
             max_message_size: 16 * 1024 * 1024,
-            compression: false,
             default_topic: "main_land".to_string(),
             acknowledgements: AcknowledgementsConfig::default(),
             max_hold_ms: default_max_hold_ms(),

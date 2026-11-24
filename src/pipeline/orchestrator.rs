@@ -3984,7 +3984,9 @@ mod tests {
             file: scalo::dlq::FileDlqConfig {
                 enabled: true,
                 path: dir.to_path_buf(),
-                compress_rotated: false,
+                compress_rotated: scalo::compression::Compression::new(
+                    scalo::compression::Codec::None,
+                ),
                 ..scalo::dlq::FileDlqConfig::default()
             },
             ..scalo::dlq::DlqConfig::default()

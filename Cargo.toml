@@ -93,7 +93,7 @@ crossbeam-channel = ">=0.5.17, <0.6"
 indexmap = { version = ">=2.14.2, <3", features = ["serde"] }
 
 # The PGO workload driver's producer, behind the `pgo-driver` feature.
-rdkafka = { version = ">=0.39.0, <0.40", features = ["dynamic-linking"], optional = true }
+rdkafka = { version = ">=0.40.0, <0.41", features = ["dynamic-linking"], optional = true }
 
 [dev-dependencies]
 criterion = { version = ">=0.8.2, <0.9", features = ["html_reports"] }
@@ -111,7 +111,7 @@ scalo = { version = ">=2.14.33, <3", features = ["transport-kafka-test-support"]
 # client. Same range as the copy scalo resolves, so cargo unifies to one.
 tonic = { version = ">=0.14.9, <0.15", default-features = false }
 
-rdkafka = { version = ">=0.39.0, <0.40", features = ["dynamic-linking"] }
+rdkafka = { version = ">=0.40.0, <0.41", features = ["dynamic-linking"] }
 
 clickhouse = { version = ">=0.15.3, <0.16", features = ["lz4", "time", "rustls-tls", "rustls-tls-native-roots", "inserter"] }
 time = ">=0.3.55, <0.4"
