@@ -12,7 +12,7 @@
 
 dfe-loader reads the schema from ClickHouse, not from a config file -- but a
 plain `CREATE TABLE` does not say where each column's value comes from. That is
-what these `@`-comment directives do. They live in each column's `COMMENT`, which the loader reads from `system.columns`: a SQL `--` line comment never reaches the server. dfe-schemas renders a column's `expr` into that `COMMENT`, and the data-prep stage reads the directives it acts on to decide whether a column is read from a source field path or computed from a CEL expression.
+what these `@`-comment directives do. They live in each column's `COMMENT`, which the loader reads from `system.columns`: a SQL `--` line comment never reaches the server. dfe-schemas renders a column's `expr` into that `COMMENT`, and the data-prep stage reads the directives it acts on to decide whether a column is read from a source field path or computed from a [CEL](https://github.com/cel-expr/cel-spec/blob/master/doc/langdef.md) expression.
 
 Five directives change loader behaviour: `@skip`, `@default`, `@source`,
 `@renamed` and `@computed` (`DIRECTIVE_NAMES` in

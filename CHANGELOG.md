@@ -619,7 +619,7 @@ hand. Release notes also appear on the GitHub Releases page, one per tag.
 
 ### Features
 
-* add CEL expressions, DfeApp CLI framework, ubuntu 24.04 base ([6d06c7b](https://github.com/hyperi-io/dfe-loader/commit/6d06c7b22896b1fca1be13b2ccf26709307ea2cc))
+* add [CEL](https://github.com/cel-expr/cel-spec/blob/master/doc/langdef.md) expressions, DfeApp CLI framework, ubuntu 24.04 base ([6d06c7b](https://github.com/hyperi-io/dfe-loader/commit/6d06c7b22896b1fca1be13b2ccf26709307ea2cc))
 
 ## [1.10.1](https://github.com/hyperi-io/dfe-loader/compare/v1.10.0...v1.10.1) (2026-03-03)
 

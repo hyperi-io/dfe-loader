@@ -135,7 +135,7 @@ wins over a COMMENT -- the exact resolution order is in
 | `@default:value` | `default:` | Substitute when the column is null or absent |
 | `@source:path` | `renamed:` | Source field path(s) for this column, and a `\|` fallback fills `default:` |
 | `@renamed:path` | `renamed:` | Source field path(s) for this column |
-| `@computed:expr` | `computed:` | CEL expression producing the value |
+| `@computed:expr` | `computed:` | [CEL](https://github.com/cel-expr/cel-spec/blob/master/doc/langdef.md) expression producing the value |
 | `@coerce:category` | `coerce:` | None: the encoder's coercion rules are fixed. The DDL directive logs a warning, the config key is refused |
 
 `@generated` and `@config` are descriptive only: the loader drops both as
