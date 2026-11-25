@@ -217,6 +217,7 @@
         "external_topics": [],
         "source_to_table": {},
         "table_schema_versions": {},
+        "table_schemas": {},
         "topic_suffixes": [
           "_land",
           "_load"
@@ -1448,6 +1449,17 @@
           },
           "default": {}
         },
+        "table_schemas": {
+          "description": "Each deployed table's columns as its deploy created them, keyed by table\nname. A listed table in `default_db` takes records from the first one, with\nno wait on a schema read. `ClickHouse`'s own answer, read beside it,\nreplaces them.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/TableColumn"
+            }
+          },
+          "default": {}
+        },
         "topic_suffixes": {
           "description": "Topic suffixes to strip when deriving _source from Kafka topic name\nExample: topic \"`auth_land`\" with suffix \"_land\" → _source = \"auth\"",
           "type": "array",
@@ -1532,6 +1544,31 @@
         "topic",
         "org_id",
         "source"
+      ]
+    },
+    "TableColumn": {
+      "description": "One column of a deployed table, as `system.columns` lists it.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "type": {
+          "description": "The `ClickHouse` type, for example `LowCardinality(String)`.",
+          "type": "string"
+        },
+        "default_kind": {
+          "description": "`DEFAULT`, `MATERIALIZED` or `ALIAS`, empty for a column with no default.",
+          "type": "string"
+        },
+        "comment": {
+          "description": "The column comment, which carries its directives.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "type"
       ]
     },
     "DlqConfig": {
