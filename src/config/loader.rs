@@ -118,6 +118,10 @@ pub const TRANSPORT_GRPC: &str = "grpc";
 /// The config section a running loader reloads, named in the contract's `hot_paths`.
 pub const HOT_PATH_ROUTING: &str = "routing";
 
+/// The per-table capture modes dfe-engine compiles from sources, reloaded with the
+/// rest of `metadata`, so a source change rolls no pods.
+pub const HOT_PATH_CAPTURE: &str = "metadata.table_capture_modes";
+
 fn default_transport() -> String {
     TRANSPORT_KAFKA.to_string()
 }
@@ -873,7 +877,7 @@ impl Config {
                     .app_protocol("kubernetes.io/h2c"),
             ],
             // The watcher rebuilds routing on a reload, so an edit there need not roll the pods.
-            hot_paths: vec![HOT_PATH_ROUTING.into()],
+            hot_paths: vec![HOT_PATH_ROUTING.into(), HOT_PATH_CAPTURE.into()],
             entrypoint_args: vec!["--config".into(), "/etc/dfe/loader.yaml".into()],
             secrets: Self::secrets(),
             // Derived from Config::default(), NOT hand-authored: a json! literal
@@ -2449,14 +2453,20 @@ kafka:
         );
     }
 
-    /// A routing edit applies with no restart only where the watcher runs and
-    /// the chart leaves `routing` out of the pod's config checksum.
+    /// A routing or capture-mode edit applies with no restart only where the
+    /// watcher runs and the chart leaves both out of the pod's config checksum.
     #[test]
     fn a_routing_edit_reaches_a_running_pod() {
         assert!(Config::default().hot_reload.enabled);
 
         let contract = Config::deployment_contract();
-        assert_eq!(contract.hot_paths, vec!["routing".to_string()]);
+        assert_eq!(
+            contract.hot_paths,
+            vec![
+                "routing".to_string(),
+                "metadata.table_capture_modes".to_string()
+            ]
+        );
         assert!(
             !contract.config_mount_path.is_empty(),
             "a hot path needs a mounted config file to reload"
