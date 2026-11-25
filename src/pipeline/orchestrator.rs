@@ -646,6 +646,7 @@ impl Orchestrator {
                             absent_tables.remove(&new_stages.default_table);
                         }
                         stages = new_stages;
+                        forget_moved_schemas(&self.config.routing, &new_config.routing, &inserter);
                         let to_warm =
                             tables_to_warm(&new_config.routing, &mut absent_tables, &schema_cache);
                         self.recheck_retired_held(&absent_tables, &stages.default_table, &resolve_tx);
@@ -2458,6 +2459,36 @@ fn tables_to_warm(
         .into_iter()
         .filter(|table| schema_cache.needs_refresh(table) && !absent_tables.contains(table))
         .collect()
+}
+
+/// Drop the cached schema of each table whose schema version `new` moves from
+/// `old`, in every database the routing writes to, so the reload's pre-warm
+/// reads the columns a deploy just added instead of waiting out the cache TTL.
+fn forget_moved_schemas(
+    old: &crate::config::RoutingConfig,
+    new: &crate::config::RoutingConfig,
+    inserter: &Inserter,
+) {
+    let databases: std::collections::BTreeSet<&str> = std::iter::once(new.default_db.as_str())
+        .chain(
+            new.org_routes
+                .iter()
+                .map(crate::config::OrgRoute::effective_database),
+        )
+        .collect();
+    for (table, version) in &new.table_schema_versions {
+        if old.table_schema_versions.get(table) == Some(version) {
+            continue;
+        }
+        info!(
+            table = %table,
+            version = %version,
+            "Table schema version changed, re-reading its columns"
+        );
+        for db in &databases {
+            inserter.forget_schema(&format!("{db}.{table}"));
+        }
+    }
 }
 
 /// Collect the config-known tables to pre-warm (default table +
@@ -5529,6 +5560,76 @@ mod tests {
                 absent.contains(&marked),
                 !resolved_again,
                 "marked {marked}, routing names {named:?}"
+            );
+        }
+    }
+
+    fn routing_versions(versions: &[(&str, &str)]) -> crate::config::RoutingConfig {
+        let mut routing = routing_naming(&["rcproof"]);
+        routing.org_routes = vec![crate::config::OrgRoute {
+            org_id: "acme".to_string(),
+            database: None,
+        }];
+        routing.table_schema_versions = versions
+            .iter()
+            .map(|(table, version)| ((*table).to_string(), (*version).to_string()))
+            .collect();
+        routing
+    }
+
+    #[test]
+    fn a_reload_that_moves_a_table_s_schema_version_re_reads_that_table_alone() {
+        // A deploy that adds a column moves only the table's version in the
+        // loader's config, and a cached schema leaves the column NULL until its TTL.
+        let no_versions: crate::config::RoutingConfig =
+            serde_json::from_str(r#"{"source_to_table": {"rcproof": "rcproof"}}"#)
+                .expect("an overlay with no versions loads");
+        assert!(no_versions.table_schema_versions.is_empty());
+
+        // (versions before, versions after, tables re-read)
+        let cases: [(&[(&str, &str)], &[(&str, &str)], &[&str]); 4] = [
+            (
+                &[("rcproof", "1.0.0")],
+                &[("rcproof", "2.0.0")],
+                &["acme.rcproof", "dfe.rcproof"],
+            ),
+            (&[("rcproof", "1.0.0")], &[("rcproof", "1.0.0")], &[]),
+            (
+                &[],
+                &[("rcproof", "1.0.0")],
+                &["acme.rcproof", "dfe.rcproof"],
+            ),
+            (&[("rcproof", "1.0.0")], &[], &[]),
+        ];
+        for (before, after, want) in cases {
+            let cache = Arc::new(SchemaCache::new(300));
+            let inserter = inserter_for(&Config::default()).with_schema_cache(Arc::clone(&cache));
+            let cached = ["acme.rcproof", "dfe.main", "dfe.rcproof"];
+            for table in cached {
+                cache.insert(table.to_string(), cached_schema(table));
+            }
+
+            forget_moved_schemas(
+                &routing_versions(before),
+                &routing_versions(after),
+                &inserter,
+            );
+
+            let re_read: Vec<&str> = cached
+                .into_iter()
+                .filter(|table| cache.get(table).is_none())
+                .collect();
+            assert_eq!(re_read, want, "versions {before:?} then {after:?}");
+            let mut absent =
+                super::super::types::AbsentTables::new(ABSENT_TABLE_TTL, ABSENT_TABLE_CAPACITY);
+            let warm = tables_to_warm(&routing_versions(after), &mut absent, &cache);
+            assert_eq!(
+                warm,
+                want.iter()
+                    .filter(|table| table.starts_with("dfe."))
+                    .map(|table| (*table).to_string())
+                    .collect::<Vec<String>>(),
+                "the reload's pre-warm reads the moved table again, versions {before:?} then {after:?}"
             );
         }
     }

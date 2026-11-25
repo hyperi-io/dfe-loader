@@ -216,6 +216,7 @@
         "org_routes": [],
         "external_topics": [],
         "source_to_table": {},
+        "table_schema_versions": {},
         "topic_suffixes": [
           "_land",
           "_load"
@@ -1433,6 +1434,14 @@
         },
         "source_to_table": {
           "description": "Source value to table name mapping\nMaps extracted source values to destination table names",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {}
+        },
+        "table_schema_versions": {
+          "description": "Schema version of each table, keyed by table name. A reload that changes\na table's version re-reads its columns and column directives.",
           "type": "object",
           "additionalProperties": {
             "type": "string"

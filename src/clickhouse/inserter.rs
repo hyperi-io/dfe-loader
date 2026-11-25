@@ -455,8 +455,10 @@ impl Inserter {
         self.refresh_on_error
     }
 
-    /// Drop the loader's cached schema for `table`, so its next reader re-fetches.
-    fn drop_cached_schema(&self, table: &str) {
+    /// Drop `table`'s schema from the encoder's cache and the loader's, so the
+    /// next insert and the next record each read the columns `ClickHouse` has now.
+    pub fn forget_schema(&self, table: &str) {
+        self.dynamic_schema_cache.invalidate(&encoder_key(table));
         if let Some(cache) = &self.schema_cache {
             cache.invalidate(table);
         }
@@ -752,8 +754,7 @@ impl Inserter {
                     DynamicError::SchemaFetch { .. } | DynamicError::EmptySchema { .. }
                 )
             {
-                self.dynamic_schema_cache.invalidate(&encoder_key(table));
-                self.drop_cached_schema(table);
+                self.forget_schema(table);
             }
             last_error = Some(error);
             if attempt < self.max_retries {
@@ -1464,6 +1465,39 @@ mod tests {
             )),
         );
         inserter
+    }
+
+    #[test]
+    fn forgetting_a_schema_drops_that_table_from_both_caches() {
+        let schema_cache = Arc::new(SchemaCache::new(300));
+        let inserter =
+            inserter_with_short_bounds(([127, 0, 0, 1], 9).into(), InsertFormat::RowBinary)
+                .with_schema_cache(Arc::clone(&schema_cache));
+        inserter.dynamic_schema_cache.insert(
+            "default.other",
+            Arc::new(DynamicSchema::from_columns(
+                "default.other",
+                vec![ColumnDef::with_default_kind("id", "UInt64", "")],
+            )),
+        );
+        for table in ["default.t", "default.other"] {
+            schema_cache.insert(
+                table.to_string(),
+                crate::clickhouse::TableSchema {
+                    database: "default".to_string(),
+                    table: table.to_string(),
+                    columns: Vec::new(),
+                    comment: String::new(),
+                },
+            );
+        }
+
+        inserter.forget_schema("default.t");
+
+        assert!(inserter.dynamic_schema_cache.get("default.t").is_none());
+        assert!(schema_cache.get("default.t").is_none());
+        assert!(inserter.dynamic_schema_cache.get("default.other").is_some());
+        assert!(schema_cache.get("default.other").is_some());
     }
 
     #[tokio::test]
