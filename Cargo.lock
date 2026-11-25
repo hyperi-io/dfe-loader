@@ -1875,6 +1875,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "hostname"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "617aaa3557aef3810a6369d0a99fac8a080891b68bd9f9812a1eeda0c0730cbd"
+dependencies = [
+ "cfg-if",
+ "libc",
+ "windows-link 0.2.1",
+]
+
+[[package]]
 name = "http"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3030,6 +3041,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "opentelemetry-resource-detectors"
+version = "0.13.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dfe8108824d824e717166f131c9d3d7e23fa268bc3b989dbf48343da9bde54a3"
+dependencies = [
+ "hostname",
+ "opentelemetry",
+ "opentelemetry-semantic-conventions",
+ "opentelemetry_sdk",
+]
+
+[[package]]
+name = "opentelemetry-semantic-conventions"
+version = "0.33.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7a3cf639fefd3e852869114f9925b578da6dd8e99281a2089bb0e773ead46962"
+
+[[package]]
 name = "opentelemetry_sdk"
 version = "0.33.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3542,7 +3571,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6e4d69d0fa3e7f6f9cf6b53a0e83e4fc99ba3586f65ce166cff30bd13bb4ad2"
 dependencies = [
  "heck",
- "itertools 0.14.0",
+ "itertools 0.13.0",
  "log",
  "multimap",
  "petgraph",
@@ -3563,7 +3592,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1ad9c5423459fa2f729b8d9235fab810aa29628b171467744fc86d21460ad70d"
 dependencies = [
  "anyhow",
- "itertools 0.14.0",
+ "itertools 0.13.0",
  "proc-macro2",
  "quote",
  "syn 2.0.119",
@@ -4410,9 +4439,9 @@ dependencies = [
 
 [[package]]
 name = "scalo"
-version = "2.14.38"
+version = "2.14.39"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "541ee7dd482aabf0d4f2bde0f578a04c13122bc35ecc522f943cc4b027ce8e85"
+checksum = "ef4a9620a07645c5fe06c21ea41d14e3157e685fec1582ea0479f1e0e0e746fa"
 dependencies = [
  "aes-gcm",
  "arc-swap",
@@ -4441,6 +4470,7 @@ dependencies = [
  "metrics-util",
  "opentelemetry",
  "opentelemetry-otlp",
+ "opentelemetry-resource-detectors",
  "opentelemetry_sdk",
  "owo-colors",
  "parking_lot 0.13.0",
