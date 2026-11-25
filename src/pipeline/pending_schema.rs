@@ -5,16 +5,16 @@
 //!
 //! Holds messages whose destination table's schema is not yet cached.
 //! Drained when the background resolver populates the schema. Age limits route
-//! stale messages to the DLQ with security events. A full buffer either routes
-//! its overflow to the DLQ or admits it and reports itself full, so the caller
-//! stops intake -- see [`OnFull`].
+//! stale messages to the DLQ with security events. A full buffer either refuses
+//! its overflow, for the caller to read again later or dead-letter, or admits
+//! it and reports itself full, so the caller stops intake -- see [`OnFull`].
 //!
 //! `last_requested_at` drives three things: the first-request signal
 //! (`EnqueueOutcome::NeedsResolution`) so the caller kicks off resolution,
 //! periodic re-requests so a table whose resolution failed — e.g. a transient
 //! ClickHouse outage — is retried instead of silently ageing out to the DLQ,
-//! and the per-table cap, which overflows to the DLQ only once a resolution
-//! has answered, so a new table's first poll batch waits for its schema.
+//! and the per-table cap, which refuses only once a resolution has answered,
+//! so a new table's first poll batch waits for its schema.
 
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -54,8 +54,9 @@ impl PendingSchemaConfig {
 /// What a message does when the buffer has hit a cap.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum OnFull {
-    /// Route the overflow to the DLQ and keep taking messages.
-    DeadLetter,
+    /// Refuse the message and keep taking others. On Kafka the caller seeks
+    /// back to it, so the source still holds it.
+    Refuse,
     /// Take the message anyway; the caller stops intake while
     /// [`PendingSchemaBuffer::is_full`] holds, which is the only answer where
     /// the buffer is a message's last copy.
@@ -71,18 +72,36 @@ pub(crate) enum EnqueueOutcome {
     NeedsResolution,
 }
 
-/// Error returned by `enqueue` when caps are hit.
+/// Error returned by `enqueue` when caps are hit, naming the message's table.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum PendingOverflow {
     /// Per-table cap exceeded for this table.
     PerTable(String),
+    /// The cap across every table is reached.
+    Total(String),
+}
+
+impl PendingOverflow {
+    /// The table the refused message was for.
+    pub fn table(&self) -> &str {
+        match self {
+            Self::PerTable(table) | Self::Total(table) => table,
+        }
+    }
+
+    /// The DLQ reason for a refused message that is dead-lettered.
+    pub fn reason(&self) -> String {
+        match self {
+            Self::PerTable(table) => format!("pending_schema_per_table_overflow table={table}"),
+            Self::Total(table) => format!("pending_schema_global_overflow table={table}"),
+        }
+    }
 }
 
 /// Reason a message was returned by `expire` / `drain_all`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ExpireReason {
     AgeExceeded { age_ms: u128, table: String },
-    GlobalCapEviction { table: String },
     Shutdown { table: String },
 }
 
@@ -105,9 +124,6 @@ pub(crate) struct PendingSchemaBuffer {
     /// `take_ready` drains it.
     last_requested_at: FxHashMap<String, Request>,
     total_count: usize,
-    /// Messages evicted by global-cap overflow, drained on the next
-    /// `expire()` call.
-    evicted: VecDeque<(KafkaMessage, ExpireReason)>,
     config: PendingSchemaConfig,
     /// The table dead letters load into, whose messages wait for it even once
     /// it is absent.
@@ -120,7 +136,6 @@ impl PendingSchemaBuffer {
             per_table: FxHashMap::default(),
             last_requested_at: FxHashMap::default(),
             total_count: 0,
-            evicted: VecDeque::new(),
             config,
             dlq_load: None,
         }
@@ -151,15 +166,10 @@ impl PendingSchemaBuffer {
                 .any(|q| q.len() >= self.config.max_per_table)
     }
 
-    /// The lowest offset held on each partition, evictions not yet collected
-    /// included: a Kafka commit must not pass a message whose only copy is here.
+    /// The lowest offset held on each partition: a Kafka commit must not pass
+    /// a message whose only copy is here.
     pub fn lowest_offsets(&self) -> Vec<KafkaOffset> {
-        let held = self
-            .per_table
-            .values()
-            .flatten()
-            .map(|p| &p.msg)
-            .chain(self.evicted.iter().map(|(msg, _)| msg));
+        let held = self.per_table.values().flatten().map(|p| &p.msg);
         let mut lowest: FxHashMap<(&str, i32), &KafkaMessage> = FxHashMap::default();
         for msg in held {
             lowest
@@ -196,31 +206,29 @@ impl PendingSchemaBuffer {
     /// Returns `NeedsResolution` the first time a table is seen (caller must
     /// push the table to the resolver channel); `Enqueued` otherwise.
     ///
-    /// Under [`OnFull::DeadLetter`], once [`Self::record_answer`] has run for
-    /// the table, the per-table cap returns `Err(PerTable)` and does NOT
-    /// enqueue -- the caller routes the current message to DLQ. Before that,
-    /// a poll batch larger than the cap waits for its first fetch in the
-    /// buffer's free space, but never evicts another table's message. The
-    /// global cap evicts the oldest message across all tables (queued in
-    /// `evicted`) before inserting. Under [`OnFull::Backpressure`] every
+    /// Under [`OnFull::Refuse`], once [`Self::record_answer`] has run for the
+    /// table, the per-table cap returns `Err(PerTable)` and does NOT enqueue.
+    /// Before that, a poll batch larger than the cap waits for its first fetch
+    /// in the buffer's free space. The global cap returns `Err(Total)` and
+    /// takes nothing from another table. The caller reads a refused message
+    /// again later, or dead-letters it. Under [`OnFull::Backpressure`] every
     /// message is enqueued and neither cap drops anything.
     pub fn enqueue(
         &mut self,
         table: String,
         msg: KafkaMessage,
     ) -> Result<EnqueueOutcome, PendingOverflow> {
-        if self.config.on_full == OnFull::DeadLetter {
+        if self.config.on_full == OnFull::Refuse {
+            if self.total_count >= self.config.max_total {
+                return Err(PendingOverflow::Total(table));
+            }
             if self.len_per_table(&table) >= self.config.max_per_table
-                && (self.total_count >= self.config.max_total
-                    || self
-                        .last_requested_at
-                        .get(&table)
-                        .is_some_and(|r| r.answered))
+                && self
+                    .last_requested_at
+                    .get(&table)
+                    .is_some_and(|r| r.answered)
             {
                 return Err(PendingOverflow::PerTable(table));
-            }
-            if self.total_count >= self.config.max_total {
-                self.evict_oldest();
             }
         }
 
@@ -267,11 +275,10 @@ impl PendingSchemaBuffer {
         absent: &super::types::AbsentTables,
     ) -> Vec<KafkaMessage> {
         let mut out = Vec::new();
-        let waits = |t: &str| self.dlq_load.as_ref().is_some_and(|d| d.loads_into(t));
         let ready_tables: Vec<String> = self
             .per_table
             .keys()
-            .filter(|t| schema_cache.get(t).is_some() || (absent.contains(t) && !waits(t)))
+            .filter(|t| self.releases(t, schema_cache, absent))
             .cloned()
             .collect();
         for table in ready_tables {
@@ -284,10 +291,22 @@ impl PendingSchemaBuffer {
         out
     }
 
-    /// Return messages older than `config.max_age`, plus any global-cap
-    /// evictions queued since the last call. Caller routes them to DLQ.
+    /// Whether [`Self::take_ready`] releases `table`'s messages: its schema is
+    /// cached, or ClickHouse confirmed it absent and it is not the table dead
+    /// letters load into.
+    pub fn releases(
+        &self,
+        table: &str,
+        schema_cache: &SchemaCache,
+        absent: &super::types::AbsentTables,
+    ) -> bool {
+        let waits = self.dlq_load.as_ref().is_some_and(|d| d.loads_into(table));
+        schema_cache.get(table).is_some() || (absent.contains(table) && !waits)
+    }
+
+    /// Return messages older than `config.max_age`. Caller routes them to DLQ.
     pub fn expire(&mut self, now: Instant) -> Vec<(KafkaMessage, ExpireReason)> {
-        let mut out: Vec<(KafkaMessage, ExpireReason)> = self.evicted.drain(..).collect();
+        let mut out: Vec<(KafkaMessage, ExpireReason)> = Vec::new();
 
         let max_age = self.config.max_age;
         let mut empty_tables = Vec::new();
@@ -320,7 +339,7 @@ impl PendingSchemaBuffer {
 
     /// Drain all pending messages with `Shutdown` reason. Caller routes to DLQ.
     pub fn drain_all(&mut self) -> Vec<(KafkaMessage, ExpireReason)> {
-        let mut out: Vec<(KafkaMessage, ExpireReason)> = self.evicted.drain(..).collect();
+        let mut out: Vec<(KafkaMessage, ExpireReason)> = Vec::with_capacity(self.total_count);
         for (table, queue) in self.per_table.drain() {
             for p in queue {
                 out.push((
@@ -336,8 +355,7 @@ impl PendingSchemaBuffer {
         out
     }
 
-    /// Remove every message read from `topic`/`partition`, evictions not yet
-    /// collected included, adding each to `purged`.
+    /// Remove every message read from `topic`/`partition`, adding each to `purged`.
     pub fn purge_partition(&mut self, topic: &str, partition: i32, purged: &mut Purged) {
         let from = |msg: &KafkaMessage| msg.partition == partition && &*msg.topic == topic;
         let mut emptied = Vec::new();
@@ -359,13 +377,6 @@ impl PendingSchemaBuffer {
             self.per_table.remove(&table);
             self.last_requested_at.remove(&table);
         }
-        self.evicted.retain(|(msg, _)| {
-            if from(msg) {
-                purged.record(msg.offset, msg.payload.len() as u64);
-                return false;
-            }
-            true
-        });
     }
 
     /// Tables still pending whose last resolution request is older than
@@ -385,30 +396,6 @@ impl PendingSchemaBuffer {
             }
         }
         due
-    }
-
-    /// Evict the oldest message across all tables into the eviction queue.
-    /// Drained by `expire()`.
-    fn evict_oldest(&mut self) {
-        let oldest_table = self
-            .per_table
-            .iter()
-            .filter_map(|(t, q)| q.front().map(|m| (t.clone(), m.enqueued_at)))
-            .min_by_key(|(_, ts)| *ts)
-            .map(|(t, _)| t);
-
-        if let Some(table) = oldest_table
-            && let Some(queue) = self.per_table.get_mut(&table)
-            && let Some(p) = queue.pop_front()
-        {
-            self.total_count -= 1;
-            self.evicted
-                .push_back((p.msg, ExpireReason::GlobalCapEviction { table: p.table }));
-            if queue.is_empty() {
-                self.per_table.remove(&table);
-                self.last_requested_at.remove(&table);
-            }
-        }
     }
 }
 
@@ -440,7 +427,7 @@ mod tests {
             max_per_table: 3,
             max_total: 10,
             max_age: Duration::from_secs(30),
-            on_full: OnFull::DeadLetter,
+            on_full: OnFull::Refuse,
         }
     }
 
@@ -576,7 +563,7 @@ mod tests {
             max_per_table: 100,
             max_total: 100,
             max_age: Duration::from_millis(20),
-            on_full: OnFull::DeadLetter,
+            on_full: OnFull::Refuse,
         };
         let mut buf = PendingSchemaBuffer::new(cfg);
         buf.enqueue("dfe.unreachable".into(), make_msg(b"x"))
@@ -663,29 +650,25 @@ mod tests {
     }
 
     #[test]
-    fn enqueue_global_overflow_evicts_oldest_across_tables() {
+    fn the_global_cap_refuses_the_newest_and_takes_from_no_table() {
         let cfg = PendingSchemaConfig {
             max_per_table: 100,
             max_total: 3,
             max_age: Duration::from_secs(30),
-            on_full: OnFull::DeadLetter,
+            on_full: OnFull::Refuse,
         };
         let mut buf = PendingSchemaBuffer::new(cfg);
         buf.enqueue("a".into(), make_msg(b"1")).unwrap();
-        std::thread::sleep(Duration::from_millis(2));
         buf.enqueue("b".into(), make_msg(b"2")).unwrap();
-        std::thread::sleep(Duration::from_millis(2));
         buf.enqueue("a".into(), make_msg(b"3")).unwrap();
-        // Full. Next enqueue evicts the oldest (table "a", payload b"1").
-        buf.enqueue("c".into(), make_msg(b"4")).unwrap();
+        let refused = buf
+            .enqueue("c".into(), make_msg(b"4"))
+            .expect_err("the buffer is full");
+        assert_eq!(refused, PendingOverflow::Total("c".into()));
+        assert_eq!(refused.table(), "c");
         assert_eq!(buf.len(), 3);
-
-        // The eviction is drained via expire().
-        let expired = buf.expire(Instant::now());
-        assert_eq!(expired.len(), 1);
-        let (msg, reason) = &expired[0];
-        assert_eq!(msg.payload, b"1");
-        assert!(matches!(reason, ExpireReason::GlobalCapEviction { table } if table == "a"));
+        assert_eq!(buf.len_per_table("a"), 2, "nothing was taken from a");
+        assert!(buf.expire(Instant::now()).is_empty(), "nothing was evicted");
     }
 
     #[test]
@@ -694,7 +677,7 @@ mod tests {
             max_per_table: 100,
             max_total: 100,
             max_age: Duration::from_millis(20),
-            on_full: OnFull::DeadLetter,
+            on_full: OnFull::Refuse,
         };
         let mut buf = PendingSchemaBuffer::new(cfg);
         buf.enqueue("a".into(), make_msg(b"old")).unwrap();
@@ -827,24 +810,6 @@ mod tests {
     }
 
     #[test]
-    fn an_eviction_not_yet_collected_still_holds_its_offset_down() {
-        let mut buf = PendingSchemaBuffer::new(PendingSchemaConfig {
-            max_per_table: 100,
-            max_total: 1,
-            ..small_cfg()
-        });
-        buf.enqueue("dfe.a".into(), msg_at("t", 0, 5)).unwrap();
-        // The global cap evicts offset 5 into the queue `expire` drains.
-        buf.enqueue("dfe.b".into(), msg_at("t", 0, 9)).unwrap();
-        assert_eq!(buf.len(), 1);
-        assert_eq!(floors(&buf), vec![("t".to_string(), 0, 5)]);
-
-        let handed_on = buf.expire(Instant::now());
-        assert_eq!(handed_on.len(), 1);
-        assert_eq!(floors(&buf), vec![("t".to_string(), 0, 9)]);
-    }
-
-    #[test]
     fn a_message_released_by_its_schema_no_longer_holds_the_floor() {
         let mut buf = PendingSchemaBuffer::new(small_cfg());
         buf.enqueue("dfe.t1".into(), msg_at("t", 0, 4)).unwrap();
@@ -878,28 +843,6 @@ mod tests {
             floors(&buf),
             vec![("t".to_string(), 1, 41), ("u".to_string(), 0, 43)]
         );
-    }
-
-    #[test]
-    fn purge_partition_takes_an_eviction_not_yet_collected() {
-        let mut buf = PendingSchemaBuffer::new(PendingSchemaConfig {
-            max_per_table: 100,
-            max_total: 1,
-            ..small_cfg()
-        });
-        buf.enqueue("dfe.a".into(), msg_at("t", 0, 5)).unwrap();
-        // The global cap evicts offset 5 into the queue `expire` drains.
-        buf.enqueue("dfe.b".into(), msg_at("t", 1, 9)).unwrap();
-
-        let mut purged = Purged::default();
-        buf.purge_partition("t", 0, &mut purged);
-
-        assert_eq!(purged.records(), 1);
-        assert!(
-            buf.expire(Instant::now()).is_empty(),
-            "a purged eviction still went to the DLQ"
-        );
-        assert_eq!(floors(&buf), vec![("t".to_string(), 1, 9)]);
     }
 
     #[test]

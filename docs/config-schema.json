@@ -881,21 +881,21 @@
           "default": 60
         },
         "pending_max_per_table": {
-          "description": "Max messages buffered per table while waiting for schema resolution.\nOn Kafka, the cap starts once the table's first schema fetch answers,\nand past it messages route to DLQ with a security event. Until then\nthey use free space under `pending_max_total`. On gRPC, a table at this cap stops\nintake until its schema resolves.",
+          "description": "Max messages buffered per table while waiting for schema resolution.\nOn Kafka, the cap starts once the table's first schema fetch answers.\nUntil then they use free space under `pending_max_total`. Past it the\npartition carrying the next message pauses and reads again from it once\nthe schema resolves. On gRPC, a table at this cap stops intake until its\nschema resolves.",
           "type": "integer",
           "format": "uint",
           "minimum": 0,
           "default": 1000
         },
         "pending_max_total": {
-          "description": "Max messages buffered across all tables.\nOn Kafka, hitting this cap evicts the oldest entry FIFO across tables.\nOn gRPC it stops intake until the buffer drains.",
+          "description": "Max messages buffered across all tables.\nOn Kafka, past this cap the partition carrying the next message pauses,\nas for `pending_max_per_table`. On gRPC it stops intake until the buffer\ndrains.",
           "type": "integer",
           "format": "uint",
           "minimum": 0,
           "default": 10000
         },
         "pending_max_age_secs": {
-          "description": "Max age of a pending message before it is routed to DLQ. On gRPC with\nno working DLQ, messages keep waiting for their schema instead.",
+          "description": "Max age of a pending message before it is routed to DLQ. On gRPC with\nno working DLQ, messages keep waiting for their schema instead. On Kafka\nit is also the longest a partition stays paused, after which its\ntables' overflow goes to the DLQ until a schema fetch succeeds.",
           "type": "integer",
           "format": "uint64",
           "minimum": 0,

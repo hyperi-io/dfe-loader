@@ -112,7 +112,7 @@ The orchestrator runs `process` over the batch on the first pool it has: the `Ba
 
 ## The sequential phase
 
-`BatchCoordinator` (`src/pipeline/coordinator.rs`) holds the mutable references: the buffer manager, the capture, field-mapping and computed-column caches, the pending-schema buffer, metrics and the memory guard. `apply_results` walks the results in order. An `Ok` marks the table pending, ensures its cache entry and pushes the row into the table's buffer. A `SchemaPending` error parks the message in the pending-schema buffer, and any other error becomes a dead letter and releases the message's memory. It returns a `BatchOutcome` with the counters, the tables that need a schema resolution and the dead letters, which the orchestrator hands to the DLQ.
+`BatchCoordinator` (`src/pipeline/coordinator.rs`) holds the mutable references: the buffer manager, the capture, field-mapping and computed-column caches, the pending-schema buffer, metrics and the memory guard. `apply_results` walks the results in order. An `Ok` marks the table pending, ensures its cache entry and pushes the row into the table's buffer. A `SchemaPending` error parks the message in the pending-schema buffer, and any other error becomes a dead letter and releases the message's memory. On Kafka a message the full buffer refuses is overflow: the orchestrator pauses its partition and seeks back to it ([../operations.md](../operations.md#a-partition-is-paused)). It returns a `BatchOutcome` with the counters, the tables that need a schema resolution, the dead letters, which the orchestrator hands to the DLQ, and the overflow.
 
 The coordinator is built only after the processor is dropped, so the borrow checker keeps the two phases apart.
 

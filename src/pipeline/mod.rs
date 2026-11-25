@@ -14,6 +14,7 @@ pub mod coordinator;
 pub mod enrichment;
 pub(crate) mod leases;
 pub mod orchestrator;
+pub(crate) mod partition_pause;
 pub(crate) mod pending_schema;
 pub mod processor;
 pub(crate) mod startup;

@@ -42,3 +42,5 @@ highlight = "all"
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# The scalo git build Cargo.toml's [patch.crates-io] points at, removed with it.
+allow-git = ["https://github.com/hyperi-io/scalo-rs"]

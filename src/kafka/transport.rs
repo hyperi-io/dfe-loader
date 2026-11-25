@@ -27,7 +27,7 @@ use crate::config::{KafkaConfig, RoutingConfig};
 use scalo::SelfRegulationGovernor;
 use scalo::memory::MemoryGuard;
 use scalo::transport::filter::FilteredDlqEntry;
-use scalo::transport::kafka::PartitionLease;
+use scalo::transport::kafka::{PartitionControlError, PartitionLease, PartitionOp};
 use scalo::transport::{
     AckControl, DeliveryStatus, GrpcConfig as TransportGrpcConfig, GrpcToken, GrpcTransport,
     KafkaConfig as TransportKafkaConfig, KafkaToken, KafkaTransport, TransportBase, TransportError,
@@ -36,6 +36,9 @@ use scalo::transport::{
 use tracing::{debug, trace};
 
 use super::KafkaMessage;
+
+/// The answer to a partition pause, resume or seek.
+pub type ControlResult = std::result::Result<(), PartitionControlError>;
 
 /// What auto-discovery subscribes to when neither `topics` nor `topic_regex`
 /// is set: a topic ending in one of `suffixes`. `None` for no suffix, which
@@ -443,6 +446,28 @@ impl TransportAdapter {
     /// Count `records` discarded because the lease they were read under ended.
     pub fn discarded_after_revoke(&self, records: u64) {
         self.transport.discarded_after_revoke(records);
+    }
+
+    /// Stop fetching `topic`/`partition` until [`Self::resume`] names it.
+    pub fn pause(&self, topic: &str, partition: i32) -> ControlResult {
+        self.transport.pause_partitions(&[(topic, partition)])
+    }
+
+    /// Fetch `topic`/`partition` again after [`Self::pause`].
+    pub fn resume(&self, topic: &str, partition: i32) -> ControlResult {
+        self.transport.resume_partitions(&[(topic, partition)])
+    }
+
+    /// Read `topic`/`partition` again from `offset`.
+    pub async fn seek(&self, topic: &str, partition: i32, offset: i64) -> ControlResult {
+        self.transport
+            .seek_partition(topic, partition, offset)
+            .await
+    }
+
+    /// The partitions [`Self::pause`] holds paused now. A revoke ends a hold.
+    pub fn paused(&self) -> Vec<(Arc<str>, i32)> {
+        self.transport.paused_partitions()
     }
 
     /// Commit offsets for processed messages.
@@ -897,6 +922,44 @@ impl TransportBackend {
         match self {
             Self::Kafka(a) => a.discarded_after_revoke(records),
             Self::Grpc(_) => {}
+        }
+    }
+
+    /// Stop fetching `topic`/`partition` (Kafka only: gRPC refuses it).
+    pub fn pause_partition(&self, topic: &str, partition: i32) -> ControlResult {
+        match self {
+            Self::Kafka(a) => a.pause(topic, partition),
+            Self::Grpc(_) => Err(PartitionControlError::NoConsumer {
+                op: PartitionOp::Pause,
+            }),
+        }
+    }
+
+    /// Fetch `topic`/`partition` again (Kafka only: gRPC refuses it).
+    pub fn resume_partition(&self, topic: &str, partition: i32) -> ControlResult {
+        match self {
+            Self::Kafka(a) => a.resume(topic, partition),
+            Self::Grpc(_) => Err(PartitionControlError::NoConsumer {
+                op: PartitionOp::Resume,
+            }),
+        }
+    }
+
+    /// Read `topic`/`partition` again from `offset` (Kafka only: gRPC refuses it).
+    pub async fn seek_partition(&self, topic: &str, partition: i32, offset: i64) -> ControlResult {
+        match self {
+            Self::Kafka(a) => a.seek(topic, partition, offset).await,
+            Self::Grpc(_) => Err(PartitionControlError::NoConsumer {
+                op: PartitionOp::Seek,
+            }),
+        }
+    }
+
+    /// The partitions held paused now (none for gRPC).
+    pub fn paused_partitions(&self) -> Vec<(Arc<str>, i32)> {
+        match self {
+            Self::Kafka(a) => a.paused(),
+            Self::Grpc(_) => Vec::new(),
         }
     }
 

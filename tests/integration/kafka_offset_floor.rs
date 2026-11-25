@@ -576,6 +576,92 @@ async fn no_record_waiting_on_its_schema_is_lost_to_a_shutdown() {
     );
 }
 
+/// Records of a burst over the per-table cap, for a table whose first schema
+/// fetch fails (#362).
+const BURST: u64 = 300;
+
+/// A burst over the per-table cap, before the table's schema loads and with
+/// its first fetch failing, waits in Kafka on a paused partition and lands
+/// whole once the fetch succeeds: nothing in the DLQ, no record lost.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_burst_over_the_cap_before_its_schema_loads_lands_with_no_dead_letter() {
+    let infra = TestInfrastructure::new(test_name!(), true, true).await;
+    let clickhouse = clickhouse_address(&infra).await;
+    let bootstrap = kafka_bootstrap(&infra).await;
+    let direct = query_client(&clickhouse);
+    let proxy = ReadRefusingProxy::start(clickhouse.clone()).await;
+
+    let landing = unique_table_name("kafka_burst_landing");
+    let source = unique_table_name("kafka_burst_source");
+    for table in [&landing, &source] {
+        direct
+            .execute(&format!(
+                "CREATE TABLE default.{table} (id UInt64) ENGINE = MergeTree() ORDER BY id"
+            ))
+            .await
+            .expect("create table");
+    }
+    let topic = format!("burst-{landing}");
+    let group = format!("dfe-{landing}");
+    ensure_topic(&bootstrap, &topic).await;
+
+    let dlq_dir = tempfile::tempdir().expect("DLQ spool directory");
+    let mut config = kafka_loader(&bootstrap, &topic, &group, proxy.address(), &landing);
+    with_file_dlq(&mut config, dlq_dir.path());
+    config.schema.pending_max_per_table = 50;
+    config.schema.pending_max_age_secs = 120;
+    let manager = MetricsManager::new("loader_it");
+    let (shutdown, loader) = start_loader(config);
+    let producer = make_producer(&bootstrap);
+    wait_for_loader(&producer, &topic, &clickhouse, &landing).await;
+
+    // Every schema fetch for the source fails until reads are allowed again.
+    proxy.refuse_reads();
+    let burst: BTreeSet<u64> = (1..=BURST).collect();
+    for id in &burst {
+        produce(
+            &producer,
+            &topic,
+            &format!(r#"{{"_source":"{source}","id":{id}}}"#),
+        )
+        .await;
+    }
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    let while_refused = dead_lettered_ids(dlq_dir.path());
+    let paused = counter_value(&manager, "partition_pauses_total", "");
+    proxy.allow_reads();
+    let landed = wait_landed(&clickhouse, &source, &burst, BUDGET).await;
+    let resolved = counter_value(&manager, "partition_resumes_total", "reason=\"resolved\"");
+
+    shutdown.cancel();
+    let _ = tokio::time::timeout(Duration::from_secs(30), loader).await;
+    let dead_lettered = dead_lettered_ids(dlq_dir.path());
+    for table in [&landing, &source] {
+        let _ = direct
+            .execute(&format!("DROP TABLE IF EXISTS default.{table}"))
+            .await;
+    }
+
+    assert!(
+        paused >= 1.0,
+        "the burst never paused its partition, so the cap was never reached"
+    );
+    assert!(
+        resolved >= 1.0,
+        "the partition did not resume on the schema loading"
+    );
+    assert!(
+        while_refused.is_empty() && dead_lettered.is_empty(),
+        "records of the burst reached the DLQ: {while_refused:?} then {dead_lettered:?}"
+    );
+    let lost: Vec<u64> = burst.difference(&landed).copied().collect();
+    assert!(
+        lost.is_empty(),
+        "{} of {BURST} records never landed once the schema loaded: {lost:?}",
+        lost.len()
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_batch_whose_insert_failed_holds_the_commit_below_it_until_it_lands() {
     let infra = TestInfrastructure::new(test_name!(), true, true).await;

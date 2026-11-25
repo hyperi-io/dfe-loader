@@ -63,6 +63,7 @@ use super::acks::AckLedger;
 use super::capture::CaptureOverrides;
 use super::enrichment::EnrichmentPipeline;
 use super::leases::Leases;
+use super::partition_pause::PartitionPauses;
 use super::pending_schema::{ExpireReason, OnFull, PendingSchemaBuffer, PendingSchemaConfig};
 use super::types::{SchemaResolution, TableResolutionResult};
 use super::unsettled::{Held, Unsettled, purge_dead_letters};
@@ -121,6 +122,17 @@ pub struct Orchestrator {
     /// The DLQ topics the transport subscribed at startup. A reload never
     /// changes them, so a topic still read is still pinned and never re-dead-lettered.
     dlq_load: DlqLoadConfig,
+    /// Kafka partitions paused while tables over their pending-schema cap
+    /// wait on their schema, and the seek points no commit passes.
+    pauses: PartitionPauses,
+}
+
+/// How often held partitions are checked for a resume, whatever arrives.
+const PAUSE_UPKEEP_INTERVAL: Duration = Duration::from_secs(1);
+
+/// The partition holds a config builds: none outlasts the pending-schema age cap.
+fn pauses_for(config: &Config) -> PartitionPauses {
+    PartitionPauses::new(Duration::from_secs(config.schema.pending_max_age_secs))
 }
 
 /// A hold whose attempts are never further apart than the flush interval.
@@ -172,6 +184,7 @@ impl Orchestrator {
         let unsettled = unsettled_for(&config);
         Self {
             unsettled,
+            pauses: pauses_for(&config),
             dlq_load: config.dlq_load.clone(),
             config,
             shared_config: None,
@@ -203,6 +216,7 @@ impl Orchestrator {
         let unsettled = unsettled_for(&config);
         Self {
             unsettled,
+            pauses: pauses_for(&config),
             dlq_load: config.dlq_load.clone(),
             config,
             shared_config: None,
@@ -478,11 +492,12 @@ impl Orchestrator {
         let mut buffer_manager = BufferManager::new(&self.config.buffer);
 
         // Pending-schema buffer — holds messages whose table schema is not yet cached.
-        // Drained when the background resolver populates the schema. Where
-        // nothing re-delivers, a full buffer stops intake instead of shedding
-        // its overflow to the DLQ.
+        // Drained when the background resolver populates the schema. On Kafka
+        // a full buffer refuses its overflow, and the partition carrying it is
+        // paused and sought back to it. Where nothing re-delivers, a full buffer
+        // stops intake instead.
         let on_full = if redelivers {
-            OnFull::DeadLetter
+            OnFull::Refuse
         } else {
             OnFull::Backpressure
         };
@@ -588,6 +603,10 @@ impl Orchestrator {
         let mut early_flush = interval(EARLY_FLUSH_AGE);
         early_flush.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
+        // A paused partition delivers nothing, so a timer drives its resume.
+        let mut pause_upkeep = interval(PAUSE_UPKEEP_INTERVAL);
+        pause_upkeep.set_missed_tick_behavior(MissedTickBehavior::Delay);
+
         loop {
             // The Kafka recv blocks its worker without yielding, and outside the
             // select! a yield drops nothing, so the runtime drives timers and I/O
@@ -640,6 +659,8 @@ impl Orchestrator {
 
                         // --- Hot-reloaded: takes effect on next batch ---
                         // Rows already buffered keep the table they were routed to.
+                        // The tables a hold waits on may be removed or moved.
+                        self.pauses.release_all(&transport, std::time::Instant::now());
                         let new_stages = Stages::new(&new_config, &self.dlq_load);
                         if new_stages.default_table != stages.default_table {
                             // The default is never held absent: its rows wait for it instead.
@@ -718,7 +739,7 @@ impl Orchestrator {
                     // Check for buffers ready to flush
                     let batches = buffer_manager.get_ready_for_flush();
                     // Read after the take, so it names only what stayed behind.
-                    let still_held = unplaced_offsets(&buffer_manager, &pending_schema_buffer);
+                    let still_held = unplaced_offsets(&buffer_manager, &pending_schema_buffer, &self.pauses);
                     self.flush_or_settle(&inserter, &transport, dlq.as_ref(), batches, still_held, &mut buffer_manager, &mut pending_schema_buffer).await;
                     self.recheck_retired_held(&absent_tables, &stages.default_table, &resolve_tx);
                 }
@@ -727,7 +748,7 @@ impl Orchestrator {
                 () = self.unsettled.due(), if !self.unsettled.is_empty() => {
                     let held = self.take_unsettled_for(&absent_tables, &stages.default_table);
                     self.queue_dead_letters(held.dead_letters);
-                    let still_held = unplaced_offsets(&buffer_manager, &pending_schema_buffer);
+                    let still_held = unplaced_offsets(&buffer_manager, &pending_schema_buffer, &self.pauses);
                     self.flush_or_settle(&inserter, &transport, dlq.as_ref(), held.batches, still_held, &mut buffer_manager, &mut pending_schema_buffer).await;
                 }
 
@@ -764,6 +785,7 @@ impl Orchestrator {
                         SchemaResolution::Resolved(schema) => {
                             // The table exists now, so stop diverting its events.
                             absent_tables.remove(table);
+                            self.pauses.resolved(table);
                             // Apply field mapping (needs schema; uses ColumnMetaCache for rename rules)
                             if let Some(ref mut fm) = field_mapping_cache {
                                 fm.build_and_cache(table, &schema, &col_meta_cache);
@@ -790,6 +812,7 @@ impl Orchestrator {
                             // An unknown source is a routing miss, so its events
                             // fall back to the default table rather than ageing
                             // out to the DLQ.
+                            self.pauses.resolved(table);
                             let marked = record_table_absent(
                                 &mut absent_tables,
                                 &schema_cache,
@@ -850,12 +873,20 @@ impl Orchestrator {
                     }
                 }
 
+                _ = pause_upkeep.tick(), if self.pauses.is_holding() => {
+                    self.pauses.upkeep(
+                        &transport,
+                        |table| pending_schema_buffer.releases(table, &schema_cache, &absent_tables),
+                        std::time::Instant::now(),
+                    );
+                }
+
                 // A sender waits on each held row, so rows flush at a short age
                 // instead of waiting for a batch to fill.
                 _ = early_flush.tick(), if self.holds_answers => {
                     if transport.held_records() > 0 {
                         let batches = buffer_manager.take_older_than(EARLY_FLUSH_AGE);
-                        let still_held = unplaced_offsets(&buffer_manager, &pending_schema_buffer);
+                        let still_held = unplaced_offsets(&buffer_manager, &pending_schema_buffer, &self.pauses);
                         self.flush_or_settle(&inserter, &transport, dlq.as_ref(), batches, still_held, &mut buffer_manager, &mut pending_schema_buffer).await;
                     }
                 }
@@ -965,6 +996,7 @@ impl Orchestrator {
                                 }
                             }
                             let mut fresh = fan.messages;
+                            self.pauses.received(&fresh);
                             for msg in &fresh {
                                 self.memory_guard.add_bytes(msg.payload.len() as u64);
                                 if self.holds_answers {
@@ -1121,6 +1153,7 @@ impl Orchestrator {
                                 memory_guard: &self.memory_guard,
                                 pending_schema: &mut pending_schema_buffer,
                                 absent_tables: &absent_tables,
+                                pauses: redelivers.then_some(&self.pauses),
                             };
                             // When pre-route is active, results only contain passing
                             // messages — build the matching message slice.
@@ -1132,6 +1165,26 @@ impl Orchestrator {
                                 coordinator.apply_results(results, &batch)
                             };
                             self.queue_dead_letters(std::mem::take(&mut outcome.dead_letters));
+                            // Before any flush below, so the seek points bound its commit.
+                            let overflow = std::mem::take(&mut outcome.overflow);
+                            if !overflow.is_empty() {
+                                let refused = self
+                                    .pauses
+                                    .hold(&transport, overflow, std::time::Instant::now())
+                                    .await;
+                                let dead_letters = refused
+                                    .iter()
+                                    .map(|o| {
+                                        super::coordinator::dead_letter_overflow(
+                                            &o.msg,
+                                            &o.table,
+                                            o.reason.clone(),
+                                            &self.metrics,
+                                        )
+                                    })
+                                    .collect();
+                                self.queue_dead_letters(dead_letters);
+                            }
 
                             let batch_elapsed = batch_start.elapsed();
                             debug!(
@@ -1235,7 +1288,7 @@ impl Orchestrator {
                             let batches = buffer_manager.get_ready_for_flush();
                             if !batches.is_empty() {
                                 // Read after the take, so it names only what stayed behind.
-                                let still_held = unplaced_offsets(&buffer_manager, &pending_schema_buffer);
+                                let still_held = unplaced_offsets(&buffer_manager, &pending_schema_buffer, &self.pauses);
                                 self.flush_batches_transport(&inserter, &transport, dlq.as_ref(), batches, still_held, &mut buffer_manager, &mut pending_schema_buffer).await;
                             }
                         }
@@ -1270,7 +1323,8 @@ impl Orchestrator {
         self.retire_pending(drained);
 
         // Final flush: every buffer is empty after this, so only a row
-        // ClickHouse or the DLQ still refuses holds the watermark down.
+        // ClickHouse or the DLQ still refuses, or a seek point not read again,
+        // holds the watermark down.
         let held = self.take_unsettled_for(&absent_tables, &stages.default_table);
         self.queue_dead_letters(held.dead_letters);
         let mut final_batches = buffer_manager.flush_all();
@@ -1278,12 +1332,13 @@ impl Orchestrator {
         if !final_batches.is_empty() {
             info!(batches = final_batches.len(), "Flushing remaining buffers");
         }
+        let seek_points = self.pauses.floors();
         self.flush_or_settle(
             &inserter,
             &transport,
             dlq.as_ref(),
             final_batches,
-            Vec::new(),
+            seek_points,
             &mut buffer_manager,
             &mut pending_schema_buffer,
         )
@@ -1966,6 +2021,8 @@ impl Orchestrator {
             .purge_partition(topic, partition, &mut purged);
         purge_dead_letters(&mut self.dead_letters, topic, partition, &mut purged);
         self.memory_guard.release(purged.bytes);
+        self.pauses
+            .forget(topic, partition, std::time::Instant::now());
         purged
     }
 
@@ -2886,14 +2943,17 @@ fn received_offsets(messages: &[crate::kafka::KafkaMessage]) -> Vec<KafkaOffset>
         .collect()
 }
 
-/// Offsets whose only copy is in memory: rows in a buffer not yet flushed, and
-/// messages waiting on their table schema. A Kafka commit must stop below each.
+/// Offsets whose only copy is in memory -- rows in a buffer not yet flushed,
+/// messages waiting on their table schema -- and the seek points of partitions
+/// not read again yet. A Kafka commit must stop below each.
 fn unplaced_offsets(
     buffers: &BufferManager,
     pending: &super::pending_schema::PendingSchemaBuffer,
+    pauses: &PartitionPauses,
 ) -> Vec<KafkaOffset> {
     let mut offsets = buffers.lowest_pending_offsets();
     offsets.extend(pending.lowest_offsets());
+    offsets.extend(pauses.floors());
     offsets
 }
 
@@ -3091,16 +3151,13 @@ fn report_discarded(transport: &TransportBackend, topic: &str, partition: i32, r
     transport.discarded_after_revoke(records);
 }
 
-/// Human-readable DLQ reason string for an expired / evicted / shutdown-drained
+/// Human-readable DLQ reason string for an expired or shutdown-drained
 /// pending-schema message.
 fn format_pending_reason(reason: &super::pending_schema::ExpireReason) -> String {
     use super::pending_schema::ExpireReason;
     match reason {
         ExpireReason::AgeExceeded { age_ms, table } => {
             format!("schema_pending_timeout table={table} age_ms={age_ms}")
-        }
-        ExpireReason::GlobalCapEviction { table } => {
-            format!("pending_schema_global_overflow table={table}")
         }
         ExpireReason::Shutdown { table } => format!("schema_pending_shutdown table={table}"),
     }
@@ -3111,7 +3168,6 @@ fn pending_reason_label(reason: &super::pending_schema::ExpireReason) -> &'stati
     use super::pending_schema::ExpireReason;
     match reason {
         ExpireReason::AgeExceeded { .. } => "schema_pending_timeout",
-        ExpireReason::GlobalCapEviction { .. } => "pending_schema_global_overflow",
         ExpireReason::Shutdown { .. } => "schema_pending_shutdown",
     }
 }
@@ -5887,7 +5943,7 @@ mod tests {
         let mut pending = super::super::pending_schema::PendingSchemaBuffer::new(
             PendingSchemaConfig::from_schema_config(
                 &crate::config::SchemaConfig::default(),
-                OnFull::DeadLetter,
+                OnFull::Refuse,
             ),
         );
         let msg = crate::kafka::KafkaMessage {
@@ -5915,11 +5971,44 @@ mod tests {
 
         let flushed = buffers.get_ready_for_flush();
         let committable: Vec<KafkaOffset> = flushed.into_iter().flat_map(|b| b.offsets).collect();
-        let to_commit = committable_offsets(committable, &unplaced_offsets(&buffers, &pending));
+        let to_commit = committable_offsets(
+            committable,
+            &unplaced_offsets(&buffers, &pending, &no_pauses()),
+        );
 
         assert!(
             to_commit.is_empty(),
             "the watermark passed an offset waiting on its schema: {to_commit:?}"
+        );
+    }
+
+    fn no_pauses() -> PartitionPauses {
+        PartitionPauses::new(Duration::from_secs(30))
+    }
+
+    /// Partition 0 was sought back to 100 and has not delivered since, while
+    /// another table's rows 101..106 inserted: the commit, the shutdown's
+    /// final one included, stops at the seek point.
+    #[test]
+    fn a_seek_point_holds_the_watermark_below_it() {
+        let mut buffers = staged_buffers();
+        for off in 101..106 {
+            buffered_row(&mut buffers, "dfe.foo", 0, off);
+        }
+        let pending = PendingSchemaBuffer::new(PendingSchemaConfig::from_schema_config(
+            &crate::config::SchemaConfig::default(),
+            OnFull::Refuse,
+        ));
+        let pauses = no_pauses().with_seek_point("dfe-events", 0, 100);
+
+        let flushed = buffers.get_ready_for_flush();
+        let committable: Vec<KafkaOffset> = flushed.into_iter().flat_map(|b| b.offsets).collect();
+        let to_commit =
+            committable_offsets(committable, &unplaced_offsets(&buffers, &pending, &pauses));
+
+        assert!(
+            to_commit.is_empty(),
+            "the watermark passed a seek point not read again: {to_commit:?}"
         );
     }
 
@@ -5933,7 +6022,10 @@ mod tests {
 
         let flushed = buffers.get_ready_for_flush();
         let committable: Vec<KafkaOffset> = flushed.into_iter().flat_map(|b| b.offsets).collect();
-        let to_commit = committable_offsets(committable, &unplaced_offsets(&buffers, &pending));
+        let to_commit = committable_offsets(
+            committable,
+            &unplaced_offsets(&buffers, &pending, &no_pauses()),
+        );
 
         assert_eq!(to_commit.iter().map(|o| o.offset).max(), Some(105));
     }

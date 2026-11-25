@@ -75,6 +75,18 @@ A roll starts the incoming pod as the old one still buffers rows, and the rebala
 
 With `kafka.acknowledgements.enabled: false` offsets commit at receipt, so the buffered rows are their only copy and nothing is discarded.
 
+## A partition is paused
+
+A table whose schema has not loaded waits in the pending-schema buffer. Once it passes `schema.pending_max_per_table` (after its first schema answer) or the buffer passes `schema.pending_max_total`, the loader pauses the Kafka partition carrying the next record and seeks it back to that record. The records wait in Kafka, not the DLQ, and the commit stays below the seek point. Rows of other tables after it on the same partition are read again, so they can land twice.
+
+- The log has one `warn` per pause, `Partition paused until its tables' schemas resolve`, and one `info` per resume, `Partition resumed`. Both name the `topic`, `partition` and `tables`, and the resume its `reason` and `paused_for_secs`. While any partition is paused past half the bound, `Partitions still paused waiting on table schemas` repeats every 10 s.
+- `dfe_loader_partition_paused{topic,partition}` is 1 while paused. `dfe_loader_partition_pauses_total` and `dfe_loader_partition_resumes_total{reason}` count the edges, and `dfe_loader_partition_paused_seconds` how long each lasted. A refused pause, resume or seek counts in `transport_partition_control_errors_total{op,reason}`.
+- The bound is `schema.pending_max_age_secs` (30 s), checked every second whether or not records arrive. A partition resumes as soon as every table holding it has its schema or is confirmed absent (`reason="resolved"`), at the bound (`aged_out`), on a revoke (`rebalance`), on a config reload (`reload`), and at once when its seek fails (`seek_error`). A refused resume is retried every second.
+- After `aged_out` the tables' overflow goes to the DLQ, as `pending_schema_per_table_overflow` or `pending_schema_global_overflow`, until one schema fetch for the table succeeds. A failed seek or pause sends its records there too. So a ClickHouse outage that fails every fetch costs a pause of the bound, then dead letters, never a partition paused for good.
+- Paused never touches `/readyz` or `/livez`. The member stays in its group, and the gRPC transport never pauses: a full buffer stops its intake instead.
+
+What an operator does: check the logged tables exist in ClickHouse and that the loader can read their schema (`dfe_loader_schema_prewarm_failed_tables`, the `Schema fetch failed` debug line). A steady `aged_out` rate means those fetches keep failing. Raise `schema.pending_max_per_table` for a source whose first burst outruns its schema fetch.
+
 ## DLQ
 
 Dead-lettered messages go to the DLQ (Kafka first, file fallback, file only on gRPC). Payloads that are not JSON or fail processing, records with a schema that never arrived within `schema.pending_max_age_secs`, and salvaged bad rows land there with their reason. A routing miss does not: it lands in the default table. DLQ and consumer errors are debounced in the logs so a burst does not flood.

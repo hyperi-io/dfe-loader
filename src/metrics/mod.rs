@@ -44,6 +44,12 @@ pub mod names {
     pub const PENDING_SCHEMA_OVERFLOW_TOTAL: &str = name!("pending_schema_overflow_total");
     pub const PENDING_SCHEMA_EXPIRED_TOTAL: &str = name!("pending_schema_expired_total");
     pub const PENDING_SCHEMA_MESSAGES: &str = name!("pending_schema_messages");
+    /// 1 while a Kafka partition is paused for tables waiting on their schema, by `topic` and `partition`.
+    pub const PARTITION_PAUSED: &str = name!("partition_paused");
+    pub const PARTITION_PAUSES_TOTAL: &str = name!("partition_pauses_total");
+    /// Held partitions resumed, by `reason`.
+    pub const PARTITION_RESUMES_TOTAL: &str = name!("partition_resumes_total");
+    pub const PARTITION_PAUSED_SECONDS: &str = name!("partition_paused_seconds");
     pub const ROWS_LOST_TOTAL: &str = name!("rows_lost_total");
     pub const SCHEMA_PREWARM_RETRIES_TOTAL: &str = name!("schema_prewarm_retries_total");
     pub const SCHEMA_PREWARM_FAILED_TABLES: &str = name!("schema_prewarm_failed_tables");
@@ -222,6 +228,27 @@ impl Metrics {
             "Computed columns left unset because their CEL expression failed, by table, column and stage",
             &["table", "column", "stage"],
             "transform",
+        );
+        // Emitted from the pipeline's partition holds, which hold no Metrics handle.
+        let _ = manager.gauge_with_labels(
+            names::PARTITION_PAUSED,
+            "1 while a Kafka partition is paused for tables waiting on their schema, else 0",
+            &["topic", "partition"],
+            "custom",
+        );
+        let _ = manager.counter(
+            names::PARTITION_PAUSES_TOTAL,
+            "Kafka partitions paused for tables waiting on their schema",
+        );
+        let _ = manager.counter_with_labels(
+            names::PARTITION_RESUMES_TOTAL,
+            "Held Kafka partitions resumed, by reason: resolved, aged_out, rebalance, reload or seek_error",
+            &["reason"],
+            "custom",
+        );
+        let _ = manager.histogram(
+            names::PARTITION_PAUSED_SECONDS,
+            "How long a Kafka partition was held paused",
         );
 
         Self {
@@ -476,8 +503,8 @@ impl Metrics {
         self.pending_schema_overflow.increment(1);
     }
 
-    /// Record a pending-schema message DLQ'd by the expire sweep (aged out,
-    /// globally evicted, or drained on shutdown) (#36).
+    /// Record a pending-schema message DLQ'd by the expire sweep (aged out, or
+    /// drained on shutdown) (#36).
     pub fn record_pending_schema_expired(&self) {
         self.pending_schema_expired.increment(1);
     }
@@ -866,6 +893,10 @@ mod tests {
             "dfe_loader_pending_schema_overflow_total",
             "dfe_loader_pending_schema_expired_total",
             "dfe_loader_pending_schema_messages",
+            "dfe_loader_partition_paused",
+            "dfe_loader_partition_pauses_total",
+            "dfe_loader_partition_resumes_total",
+            "dfe_loader_partition_paused_seconds",
             "dfe_loader_rows_lost_total",
             "pipeline_dead_letters_dropped_total",
             "pipeline_retries_total",

@@ -792,7 +792,7 @@ mod tests {
             max_per_table: 100,
             max_total: 1000,
             max_age: std::time::Duration::from_secs(30),
-            on_full: OnFull::DeadLetter,
+            on_full: OnFull::Refuse,
         });
         let outcome = BatchCoordinator {
             buffer_manager: &mut buffer_manager,
@@ -806,6 +806,7 @@ mod tests {
                 std::time::Duration::from_secs(60),
                 16,
             ),
+            pauses: None,
         }
         .apply_results(vec![Err(err)], std::slice::from_ref(&msg));
 

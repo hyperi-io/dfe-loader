@@ -18,7 +18,8 @@ use crate::metrics::Metrics;
 use crate::transform::{ComputedColumnCache, FieldMappingCache};
 
 use super::capture::CaptureOverrides;
-use super::pending_schema::{EnqueueOutcome, PendingOverflow, PendingSchemaBuffer};
+use super::partition_pause::{Overflow, PartitionPauses};
+use super::pending_schema::{EnqueueOutcome, PendingSchemaBuffer};
 use super::types::{AbsentTables, ProcessedMessage};
 
 /// Emit the `data.dlq_routed` security event, naming what was dead-lettered.
@@ -44,6 +45,25 @@ pub(crate) fn dead_letter(msg: &KafkaMessage, reason: impl Into<String>) -> DlqE
     ))
 }
 
+/// The DLQ entry for a message the pending-schema buffer refused, counted and
+/// with its security event.
+pub(crate) fn dead_letter_overflow(
+    msg: &KafkaMessage,
+    table: &str,
+    reason: String,
+    metrics: &Option<Metrics>,
+) -> DlqEntry {
+    if let Some(m) = metrics {
+        m.record_pending_schema_overflow();
+    }
+    record_dlq_routed(
+        "pending_schema_overflow",
+        &format!("pending-schema cap exceeded for {table}"),
+        &msg.location(),
+    );
+    dead_letter(msg, reason)
+}
+
 /// Counters returned from `apply_results` for the orchestrator to update stats.
 #[derive(Debug, Default)]
 pub struct BatchOutcome {
@@ -57,6 +77,9 @@ pub struct BatchOutcome {
     /// Messages only the DLQ can take, for the orchestrator to hand over and
     /// hold until it does.
     pub dead_letters: Vec<DlqEntry>,
+    /// Messages the pending-schema buffer refused, for the orchestrator to
+    /// read again from Kafka by pausing and seeking their partitions.
+    pub(crate) overflow: Vec<Overflow>,
 }
 
 /// Applies parallel processing results to mutable state.
@@ -74,6 +97,9 @@ pub(crate) struct BatchCoordinator<'a> {
     pub pending_schema: &'a mut PendingSchemaBuffer,
     /// A table answered absent before is capped from its first held message.
     pub absent_tables: &'a AbsentTables,
+    /// The Kafka partition holds, where a refused message is read again
+    /// rather than dead-lettered. `None` where nothing re-reads.
+    pub pauses: Option<&'a PartitionPauses>,
 }
 
 impl BatchCoordinator<'_> {
@@ -155,21 +181,25 @@ impl BatchCoordinator<'_> {
                             outcome.pending += 1;
                             outcome.needs_resolution.push(table);
                         }
-                        Err(PendingOverflow::PerTable(t)) => {
-                            // Per-table cap hit: this message overflows to the
-                            // DLQ. Other buffered messages for the table stay put.
-                            if let Some(m) = self.metrics {
-                                m.record_pending_schema_overflow();
+                        Err(refused) => {
+                            // Read again from Kafka once its table resolves,
+                            // unless its last hold aged out. Other buffered
+                            // messages for the table stay put.
+                            let table = refused.table();
+                            if self.pauses.is_some_and(|p| !p.dead_letters(table)) {
+                                outcome.overflow.push(Overflow {
+                                    table: table.to_string(),
+                                    reason: refused.reason(),
+                                    msg: msg.clone_for_pending(),
+                                });
+                            } else {
+                                outcome.dead_letters.push(dead_letter_overflow(
+                                    msg,
+                                    table,
+                                    refused.reason(),
+                                    self.metrics,
+                                ));
                             }
-                            record_dlq_routed(
-                                "pending_schema_overflow",
-                                &format!("per-table cap exceeded for {t}"),
-                                &msg.location(),
-                            );
-                            outcome.dead_letters.push(dead_letter(
-                                msg,
-                                format!("pending_schema_per_table_overflow table={t}"),
-                            ));
                             self.memory_guard.release(msg.payload.len() as u64);
                         }
                     }
@@ -232,7 +262,7 @@ mod tests {
                 max_per_table: 100,
                 max_total: 1000,
                 max_age: std::time::Duration::from_secs(30),
-                on_full: crate::pipeline::pending_schema::OnFull::DeadLetter,
+                on_full: crate::pipeline::pending_schema::OnFull::Refuse,
             },
         )
     }
@@ -272,6 +302,7 @@ mod tests {
             memory_guard,
             pending_schema,
             absent_tables: &NO_ABSENT_TABLES,
+            pauses: None,
         }
     }
 
@@ -385,6 +416,7 @@ mod tests {
         assert_eq!(outcome.pending, 0);
         assert_eq!(outcome.needs_resolution, [] as [std::string::String; 0]);
         assert!(outcome.dead_letters.is_empty());
+        assert!(outcome.overflow.is_empty());
     }
 
     // ---- BatchCoordinator tests ----
@@ -790,7 +822,7 @@ mod tests {
                 max_per_table: 100,
                 max_total: 1000,
                 max_age: std::time::Duration::from_secs(30),
-                on_full: crate::pipeline::pending_schema::OnFull::DeadLetter,
+                on_full: crate::pipeline::pending_schema::OnFull::Refuse,
             },
         );
 
@@ -865,7 +897,7 @@ mod tests {
                 max_per_table: 2,
                 max_total: 1000,
                 max_age: std::time::Duration::from_secs(30),
-                on_full: OnFull::DeadLetter,
+                on_full: OnFull::Refuse,
             });
             let mut absent = AbsentTables::new(std::time::Duration::ZERO, 16);
             let pending_for = |offsets: std::ops::Range<i64>| {
@@ -917,6 +949,7 @@ mod tests {
                 memory_guard: &guard,
                 pending_schema: &mut pending,
                 absent_tables: &absent,
+                pauses: None,
             }
             .apply_results(results, &messages);
 
