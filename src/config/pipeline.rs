@@ -133,6 +133,10 @@ pub struct RoutingConfig {
     /// Maps extracted source values to destination table names
     pub source_to_table: HashMap<String, String>,
 
+    /// Schema version of each table, keyed by table name. A reload that changes
+    /// a table's version re-reads its columns and column directives.
+    pub table_schema_versions: HashMap<String, String>,
+
     /// Topic suffixes to strip when deriving _source from Kafka topic name
     /// Example: topic "`auth_land`" with suffix "_land" → _source = "auth"
     pub topic_suffixes: Vec<String>,
@@ -157,6 +161,7 @@ impl Default for RoutingConfig {
             org_routes: vec![],
             external_topics: vec![],
             source_to_table: HashMap::new(),
+            table_schema_versions: HashMap::new(),
             topic_suffixes: vec!["_land".to_string(), "_load".to_string()],
             dlq: DlqConfig::default(),
         }
