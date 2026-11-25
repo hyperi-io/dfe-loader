@@ -104,7 +104,7 @@ flowchart TB
 
 *Figure 1. L4 Detail -- Batch phases. Pre-route runs only when the BatchEngine has a `routing_field`.* Up: [Pipeline](README.md).
 
-`MessageProcessor` (`src/pipeline/processor.rs`) holds only shared references, and its `process` method does no I/O and no `.await`. For one message it rejects a payload that does not open a JSON object or array, parses it with sonic-rs, holds an external topic's record to its source's tenant, routes it to a table, then extracts and transforms the fields. It goes on to derive the capture settings, apply the field mapping, evaluate computed columns and CEL expressions, and run enrichment. The result is a `ProcessedMessage` (`src/pipeline/types.rs`) or an error.
+`MessageProcessor` (`src/pipeline/processor.rs`) holds only shared references, and its `process` method does no I/O and no `.await`. For one message it rejects a payload that does not open a JSON object or array, parses it with sonic-rs, holds an external topic's record to its source's tenant, routes it to a table, then extracts and transforms the fields. It goes on to derive the capture settings, apply the field mapping, evaluate computed columns and [CEL](https://github.com/cel-expr/cel-spec/blob/master/doc/langdef.md) expressions, and run enrichment. The result is a `ProcessedMessage` (`src/pipeline/types.rs`) or an error.
 
 What it reads is safe to share. `CaptureOverrides::derive_config` (`src/pipeline/capture.rs`) is a pure `&self` method. Enrichment (`src/pipeline/enrichment.rs`) is in-memory GeoIP, reputation and risk lookups, with the GeoIP cache behind a `parking_lot::RwLock`.
 
