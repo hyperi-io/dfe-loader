@@ -137,6 +137,8 @@ tables) and bounds how long a stale schema can persist after a benign
 
 The loader keeps a second cache of the same read, `SchemaCache` in `src/clickhouse/schema.rs`, which decides the fields the header extractor promotes. Its entries live for `schema.cache_ttl_secs` as well, and every 60 s a background task hands each entry within 30 s of expiry to the schema resolver, which re-reads its columns and comments together.
 
+A table `routing.table_schemas` lists starts in `SchemaCache` with the columns dfe-engine sent, in `routing.default_db`, so its first records are promoted without a read ([../pipeline/routing.md](../pipeline/routing.md)). The read still runs and its answer replaces them, and a drift error on insert drops them as it drops any entry. The encoder's cache never takes configured columns: an insert always encodes against `system.columns`.
+
 ## Mismatch recovery
 
 A TTL does not cover a schema change that happens mid-batch, so the insert path recovers on error as well. `dfe-clickhouse` reads a drift code, such as `TYPE_MISMATCH`, `NO_SUCH_COLUMN_IN_TABLE` or `INCORRECT_DATA`, as `SchemaMismatch`, and reads the message for drift wording only when the error has no code. The table's cache entry is invalidated, and the retry re-fetches from `system.columns` and re-encodes against the current schema. A non-drift error (network, auth, server down) is returned unchanged, so an outage is not mistaken for schema drift.

@@ -24,7 +24,7 @@ use crate::common::containers::{
     KAFKA_PORT, restart_clickhouse, start_clickhouse_on, stop_container,
 };
 use dfe_loader::clickhouse::InsertFormat;
-use dfe_loader::config::{Config, SharedConfig};
+use dfe_loader::config::{Config, SharedConfig, TableColumn};
 use dfe_loader::metrics::Metrics;
 use dfe_loader::pipeline::Orchestrator;
 use rdkafka::consumer::{BaseConsumer, Consumer};
@@ -573,6 +573,166 @@ async fn no_record_waiting_on_its_schema_is_lost_to_a_shutdown() {
         "{} of {PARKED} records waiting on their schema were in neither ClickHouse nor the DLQ \
          after a clean stop: {lost:?}",
         lost.len()
+    );
+}
+
+/// Records of a burst over the pending-schema cap, for a newly deployed table (#362).
+const BURST: u64 = 300;
+
+/// How long a burst for a table whose columns the config lists has to land: no
+/// schema read, so no wait on one.
+const NO_WAIT: Duration = Duration::from_secs(30);
+
+/// The config's columns for `default.{table}`, a table created with only `id`.
+fn configured(config: &mut Config, table: &str, id_type: &str, extra: &[&str]) {
+    let mut columns = vec![TableColumn {
+        name: "id".into(),
+        ty: id_type.into(),
+        default_kind: String::new(),
+        comment: String::new(),
+    }];
+    columns.extend(extra.iter().map(|name| TableColumn {
+        name: (*name).into(),
+        ty: "String".into(),
+        default_kind: String::new(),
+        comment: String::new(),
+    }));
+    config
+        .routing
+        .table_schemas
+        .insert(table.to_string(), columns);
+}
+
+/// A newly deployed table whose columns the config lists takes a burst over the
+/// pending-schema cap with every schema read refused: each record lands, none in
+/// the DLQ, with no wait on a read.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_burst_for_a_newly_deployed_table_lands_with_no_schema_read() {
+    let infra = TestInfrastructure::new(test_name!(), true, true).await;
+    let clickhouse = clickhouse_address(&infra).await;
+    let bootstrap = kafka_bootstrap(&infra).await;
+    let direct = query_client(&clickhouse);
+    let proxy = ReadRefusingProxy::start(clickhouse.clone()).await;
+
+    let landing = unique_table_name("kafka_deployed_landing");
+    let source = unique_table_name("kafka_deployed_source");
+    for table in [&landing, &source] {
+        direct
+            .execute(&format!(
+                "CREATE TABLE default.{table} (id UInt64) ENGINE = MergeTree() ORDER BY id"
+            ))
+            .await
+            .expect("create table");
+    }
+    let topic = format!("deployed-{landing}");
+    let group = format!("dfe-{landing}");
+    ensure_topic(&bootstrap, &topic).await;
+
+    let dlq_dir = tempfile::tempdir().expect("DLQ spool directory");
+    let mut config = kafka_loader(&bootstrap, &topic, &group, proxy.address(), &landing);
+    with_file_dlq(&mut config, dlq_dir.path());
+    // JSONEachRow encodes without the table's columns, so no insert needs a read either.
+    config.clickhouse.insert_format = InsertFormat::JsonEachRow;
+    config.schema.pending_max_per_table = 50;
+    config.schema.pending_max_total = 100;
+    configured(&mut config, &source, "UInt64", &[]);
+    let (shutdown, loader) = start_loader(config);
+    let producer = make_producer(&bootstrap);
+    wait_for_loader(&producer, &topic, &clickhouse, &landing).await;
+
+    proxy.refuse_reads();
+    let burst: BTreeSet<u64> = (1..=BURST).collect();
+    for id in &burst {
+        produce(
+            &producer,
+            &topic,
+            &format!(r#"{{"_source":"{source}","id":{id}}}"#),
+        )
+        .await;
+    }
+    let landed = wait_landed(&clickhouse, &source, &burst, NO_WAIT).await;
+    let dead_lettered = dead_lettered_ids(dlq_dir.path());
+
+    shutdown.cancel();
+    let _ = tokio::time::timeout(Duration::from_secs(30), loader).await;
+    for table in [&landing, &source] {
+        let _ = direct
+            .execute(&format!("DROP TABLE IF EXISTS default.{table}"))
+            .await;
+    }
+
+    assert!(
+        dead_lettered.is_empty(),
+        "records of the burst reached the DLQ: {dead_lettered:?}"
+    );
+    let lost: Vec<u64> = burst.difference(&landed).copied().collect();
+    assert!(
+        lost.is_empty(),
+        "{} of {BURST} records did not land within {NO_WAIT:?} with every read refused: {lost:?}",
+        lost.len()
+    );
+}
+
+/// The config lists a stale table: `id` as a String and a column `ghost` the
+/// table does not have. Inserts encode against the columns `ClickHouse` holds,
+/// so every record lands with its `id`, and none reaches the DLQ.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stale_configured_table_still_takes_clickhouse_s_columns() {
+    let infra = TestInfrastructure::new(test_name!(), true, true).await;
+    let clickhouse = clickhouse_address(&infra).await;
+    let bootstrap = kafka_bootstrap(&infra).await;
+    let direct = query_client(&clickhouse);
+
+    let landing = unique_table_name("kafka_stale_landing");
+    let source = unique_table_name("kafka_stale_source");
+    for table in [&landing, &source] {
+        direct
+            .execute(&format!(
+                "CREATE TABLE default.{table} (id UInt64) ENGINE = MergeTree() ORDER BY id"
+            ))
+            .await
+            .expect("create table");
+    }
+    let topic = format!("stale-{landing}");
+    let group = format!("dfe-{landing}");
+    ensure_topic(&bootstrap, &topic).await;
+
+    let dlq_dir = tempfile::tempdir().expect("DLQ spool directory");
+    let mut config = kafka_loader(&bootstrap, &topic, &group, clickhouse.clone(), &landing);
+    with_file_dlq(&mut config, dlq_dir.path());
+    configured(&mut config, &source, "String", &["ghost"]);
+    let (shutdown, loader) = start_loader(config);
+    let producer = make_producer(&bootstrap);
+    wait_for_loader(&producer, &topic, &clickhouse, &landing).await;
+
+    let sent: BTreeSet<u64> = (1..=20).collect();
+    for id in &sent {
+        produce(
+            &producer,
+            &topic,
+            &format!(r#"{{"_source":"{source}","id":{id},"ghost":"boo"}}"#),
+        )
+        .await;
+    }
+    let landed = wait_landed(&clickhouse, &source, &sent, BUDGET).await;
+    let dead_lettered = dead_lettered_ids(dlq_dir.path());
+
+    shutdown.cancel();
+    let _ = tokio::time::timeout(Duration::from_secs(30), loader).await;
+    for table in [&landing, &source] {
+        let _ = direct
+            .execute(&format!("DROP TABLE IF EXISTS default.{table}"))
+            .await;
+    }
+
+    assert!(
+        dead_lettered.is_empty(),
+        "a stale configured table sent records to the DLQ: {dead_lettered:?}"
+    );
+    let lost: Vec<u64> = sent.difference(&landed).copied().collect();
+    assert!(
+        lost.is_empty(),
+        "records lost to a stale configured table: {lost:?}"
     );
 }
 

@@ -42,7 +42,7 @@ pub use pipeline::{
     DlqLoadConfig, EnrichmentConfig, ExternalTopic, FieldMappingConfig, FieldMappingOverride,
     FieldSanitizationConfig, GeoIpConfig, GeoIpProvider, InvalidTimestampAction, MetadataConfig,
     OrgRoute, PayloadConfig, ReputationEnrichmentConfig, RiskCountries, RiskLevelBands, RiskScores,
-    RiskScoringConfig, RiskWeights, RoutingConfig, SchemaConfig, TableCaptureConfig,
+    RiskScoringConfig, RiskWeights, RoutingConfig, SchemaConfig, TableCaptureConfig, TableColumn,
     TimestampDqConfig,
 };
 pub use shared::SharedConfig;

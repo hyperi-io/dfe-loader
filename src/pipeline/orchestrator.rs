@@ -500,6 +500,9 @@ impl Orchestrator {
                 .with_live_recheck(LIVE_ABSENT_RECHECK_FIRST, LIVE_ABSENT_RECHECK_CAP);
         absent_tables.set_live(collect_pre_warm_tables(&self.config.routing));
 
+        // Deployed tables' columns from the config, applied before the first receive.
+        let mut configured = configured_resolutions(&self.config.routing, |_, _| true);
+
         // Per-table capture overrides (_json/_raw disable via config + DDL tags)
         let mut capture_overrides = CaptureOverrides::new(&self.config.metadata);
 
@@ -646,7 +649,11 @@ impl Orchestrator {
                             absent_tables.remove(&new_stages.default_table);
                         }
                         stages = new_stages;
-                        forget_moved_schemas(&self.config.routing, &new_config.routing, &inserter);
+                        let moved =
+                            forget_moved_schemas(&self.config.routing, &new_config.routing, &inserter);
+                        configured.extend(configured_resolutions(&new_config.routing, |table, qualified| {
+                            moved.contains(table) || schema_cache.needs_refresh(qualified)
+                        }));
                         let to_warm =
                             tables_to_warm(&new_config.routing, &mut absent_tables, &schema_cache);
                         self.recheck_retired_held(&absent_tables, &stages.default_table, &resolve_tx);
@@ -731,14 +738,15 @@ impl Orchestrator {
                     self.flush_or_settle(&inserter, &transport, dlq.as_ref(), held.batches, still_held, &mut buffer_manager, &mut pending_schema_buffer).await;
                 }
 
-                // Apply schema resolution results from background resolver.
+                // Apply schema resolution results: the configured columns of a
+                // deployed table first, then each read from the background resolver.
                 //
                 // Receives TableResolutionResult and applies to all three per-table caches:
                 //   - CaptureOverrides: DDL comment tags (_json/_raw disable)
                 //   - FieldMappingCache: rename/copy rules from schema + column comments
                 //   - ComputedColumnCache: CEL expressions from column comments
                 //   - SchemaCache: full schema for HeaderExtractor (Change A)
-                Some(result) = schema_result_rx.recv() => {
+                Some(result) = next_resolution(&mut configured, &mut schema_result_rx) => {
                     let table = &result.table;
                     // Any answer, a failure included, starts the table's per-table cap.
                     pending_schema_buffer.record_answer(table);
@@ -2462,13 +2470,17 @@ fn tables_to_warm(
 }
 
 /// Drop the cached schema of each table whose schema version `new` moves from
-/// `old`, in every database the routing writes to, so the reload's pre-warm
-/// reads the columns a deploy just added instead of waiting out the cache TTL.
+/// `old`, in every database the routing writes to, and return those tables.
+///
+/// The insert encoder reads the table again before its next insert. A table
+/// `new` lists columns for is seeded from them in `default_db` by
+/// [`configured_resolutions`], and the reload's pre-warm reads it instead of
+/// waiting out the cache TTL.
 fn forget_moved_schemas(
     old: &crate::config::RoutingConfig,
     new: &crate::config::RoutingConfig,
     inserter: &Inserter,
-) {
+) -> FxHashSet<String> {
     let databases: std::collections::BTreeSet<&str> = std::iter::once(new.default_db.as_str())
         .chain(
             new.org_routes
@@ -2476,6 +2488,7 @@ fn forget_moved_schemas(
                 .map(crate::config::OrgRoute::effective_database),
         )
         .collect();
+    let mut moved = FxHashSet::default();
     for (table, version) in &new.table_schema_versions {
         if old.table_schema_versions.get(table) == Some(version) {
             continue;
@@ -2488,7 +2501,85 @@ fn forget_moved_schemas(
         for db in &databases {
             inserter.forget_schema(&format!("{db}.{table}"));
         }
+        moved.insert(table.clone());
     }
+    moved
+}
+
+/// A resolution in `routing.default_db` of each table `routing.table_schemas`
+/// lists columns for, for the tables `wanted` names by bare and qualified name.
+///
+/// The event loop applies them as it applies a read from `ClickHouse`, ahead of
+/// the next receive, so a deployed table never waits on its first read. The
+/// read still runs, and its answer replaces them. An org database is left to
+/// its read, since the deploy that sent the columns created the table in
+/// `default_db` only.
+fn configured_resolutions(
+    routing: &crate::config::RoutingConfig,
+    wanted: impl Fn(&str, &str) -> bool,
+) -> std::collections::VecDeque<TableResolutionResult> {
+    let db = routing.default_db.as_str();
+    let mut tables: Vec<(&String, &Vec<crate::config::TableColumn>)> =
+        routing.table_schemas.iter().collect();
+    tables.sort_unstable_by_key(|(table, _)| *table);
+    tables
+        .into_iter()
+        .filter(|(table, _)| wanted(table, &format!("{db}.{table}")))
+        .map(|(table, columns)| configured_resolution(db, table, columns))
+        .collect()
+}
+
+/// The resolution `db`.`table`'s configured columns stand for, with the column
+/// directives their comments carry, as a read from `ClickHouse` would give.
+fn configured_resolution(
+    db: &str,
+    table: &str,
+    columns: &[crate::config::TableColumn],
+) -> TableResolutionResult {
+    use crate::clickhouse::{ColumnInfo, ParsedType, TableSchema};
+
+    let schema = TableSchema {
+        database: db.to_string(),
+        table: table.to_string(),
+        columns: columns
+            .iter()
+            .zip(1_u64..)
+            .map(|(column, position)| ColumnInfo {
+                name: column.name.clone(),
+                type_name: column.ty.clone(),
+                parsed_type: ParsedType::parse(&column.ty),
+                position,
+                default_kind: column.default_kind.clone(),
+                default_expression: String::new(),
+                comment: column.comment.clone(),
+                is_in_primary_key: false,
+                is_in_sorting_key: false,
+            })
+            .collect(),
+        comment: String::new(),
+    };
+    let directives = columns
+        .iter()
+        .map(|column| (column.name.clone(), parse_directives(&column.comment)))
+        .collect();
+    TableResolutionResult {
+        table: format!("{db}.{table}"),
+        comment: None,
+        schema: SchemaResolution::Resolved(schema),
+        column_directives: Some(directives),
+    }
+}
+
+/// The next resolution to apply: a configured one first, else the next read
+/// from `ClickHouse`. Cancel-safe, as `recv` is.
+async fn next_resolution(
+    configured: &mut std::collections::VecDeque<TableResolutionResult>,
+    reads: &mut mpsc::Receiver<TableResolutionResult>,
+) -> Option<TableResolutionResult> {
+    if let Some(result) = configured.pop_front() {
+        return Some(result);
+    }
+    reads.recv().await
 }
 
 /// Collect the config-known tables to pre-warm (default table +
@@ -5632,6 +5723,111 @@ mod tests {
                 "the reload's pre-warm reads the moved table again, versions {before:?} then {after:?}"
             );
         }
+    }
+
+    fn routing_with_columns() -> crate::config::RoutingConfig {
+        serde_json::from_value(serde_json::json!({
+            "default_db": "dfe",
+            "org_routes": [{"org_id": "acme"}],
+            "table_schema_versions": {"fw": "1.0.0"},
+            "table_schemas": {"fw": [
+                {"name": "host", "type": "LowCardinality(String)", "comment": "@source: host.name - Host"},
+                {"name": "shout", "type": "String", "default_kind": "MATERIALIZED"},
+                {"name": "n", "type": "Nullable(UInt64)"},
+            ]},
+        }))
+        .expect("routing with table_schemas loads")
+    }
+
+    /// A deployed table's configured columns stand in for a read in the default
+    /// database alone, with the directives their comments carry.
+    #[test]
+    fn configured_columns_resolve_a_deployed_table_in_the_default_database() {
+        let resolutions = configured_resolutions(&routing_with_columns(), |_, _| true);
+        let tables: Vec<&str> = resolutions.iter().map(|r| r.table.as_str()).collect();
+        assert_eq!(tables, ["dfe.fw"], "an org database waits on its own read");
+        for resolution in &resolutions {
+            let SchemaResolution::Resolved(schema) = &resolution.schema else {
+                panic!(
+                    "{}: configured columns are a resolved schema",
+                    resolution.table
+                );
+            };
+            let columns: Vec<(&str, &str, u64, &str)> = schema
+                .columns
+                .iter()
+                .map(|c| {
+                    (
+                        c.name.as_str(),
+                        c.type_name.as_str(),
+                        c.position,
+                        c.default_kind.as_str(),
+                    )
+                })
+                .collect();
+            assert_eq!(
+                columns,
+                [
+                    ("host", "LowCardinality(String)", 1, ""),
+                    ("shout", "String", 2, "MATERIALIZED"),
+                    ("n", "Nullable(UInt64)", 3, ""),
+                ]
+            );
+            assert!(schema.columns[2].is_nullable());
+            let directives = resolution
+                .column_directives
+                .as_ref()
+                .expect("directives from the comments");
+            assert_eq!(directives["host"].renamed, ["host.name"]);
+            assert_eq!(directives["n"].renamed, Vec::<String>::new());
+        }
+    }
+
+    /// A reload seeds a table whose version moved, or one with no fresh schema,
+    /// and leaves a table `ClickHouse` already answered for alone.
+    #[test]
+    fn a_reload_seeds_only_moved_or_uncached_tables() {
+        let routing = routing_with_columns();
+        // (case, moved, cached, tables seeded)
+        let cases: [(&str, bool, bool, &[&str]); 3] = [
+            ("cached and unchanged", false, true, &[]),
+            ("cached and moved", true, true, &["dfe.fw"]),
+            ("not cached", false, false, &["dfe.fw"]),
+        ];
+        for (case, moved, cached, want) in cases {
+            let cache = SchemaCache::new(300);
+            if cached {
+                cache.insert("dfe.fw".into(), cached_schema("dfe.fw"));
+            }
+            let seeded = configured_resolutions(&routing, |_, qualified| {
+                moved || cache.needs_refresh(qualified)
+            });
+            let tables: Vec<&str> = seeded.iter().map(|r| r.table.as_str()).collect();
+            assert_eq!(tables, want, "{case}");
+        }
+    }
+
+    /// Configured columns are applied ahead of any read, and a read waits its turn.
+    #[tokio::test]
+    async fn configured_resolutions_come_before_reads() {
+        let (tx, mut rx) = mpsc::channel(4);
+        tx.send(TableResolutionResult {
+            table: "dfe.read".into(),
+            comment: None,
+            schema: SchemaResolution::Unavailable,
+            column_directives: None,
+        })
+        .await
+        .expect("send a read");
+        let mut configured = configured_resolutions(&routing_with_columns(), |_, _| true);
+        let mut order = Vec::new();
+        for _ in 0..2 {
+            let next = next_resolution(&mut configured, &mut rx)
+                .await
+                .expect("a resolution");
+            order.push(next.table);
+        }
+        assert_eq!(order, ["dfe.fw", "dfe.read"]);
     }
 
     #[test]
