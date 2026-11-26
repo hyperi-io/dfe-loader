@@ -43,13 +43,14 @@ use jiff::Timestamp;
 use parking_lot::RwLock;
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde_json::{Map, Value};
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::datetime::{self, utc_text};
 
 use crate::clickhouse::TableSchema;
 use crate::column_meta::{ColumnMetaCache, TOPIC_NAME_MARKER};
 use crate::config::{MetadataConfig, RoutingConfig, TimestampDqConfig};
+use crate::metrics::names;
 use crate::transform::timestamp::{TimestampResult, TimestampValidator};
 
 /// The reason a payload that parsed promoted nothing.
@@ -310,23 +311,54 @@ impl HeaderExtractor {
         value: &Value,
         now: &Timestamp,
     ) -> String {
-        let result = match value {
+        // Whether the value named an instant, so a rejection is the bounds' and not the text's.
+        let (result, named_instant) = match value {
             Value::String(text) => match datetime::parse(text).ok().and_then(instant_time) {
-                Some(dt) => validator.check_bounds_with_now(dt, *now),
-                None => validator.validate_with_now(text, *now),
+                Some(dt) => (validator.check_bounds_with_now(dt, *now), true),
+                None => (validator.validate_with_now(text, *now), false),
             },
-            Value::Number(n) => epoch_time(n).map_or_else(
-                || TimestampResult::Invalid(format!("Invalid epoch: {n}")),
-                |dt| validator.check_bounds_with_now(dt, *now),
+            Value::Number(n) => match epoch_time(n) {
+                Some(dt) => (validator.check_bounds_with_now(dt, *now), true),
+                None => (
+                    TimestampResult::Invalid(format!("Invalid epoch: {n}")),
+                    false,
+                ),
+            },
+            _ => (
+                TimestampResult::Invalid("Timestamp must be string or number".into()),
+                false,
             ),
-            _ => TimestampResult::Invalid("Timestamp must be string or number".into()),
         };
         match result {
             TimestampResult::Valid(dt) | TimestampResult::Corrected(dt, _) => utc_text(&dt),
             TimestampResult::Invalid(reason) => {
                 debug!(reason = %reason, "_timestamp replaced with the ingest time");
+                count_timestamp_replaced(if named_instant {
+                    OUT_OF_BOUNDS
+                } else {
+                    UNPARSEABLE
+                });
                 utc_text(now)
             }
+        }
+    }
+
+    /// `_timestamp` with `timestamp_dq` off: a value the insert cannot read
+    /// lands as the ingest time, every other value as it came.
+    fn unchecked_timestamp(map: &mut Map<String, Value>, name: &str, now: &Timestamp) {
+        let readable = match map.get(name) {
+            Some(Value::String(text)) => {
+                let text = text.trim();
+                datetime::parse(text).is_ok() || text.parse::<i64>().is_ok()
+            }
+            Some(Value::Number(_)) => true,
+            _ => false,
+        };
+        if readable {
+            normalise_datetime(map, name);
+        } else if let Some(value) = map.get_mut(name) {
+            count_timestamp_replaced(UNPARSEABLE);
+            *value = Value::String(utc_text(now));
         }
     }
 
@@ -535,7 +567,7 @@ impl HeaderExtractor {
                     let checked = self.checked_timestamp(validator, &map[name.as_str()], &now);
                     map.insert(name.clone(), Value::String(checked));
                 } else {
-                    normalise_datetime(&mut map, name);
+                    Self::unchecked_timestamp(&mut map, name, &now);
                 }
                 continue;
             }
@@ -610,6 +642,25 @@ fn unstored_fields(parsed: &Map<String, Value>, contended: &FxHashSet<Box<str>>)
 #[inline]
 fn is_generated(col: &crate::clickhouse::types::ColumnInfo) -> bool {
     matches!(col.default_kind.as_str(), "MATERIALIZED" | "ALIAS")
+}
+
+/// `reason` label of a `_timestamp` the insert could not read.
+const UNPARSEABLE: &str = "unparseable";
+/// `reason` label of a `_timestamp` that named an instant outside `timestamp_dq`'s bounds.
+const OUT_OF_BOUNDS: &str = "out_of_bounds";
+
+/// Count a `_timestamp` that landed as the ingest time, and say so at most once a minute.
+///
+/// The original value stays in `_json` and `_raw` where the table captures them.
+fn count_timestamp_replaced(reason: &'static str) {
+    metrics::counter!(names::TIMESTAMP_REPLACED_TOTAL, "reason" => reason).increment(1);
+    static REPLACED_TS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    if scalo::logger::log_debounced(&REPLACED_TS, 60_000) {
+        warn!(
+            reason = reason,
+            "_timestamp landed as the ingest time (max 1 per 60s), see dfe_loader_timestamp_replaced_total"
+        );
+    }
 }
 
 /// The instant parsed date-time text names.
@@ -2565,6 +2616,132 @@ mod tests {
                 landed.starts_with("2026-09-07T05:53:53"),
                 "{raw:?} -> {landed}"
             );
+        }
+    }
+
+    /// A `_timestamp` the insert cannot read lands as the ingest time, counted by
+    /// reason, with `timestamp_dq` on or off. A readable time stays as it came,
+    /// and an instant outside the bounds is the check's alone.
+    #[test]
+    fn an_unreadable_timestamp_lands_as_the_ingest_time() {
+        use crate::metrics::counting::CountingRecorder;
+
+        enum Want {
+            Now(&'static str),
+            Kept(&'static str),
+        }
+        let on = true;
+        let off = false;
+        let cases: [(bool, &[u8], Want); 16] = [
+            (
+                on,
+                br#"{"timestamp": "0000-00-00 00:00:00.000000"}"#,
+                Want::Now("unparseable"),
+            ),
+            (
+                off,
+                br#"{"timestamp": "0000-00-00 00:00:00.000000"}"#,
+                Want::Now("unparseable"),
+            ),
+            (on, br#"{"timestamp": ""}"#, Want::Now("unparseable")),
+            (off, br#"{"timestamp": ""}"#, Want::Now("unparseable")),
+            (
+                on,
+                br#"{"timestamp": "not a date"}"#,
+                Want::Now("unparseable"),
+            ),
+            (
+                off,
+                br#"{"timestamp": "not a date"}"#,
+                Want::Now("unparseable"),
+            ),
+            (
+                on,
+                br#"{"timestamp": "2026-13-45 99:99:99"}"#,
+                Want::Now("unparseable"),
+            ),
+            (
+                off,
+                br#"{"timestamp": "2026-13-45 99:99:99"}"#,
+                Want::Now("unparseable"),
+            ),
+            (
+                off,
+                br#"{"timestamp": ["2026-03-15"]}"#,
+                Want::Now("unparseable"),
+            ),
+            (
+                on,
+                br#"{"timestamp": "2099-01-01T00:00:00Z"}"#,
+                Want::Now("out_of_bounds"),
+            ),
+            (
+                off,
+                br#"{"timestamp": "2099-01-01T00:00:00Z"}"#,
+                Want::Kept("2099-01-01"),
+            ),
+            (
+                on,
+                br#"{"timestamp": "2026-03-15 10:30:00.123"}"#,
+                Want::Kept("2026-03-15T10:30:00.123Z"),
+            ),
+            (
+                off,
+                br#"{"timestamp": "2026-03-15 10:30:00.123"}"#,
+                Want::Kept("2026-03-15 10:30:00.123"),
+            ),
+            (
+                off,
+                br#"{"timestamp": "2026-03-15T10:30:00.123+10:00"}"#,
+                Want::Kept("2026-03-15T00:30:00.123Z"),
+            ),
+            (
+                off,
+                br#"{"timestamp": "1788760433"}"#,
+                Want::Kept("1788760433"),
+            ),
+            (
+                off,
+                br#"{"timestamp": 1788760433}"#,
+                Want::Kept("1788760433"),
+            ),
+        ];
+        let schema = make_datetime_schema(&["_timestamp"]);
+        let col_meta = empty_col_meta();
+        for (dq_on, raw, want) in cases {
+            let dq = TimestampDqConfig {
+                enabled: dq_on,
+                ..TimestampDqConfig::default()
+            };
+            let extractor = extractor_with(&MetadataConfig::default(), &dq);
+            let recorder = CountingRecorder::default();
+            let map = metrics::with_local_recorder(&recorder, || {
+                extractor
+                    .extract(raw, "dfe.events", &schema, &col_meta, None)
+                    .fields
+            });
+            let label = format!(
+                "{} with timestamp_dq on={dq_on}",
+                String::from_utf8_lossy(raw)
+            );
+            let landed = map["_timestamp"].to_string();
+            let name = names::TIMESTAMP_REPLACED_TOTAL;
+            match want {
+                Want::Now(reason) => {
+                    let text = map["_timestamp"].as_str().expect("text");
+                    let secs = datetime::parse(text).expect("ingest time reads back").secs;
+                    assert!(
+                        (secs - Timestamp::now().as_second()).abs() < 60,
+                        "{label}: not the ingest time: {landed}"
+                    );
+                    assert_eq!(recorder.labelled(name, "reason", reason), 1, "{label}");
+                    assert_eq!(recorder.total(name), 1, "{label}");
+                }
+                Want::Kept(shown) => {
+                    assert!(landed.contains(shown), "{label}: {landed}");
+                    assert_eq!(recorder.total(name), 0, "{label}: counted a readable time");
+                }
+            }
         }
     }
 
