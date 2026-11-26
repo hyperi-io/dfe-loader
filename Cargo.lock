@@ -2242,9 +2242,9 @@ checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
 name = "jiff"
-version = "1.0.0"
+version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9cc767b5763de45e810109520123bb2829a653f3a7ed9be40b2bc4f81158f595"
+checksum = "107f2e89536b6818514025f6787b0d94d819e54fe3b40365275fc753de485b3f"
 dependencies = [
  "jiff-core",
  "jiff-static",
@@ -2258,18 +2258,18 @@ dependencies = [
 
 [[package]]
 name = "jiff-core"
-version = "1.0.0"
+version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "894f7ac42105f584100691b3bf6e6b92dd12fcfa225f6c397f95c8a94b47b68f"
+checksum = "d44c923edf2bf456a982253f1a9ee1f6e89e421dffd0065d9b9a581da0def58f"
 dependencies = [
  "log",
 ]
 
 [[package]]
 name = "jiff-static"
-version = "1.0.0"
+version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "955491488dc99b572ea6d67b172dcd98787d00744b1fb44a5689b4e6413695a6"
+checksum = "4996f71e569e3a3e32b925c28ef8f0027dc30bb1d594b33eeda409eea185f5c8"
 dependencies = [
  "jiff-core",
  "proc-macro2",
@@ -4439,9 +4439,8 @@ dependencies = [
 
 [[package]]
 name = "scalo"
-version = "2.14.39"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ef4a9620a07645c5fe06c21ea41d14e3157e685fec1582ea0479f1e0e0e746fa"
+version = "0.0.0"
+source = "git+https://github.com/hyperi-io/scalo-rs?rev=e8a3c79aeacf#e8a3c79aeacfc5a5739368d29ff30de2661c5fff"
 dependencies = [
  "aes-gcm",
  "arc-swap",
@@ -4513,7 +4512,6 @@ dependencies = [
  "tracing-subscriber",
  "tracing-throttle",
  "uuid",
- "webpki-roots",
  "wide",
  "windows",
  "windows-registry",
@@ -5484,11 +5482,9 @@ dependencies = [
  "hyper-util",
  "percent-encoding",
  "pin-project",
- "rustls-native-certs",
  "socket2",
  "sync_wrapper",
  "tokio",
- "tokio-rustls",
  "tokio-stream",
  "tokio-util",
  "tower",

@@ -653,10 +653,17 @@ impl Config {
         }
         // Of the borrowed Kafka TlsConfig shape only `enabled` reaches a client.
         if let Some(ref tls) = self.clickhouse.tls {
+            let unset = scalo::tls_config::ClientTlsConfig::default();
+            let client = &tls.client;
             let ignored: Vec<&str> = [
-                ("ca_cert_file", tls.ca_cert_file.is_some()),
-                ("cert_file", tls.cert_file.is_some()),
-                ("key_file", tls.key_file.is_some()),
+                ("profile", client.profile != unset.profile),
+                ("trust", client.trust != unset.trust),
+                ("ca_paths", !client.ca_paths.is_empty()),
+                ("client_cert_path", client.client_cert_path.is_some()),
+                ("client_key_path", client.client_key_path.is_some()),
+                ("pin_sha256", !client.pin_sha256.is_empty()),
+                ("server_name", client.server_name.is_some()),
+                ("key_share", client.key_share != unset.key_share),
                 ("skip_verify", tls.skip_verify),
             ]
             .into_iter()

@@ -282,16 +282,30 @@ fn mechanisms_with_no_wiring_are_rejected() {
 // ClickHouse TLS
 // ============================================================================
 
-/// Only `clickhouse.tls.enabled` reaches the client. The other four fields were
+/// Only `clickhouse.tls.enabled` reaches the client. The other fields were
 /// accepted and dropped, so a private-CA bundle or skip_verify read as applied.
 #[test]
 fn clickhouse_tls_fields_with_no_reader_are_rejected() {
     for (label, tls) in [
         (
-            "ca_cert_file",
+            "ca_paths",
             TlsConfig {
                 enabled: true,
-                ca_cert_file: Some("/certs/ca.pem".into()),
+                client: scalo::tls_config::ClientTlsConfig {
+                    ca_paths: vec!["/certs/ca.pem".into()],
+                    ..Default::default()
+                },
+                ..TlsConfig::default()
+            },
+        ),
+        (
+            "client_cert_path",
+            TlsConfig {
+                enabled: true,
+                client: scalo::tls_config::ClientTlsConfig {
+                    client_cert_path: Some("/certs/client.pem".into()),
+                    ..Default::default()
+                },
                 ..TlsConfig::default()
             },
         ),

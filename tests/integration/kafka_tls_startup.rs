@@ -240,19 +240,19 @@ fn config_file(shared: &Shared, row: &Row, table: &str, topic: &str) -> String {
         (Form::Env | Form::EnvSystemTrust, _) => String::new(),
         (Form::File, Listener::Tls) => {
             format!(
-                "  tls:\n    enabled: true\n    ca_cert_file: \"{}\"\n",
+                "  tls:\n    enabled: true\n    trust: bundle\n    ca_paths: \"{}\"\n",
                 pki.file(row.ca)
             )
         }
         (Form::File, Listener::SaslSsl) => format!(
-            "  tls:\n    enabled: true\n    ca_cert_file: \"{}\"\n  sasl:\n    enabled: true\n    \
+            "  tls:\n    enabled: true\n    trust: bundle\n    ca_paths: \"{}\"\n  sasl:\n    enabled: true\n    \
              mechanism: scram_sha_512\n    username: \"{SCRAM_USER}\"\n    password: \"{}\"\n",
             pki.file(row.ca),
             row.password.text()
         ),
         (Form::File, Listener::Mtls) => format!(
-            "  tls:\n    enabled: true\n    ca_cert_file: \"{}\"\n    cert_file: \"{}\"\n    \
-             key_file: \"{}\"\n",
+            "  tls:\n    enabled: true\n    trust: bundle\n    ca_paths: \"{}\"\n    client_cert_path: \"{}\"\n    \
+             client_key_path: \"{}\"\n",
             pki.file(row.ca),
             pki.file("client.crt"),
             pki.file("client.key")
@@ -338,8 +338,8 @@ async fn run_row(shared: Arc<Shared>, row: &'static Row) -> Result<String, Strin
         if let Form::EnvSystemTrust = row.form {
             command.env("SSL_CERT_FILE", shared.broker.pki.file(row.ca));
         } else {
-            command.env(
-                "DFE_LOADER_KAFKA__TLS__CA_CERT_FILE",
+            command.env("DFE_LOADER_KAFKA__TLS__TRUST", "bundle").env(
+                "DFE_LOADER_KAFKA__TLS__CA_PATHS",
                 shared.broker.pki.file(row.ca),
             );
         }

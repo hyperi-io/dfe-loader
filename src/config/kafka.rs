@@ -373,13 +373,15 @@ impl SaslConfig {
     }
 }
 
+/// TLS: `enabled` and `skip_verify` beside scalo's client `tls` section
+/// (`profile`, `trust`, `ca_paths`, `client_cert_path`, `client_key_path`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 #[derive(Default)]
 pub struct TlsConfig {
     pub enabled: bool,
-    pub ca_cert_file: Option<String>,
-    pub cert_file: Option<String>,
-    pub key_file: Option<String>,
     pub skip_verify: bool,
+    /// The client TLS section. A private CA is `trust: bundle` with `ca_paths`.
+    #[serde(flatten)]
+    pub client: scalo::tls_config::ClientTlsConfig,
 }
