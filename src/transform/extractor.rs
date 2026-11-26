@@ -43,13 +43,14 @@ use jiff::Timestamp;
 use parking_lot::RwLock;
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde_json::{Map, Value};
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::datetime::{self, utc_text};
 
 use crate::clickhouse::TableSchema;
 use crate::column_meta::{ColumnMetaCache, TOPIC_NAME_MARKER};
 use crate::config::{MetadataConfig, RoutingConfig, TimestampDqConfig};
+use crate::metrics::names;
 use crate::transform::timestamp::{TimestampResult, TimestampValidator};
 
 /// The reason a payload that parsed promoted nothing.
@@ -310,23 +311,60 @@ impl HeaderExtractor {
         value: &Value,
         now: &Timestamp,
     ) -> String {
-        let result = match value {
+        // Whether the value named an instant, so a rejection is the bounds' and not the text's.
+        let (result, named_instant) = match value {
             Value::String(text) => match datetime::parse(text).ok().and_then(instant_time) {
-                Some(dt) => validator.check_bounds_with_now(dt, *now),
-                None => validator.validate_with_now(text, *now),
+                Some(dt) => (validator.check_bounds_with_now(dt, *now), true),
+                None => (validator.validate_with_now(text, *now), false),
             },
-            Value::Number(n) => epoch_time(n).map_or_else(
-                || TimestampResult::Invalid(format!("Invalid epoch: {n}")),
-                |dt| validator.check_bounds_with_now(dt, *now),
+            Value::Number(n) => match epoch_time(n) {
+                Some(dt) => (validator.check_bounds_with_now(dt, *now), true),
+                None => (
+                    TimestampResult::Invalid(format!("Invalid epoch: {n}")),
+                    false,
+                ),
+            },
+            _ => (
+                TimestampResult::Invalid("Timestamp must be string or number".into()),
+                false,
             ),
-            _ => TimestampResult::Invalid("Timestamp must be string or number".into()),
         };
         match result {
             TimestampResult::Valid(dt) | TimestampResult::Corrected(dt, _) => utc_text(&dt),
             TimestampResult::Invalid(reason) => {
                 debug!(reason = %reason, "_timestamp replaced with the ingest time");
+                count_timestamp_replaced(
+                    if named_instant {
+                        OUT_OF_BOUNDS
+                    } else {
+                        UNPARSEABLE
+                    },
+                    "_timestamp",
+                );
                 utc_text(now)
             }
+        }
+    }
+
+    /// `_timestamp` with `timestamp_dq` off: a value the insert cannot read
+    /// lands as the ingest time, every other value as it came.
+    fn unchecked_timestamp(map: &mut Map<String, Value>, name: &str, now: &Timestamp) {
+        if map.get(name).is_some_and(is_readable_datetime) {
+            normalise_datetime(map, name);
+        } else if let Some(value) = map.get_mut(name) {
+            count_timestamp_replaced(UNPARSEABLE, name);
+            *value = Value::String(utc_text(now));
+        }
+    }
+
+    /// A date-time column other than `_timestamp`: a value the insert cannot
+    /// read is left out, so the column's own NULL or DEFAULT applies, and every
+    /// other value is normalised as it came.
+    fn keep_readable_datetime(map: &mut Map<String, Value>, name: &str) {
+        if map.get(name).is_some_and(is_readable_datetime) {
+            normalise_datetime(map, name);
+        } else if map.remove(name).is_some() {
+            count_timestamp_replaced(UNPARSEABLE, name);
         }
     }
 
@@ -513,7 +551,11 @@ impl HeaderExtractor {
                     let found = self
                         .sources_for(name, &directives.renamed, false)
                         .try_each(|path| take_path(&mut parsed, path, name, &mut map, contended));
-                    if found && !map.get(name.as_str()).is_some_and(Value::is_null) {
+                    let stamp = map.get(name.as_str());
+                    if found && stamp.is_some_and(|v| !v.is_null() && !is_readable_datetime(v)) {
+                        count_timestamp_replaced(UNPARSEABLE, name);
+                        map.insert(name.clone(), Value::String(utc_text(&now)));
+                    } else if found && !stamp.is_some_and(Value::is_null) {
                         normalise_datetime(&mut map, name);
                     } else {
                         map.insert(name.clone(), Value::String(utc_text(&now)));
@@ -535,7 +577,7 @@ impl HeaderExtractor {
                     let checked = self.checked_timestamp(validator, &map[name.as_str()], &now);
                     map.insert(name.clone(), Value::String(checked));
                 } else {
-                    normalise_datetime(&mut map, name);
+                    Self::unchecked_timestamp(&mut map, name, &now);
                 }
                 continue;
             }
@@ -563,7 +605,7 @@ impl HeaderExtractor {
             {
                 map.insert(name.clone(), value);
             } else if found && is_datetime(col) {
-                normalise_datetime(&mut map, name);
+                Self::keep_readable_datetime(&mut map, name);
             }
         }
 
@@ -610,6 +652,45 @@ fn unstored_fields(parsed: &Map<String, Value>, contended: &FxHashSet<Box<str>>)
 #[inline]
 fn is_generated(col: &crate::clickhouse::types::ColumnInfo) -> bool {
     matches!(col.default_kind.as_str(), "MATERIALIZED" | "ALIAS")
+}
+
+/// `reason` label of a `_timestamp` the insert could not read.
+const UNPARSEABLE: &str = "unparseable";
+/// `reason` label of a `_timestamp` that named an instant outside `timestamp_dq`'s bounds.
+const OUT_OF_BOUNDS: &str = "out_of_bounds";
+
+/// Count a date-time value the loader replaced or left out, and say so at most once a minute.
+///
+/// `column` is a schema column name, so the label set is bounded by the tables' DDL and never
+/// by record values. The original value stays in `_json` and `_raw` where the table captures them.
+fn count_timestamp_replaced(reason: &'static str, column: &str) {
+    metrics::counter!(
+        names::TIMESTAMP_REPLACED_TOTAL,
+        "reason" => reason,
+        "column" => column.to_string()
+    )
+    .increment(1);
+    static REPLACED_TS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    if scalo::logger::log_debounced(&REPLACED_TS, 60_000) {
+        warn!(
+            reason = reason,
+            column = column,
+            "date-time value replaced or left out (max 1 per 60s), see dfe_loader_timestamp_replaced_total"
+        );
+    }
+}
+
+/// Whether the insert reads the value as a date-time: text in the form `datetime::parse` reads,
+/// numeric text or a number as an epoch. A null is the insert's own default.
+fn is_readable_datetime(value: &Value) -> bool {
+    match value {
+        Value::String(text) => {
+            let text = text.trim();
+            datetime::parse(text).is_ok() || text.parse::<i64>().is_ok()
+        }
+        Value::Number(_) | Value::Null => true,
+        _ => false,
+    }
 }
 
 /// The instant parsed date-time text names.
@@ -2565,6 +2646,245 @@ mod tests {
                 landed.starts_with("2026-09-07T05:53:53"),
                 "{raw:?} -> {landed}"
             );
+        }
+    }
+
+    /// A `_timestamp` the insert cannot read lands as the ingest time, counted by
+    /// reason, with `timestamp_dq` on or off. A readable time stays as it came,
+    /// and an instant outside the bounds is the check's alone. Any other
+    /// date-time column leaves an unreadable value out.
+    #[test]
+    fn an_unreadable_datetime_never_rejects_the_row() {
+        use crate::metrics::counting::CountingRecorder;
+
+        enum Want {
+            Now(&'static str),
+            Kept(&'static str),
+        }
+        let on = true;
+        let off = false;
+        let cases: [(bool, &[u8], Want); 16] = [
+            (
+                on,
+                br#"{"timestamp": "0000-00-00 00:00:00.000000"}"#,
+                Want::Now("unparseable"),
+            ),
+            (
+                off,
+                br#"{"timestamp": "0000-00-00 00:00:00.000000"}"#,
+                Want::Now("unparseable"),
+            ),
+            (on, br#"{"timestamp": ""}"#, Want::Now("unparseable")),
+            (off, br#"{"timestamp": ""}"#, Want::Now("unparseable")),
+            (
+                on,
+                br#"{"timestamp": "not a date"}"#,
+                Want::Now("unparseable"),
+            ),
+            (
+                off,
+                br#"{"timestamp": "not a date"}"#,
+                Want::Now("unparseable"),
+            ),
+            (
+                on,
+                br#"{"timestamp": "2026-13-45 99:99:99"}"#,
+                Want::Now("unparseable"),
+            ),
+            (
+                off,
+                br#"{"timestamp": "2026-13-45 99:99:99"}"#,
+                Want::Now("unparseable"),
+            ),
+            (
+                off,
+                br#"{"timestamp": ["2026-03-15"]}"#,
+                Want::Now("unparseable"),
+            ),
+            (
+                on,
+                br#"{"timestamp": "2099-01-01T00:00:00Z"}"#,
+                Want::Now("out_of_bounds"),
+            ),
+            (
+                off,
+                br#"{"timestamp": "2099-01-01T00:00:00Z"}"#,
+                Want::Kept("2099-01-01"),
+            ),
+            (
+                on,
+                br#"{"timestamp": "2026-03-15 10:30:00.123"}"#,
+                Want::Kept("2026-03-15T10:30:00.123Z"),
+            ),
+            (
+                off,
+                br#"{"timestamp": "2026-03-15 10:30:00.123"}"#,
+                Want::Kept("2026-03-15 10:30:00.123"),
+            ),
+            (
+                off,
+                br#"{"timestamp": "2026-03-15T10:30:00.123+10:00"}"#,
+                Want::Kept("2026-03-15T00:30:00.123Z"),
+            ),
+            (
+                off,
+                br#"{"timestamp": "1788760433"}"#,
+                Want::Kept("1788760433"),
+            ),
+            (
+                off,
+                br#"{"timestamp": 1788760433}"#,
+                Want::Kept("1788760433"),
+            ),
+        ];
+        let schema = make_datetime_schema(&["_timestamp"]);
+        let col_meta = empty_col_meta();
+        for (dq_on, raw, want) in cases {
+            let dq = TimestampDqConfig {
+                enabled: dq_on,
+                ..TimestampDqConfig::default()
+            };
+            let extractor = extractor_with(&MetadataConfig::default(), &dq);
+            let recorder = CountingRecorder::default();
+            let map = metrics::with_local_recorder(&recorder, || {
+                extractor
+                    .extract(raw, "dfe.events", &schema, &col_meta, None)
+                    .fields
+            });
+            let label = format!(
+                "{} with timestamp_dq on={dq_on}",
+                String::from_utf8_lossy(raw)
+            );
+            let landed = map["_timestamp"].to_string();
+            let name = names::TIMESTAMP_REPLACED_TOTAL;
+            match want {
+                Want::Now(reason) => {
+                    let text = map["_timestamp"].as_str().expect("text");
+                    let secs = datetime::parse(text).expect("ingest time reads back").secs;
+                    assert!(
+                        (secs - Timestamp::now().as_second()).abs() < 60,
+                        "{label}: not the ingest time: {landed}"
+                    );
+                    assert_eq!(recorder.labelled(name, "reason", reason), 1, "{label}");
+                    assert_eq!(recorder.total(name), 1, "{label}");
+                }
+                Want::Kept(shown) => {
+                    assert!(landed.contains(shown), "{label}: {landed}");
+                    assert_eq!(recorder.total(name), 0, "{label}: counted a readable time");
+                }
+            }
+        }
+
+        // pmacct pmbmpd writes 0000-00-00 00:00:00.000000 in its time fields on BMP init and
+        // in some route_monitor records. A date-time column other than `_timestamp` leaves
+        // the value out, so its NULL or DEFAULT applies and the row encodes.
+        use dfe_clickhouse::dynamic::{ColumnDef, DynamicRow};
+
+        let typed = |name: &str, ty: &str, default_kind: &str| ColumnInfo {
+            name: name.to_string(),
+            type_name: ty.to_string(),
+            parsed_type: ParsedType::parse(ty),
+            position: 1,
+            default_kind: default_kind.to_string(),
+            default_expression: if default_kind.is_empty() {
+                String::new()
+            } else {
+                "now64(6)".to_string()
+            },
+            comment: String::new(),
+            is_in_primary_key: false,
+            is_in_sorting_key: false,
+        };
+        let mut bmp = make_schema(&["event_type", "bmp_msg_type", "peer_ip_src"]);
+        bmp.columns.extend([
+            typed("_timestamp", "DateTime64(3)", ""),
+            typed("_timestamp_received", "DateTime64(3)", ""),
+            typed("timestamp_arrival", "Nullable(DateTime64(6))", ""),
+            typed("timestamp_start", "DateTime64(6)", "DEFAULT"),
+            typed("timestamp_last", "DateTime", ""),
+        ]);
+        let zero = "0000-00-00 00:00:00.000000";
+        // (record, columns left out, columns kept, columns counted)
+        let bmp_cases: [(String, &[&str], &[&str], u64); 3] = [
+            (
+                format!(
+                    r#"{{"event_type":"log","bmp_msg_type":"init","peer_ip_src":"10.0.0.1","timestamp":"{zero}","timestamp_arrival":"{zero}","timestamp_start":"{zero}","timestamp_last":"{zero}","_timestamp_received":"{zero}"}}"#
+                ),
+                &["timestamp_arrival", "timestamp_start", "timestamp_last"],
+                &["_timestamp", "_timestamp_received"],
+                5,
+            ),
+            (
+                format!(
+                    r#"{{"event_type":"log","bmp_msg_type":"route_monitor","peer_ip_src":"10.0.0.1","timestamp":"2026-11-25 11:00:00.123456","timestamp_arrival":"2026-11-25 11:00:00.100000","timestamp_start":"{zero}"}}"#
+                ),
+                &["timestamp_start"],
+                &["_timestamp", "timestamp_arrival"],
+                1,
+            ),
+            (
+                r#"{"event_type":"log","bmp_msg_type":"route_monitor","peer_ip_src":"10.0.0.1","timestamp":"2026-11-25 11:00:00.123456","timestamp_arrival":"2026-11-25 11:00:00.100000","timestamp_start":"2026-11-25 10:00:00","timestamp_last":1788760433}"#.to_string(),
+                &[],
+                &["_timestamp", "timestamp_arrival", "timestamp_start", "timestamp_last"],
+                0,
+            ),
+        ];
+        let columns: Vec<ColumnDef> = bmp
+            .columns
+            .iter()
+            .map(|c| ColumnDef::with_default_kind(&c.name, &c.type_name, &c.default_kind))
+            .collect();
+        let encodes = |row: &Map<String, Value>| {
+            let insert: Vec<ColumnDef> = columns
+                .iter()
+                .filter(|c| row.contains_key(&c.name) || !c.has_default)
+                .cloned()
+                .collect();
+            DynamicRow::new(row, &insert).encode().map(|_| insert.len())
+        };
+        let extractor = default_extractor();
+        for (raw, left_out, kept, counted) in bmp_cases {
+            let recorder = CountingRecorder::default();
+            let map = metrics::with_local_recorder(&recorder, || {
+                extractor
+                    .extract(raw.as_bytes(), "dfe.bmp", &bmp, &col_meta, None)
+                    .fields
+            });
+            for name in left_out {
+                assert!(
+                    !map.contains_key(*name),
+                    "{name} was kept in {raw}: {map:?}"
+                );
+            }
+            for name in kept {
+                assert!(
+                    map.contains_key(*name),
+                    "{name} was dropped from {raw}: {map:?}"
+                );
+            }
+            let recorded = recorder.total(names::TIMESTAMP_REPLACED_TOTAL);
+            assert_eq!(recorded, counted, "replaced count for {raw}");
+            for name in left_out {
+                assert_eq!(
+                    recorder.labelled(names::TIMESTAMP_REPLACED_TOTAL, "column", name),
+                    1,
+                    "{name} in {raw}"
+                );
+            }
+            let landed = encodes(&map);
+            assert!(landed.is_ok(), "{raw} was rejected: {landed:?}");
+            if left_out.contains(&"timestamp_start") {
+                let omitted = columns.len() - landed.expect("encodes");
+                assert_eq!(
+                    omitted, 1,
+                    "the DEFAULT column leaves the INSERT's column list"
+                );
+            }
+            if counted > 0 {
+                let source: Map<String, Value> =
+                    serde_json::from_str(&raw).expect("record is an object");
+                assert!(encodes(&source).is_err(), "{raw} encoded without the fix");
+            }
         }
     }
 
