@@ -6,7 +6,7 @@ authors = ["HyperI <dev@hyperi.com.au>"]
 description = "Loads Kafka and gRPC streams into ClickHouse in large batched inserts."
 license = "BUSL-1.1"
 repository = "https://github.com/hyperi-io/dfe-loader"
-rust-version = "1.95"
+rust-version = "1.100"
 exclude = ["ci/", "docs/", "reference/", "scripts/"]
 
 [lib]
@@ -28,8 +28,7 @@ tokio = { version = ">=1.54.1, <2", features = ["full"] }
 tokio-util = { version = ">=0.7.20, <0.8", features = ["rt"] }
 
 # The floor moves with `release.helm.library` in .hyperi-ci.yaml.
-# 2.14.40: the git tree carries version 0.0.0 until the release stamps it.
-scalo = { version = "0.0.0", git = "https://github.com/hyperi-io/scalo-rs", rev = "e8a3c79aeacf", features = ["config-schema", "transport-kafka", "transport-grpc", "dlq-kafka", "config", "config-reload", "deployment", "version-check", "scaling", "cli-service", "top", "logger", "metrics", "service-metrics", "expression", "memory", "worker-batch", "governor", "secrets", "sink-stack", "geoip-download"] }
+scalo = { version = ">=2.14.40, <3", features = ["config-schema", "transport-kafka", "transport-grpc", "dlq-kafka", "config", "config-reload", "deployment", "version-check", "scaling", "cli-service", "top", "logger", "metrics", "service-metrics", "expression", "memory", "worker-batch", "governor", "secrets", "sink-stack", "geoip-download"] }
 
 # Config-schema derivation. Same range as scalo so cargo unifies to one schemars.
 schemars = { version = ">=1.2.3, <2", default-features = false, features = ["std", "derive", "preserve_order", "indexmap2"] }
@@ -102,8 +101,7 @@ test-case = ">=3.4.1, <4"
 reqwest = { version = ">=0.12, <0.13", default-features = false, features = ["blocking", "rustls-tls-native-roots"] }
 
 # The Kafka tests' broker image pin and TLS/SASL broker fixture.
-# 2.14.40: the git tree carries version 0.0.0 until the release stamps it.
-scalo = { version = "0.0.0", git = "https://github.com/hyperi-io/scalo-rs", rev = "e8a3c79aeacf", features = ["transport-kafka-test-support"] }
+scalo = { version = ">=2.14.40, <3", features = ["transport-kafka-test-support"] }
 
 # The status code a raw Push is refused with, through scalo's generated gRPC
 # client. Same range as the copy scalo resolves, so cargo unifies to one.

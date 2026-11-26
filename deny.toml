@@ -41,6 +41,4 @@ highlight = "all"
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"
-# 2.14.40: scalo from git until the release reaches crates.io.
-allow-git = ["https://github.com/hyperi-io/scalo-rs"]
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
