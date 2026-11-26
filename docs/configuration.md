@@ -147,7 +147,7 @@ HTTPS verifies the server's certificate and host name against the container's sy
 | Setting | Values | Effect |
 |---------|--------|--------|
 | `clickhouse.tls.enabled` | bool | TLS for the connection: HTTPS, or native TLS. When `clickhouse.tls` is absent, a host on 8443/9440 or under `clickhouse.cloud` turns it on |
-| `clickhouse.tls.ca_cert_file`, `cert_file`, `key_file`, `skip_verify` | -- | refused at startup: no client reads them |
+| `clickhouse.tls.ca_paths`, `client_cert_path`, `client_key_path`, `skip_verify` and the other `tls` keys | -- | refused at startup: no client reads them |
 
 See [clickhouse/tls.md](clickhouse/tls.md).
 

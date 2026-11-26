@@ -282,16 +282,30 @@ fn mechanisms_with_no_wiring_are_rejected() {
 // ClickHouse TLS
 // ============================================================================
 
-/// Only `clickhouse.tls.enabled` reaches the client. The other four fields were
+/// Only `clickhouse.tls.enabled` reaches the client. The other fields were
 /// accepted and dropped, so a private-CA bundle or skip_verify read as applied.
 #[test]
 fn clickhouse_tls_fields_with_no_reader_are_rejected() {
     for (label, tls) in [
         (
-            "ca_cert_file",
+            "ca_paths",
             TlsConfig {
                 enabled: true,
-                ca_cert_file: Some("/certs/ca.pem".into()),
+                client: scalo::tls_config::ClientTlsConfig {
+                    ca_paths: vec!["/certs/ca.pem".into()],
+                    ..Default::default()
+                },
+                ..TlsConfig::default()
+            },
+        ),
+        (
+            "client_cert_path",
+            TlsConfig {
+                enabled: true,
+                client: scalo::tls_config::ClientTlsConfig {
+                    client_cert_path: Some("/certs/client.pem".into()),
+                    ..Default::default()
+                },
                 ..TlsConfig::default()
             },
         ),
@@ -322,6 +336,40 @@ fn clickhouse_tls_fields_with_no_reader_are_rejected() {
     config
         .validate()
         .expect("clickhouse.tls.enabled alone is honoured");
+}
+
+/// Every TLS key the `tls` section replaced fails the load, naming the key to
+/// set, on Kafka and ClickHouse alike, so an old config never runs with its CA
+/// or client certificate dropped.
+#[test]
+fn a_removed_tls_key_fails_the_load_naming_its_replacement() {
+    for (yaml, replacement) in [
+        (
+            "kafka:\n  tls:\n    ca_cert_file: /ca.pem\n",
+            "ca_paths with trust: bundle",
+        ),
+        (
+            "kafka:\n  tls:\n    cert_file: /c.pem\n",
+            "client_cert_path",
+        ),
+        ("kafka:\n  tls:\n    key_file: /k.pem\n", "client_key_path"),
+        (
+            "kafka:\n  tls:\n    ca_cert_file: null\n",
+            "ca_paths with trust: bundle",
+        ),
+        (
+            "clickhouse:\n  tls:\n    ca_cert_file: /ca.pem\n",
+            "ca_paths with trust: bundle",
+        ),
+        ("kafka:\n  tls:\n    ca_path: /ca.pem\n", "ca_paths"),
+    ] {
+        let error =
+            scalo::yaml::from_str::<Config>(yaml, "config.yaml", scalo::yaml::Profile::Config)
+                .err()
+                .unwrap_or_else(|| panic!("loaded without error: {yaml}"))
+                .to_string();
+        assert!(error.contains(replacement), "{yaml}: {error}");
+    }
 }
 
 // ============================================================================

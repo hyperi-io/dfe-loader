@@ -6,6 +6,7 @@
 use std::collections::HashMap;
 
 use scalo::config::sensitive::SensitiveString;
+use scalo::tls_config::Removed;
 use scalo::transport::AcknowledgementsConfig;
 use scalo::transport::hold::HoldLadder;
 use serde::{Deserialize, Serialize};
@@ -373,13 +374,52 @@ impl SaslConfig {
     }
 }
 
+/// TLS: `enabled` and `skip_verify` beside scalo's client `tls` section
+/// (`profile`, `trust`, `ca_paths`, `client_cert_path`, `client_key_path`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 #[derive(Default)]
 pub struct TlsConfig {
     pub enabled: bool,
-    pub ca_cert_file: Option<String>,
-    pub cert_file: Option<String>,
-    pub key_file: Option<String>,
     pub skip_verify: bool,
+    /// The client TLS section. A private CA is `trust: bundle` with `ca_paths`.
+    #[serde(flatten)]
+    pub client: scalo::tls_config::ClientTlsConfig,
+
+    /// Removed: `ca_paths` with `trust: bundle`.
+    #[doc(hidden)]
+    #[serde(skip_serializing, deserialize_with = "removed_ca_cert_file")]
+    #[schemars(skip)]
+    pub ca_cert_file: Removed,
+
+    /// Removed: `client_cert_path`.
+    #[doc(hidden)]
+    #[serde(skip_serializing, deserialize_with = "removed_cert_file")]
+    #[schemars(skip)]
+    pub cert_file: Removed,
+
+    /// Removed: `client_key_path`.
+    #[doc(hidden)]
+    #[serde(skip_serializing, deserialize_with = "removed_key_file")]
+    #[schemars(skip)]
+    pub key_file: Removed,
+}
+
+/// The error for a TLS key the `tls` section replaced. Any value for it fails
+/// the load, so a config written for the old shape can't run with its CA or
+/// client certificate dropped.
+fn removed<E: serde::de::Error>(old: &str, new: &str) -> E {
+    E::custom(format!("`{old}` is removed: set {new}"))
+}
+
+fn removed_ca_cert_file<'de, D: serde::Deserializer<'de>>(_: D) -> Result<Removed, D::Error> {
+    Err(removed("ca_cert_file", "ca_paths with trust: bundle"))
+}
+
+fn removed_cert_file<'de, D: serde::Deserializer<'de>>(_: D) -> Result<Removed, D::Error> {
+    Err(removed("cert_file", "client_cert_path"))
+}
+
+fn removed_key_file<'de, D: serde::Deserializer<'de>>(_: D) -> Result<Removed, D::Error> {
+    Err(removed("key_file", "client_key_path"))
 }

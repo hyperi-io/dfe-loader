@@ -54,9 +54,10 @@ kafka:
   # TLS configuration (optional). Every key below IS honoured here.
   # tls:
   #   enabled: true
-  #   ca_cert_file: /certs/ca.pem
-  #   cert_file: /certs/client.pem     # For mTLS
-  #   key_file: /certs/client-key.pem  # For mTLS
+  #   trust: bundle                           # native adds ca_paths to the OS store, bundle trusts them alone
+  #   ca_paths: [/certs/ca.pem]
+  #   client_cert_path: /certs/client.pem     # For mTLS
+  #   client_key_path: /certs/client-key.pem  # For mTLS
   #   skip_verify: false
 
 # Direct Push listener, used with `transport: grpc`.
@@ -86,8 +87,9 @@ clickhouse:
     - admin_events
     - error_events
   # TLS (required for ClickHouse Cloud). `enabled` is the ONLY honoured key --
-  # it selects https against the system trust store. ca_cert_file / cert_file /
-  # key_file / skip_verify are startup errors: mount a private CA instead.
+  # it selects https against the system trust store. ca_paths / client_cert_path /
+  # client_key_path / skip_verify and the other tls keys are startup errors: mount
+  # a private CA instead.
   # tls:
   #   enabled: true
 
