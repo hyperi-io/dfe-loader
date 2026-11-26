@@ -57,7 +57,8 @@ pub mod names {
     /// Computed columns left unset, by `table`, `column` and `stage` (`compile`, `context`, `eval`).
     pub const COMPUTED_EVAL_FAILURES_TOTAL: &str = name!("computed_eval_failures_total");
 
-    /// Rows whose `_timestamp` landed as the ingest time, by `reason` (`unparseable`, `out_of_bounds`).
+    /// Date-time values the loader replaced (`_timestamp`, with the ingest time) or left out (any other
+    /// column, so its NULL or DEFAULT applies), by `reason` (`unparseable`, `out_of_bounds`) and schema `column`.
     pub const TIMESTAMP_REPLACED_TOTAL: &str = name!("timestamp_replaced_total");
 
     pub const MESSAGES_BY_TABLE_TOTAL: &str = name!(legacy "messages_by_table_total");
@@ -222,8 +223,8 @@ impl Metrics {
         );
         let _ = manager.counter_with_labels(
             names::TIMESTAMP_REPLACED_TOTAL,
-            "Rows whose _timestamp landed as the ingest time, by reason (unparseable, out_of_bounds)",
-            &["reason"],
+            "Date-time values replaced with the ingest time (_timestamp) or left out (other columns), by reason (unparseable, out_of_bounds) and column",
+            &["reason", "column"],
             "transform",
         );
         let _ = manager.counter_with_labels(
