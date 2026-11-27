@@ -112,7 +112,7 @@ Types are the `timeseries` profile's as dfe-schemas renders them. The loader rea
 | Column | Type | What the loader writes |
 |---|---|---|
 | `_timestamp_load` | `DateTime64(3,'UTC') DEFAULT now64(3)` | Nothing: the INSERT leaves it out and ClickHouse fills the load time |
-| `_timestamp` | `DateTime64(3,'UTC')` | The record's `timestamp`, `@timestamp` or `_timestamp`, the first present, held to `timestamp_dq`, else the ingest time. A directive cannot move it |
+| `_timestamp` | `DateTime64(3,'UTC')` | The column's directive, `first(timestamp/@timestamp/_timestamp) \| now()`: the first of those fields present, held to `timestamp_dq`, else the ingest time. A column with no directive reads `timestamp`, then `_timestamp` |
 | `_timestamp_received` | `DateTime64(3,'UTC')` | The first hop's `_timestamp_received` stamp, then the fields the column's directive names, then the ingest time |
 | `_uuid` | `Nullable(UUID) DEFAULT generateUUIDv7()` | Nothing: ClickHouse generates a time-ordered UUID |
 | `_org_id` | `LowCardinality(String)` | The `routing.org_id_field` value (default `_org_id`), else `routing.default_org_id`. No directive or sender field can change where it is read |

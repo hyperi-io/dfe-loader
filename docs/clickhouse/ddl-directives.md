@@ -382,7 +382,7 @@ dfe-schemas renders the directives into the column `COMMENT`, with the human des
 ```sql
 CREATE TABLE dfe.main (
     `_timestamp_load` DateTime64(3,'UTC') DEFAULT now64(3) COMMENT '@generated: now64(3) - Insertion timestamp (ms precision)',
-    `_timestamp` DateTime64(3,'UTC') COMMENT '@source: timestamp | now() - Event timestamp from source data',
+    `_timestamp` DateTime64(3,'UTC') COMMENT '@source: first(timestamp/@timestamp/_timestamp) | now() - Event timestamp from source data',
     `_source` LowCardinality(Nullable(String)) COMMENT '@source: first(_source) | topic_name - Data source label (e.g. beats, syslog, crowdstrike-edr)',
     ...
 )

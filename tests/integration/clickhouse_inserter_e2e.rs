@@ -2114,7 +2114,7 @@ async fn create_per_source_table(client: &ClickHouseQueryClient, table: &str) {
     let ddl = format!(
         "CREATE TABLE `{table}` (
             `_timestamp_load` DateTime64(3, 'UTC') DEFAULT now64(3) COMMENT '@generated: now64(3) - Insertion timestamp (ms precision)',
-            `_timestamp` DateTime64(3, 'UTC') COMMENT '@source: timestamp | now() - Event timestamp from source data',
+            `_timestamp` DateTime64(3, 'UTC') COMMENT '@source: first(timestamp/@timestamp/_timestamp) | now() - Event timestamp from source data',
             `_timestamp_received` DateTime64(3, 'UTC') COMMENT '@source: first(timestamp_received/received_at) - When the event was first received',
             `_uuid` Nullable(UUID) DEFAULT generateUUIDv7() COMMENT '@generated: generateUUIDv7() - Time-ordered unique event identifier',
             `_org_id` LowCardinality(String) COMMENT '@source: org_id - Tenant/organisation identifier',
