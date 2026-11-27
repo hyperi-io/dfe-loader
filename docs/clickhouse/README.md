@@ -41,6 +41,7 @@ config:
     fontSize: 15px
     lineColor: "#64748B"
     primaryTextColor: "#0F172A"
+    nodeBorder: "#334155"
     clusterBorder: "#0072B2"
     edgeLabelBackground: "#FFFFFF"
   themeCSS: >-
@@ -60,6 +61,8 @@ config:
     span.edgeLabel{display:inline-block;background:#FFFFFF!important;color:#1E293B;border:1px solid #94A3B8;border-radius:999px;padding:2px 10px;font-size:12px;font-weight:500}
     span.edgeLabel p{background:transparent!important}
     .label-icon{width:20px;height:20px;vertical-align:-4px;margin-right:6px}
+    .icon-shape path[stroke-width="0"][fill="none"]{fill:#FFFFFF;stroke:#FFFFFF;stroke-width:12px;stroke-linejoin:round}
+    .icon-shape p{background:transparent!important;color:#0F172A}
     .ingest .label-icon{color:#0E8A7D}
     .xform .label-icon{color:#7B4FB0}
     .load .label-icon{color:#0072B2}
@@ -102,7 +105,7 @@ flowchart TB
   style insert fill:none,stroke:#0072B2,stroke-width:1.5px,stroke-dasharray:6 4
 ```
 
-*Figure 1. L4 Detail -- Insert layer. The dotted arrow is the salvage path.* Up: [L3 Components -- dfe-loader](../architecture.md). Down: [L4 Detail -- Dynamic insert](#how-it-works), [L4 Detail -- Insert outcome](#scaling-and-failure).
+*Figure 1. L4 Detail -- Insert layer. The arrow to DLQ is the salvage path.* Up: [L3 Components -- dfe-loader](../architecture.md). Down: [L4 Detail -- Dynamic insert](#how-it-works), [L4 Detail -- Insert outcome](#scaling-and-failure).
 
 ## How it works
 
@@ -131,6 +134,7 @@ config:
     fontSize: 15px
     lineColor: "#64748B"
     primaryTextColor: "#0F172A"
+    nodeBorder: "#334155"
     clusterBorder: "#0072B2"
     edgeLabelBackground: "#FFFFFF"
   themeCSS: >-
@@ -150,6 +154,8 @@ config:
     span.edgeLabel{display:inline-block;background:#FFFFFF!important;color:#1E293B;border:1px solid #94A3B8;border-radius:999px;padding:2px 10px;font-size:12px;font-weight:500}
     span.edgeLabel p{background:transparent!important}
     .label-icon{width:20px;height:20px;vertical-align:-4px;margin-right:6px}
+    .icon-shape path[stroke-width="0"][fill="none"]{fill:#FFFFFF;stroke:#FFFFFF;stroke-width:12px;stroke-linejoin:round}
+    .icon-shape p{background:transparent!important;color:#0F172A}
     .ingest .label-icon{color:#0E8A7D}
     .xform .label-icon{color:#7B4FB0}
     .load .label-icon{color:#0072B2}
@@ -189,7 +195,7 @@ flowchart TB
   style dynamic fill:none,stroke:#0072B2,stroke-width:1.5px,stroke-dasharray:6 4
 ```
 
-*Figure 2. L4 Detail -- Dynamic insert, over HTTP. The dashed box is the crates.io client.* Up: [L4 Detail -- ClickHouse insert layer](README.md).
+*Figure 2. L4 Detail -- Dynamic insert, over HTTP. clickhouse::Client is the crates.io client.* Up: [L4 Detail -- ClickHouse insert layer](README.md).
 
 `ParsedType` parses each column's type string for the encoder. A JSONEachRow insert skips the encoder: `shape_for_type` rewrites the values the server would refuse and the rows go straight to `insert_formatted_with`.
 
@@ -224,6 +230,7 @@ config:
     fontSize: 15px
     lineColor: "#64748B"
     primaryTextColor: "#0F172A"
+    nodeBorder: "#334155"
     clusterBorder: "#0072B2"
     edgeLabelBackground: "#FFFFFF"
   themeCSS: >-
@@ -243,6 +250,8 @@ config:
     span.edgeLabel{display:inline-block;background:#FFFFFF!important;color:#1E293B;border:1px solid #94A3B8;border-radius:999px;padding:2px 10px;font-size:12px;font-weight:500}
     span.edgeLabel p{background:transparent!important}
     .label-icon{width:20px;height:20px;vertical-align:-4px;margin-right:6px}
+    .icon-shape path[stroke-width="0"][fill="none"]{fill:#FFFFFF;stroke:#FFFFFF;stroke-width:12px;stroke-linejoin:round}
+    .icon-shape p{background:transparent!important;color:#0F172A}
     .ingest .label-icon{color:#0E8A7D}
     .xform .label-icon{color:#7B4FB0}
     .load .label-icon{color:#0072B2}
@@ -300,7 +309,7 @@ flowchart TB
   style R3 fill:none,stroke:#0072B2,stroke-width:1.5px,stroke-dasharray:6 4
 ```
 
-*Figure 3. L4 Detail -- Insert outcome. Orange is the end that dead-letters rows.* Up: [L4 Detail -- ClickHouse insert layer](README.md).
+*Figure 3. L4 Detail -- Insert outcome. Salvage to DLQ is the end that dead-letters rows.* Up: [L4 Detail -- ClickHouse insert layer](README.md).
 
 `Inserter::dynamic_verdict` in `src/clickhouse/inserter.rs` makes the call. Retryable means a timeout, a dropped connection or a code on the retry list in `src/clickhouse/error.rs`. A stale or unreadable cached schema is retried on a fresh read without asking the table, and an encoder refusal of a value goes straight to salvage.
 
