@@ -3,6 +3,31 @@
 Rendered by CI and committed back at the end of a release -- do not edit by
 hand. Release notes also appear on the GitHub Releases page, one per tag.
 
+## [1.18.76](https://github.com/hyperi-io/dfe-loader/compare/v1.18.75...v1.18.76) (2026-11-27)
+
+### What's Changed
+* fix(deps): replace chrono with jiff and std by @catinspace-au in https://github.com/hyperi-io/dfe-loader/pull/371
+* fix(pgo): wait for loader shutdown using the deployment contract by @catinspace-au in https://github.com/hyperi-io/dfe-loader/pull/374
+* fix(pgo): drop the script's profraw check by @catinspace-au in https://github.com/hyperi-io/dfe-loader/pull/375
+* fix(deps): update redpandadata/redpanda Docker tag to v26.2.7 by @renovate[bot] in https://github.com/hyperi-io/dfe-loader/pull/372
+* fix(deps): update rust-dependencies by @renovate[bot] in https://github.com/hyperi-io/dfe-loader/pull/373
+* fix: rebuild on scalo 2.14.34 by @catinspace-au in https://github.com/hyperi-io/dfe-loader/pull/377
+* fix(ci): pass the CI tools app key to hyperi-ci by @catinspace-au in https://github.com/hyperi-io/dfe-loader/pull/378
+* fix: rebuild on scalo 2.14.36 by @catinspace-au in https://github.com/hyperi-io/dfe-loader/pull/379
+* fix: rebuild on scalo 2.14.37 by @catinspace-au in https://github.com/hyperi-io/dfe-loader/pull/380
+* fix: rebuild on scalo 2.14.38 by @catinspace-au in https://github.com/hyperi-io/dfe-loader/pull/381
+* fix(schema): re-read tables on version change by @catinspace-au in https://github.com/hyperi-io/dfe-loader/pull/382
+* fix: rebuild on scalo 2.14.39 by @catinspace-au in https://github.com/hyperi-io/dfe-loader/pull/383
+* docs: link CEL to its language definition by @catinspace-au in https://github.com/hyperi-io/dfe-loader/pull/384
+* fix(schema): seed deployed tables' columns from routing config by @catinspace-au in https://github.com/hyperi-io/dfe-loader/pull/386
+* fix(config): reload capture modes without rolling the pods by @catinspace-au in https://github.com/hyperi-io/dfe-loader/pull/387
+* fix(transform): accept rows with invalid date-times by @catinspace-au in https://github.com/hyperi-io/dfe-loader/pull/388
+* fix(tls): move TLS keys to scalo's TLS section by @catinspace-au in https://github.com/hyperi-io/dfe-loader/pull/389
+* test(column_meta): pin directives to dfe-schemas by @catinspace-au in https://github.com/hyperi-io/dfe-loader/pull/390
+* fix(routing): route only to deployed tables by @catinspace-au in https://github.com/hyperi-io/dfe-loader/pull/391
+* fix(repo): remove an unreferenced third-party paper by @catinspace-au in https://github.com/hyperi-io/dfe-loader/pull/392
+* fix(transform): read the event time from the _timestamp directive by @catinspace-au in https://github.com/hyperi-io/dfe-loader/pull/365
+
 ## [1.18.75](https://github.com/hyperi-io/dfe-loader/compare/v1.18.74...v1.18.75) (2026-11-23)
 
 ### What's Changed
