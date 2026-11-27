@@ -1,0 +1,4 @@
+{
+  "loader": ["coerce", "computed", "default", "renamed", "skip", "source"],
+  "descriptive": ["captured", "generated"]
+}

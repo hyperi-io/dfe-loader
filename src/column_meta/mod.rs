@@ -588,6 +588,7 @@ fn entry_to_directives(entry: &ColumnDirectivesEntry) -> ColumnDirectives {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
 
     #[test]
     fn test_parse_skip() {
@@ -1192,5 +1193,102 @@ mod tests {
     fn test_parse_scalar_value_returns_bool() {
         let result = parse_scalar_value("true");
         assert_eq!(result, Some(Value::Bool(true)));
+    }
+
+    /// dfe-schemas' `directives.json` at tag v0.2.33-rc.3. The pin is recorded in `SOURCE` beside it.
+    const DFE_SCHEMAS_DIRECTIVES: &str =
+        include_str!("../../tests/fixtures/dfe-schemas/directives.json");
+
+    fn dfe_schemas_directives(group: &str) -> Vec<String> {
+        let schema: serde_json::Value =
+            serde_json::from_str(DFE_SCHEMAS_DIRECTIVES).expect("pinned directives.json parses");
+        schema[group]
+            .as_array()
+            .unwrap_or_else(|| panic!("directives.json has no \"{group}\" array"))
+            .iter()
+            .map(|v| v.as_str().expect("directive names are strings").to_string())
+            .collect()
+    }
+
+    /// Names of the arms in `parse_directives`' `match name` block, read from this file.
+    ///
+    /// Brace depth keeps the scan inside that block, so the nested `match` is skipped.
+    fn parse_directives_arm_names() -> BTreeSet<String> {
+        const SOURCE: &str = include_str!("mod.rs");
+        let arm = regex::Regex::new(r#"^\s*"([a-z_]+)"(\s+if\s+[a-z_]+)?\s*=>"#)
+            .expect("arm pattern compiles");
+        let body = SOURCE
+            .split_once("pub fn parse_directives(")
+            .expect("parse_directives is defined in this file")
+            .1;
+        let mut lines = body
+            .lines()
+            .skip_while(|line| line.trim() != "match name {");
+        lines.next().expect("parse_directives matches on name");
+        let mut depth = 1_usize;
+        let mut names = BTreeSet::new();
+        for line in lines {
+            if depth == 1
+                && let Some(caps) = arm.captures(line)
+            {
+                names.insert(caps[1].to_string());
+            }
+            let code = line.split("//").next().unwrap_or_default();
+            for byte in code.bytes() {
+                match byte {
+                    b'{' => depth += 1,
+                    b'}' => depth -= 1,
+                    _ => {}
+                }
+            }
+            if depth == 0 {
+                break;
+            }
+        }
+        assert_eq!(depth, 0, "the match block in parse_directives closes");
+        names
+    }
+
+    #[test]
+    fn parser_arms_match_directive_names_and_dfe_schemas() {
+        let arms = parse_directives_arm_names();
+        let names: BTreeSet<String> = DIRECTIVE_NAMES
+            .iter()
+            .map(|name| String::from_utf8_lossy(name).into_owned())
+            .collect();
+        let loader: BTreeSet<String> = dfe_schemas_directives("loader").into_iter().collect();
+        assert_eq!(
+            arms, names,
+            "parse_directives' match arms must equal DIRECTIVE_NAMES"
+        );
+        assert_eq!(
+            names, loader,
+            "DIRECTIVE_NAMES must equal the \"loader\" list in dfe-schemas directives.json"
+        );
+    }
+
+    #[test]
+    fn every_parser_name_is_read_by_parse_directives() {
+        for name in DIRECTIVE_NAMES {
+            let name = String::from_utf8_lossy(name);
+            let parsed = parse_directives(&format!("@{name}: probe"));
+            assert_ne!(
+                parsed,
+                ColumnDirectives::default(),
+                "parser ignores @{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn descriptive_directives_are_not_read_by_parse_directives() {
+        for name in dfe_schemas_directives("descriptive") {
+            let parsed = parse_directives(&format!("@{name}: probe"));
+            assert_eq!(
+                parsed,
+                ColumnDirectives::default(),
+                "parser reads @{name}, which dfe-schemas marks descriptive"
+            );
+        }
     }
 }
