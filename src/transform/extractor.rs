@@ -9,16 +9,16 @@
 //!
 //! ## What this does NOT do
 //!
-//! - No flattening — a dotted source path is walked in place, never materialised
-//! - No `_json` injection — that is spliced zero-copy at serialisation time
-//! - No coercion — the `RowBinary` encoder reshapes values at insert
+//! - No flattening: a dotted source path is walked in place, never materialised
+//! - No `_json` injection: that is spliced zero-copy at serialisation time
+//! - No coercion: the `RowBinary` encoder reshapes values at insert
 //!
 //! ## Column handling
 //!
 //! | Column | Behaviour |
 //! |---|---|
-//! | `_uuid`, `_timestamp_load` | Skipped — ClickHouse DEFAULT generates these |
-//! | `_json` | Skipped — zero-copy splice at serialisation time, unless a `@source` directive names the field it reads, `{}` when that field is absent |
+//! | `_uuid`, `_timestamp_load` | Skipped: ClickHouse DEFAULT generates these |
+//! | `_json` | Skipped: zero-copy splice at serialisation time, unless a `@source` directive names the field it reads, `{}` when that field is absent |
 //! | `_org_id` | `routing.org_id_field` alone, never a directive. Absent, null or empty is `routing.default_org_id` |
 //! | `_source` | A null or empty value reads as absent, so the column's fallback applies |
 //! | `_timestamp_received` | The first hop's `_timestamp_received` stamp, then the directive's fields, then current UTC time |
@@ -95,9 +95,9 @@ impl HeaderExtraction {
 enum Sources<'a> {
     /// The column takes no value from the payload.
     None,
-    /// Try each path in order; the first one present wins.
+    /// Try each path in order, and the first one present wins.
     List(&'a [String]),
-    /// Try each compiled-in path in order; the first one present wins.
+    /// Try each compiled-in path in order, and the first one present wins.
     Fixed(&'static [&'static str]),
     /// Try the first path, then the second when there is one.
     Pair(&'a str, Option<&'a str>),
@@ -158,7 +158,7 @@ impl TablePlan {
     /// Whether the plan still describes this schema and directive generation.
     ///
     /// An ALTER that adds, drops or renames a column changes the name list, and
-    /// a changed COMMENT bumps the DDL generation; either rebuilds the plan
+    /// a changed COMMENT bumps the DDL generation. Either rebuilds the plan
     /// rather than leaving a new collision undetected.
     fn is_current(&self, schema: &TableSchema, ddl_version: u64) -> bool {
         self.ddl_version == ddl_version
@@ -445,17 +445,17 @@ impl HeaderExtractor {
     /// Extract promoted fields from raw JSON bytes using schema column guidance.
     ///
     /// Parses the payload once with `sonic_rs::from_slice`, then performs O(1)
-    /// hash lookups per schema column. Returns only promoted fields — `_json` is
+    /// hash lookups per schema column. Returns only promoted fields: `_json` is
     /// NOT included (spliced zero-copy at serialisation time).
     ///
     /// Column directives are read from `col_meta` with full config cascade:
     /// per-table config > global config > DDL `@directive` annotations.
     ///
-    /// A pass that promotes nothing carries the reason back to the caller; the
+    /// A pass that promotes nothing carries the reason back to the caller. The
     /// caller owns the rejection, so it owns the log and the counter (#145).
     ///
     /// `topic_source` is the source this message's topic names, which the
-    /// `topic_name` fallback resolves to; `None` or an empty label leaves that
+    /// `topic_name` fallback resolves to. `None` or an empty label leaves that
     /// fallback unresolved and the column absent.
     pub fn extract(
         &self,
@@ -514,7 +514,7 @@ impl HeaderExtractor {
         for col in &schema.columns {
             let name = &col.name;
 
-            // ClickHouse generates these — never inject from source data.
+            // ClickHouse generates these, so source data never fills them.
             if matches!(name.as_str(), "_uuid" | "_timestamp_load") || is_generated(col) {
                 continue;
             }
@@ -565,7 +565,7 @@ impl HeaderExtractor {
             }
 
             // _timestamp: extract from source, fall back to now() if missing.
-            // The column is NOT Nullable and has no DEFAULT — omitting it would
+            // The column is NOT Nullable and has no DEFAULT, so omitting it would
             // produce 1970-01-01 00:00:00.000 (epoch zero).
             if name == "_timestamp" {
                 let found = self
@@ -680,16 +680,35 @@ fn count_timestamp_replaced(reason: &'static str, column: &str) {
     }
 }
 
-/// Whether the insert reads the value as a date-time: text in the form `datetime::parse` reads,
-/// numeric text or a number as an epoch. A null is the insert's own default.
+/// Whether the insert reads the value as a date-time once [`normalise_datetime`] has run: text in
+/// the form `datetime::parse` reads, numeric text, or an epoch number. A null is the insert's own
+/// default.
 fn is_readable_datetime(value: &Value) -> bool {
     match value {
         Value::String(text) => {
             let text = text.trim();
             datetime::parse(text).is_ok() || text.parse::<i64>().is_ok()
         }
-        Value::Number(_) | Value::Null => true,
+        Value::Number(n) => whole_epoch(n).is_some() || epoch_time(n).is_some(),
+        Value::Null => true,
         _ => false,
+    }
+}
+
+/// The number as the encoder takes an epoch: an integer, or a whole float in `i64` range.
+fn whole_epoch(n: &serde_json::Number) -> Option<i64> {
+    n.as_i64().or_else(|| {
+        n.as_f64()
+            .filter(|f| f.fract() == 0.0 && *f >= i64::MIN as f64 && *f < -(i64::MIN as f64))
+            .map(|f| f as i64)
+    })
+}
+
+/// The instant a fractional epoch number names. The encoder refuses a fractional number.
+fn fractional_epoch(value: &Value) -> Option<Timestamp> {
+    match value {
+        Value::Number(n) if whole_epoch(n).is_none() => epoch_time(n),
+        _ => None,
     }
 }
 
@@ -700,9 +719,10 @@ fn instant_time(instant: datetime::UtcInstant) -> Option<Timestamp> {
 
 /// A numeric epoch as an instant, its unit told by magnitude as the encoder
 /// tells it: seconds, then milliseconds past 10^12, microseconds past 10^15 and
-/// nanoseconds past 10^18. A fractional number is seconds.
+/// nanoseconds past 10^18. A whole float is told the same way, and a fractional
+/// number is seconds.
 fn epoch_time(n: &serde_json::Number) -> Option<Timestamp> {
-    if let Some(ts) = n.as_i64() {
+    if let Some(ts) = whole_epoch(n) {
         let per_second: i64 = match ts.unsigned_abs() {
             m if m > 1_000_000_000_000_000_000 => 1_000_000_000,
             m if m > 1_000_000_000_000_000 => 1_000_000,
@@ -732,13 +752,17 @@ fn is_datetime(col: &crate::clickhouse::types::ColumnInfo) -> bool {
     matches!(col.parsed_type.tag, TypeTag::DateTime | TypeTag::DateTime64)
 }
 
-/// Rewrite a zoned date-time as UTC text, keeping every fraction digit and the
-/// zone, so the insert reads the instant whatever the column's timezone.
-/// Zone-less text and epoch numbers are left alone.
+/// Rewrite a zoned date-time as UTC text, every fraction digit kept, and a
+/// fractional epoch as the UTC text of the instant it names, so the insert
+/// reads the instant whatever the column's timezone. Zone-less text and whole
+/// epoch numbers are left alone.
 #[inline]
 fn normalise_datetime(map: &mut Map<String, Value>, name: &str) {
     if let Some(value) = map.get_mut(name) {
-        datetime::normalise_zoned(value);
+        match fractional_epoch(value) {
+            Some(at) => *value = Value::String(utc_text(&at)),
+            None => datetime::normalise_zoned(value),
+        }
     }
 }
 
@@ -1111,7 +1135,7 @@ mod tests {
 
     #[test]
     fn timestamp_received_edge_stamp_beats_an_older_header_directive_234() {
-        // The 1.0.0 header names neither edge stamp; the edge stamp still wins.
+        // The 1.0.0 header names neither edge stamp, and the edge stamp still wins.
         let raw = br#"{"event":"x","received_at":"2024-01-01T00:00:00Z","_timestamp_received":1759700000123}"#;
         let directive = Some("first(timestamp_received/received_at)");
         assert_eq!(
@@ -1462,7 +1486,7 @@ mod tests {
 
     #[test]
     fn test_timestamp_fallback_to_now_when_missing() {
-        // _timestamp is NOT Nullable and has no DEFAULT — omitting it produces
+        // _timestamp is NOT Nullable and has no DEFAULT, so omitting it produces
         // epoch zero (1970-01-01 00:00:00.000). The extractor must inject now().
         let extractor = default_extractor();
         let raw = br#"{"severity": "high"}"#; // No "timestamp" or "_timestamp" field
@@ -1625,7 +1649,7 @@ mod tests {
 
     #[test]
     fn test_literal_dotted_key_still_matches() {
-        // A payload already flattened upstream keeps working — the literal key
+        // A payload already flattened upstream keeps working: the literal key
         // is the fast path, tried before any descent.
         let extractor = default_extractor();
         let raw = br#"{"host.name": "web-02"}"#;
@@ -2169,8 +2193,8 @@ mod tests {
 
     #[test]
     fn test_valid_object_matching_no_column_reports_a_reason() {
-        // The silent case: this parses, it is an object, and not one field is a
-        // column. It used to reach the caller looking like any other empty pass.
+        // This parses, it is an object, and not one field is a column, so the
+        // pass names a reason rather than looking like any other empty pass.
         let extractor = default_extractor();
         let schema = make_schema(&["message"]);
         let col_meta = empty_col_meta();
@@ -2652,7 +2676,8 @@ mod tests {
     /// A `_timestamp` the insert cannot read lands as the ingest time, counted by
     /// reason, with `timestamp_dq` on or off. A readable time stays as it came,
     /// and an instant outside the bounds is the check's alone. Any other
-    /// date-time column leaves an unreadable value out.
+    /// date-time column leaves an unreadable value out. A fractional epoch,
+    /// which the encoder refuses, lands as the UTC text it names.
     #[test]
     fn an_unreadable_datetime_never_rejects_the_row() {
         use crate::metrics::counting::CountingRecorder;
@@ -2663,7 +2688,7 @@ mod tests {
         }
         let on = true;
         let off = false;
-        let cases: [(bool, &[u8], Want); 16] = [
+        let cases: [(bool, &[u8], Want); 21] = [
             (
                 on,
                 br#"{"timestamp": "0000-00-00 00:00:00.000000"}"#,
@@ -2736,6 +2761,29 @@ mod tests {
                 br#"{"timestamp": 1788760433}"#,
                 Want::Kept("1788760433"),
             ),
+            // The encoder takes whole epochs only, so a fractional one lands as the UTC
+            // text it names, and a whole float as it came, for the encoder to read by magnitude.
+            (
+                off,
+                br#"{"timestamp": 1788760433.5}"#,
+                Want::Kept("2026-09-07T05:53:53.500Z"),
+            ),
+            (
+                on,
+                br#"{"timestamp": 1788760433.5}"#,
+                Want::Kept("2026-09-07T05:53:53.500Z"),
+            ),
+            (
+                off,
+                br#"{"timestamp": 1788760433123.0}"#,
+                Want::Kept("1788760433123"),
+            ),
+            (
+                on,
+                br#"{"timestamp": 1788760433123.0}"#,
+                Want::Kept("2026-09-07T05:53:53.123Z"),
+            ),
+            (off, br#"{"timestamp": 1e300}"#, Want::Now("unparseable")),
         ];
         let schema = make_datetime_schema(&["_timestamp"]);
         let col_meta = empty_col_meta();
@@ -2805,7 +2853,7 @@ mod tests {
         ]);
         let zero = "0000-00-00 00:00:00.000000";
         // (record, columns left out, columns kept, columns counted)
-        let bmp_cases: [(String, &[&str], &[&str], u64); 3] = [
+        let bmp_cases: [(String, &[&str], &[&str], u64); 4] = [
             (
                 format!(
                     r#"{{"event_type":"log","bmp_msg_type":"init","peer_ip_src":"10.0.0.1","timestamp":"{zero}","timestamp_arrival":"{zero}","timestamp_start":"{zero}","timestamp_last":"{zero}","_timestamp_received":"{zero}"}}"#
@@ -2827,6 +2875,12 @@ mod tests {
                 &[],
                 &["_timestamp", "timestamp_arrival", "timestamp_start", "timestamp_last"],
                 0,
+            ),
+            (
+                r#"{"event_type":"log","bmp_msg_type":"route_monitor","peer_ip_src":"10.0.0.1","timestamp":"2026-11-25 11:00:00.123456","timestamp_arrival":1764068400.25,"timestamp_start":"2026-11-25 10:00:00","timestamp_last":1e300,"_timestamp_received":1764068400.5}"#.to_string(),
+                &["timestamp_last"],
+                &["_timestamp", "_timestamp_received", "timestamp_arrival", "timestamp_start"],
+                1,
             ),
         ];
         let columns: Vec<ColumnDef> = bmp

@@ -31,7 +31,7 @@ fn config(transport: Transport, host: &str, port: u16, tls: bool) -> ClickHouseC
         hosts: vec![format!("{host}:{port}")],
         transport,
         database: "default".to_string(),
-        password: crate::common::containers::clickhouse_password(),
+        password: crate::common::containers::clickhouse_password().into(),
         tls,
         ..Default::default()
     }

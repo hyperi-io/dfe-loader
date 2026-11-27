@@ -11,17 +11,8 @@
 
 //! `ClickHouse` connection configuration.
 
-use serde::{Deserialize, Deserializer, Serialize};
-
-/// Deserialise a string that may be YAML null, missing, or empty.
-/// All resolve to empty string (no password).
-fn deserialize_optional_string<'de, D>(deserializer: D) -> Result<String, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let opt: Option<String> = Option::deserialize(deserializer)?;
-    Ok(opt.unwrap_or_default())
-}
+use scalo::config::sensitive::SensitiveString;
+use serde::{Deserialize, Serialize};
 
 /// Transport protocol for `ClickHouse` connections.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -104,7 +95,7 @@ impl std::fmt::Display for InsertFormat {
 ///     hosts: vec!["clickhouse-1:9000".to_string()],
 ///     database: "events".to_string(),
 ///     username: "app_user".to_string(),
-///     password: "secret".to_string(),
+///     password: "secret".into(),
 ///     ..Default::default()
 /// };
 ///
@@ -114,7 +105,7 @@ impl std::fmt::Display for InsertFormat {
 ///     transport: Transport::Http,
 ///     database: "events".to_string(),
 ///     username: "app_user".to_string(),
-///     password: "secret".to_string(),
+///     password: "secret".into(),
 ///     ..Default::default()
 /// };
 /// ```
@@ -147,11 +138,11 @@ pub struct ClickHouseConfig {
     /// Username for authentication.
     pub username: String,
 
-    /// Password for authentication. Empty string means no password
-    /// (valid for ClickHouse default user). Accepts YAML null, empty string,
-    /// or omitted field — all resolve to empty (no auth header sent).
-    #[serde(default, deserialize_with = "deserialize_optional_string")]
-    pub password: String,
+    /// Password for authentication, redacted from `Debug` and serialised
+    /// output. YAML null, an empty string or an omitted field is no password,
+    /// and no auth header is sent (valid for the ClickHouse default user).
+    #[serde(default)]
+    pub password: SensitiveString,
 
     /// Enable TLS/SSL for connections.
     #[serde(default)]
@@ -246,7 +237,7 @@ impl Default for ClickHouseConfig {
             insert_format: InsertFormat::RowBinary,
             database: "dfe".to_string(),
             username: "default".to_string(),
-            password: String::new(),
+            password: SensitiveString::default(),
             tls: false,
             connect_timeout_ms: default_connect_timeout(),
             request_timeout_ms: default_request_timeout(),
@@ -290,7 +281,7 @@ impl ClickHouseConfig {
     pub fn with_credentials(
         mut self,
         username: impl Into<String>,
-        password: impl Into<String>,
+        password: impl Into<SensitiveString>,
     ) -> Self {
         self.username = username.into();
         self.password = password.into();
@@ -424,7 +415,7 @@ mod tests {
         assert_eq!(config.transport, Transport::Native);
         assert_eq!(config.database, "dfe");
         assert_eq!(config.username, "default");
-        assert_eq!(config.password, "");
+        assert_eq!(config.password.expose(), "");
         assert!(!config.tls);
         assert_eq!(config.connect_timeout_ms, 5000);
         assert_eq!(config.request_timeout_ms, 60000);
@@ -451,7 +442,7 @@ mod tests {
         assert_eq!(config.primary_host(), Some("ch.example.com:9000"));
         assert_eq!(config.database, "mydb");
         assert_eq!(config.username, "user");
-        assert_eq!(config.password, "pass");
+        assert_eq!(config.password.expose(), "pass");
         assert!(config.tls);
     }
 
@@ -528,7 +519,7 @@ mod tests {
         let json =
             r#"{"hosts":["localhost:8123"],"database":"db","username":"default","password":""}"#;
         let config: ClickHouseConfig = serde_json::from_str(json).unwrap();
-        assert_eq!(config.password, "");
+        assert_eq!(config.password.expose(), "");
     }
 
     #[test]
@@ -536,14 +527,14 @@ mod tests {
         let json =
             r#"{"hosts":["localhost:8123"],"database":"db","username":"default","password":null}"#;
         let config: ClickHouseConfig = serde_json::from_str(json).unwrap();
-        assert_eq!(config.password, "");
+        assert_eq!(config.password.expose(), "");
     }
 
     #[test]
     fn test_password_missing() {
         let json = r#"{"hosts":["localhost:8123"],"database":"db","username":"default"}"#;
         let config: ClickHouseConfig = serde_json::from_str(json).unwrap();
-        assert_eq!(config.password, "");
+        assert_eq!(config.password.expose(), "");
     }
 
     #[test]

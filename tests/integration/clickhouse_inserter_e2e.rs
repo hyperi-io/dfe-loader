@@ -67,7 +67,7 @@ async fn spin_up(
         transport: Transport::Http,
         database: "default".to_string(),
         username: "default".to_string(),
-        password: crate::common::containers::clickhouse_password(),
+        password: crate::common::containers::clickhouse_password().into(),
         tls: false,
         ..Default::default()
     };
@@ -117,7 +117,7 @@ async fn spin_up_over(
         transport: Transport::Native,
         database: "default".to_string(),
         username: "default".to_string(),
-        password: crate::common::containers::clickhouse_password(),
+        password: crate::common::containers::clickhouse_password().into(),
         tls: false,
         ..Default::default()
     };

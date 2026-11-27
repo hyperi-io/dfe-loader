@@ -397,7 +397,7 @@ async fn test_error_invalid_clickhouse_host() {
         hosts: vec!["invalid-host-12345.example.com:8123".to_string()],
         database: "default".to_string(),
         username: "default".to_string(),
-        password: String::new(),
+        password: Default::default(),
         ..Default::default()
     };
 

@@ -6,8 +6,9 @@
 //! Routing happens PRE-flattening using dot notation for nested field access.
 //! The table is the one a pinned topic names, else the first `table_fields`
 //! entry carrying a value (default: `_source`), else the source the topic
-//! names, else `default_table`. The database is `default_db` unless
-//! `org_routes` lists the record's tenant.
+//! names, else `default_table`. Once dfe-engine has sent `table_schemas`, a
+//! table no deployed source owns is `default_table` too. The database is
+//! `default_db` unless `org_routes` lists the record's tenant.
 //! A null or empty routing value counts as absent.
 //!
 //! ## Performance
@@ -19,7 +20,7 @@
 
 use std::borrow::Cow;
 
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use serde_json::Value;
 
 use crate::config::{ExternalTopic, MetadataConfig, RoutingConfig};
@@ -50,6 +51,9 @@ pub enum TableChoice {
     DefaultFallback,
     /// The topic is pinned to a table, which no routing field can override.
     Pinned,
+    /// A routing field or the topic named a table no deployed source owns, so
+    /// `default_table` was used.
+    Unlisted,
 }
 
 /// The header field every record's source is read from first.
@@ -117,6 +121,10 @@ pub struct Router {
     source_paths: Vec<String>,
     /// Table by topic, for topics whose records route by topic alone.
     pinned: FxHashMap<String, String>,
+    /// The tables a record may name once dfe-engine has sent `table_schemas`:
+    /// each `source_to_table`, `table_schemas` and `table_schema_versions`
+    /// table and the default. `None` before then, when any name routes.
+    listed: Option<FxHashSet<String>>,
 }
 
 /// Whether a routing value is absent in all but name: null or empty text.
@@ -150,6 +158,19 @@ impl Router {
             .map(|r| (r.org_id.clone(), r.effective_database().to_string()))
             .collect();
 
+        // Only dfe-engine writes table_schemas, so with an empty map a loader
+        // configured by hand routes any name.
+        let listed: Option<FxHashSet<String>> = (!config.table_schemas.is_empty()).then(|| {
+            config
+                .source_to_table
+                .values()
+                .chain(config.table_schemas.keys())
+                .chain(config.table_schema_versions.keys())
+                .chain(std::iter::once(&config.default_table))
+                .cloned()
+                .collect()
+        });
+
         let mut source_paths: Vec<String> = vec![SOURCE_FIELD.to_string()];
         for path in metadata.source_fields.iter().chain(&config.table_fields) {
             if !source_paths.contains(path) {
@@ -175,7 +196,17 @@ impl Router {
                 .collect(),
             source_paths,
             pinned: FxHashMap::default(),
+            listed,
         }
+    }
+
+    /// Whether a record may name `table`: any table until dfe-engine has listed
+    /// its deployed ones, then only those and the default.
+    #[inline]
+    fn is_listed(&self, table: &str) -> bool {
+        self.listed
+            .as_ref()
+            .is_none_or(|listed| listed.contains(table))
     }
 
     /// Route every record read from one of `topics` to `table`, ahead of
@@ -313,7 +344,7 @@ impl Router {
     fn extract_table_cow<'a>(&'a self, payload: &'a [u8]) -> Cow<'a, str> {
         let table_cow = self.extract_first_match_cow(payload, &self.table_fields);
 
-        match table_cow {
+        let table = match table_cow {
             Some(cow) => {
                 // Check legacy source_to_table mapping
                 if let Some(mapped) = self.source_to_table.get(cow.as_ref()) {
@@ -322,7 +353,12 @@ impl Router {
                     cow
                 }
             }
-            None => Cow::Borrowed(&self.default_table),
+            None => Cow::Borrowed(self.default_table.as_str()),
+        };
+        if self.is_listed(&table) {
+            table
+        } else {
+            Cow::Borrowed(self.default_table.as_str())
         }
     }
 
@@ -405,6 +441,15 @@ impl Router {
             return (
                 self.build_route_result(db, &self.default_table),
                 TableChoice::DefaultFallback,
+            );
+        }
+
+        // The name came from the record, so one outside the deployed tables
+        // lands in the default table rather than any table the loader can write.
+        if !self.is_listed(table) {
+            return (
+                self.build_route_result(db, &self.default_table),
+                TableChoice::Unlisted,
             );
         }
 
@@ -1429,6 +1474,118 @@ mod tests {
             router.route_value_traced(&json!({"_source": "auth"})).1,
             TableChoice::Named,
             "a route with no topic is never pinned"
+        );
+    }
+
+    // ---- a record names only a deployed table ----
+
+    #[test]
+    fn a_record_names_only_a_table_a_deployed_source_owns() {
+        use serde_json::json;
+
+        let column = crate::config::TableColumn {
+            name: "host".to_string(),
+            ty: "String".to_string(),
+            default_kind: String::new(),
+            comment: String::new(),
+        };
+        let mut config = RoutingConfig {
+            org_routes: vec![org("acme", None)],
+            ..RoutingConfig::default()
+        };
+        for (source, table) in [("cisco-ios", "network"), ("auth", "auth")] {
+            config
+                .source_to_table
+                .insert(source.to_string(), table.to_string());
+        }
+        config.table_schemas.insert("fw".to_string(), vec![column]);
+        config
+            .table_schema_versions
+            .insert("winlog".to_string(), "1.0.0".to_string());
+        let pinned = ["dfe_loader_dlq".to_string()];
+        let router = Router::new(&config).with_pinned_topics(&pinned, "dlq");
+        // (record, topic, expected route)
+        let cases = [
+            // The engine's own tables share the database, and no deployed source owns them.
+            (
+                json!({"_source": "repository"}),
+                "auth_land",
+                ("dfe.main", TableChoice::Unlisted),
+            ),
+            (
+                json!({"_org_id": "acme", "_source": "alert_state"}),
+                "auth_land",
+                ("acme.main", TableChoice::Unlisted),
+            ),
+            (
+                json!({"x": 1}),
+                "repository_load",
+                ("dfe.main", TableChoice::Unlisted),
+            ),
+            (
+                json!({"_source": "fw"}),
+                "auth_land",
+                ("dfe.fw", TableChoice::Named),
+            ),
+            (
+                json!({"_source": "winlog"}),
+                "auth_land",
+                ("dfe.winlog", TableChoice::Named),
+            ),
+            (
+                json!({"_source": "cisco-ios"}),
+                "auth_land",
+                ("dfe.network", TableChoice::Named),
+            ),
+            (
+                json!({"x": 1}),
+                "auth_load",
+                ("dfe.auth", TableChoice::Topic),
+            ),
+            (
+                json!({"x": 1}),
+                "main_land",
+                ("dfe.main", TableChoice::DefaultFallback),
+            ),
+            (
+                json!({"_source": "main"}),
+                "auth_land",
+                ("dfe.main", TableChoice::Named),
+            ),
+            // A dead letter still lands in its pinned table, which no source lists.
+            (
+                json!({"_source": "repository"}),
+                "dfe_loader_dlq",
+                ("dfe.dlq", TableChoice::Pinned),
+            ),
+        ];
+        for (value, topic, (table, choice)) in cases {
+            assert_eq!(
+                router.route_value_on_topic(&value, topic),
+                (RouteResult::Table(table.to_string()), choice),
+                "{value} on {topic}"
+            );
+        }
+        for (payload, table) in [
+            (&br#"{"_source":"repository"}"#[..], "dfe.main"),
+            (&br#"{"_source":"fw"}"#[..], "dfe.fw"),
+        ] {
+            assert_eq!(router.route(payload), RouteResult::Table(table.to_string()));
+            assert_eq!(
+                router.route_cow(payload),
+                RouteResult::Table(table.to_string())
+            );
+        }
+
+        // A loader configured by hand, with no table_schemas, routes any name.
+        config.table_schemas.clear();
+        assert_eq!(
+            Router::new(&config)
+                .route_value_on_topic(&json!({"_source": "repository"}), "auth_land"),
+            (
+                RouteResult::Table("dfe.repository".to_string()),
+                TableChoice::Named
+            )
         );
     }
 }

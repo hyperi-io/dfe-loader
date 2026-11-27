@@ -376,7 +376,7 @@ pub fn build_client(config: &ClickHouseConfig) -> Result<ChClient> {
                 .with_user(&config.username)
                 .with_database(&config.database);
             if !config.password.is_empty() {
-                c = c.with_password(&config.password);
+                c = c.with_password(config.password.expose());
             }
             ChClient::Http(c)
         }
@@ -415,7 +415,7 @@ fn native_transport(config: &ClickHouseConfig, endpoint: &str) -> TcpClient {
         .with_pool_create_timeout(Some(config.connect_timeout()))
         .with_read_timeout(Some(config.timeouts().request));
     if !config.password.is_empty() {
-        client = client.with_password(&config.password);
+        client = client.with_password(config.password.expose());
     }
     client
 }
@@ -1242,7 +1242,7 @@ mod tests {
         let config = ClickHouseConfig {
             hosts: hosts.iter().map(ToString::to_string).collect(),
             transport: super::super::config::Transport::Native,
-            password: password.to_string(),
+            password: password.into(),
             tls,
             ..Default::default()
         };
@@ -1283,7 +1283,7 @@ mod tests {
             transport: super::super::config::Transport::Http,
             database: "db".to_string(),
             username: "user".to_string(),
-            password: "s3cret!@#$".to_string(),
+            password: "s3cret!@#$".into(),
             ..Default::default()
         };
         let client = ClickHouseQueryClient::new(&config).unwrap();
@@ -1329,7 +1329,7 @@ mod tests {
         // Empty password (explicit or default) bypasses the with_password() call.
         let mut http_config = ClickHouseConfig::default();
         http_config.transport = super::super::config::Transport::Http;
-        http_config.password = String::new();
+        http_config.password = scalo::config::sensitive::SensitiveString::default();
         assert!(ClickHouseQueryClient::new(&http_config).is_ok());
     }
 

@@ -326,6 +326,10 @@ async fn main() {
 }
 
 #[cfg(test)]
+#[allow(
+    unsafe_code,
+    reason = "the tests set the process env, unsafe in edition 2024"
+)]
 mod tests {
     use super::*;
 

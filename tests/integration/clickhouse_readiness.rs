@@ -129,7 +129,7 @@ fn as_probe_user(clickhouse: &str, password: &str) -> ClickHouseConfig {
         transport: Transport::Http,
         database: "default".to_string(),
         username: probe_user(),
-        password: password.to_string(),
+        password: password.into(),
         tls: false,
         ..Default::default()
     }

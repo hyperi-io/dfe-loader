@@ -13,8 +13,10 @@ mod clickhouse_inserter_e2e;
 mod clickhouse_readiness;
 mod clickhouse_test_config;
 #[cfg(feature = "testcontainers")]
+#[allow(unsafe_code, reason = "sets the process env, unsafe in edition 2024")]
 mod clickhouse_tls;
 mod config;
+#[allow(unsafe_code, reason = "sets the process env, unsafe in edition 2024")]
 mod config_reachability;
 // A leak check has to fail the test when the container is still there, and the
 // poll loop it sits after cannot express that as an assert.
@@ -64,6 +66,7 @@ mod resilience;
 mod rls;
 mod schema;
 mod schema_pending_e2e;
+#[allow(unsafe_code, reason = "sets the process env, unsafe in edition 2024")]
 mod shared_services;
 #[cfg(feature = "testcontainers")]
 mod tenancy;

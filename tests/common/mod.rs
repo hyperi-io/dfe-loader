@@ -627,7 +627,7 @@ pub fn create_http_test_client() -> Option<dfe_loader::clickhouse::ClickHouseQue
         transport: dfe_loader::clickhouse::Transport::Http,
         database: ch.database,
         username: ch.user,
-        password: ch.password,
+        password: ch.password.into(),
         tls: ch.tls,
         ..Default::default()
     };
