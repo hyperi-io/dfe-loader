@@ -1193,4 +1193,59 @@ mod tests {
         let result = parse_scalar_value("true");
         assert_eq!(result, Some(Value::Bool(true)));
     }
+
+    /// dfe-schemas' `directives.json` at tag v0.2.33-rc.3. The pin is recorded in `SOURCE` beside it.
+    const DFE_SCHEMAS_DIRECTIVES: &str =
+        include_str!("../../tests/fixtures/dfe-schemas/directives.json");
+
+    fn dfe_schemas_directives(group: &str) -> Vec<String> {
+        let schema: serde_json::Value =
+            serde_json::from_str(DFE_SCHEMAS_DIRECTIVES).expect("pinned directives.json parses");
+        schema[group]
+            .as_array()
+            .unwrap_or_else(|| panic!("directives.json has no \"{group}\" array"))
+            .iter()
+            .map(|v| v.as_str().expect("directive names are strings").to_string())
+            .collect()
+    }
+
+    #[test]
+    fn parser_names_match_dfe_schemas_loader_list() {
+        let mut parsed: Vec<String> = DIRECTIVE_NAMES
+            .iter()
+            .map(|name| String::from_utf8_lossy(name).into_owned())
+            .collect();
+        let mut expected = dfe_schemas_directives("loader");
+        parsed.sort();
+        expected.sort();
+        assert_eq!(
+            parsed, expected,
+            "DIRECTIVE_NAMES must equal the \"loader\" list in dfe-schemas directives.json"
+        );
+    }
+
+    #[test]
+    fn every_parser_name_is_read_by_parse_directives() {
+        for name in DIRECTIVE_NAMES {
+            let name = String::from_utf8_lossy(name);
+            let parsed = parse_directives(&format!("@{name}: probe"));
+            assert_ne!(
+                parsed,
+                ColumnDirectives::default(),
+                "parser ignores @{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn descriptive_directives_are_not_read_by_parse_directives() {
+        for name in dfe_schemas_directives("descriptive") {
+            let parsed = parse_directives(&format!("@{name}: probe"));
+            assert_eq!(
+                parsed,
+                ColumnDirectives::default(),
+                "parser reads @{name}, which dfe-schemas marks descriptive"
+            );
+        }
+    }
 }

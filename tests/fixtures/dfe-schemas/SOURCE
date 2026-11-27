@@ -1,0 +1,9 @@
+Pinned copy of dfe_schemas/directives.json from hyperi-io/dfe-schemas.
+
+Tag:     v0.2.33-rc.3
+Commit:  77103cc575a4b8bae1e23c214adf5706d84ecec1
+Blob:    82b14ae2c19463a5b588c6bd2861f049029dfd56
+sha256:  0ed41ac51dc7d0d7dee72ff30ab1127e7a09ceee25c782971c1bbd30af046945
+
+To refresh, copy the file from a newer dfe-schemas tag and update these lines.
+src/column_meta/mod.rs reads the copy through include_str!, so the test uses this pin and nothing else.
