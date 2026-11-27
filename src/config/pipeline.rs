@@ -133,12 +133,37 @@ pub struct RoutingConfig {
     /// Maps extracted source values to destination table names
     pub source_to_table: HashMap<String, String>,
 
+    /// Schema version of each table, keyed by table name. A reload that changes
+    /// a table's version re-reads its columns and column directives.
+    pub table_schema_versions: HashMap<String, String>,
+
+    /// Each deployed table's columns as its deploy created them, keyed by table
+    /// name. A listed table in `default_db` takes records from the first one, with
+    /// no wait on a schema read. `ClickHouse`'s own answer, read beside it,
+    /// replaces them.
+    pub table_schemas: HashMap<String, Vec<TableColumn>>,
+
     /// Topic suffixes to strip when deriving _source from Kafka topic name
     /// Example: topic "`auth_land`" with suffix "_land" → _source = "auth"
     pub topic_suffixes: Vec<String>,
 
     /// DLQ configuration
     pub dlq: DlqConfig,
+}
+
+/// One column of a deployed table, as `system.columns` lists it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct TableColumn {
+    pub name: String,
+    /// The `ClickHouse` type, for example `LowCardinality(String)`.
+    #[serde(rename = "type")]
+    pub ty: String,
+    /// `DEFAULT`, `MATERIALIZED` or `ALIAS`, empty for a column with no default.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub default_kind: String,
+    /// The column comment, which carries its directives.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub comment: String,
 }
 
 /// The tenant a record with no org of its own lands in, the same in every DFE component.
@@ -157,6 +182,8 @@ impl Default for RoutingConfig {
             org_routes: vec![],
             external_topics: vec![],
             source_to_table: HashMap::new(),
+            table_schema_versions: HashMap::new(),
+            table_schemas: HashMap::new(),
             topic_suffixes: vec!["_land".to_string(), "_load".to_string()],
             dlq: DlqConfig::default(),
         }
@@ -954,7 +981,7 @@ pub struct TimestampDqConfig {
     pub enabled: bool,
     pub max_future_seconds: i64,
     pub max_past_seconds: i64,
-    pub invalid_action: String,
+    pub invalid_action: InvalidTimestampAction,
     pub correct_known_bad: bool,
 }
 
@@ -964,10 +991,21 @@ impl Default for TimestampDqConfig {
             enabled: true,
             max_future_seconds: 600,
             max_past_seconds: 0, // 0 = no limit
-            invalid_action: "replace_with_now".to_string(),
+            invalid_action: InvalidTimestampAction::default(),
             correct_known_bad: true,
         }
     }
+}
+
+/// What the loader does with a timestamp that fails the data-quality checks.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum InvalidTimestampAction {
+    /// Replace the timestamp with the ingest time.
+    #[default]
+    ReplaceWithNow,
 }
 
 // ============================================================================
@@ -1313,8 +1351,10 @@ pub struct SchemaConfig {
     /// fetches each table once.
     pub pre_warm_retry_secs: u64,
     /// Max messages buffered per table while waiting for schema resolution.
-    /// On Kafka, excess messages route to DLQ with a security event. On gRPC,
-    /// a table at this cap stops intake until its schema resolves.
+    /// On Kafka, the cap starts once the table's first schema fetch answers,
+    /// and past it messages route to DLQ with a security event. Until then
+    /// they use free space under `pending_max_total`. On gRPC, a table at this cap stops
+    /// intake until its schema resolves.
     pub pending_max_per_table: usize,
     /// Max messages buffered across all tables.
     /// On Kafka, hitting this cap evicts the oldest entry FIFO across tables.

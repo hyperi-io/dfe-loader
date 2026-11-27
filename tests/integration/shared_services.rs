@@ -211,7 +211,7 @@ impl ClickHouseTarget {
             transport,
             database: database.to_string(),
             username: self.user.clone(),
-            password: self.password.clone(),
+            password: self.password.clone().into(),
             tls,
             ..Default::default()
         }
@@ -533,7 +533,15 @@ impl KafkaTarget {
             });
         let tls = self.security_protocol.contains("SSL").then(|| TlsConfig {
             enabled: true,
-            ca_cert_file: self.ca_file.clone(),
+            client: scalo::tls_config::ClientTlsConfig {
+                trust: if self.ca_file.is_some() {
+                    scalo::tls_config::TrustChoice::Bundle
+                } else {
+                    scalo::tls_config::TrustChoice::Native
+                },
+                ca_paths: self.ca_file.iter().map(std::path::PathBuf::from).collect(),
+                ..Default::default()
+            },
             ..Default::default()
         });
         KafkaConfig {

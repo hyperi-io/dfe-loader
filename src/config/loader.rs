@@ -9,7 +9,7 @@
 //!   3. Figment env vars, `__` nesting, either separator after the prefix
 //!      (`DFE_LOADER__KAFKA__BROKERS` or `DFE_LOADER_KAFKA__BROKERS`)
 //!   4. `./.env` in the working directory, read by scalo's cascade at startup
-//!   5. Config file specified by --config or `DFE_LOADER_CONFIG`
+//!   5. Config file specified by --config or `DFE_LOADER_CONFIG`, resolved by scalo's `run_app`
 //!   6. Hard-coded defaults
 
 use std::path::Path;
@@ -117,6 +117,10 @@ pub const TRANSPORT_GRPC: &str = "grpc";
 
 /// The config section a running loader reloads, named in the contract's `hot_paths`.
 pub const HOT_PATH_ROUTING: &str = "routing";
+
+/// The per-table capture modes dfe-engine compiles from sources, reloaded with the
+/// rest of `metadata`, so a source change rolls no pods.
+pub const HOT_PATH_CAPTURE: &str = "metadata.table_capture_modes";
 
 fn default_transport() -> String {
     TRANSPORT_KAFKA.to_string()
@@ -237,7 +241,7 @@ impl From<&ClickHouseConfig> for crate::clickhouse::ClickHouseConfig {
             insert_format: cfg.insert_format,
             database: cfg.database.clone(),
             username: cfg.username.clone(),
-            password: cfg.password.expose().to_string(),
+            password: cfg.password.clone(),
             tls,
             connect_timeout_ms: cfg.connect_timeout_ms,
             request_timeout_ms: cfg.request_timeout_ms,
@@ -556,15 +560,14 @@ impl Config {
     ///    (chart / deployment-contract form) or `DFE_LOADER_KAFKA__SASL__USERNAME`
     /// 4. `.env` file: the binary's `load_config` seeds scalo's cascade first,
     ///    which reads `./.env` and no parent directory's
-    /// 5. Config file (YAML, specified by `--config` or auto-detected)
+    /// 5. Config file (YAML): `config_path` is what scalo's `run_app` resolved from
+    ///    `--config` or `DFE_LOADER_CONFIG`, else auto-detected
     /// 6. Hard-coded defaults
     pub fn load(config_path: Option<&str>) -> Result<Self> {
         // 1. Start with hard-coded defaults
         let mut config = Config::default();
 
         // 2. Load YAML config file (overrides defaults).
-        let resolved = Self::resolve_config_path(config_path);
-        let config_path = resolved.as_deref();
         if let Some(path) = config_path {
             // A named file must be read: running on defaults instead hides a
             // missing mount, and a SIGHUP reload would swap them in live.
@@ -593,19 +596,6 @@ impl Config {
         config.register_sections();
 
         Ok(config)
-    }
-
-    /// Resolve the config file: `--config`, else `DFE_LOADER_CONFIG`.
-    ///
-    /// The env var is step 5 of this module's cascade and nothing read it --
-    /// scalo's `--config` arg carries no `env =`. The watcher resolves here too.
-    #[must_use]
-    pub fn resolve_config_path(cli_path: Option<&str>) -> Option<String> {
-        cli_path.map(String::from).or_else(|| {
-            std::env::var(format!("{ENV_PREFIX}_CONFIG"))
-                .ok()
-                .filter(|p| !p.is_empty())
-        })
     }
 
     /// Register all config sections in the global config registry.
@@ -663,10 +653,17 @@ impl Config {
         }
         // Of the borrowed Kafka TlsConfig shape only `enabled` reaches a client.
         if let Some(ref tls) = self.clickhouse.tls {
+            let unset = scalo::tls_config::ClientTlsConfig::default();
+            let client = &tls.client;
             let ignored: Vec<&str> = [
-                ("ca_cert_file", tls.ca_cert_file.is_some()),
-                ("cert_file", tls.cert_file.is_some()),
-                ("key_file", tls.key_file.is_some()),
+                ("profile", client.profile != unset.profile),
+                ("trust", client.trust != unset.trust),
+                ("ca_paths", !client.ca_paths.is_empty()),
+                ("client_cert_path", client.client_cert_path.is_some()),
+                ("client_key_path", client.client_key_path.is_some()),
+                ("pin_sha256", !client.pin_sha256.is_empty()),
+                ("server_name", client.server_name.is_some()),
+                ("key_share", client.key_share != unset.key_share),
                 ("skip_verify", tls.skip_verify),
             ]
             .into_iter()
@@ -826,8 +823,7 @@ impl Config {
     ///
     /// The dynamic insert applies fixed coercion rules
     /// (`docs/clickhouse/clickhouse-ext.md`), so the `coerce` column directive
-    /// stays unset, and an invalid timestamp is always replaced with the ingest
-    /// time.
+    /// stays unset.
     fn refuse_unread_settings(&self) -> Result<()> {
         let directives = &self.column_directives;
         if let Some(column) = directives
@@ -839,13 +835,6 @@ impl Config {
             return Err(crate::Error::Config(format!(
                 "column_directives: the coerce directive on {column} reaches no encoder -- \
                  the dynamic insert applies fixed coercion rules"
-            )));
-        }
-        if self.timestamp_dq.invalid_action != TimestampDqConfig::default().invalid_action {
-            return Err(crate::Error::Config(format!(
-                "timestamp_dq.invalid_action '{}' is not supported -- an invalid \
-                 timestamp is replaced with the ingest time (replace_with_now)",
-                self.timestamp_dq.invalid_action
             )));
         }
         Ok(())
@@ -895,7 +884,7 @@ impl Config {
                     .app_protocol("kubernetes.io/h2c"),
             ],
             // The watcher rebuilds routing on a reload, so an edit there need not roll the pods.
-            hot_paths: vec![HOT_PATH_ROUTING.into()],
+            hot_paths: vec![HOT_PATH_ROUTING.into(), HOT_PATH_CAPTURE.into()],
             entrypoint_args: vec!["--config".into(), "/etc/dfe/loader.yaml".into()],
             secrets: Self::secrets(),
             // Derived from Config::default(), NOT hand-authored: a json! literal
@@ -1067,6 +1056,10 @@ impl Config {
 }
 
 #[cfg(test)]
+#[allow(
+    unsafe_code,
+    reason = "the tests set the process env, unsafe in edition 2024"
+)]
 mod tests {
     use super::*;
 
@@ -1279,11 +1272,10 @@ mod tests {
     /// A setting no code reads, or a value the loader cannot use, is refused
     /// rather than accepted and ignored: an empty or missing topic suffix under
     /// discovery, an unknown risk preset, a risk score past 100, risk level
-    /// bands out of order, a `coerce` column directive, and any
-    /// `timestamp_dq.invalid_action` but the one the loader takes.
+    /// bands out of order, and a `coerce` column directive.
     #[test]
     fn a_setting_nothing_honours_is_refused() {
-        let cases: [(&str, fn(&mut Config)); 7] = [
+        let cases: [(&str, fn(&mut Config)); 6] = [
             ("routing.topic_suffixes must not hold an empty value", |c| {
                 c.routing.topic_suffixes.push(String::new());
             }),
@@ -1300,9 +1292,6 @@ mod tests {
             }),
             ("enrichment.risk_scoring.levels", |c| {
                 c.enrichment.risk_scoring.levels.high = 30;
-            }),
-            ("timestamp_dq.invalid_action", |c| {
-                c.timestamp_dq.invalid_action = "drop".into();
             }),
             ("coerce", |c| {
                 c.column_directives.global.insert(
@@ -2023,7 +2012,7 @@ kafka:
         assert_eq!(client_cfg.hosts, vec!["ch:9000"]);
         assert_eq!(client_cfg.database, "mydb");
         assert_eq!(client_cfg.username, "user");
-        assert_eq!(client_cfg.password, "pwd");
+        assert_eq!(client_cfg.password.expose(), "pwd");
         assert!(matches!(
             client_cfg.transport,
             crate::clickhouse::Transport::Native
@@ -2360,6 +2349,36 @@ kafka:
         assert!(err.to_string().contains("line 2"), "{err}");
     }
 
+    /// `timestamp_dq.invalid_action` takes `replace_with_now` only, and any
+    /// other value fails the parse rather than the later validation.
+    #[test]
+    fn an_invalid_action_other_than_replace_with_now_fails_the_parse() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let config_path = dir.path().join("timestamp_dq.yaml");
+        let path = config_path.to_str().unwrap();
+
+        std::fs::write(
+            &config_path,
+            "timestamp_dq:\n  invalid_action: replace_with_now\n",
+        )
+        .unwrap();
+        let config = parse_config_file(path).unwrap();
+        assert_eq!(
+            config.timestamp_dq.invalid_action,
+            crate::config::InvalidTimestampAction::ReplaceWithNow
+        );
+
+        for value in ["drop", "reject", "ReplaceWithNow", "\"\""] {
+            std::fs::write(
+                &config_path,
+                format!("timestamp_dq:\n  invalid_action: {value}\n"),
+            )
+            .unwrap();
+            let err = parse_config_file(path).expect_err(value).to_string();
+            assert!(err.contains("replace_with_now"), "{value}: {err}");
+        }
+    }
+
     // ========================================================================
     // ApplyFlatEnv trait -- direct testing (no process-wide env state)
     // ========================================================================
@@ -2445,14 +2464,20 @@ kafka:
         );
     }
 
-    /// A routing edit applies with no restart only where the watcher runs and
-    /// the chart leaves `routing` out of the pod's config checksum.
+    /// A routing or capture-mode edit applies with no restart only where the
+    /// watcher runs and the chart leaves both out of the pod's config checksum.
     #[test]
     fn a_routing_edit_reaches_a_running_pod() {
         assert!(Config::default().hot_reload.enabled);
 
         let contract = Config::deployment_contract();
-        assert_eq!(contract.hot_paths, vec!["routing".to_string()]);
+        assert_eq!(
+            contract.hot_paths,
+            vec![
+                "routing".to_string(),
+                "metadata.table_capture_modes".to_string()
+            ]
+        );
         assert!(
             !contract.config_mount_path.is_empty(),
             "a hot path needs a mounted config file to reload"

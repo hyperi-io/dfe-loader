@@ -72,8 +72,8 @@ DURATION="${PGO_WORKLOAD_DURATION_SECS:-300}"
 # services.clickhouse-version), pinned by digest so a rebuilt tag cannot change
 # the server. Digests sit on their own lines: the Renovate regex stops at a colon.
 # renovate: datasource=docker depName=redpandadata/redpanda
-KAFKA_TAG="v26.2.6"
-KAFKA_DIGEST="sha256:8b1076e0d61bfceb66594dc01536427ce0b529f8ead35fdab9763ab6085891ce"
+KAFKA_TAG="v26.2.7"
+KAFKA_DIGEST="sha256:43545ee03966431f5451e0b3c1e651b39fbe3eb383360220311021f50133b649"
 # renovate: datasource=docker depName=clickhouse/clickhouse-server
 CH_TAG="26.3.42.3"
 CH_DIGEST="sha256:21d572843e59539c7d100286b6f5a6053c341fe4b33c2d7b74b1ff7cb24c5399"
@@ -126,6 +126,18 @@ KAFKA_CID=""
 CH_CID=""
 CONFIG_DIR=""
 
+# A loader killed before it exits writes no .profraw, so it gets the
+# shutdown grace its deployment contract asks for.
+# The binary is instrumented, so these calls send their profile to /dev/null.
+CONTRACT_DIR="$(mktemp -d -t pgo-contract-XXXXXX)"
+env LLVM_PROFILE_FILE=/dev/null "${LOADER_BIN}" generate-artefacts --output-dir "${CONTRACT_DIR}" >/dev/null 2>&1 || true
+LOADER_GRACE="$(python3 -I -c 'import json, sys; print(json.load(open(sys.argv[1]))["termination_grace_seconds"])' "${CONTRACT_DIR}/deployment-contract.json" 2>/dev/null || true)"
+rm -rf "${CONTRACT_DIR}"
+if [[ ! "${LOADER_GRACE}" =~ ^[0-9]+$ ]]; then
+    echo "error: no termination_grace_seconds from the deployment contract that ${LOADER_BIN} generate-artefacts wrote (got '${LOADER_GRACE}')" >&2
+    exit 1
+fi
+
 cleanup() {
     local rc=$?
     if [[ "$KEEP" == "1" ]]; then
@@ -139,13 +151,19 @@ cleanup() {
     echo "pgo-workload: cleanup" >&2
     if [[ -n "$LOADER_PID" ]] && kill -0 "$LOADER_PID" 2>/dev/null; then
         kill -TERM "$LOADER_PID" 2>/dev/null || true
-        for _ in 1 2 3 4 5 6 7 8 9 10; do
-            if ! kill -0 "$LOADER_PID" 2>/dev/null; then
-                break
-            fi
+        local waited=0
+        while kill -0 "$LOADER_PID" 2>/dev/null && [[ "${waited}" -lt "${LOADER_GRACE}" ]]; do
             sleep 1
+            waited=$((waited + 1))
         done
-        kill -KILL "$LOADER_PID" 2>/dev/null || true
+        if kill -0 "$LOADER_PID" 2>/dev/null; then
+            echo "pgo-workload: loader still running ${LOADER_GRACE}s after SIGTERM, killing it; it writes no profile" >&2
+            tail -100 "$CONFIG_DIR/loader.log" >&2 || true
+            kill -KILL "$LOADER_PID" 2>/dev/null || true
+            rc=1
+        else
+            echo "pgo-workload: loader exited ${waited}s after SIGTERM" >&2
+        fi
     fi
     if [[ -n "$KAFKA_CID" ]]; then
         docker rm -f "$KAFKA_CID" >/dev/null 2>&1 || true

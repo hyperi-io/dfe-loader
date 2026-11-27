@@ -121,6 +121,12 @@ impl AbsentTables {
         self.entries.contains_key(table)
     }
 
+    /// Whether `ClickHouse` has answered that `table` does not exist, the
+    /// answer still held or being re-resolved.
+    pub fn answered_absent(&self, table: &str) -> bool {
+        self.entries.contains_key(table) || self.rechecking.contains_key(table)
+    }
+
     /// Replace the set of tables the live routing names, and drop the absent
     /// mark of each one. A routing reload naming a table says it is meant to
     /// exist, and the mark may predate the table being created. The caller

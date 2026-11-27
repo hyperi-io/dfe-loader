@@ -67,7 +67,7 @@ impl Target {
             transport: Transport::Http,
             database: "default".to_string(),
             username: "default".to_string(),
-            password: crate::common::containers::clickhouse_password(),
+            password: crate::common::containers::clickhouse_password().into(),
             tls: false,
             ..Default::default()
         })
@@ -233,12 +233,12 @@ async fn test_datetime_types() {
     );
     client.execute(&ddl).await.expect("Failed to create table");
 
-    let now = chrono::Utc::now();
+    let now = jiff::Timestamp::now();
     // DateTime64(3) accepts milliseconds integer or 'YYYY-MM-DD HH:MM:SS.mmm' string.
     // RFC3339 with timezone and sub-ms precision is not reliably supported.
-    let now_ms = now.timestamp_millis();
-    let now_str = now.format("%Y-%m-%d %H:%M:%S%.3f").to_string();
-    let today = now.format("%Y-%m-%d").to_string();
+    let now_ms = now.as_millisecond();
+    let now_str = now.strftime("%Y-%m-%d %H:%M:%S%.3f").to_string();
+    let today = now.strftime("%Y-%m-%d").to_string();
 
     let rows: Vec<serde_json::Map<String, serde_json::Value>> = vec![
         json!({"dt64_ms": now_ms, "date_col": &today})
@@ -404,13 +404,13 @@ async fn test_realistic_event_table() {
     client.execute(&ddl).await.expect("Failed to create table");
 
     let row_count: usize = 1000;
-    let now = chrono::Utc::now();
+    let now_ms = crate::common::epoch_millis();
     let event_types = ["login", "logout", "purchase", "view", "click"];
     let orgs = ["org1", "org2", "org3"];
 
     let rows: Vec<serde_json::Map<String, serde_json::Value>> = (0..row_count)
         .map(|i| {
-            let ts = now.timestamp_millis() + (i as i64 * 100);
+            let ts = now_ms + (i as i64 * 100);
             let user_id: serde_json::Value = if i % 10 == 0 {
                 serde_json::Value::Null
             } else {

@@ -123,7 +123,9 @@ Types are the `timeseries` profile's as dfe-schemas renders them. The loader rea
 
 [capture-modes.md](../pipeline/capture-modes.md) covers `_json` and `_raw`, and [routing.md](../pipeline/routing.md) covers `_org_id` and the topic's source.
 
-A numeric epoch is read by magnitude as seconds, milliseconds, microseconds or nanoseconds. A zoned text value, `2026-09-07T15:53:53.385+10:00` say, is rewritten as the UTC instant it names (`2026-09-07T05:53:53.385Z`), every fraction digit kept, so the offset is applied rather than dropped. The same rewrite applies to any `DateTime` or `DateTime64` column the header pass fills. `timestamp_dq` holds `_timestamp` to `max_future_seconds` (default 600) and `max_past_seconds` (default 0, no lower bound). A value outside them, or one that does not parse once `correct_known_bad` has tried the known bad forms, becomes the ingest time.
+A whole numeric epoch is read by magnitude as seconds, milliseconds, microseconds or nanoseconds, and a fractional one, `1788760433.5` say, is seconds, rewritten as the UTC text it names. A zoned text value, `2026-09-07T15:53:53.385+10:00` say, is rewritten as the UTC instant it names (`2026-09-07T05:53:53.385Z`), every fraction digit kept, so the offset is applied rather than dropped. The same rewrites apply to any `DateTime` or `DateTime64` column the header pass fills. `timestamp_dq` holds `_timestamp` to `max_future_seconds` (default 600) and `max_past_seconds` (default 0, no lower bound). A value outside them, or one that does not parse once `correct_known_bad` has tried the known bad forms, becomes the ingest time.
+
+A value no date-time reads, pmacct's `0000-00-00 00:00:00.000000` say, never fails the row. `_timestamp` and `_timestamp_received` take the ingest time, with `timestamp_dq` on or off, and any other date-time column leaves the value out, so its NULL or DEFAULT applies. Each one counts in `dfe_loader_timestamp_replaced_total{reason, column}`, and the value as sent stays in `_json` and `_raw` where the table keeps them.
 
 ## JSON columns take an object
 

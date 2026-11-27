@@ -87,9 +87,9 @@ impl ServiceApp for App {
         config: Self::Config,
         mut runtime: ServiceRuntime,
     ) -> impl std::future::Future<Output = Result<(), CliError>> + Send {
-        // Same resolution Config::load() uses, so a config file named by
-        // DFE_LOADER_CONFIG is hot-reloaded like one named by --config.
-        let config_path = Config::resolve_config_path(self.common_args().config.as_deref());
+        // The file run_app loaded, so one named by DFE_LOADER_CONFIG is
+        // hot-reloaded like one named by --config.
+        let config_path = self.common_args().config_path(self.env_prefix());
 
         async move {
             let mut config = config;
@@ -286,7 +286,8 @@ fn wants_heap_source(source: &scalo::memory::UsageSource) -> bool {
 
     match source {
         UsageSource::Reservations => true,
-        UsageSource::CgroupV2(_) | UsageSource::CgroupV1(_) | UsageSource::ProcStatus(_) => false,
+        // Every other source reads a kernel figure, including scalo's Windows working set.
+        _ => false,
     }
 }
 
@@ -325,6 +326,10 @@ async fn main() {
 }
 
 #[cfg(test)]
+#[allow(
+    unsafe_code,
+    reason = "the tests set the process env, unsafe in edition 2024"
+)]
 mod tests {
     use super::*;
 

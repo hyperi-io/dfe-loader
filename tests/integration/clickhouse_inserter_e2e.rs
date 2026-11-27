@@ -67,7 +67,7 @@ async fn spin_up(
         transport: Transport::Http,
         database: "default".to_string(),
         username: "default".to_string(),
-        password: crate::common::containers::clickhouse_password(),
+        password: crate::common::containers::clickhouse_password().into(),
         tls: false,
         ..Default::default()
     };
@@ -117,7 +117,7 @@ async fn spin_up_over(
         transport: Transport::Native,
         database: "default".to_string(),
         username: "default".to_string(),
-        password: crate::common::containers::clickhouse_password(),
+        password: crate::common::containers::clickhouse_password().into(),
         tls: false,
         ..Default::default()
     };
@@ -1882,7 +1882,7 @@ async fn test_inserter_with_offset_commit() {
 #[tokio::test(flavor = "multi_thread")]
 async fn test_client_http_create_database() {
     let (_infra, client, _ch) = spin_up(test_name!()).await;
-    let db = format!("testdb_{}", chrono::Utc::now().timestamp_millis());
+    let db = format!("testdb_{}", crate::common::epoch_millis());
 
     client
         .execute(&format!("CREATE DATABASE {db}"))

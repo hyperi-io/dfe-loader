@@ -22,9 +22,12 @@
 //! - Table existence checks
 //! - Health checks (ping)
 
+use std::fmt;
 use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use dfe_clickhouse::TcpClient;
@@ -36,6 +39,7 @@ use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::{TokioExecutor, TokioTimer};
 use rustc_hash::FxHashMap;
 use serde::Deserialize;
+use tower_service::Service;
 
 use super::config::{ClickHouseConfig, Timeouts};
 use super::error::ClickHouseError;
@@ -224,6 +228,78 @@ pub(crate) fn insert_sink(
         .with_timeouts(Some(timeouts.request), Some(timeouts.insert))
 }
 
+type BoxError = Box<dyn std::error::Error + Send + Sync>;
+
+/// A failed connect for the endpoint it was for.
+///
+/// The connector's own error says what failed -- a lookup, a refusal, a
+/// certificate -- but not for which host, and the client's text for it is
+/// `client error (Connect)`. This sits above the connector's error in the
+/// source chain, so every log line built from [`error_text`] names the host.
+///
+/// [`error_text`]: super::error::error_text
+#[derive(Debug)]
+struct ConnectFailed {
+    endpoint: Arc<str>,
+    source: BoxError,
+}
+
+impl fmt::Display for ConnectFailed {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "connecting to {}", self.endpoint)
+    }
+}
+
+impl std::error::Error for ConnectFailed {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.source.as_ref())
+    }
+}
+
+/// A connector that fails with [`ConnectFailed`] for the endpoint it was built for.
+#[derive(Clone)]
+struct AtEndpoint<C> {
+    endpoint: Arc<str>,
+    inner: C,
+}
+
+impl<C, R> Service<R> for AtEndpoint<C>
+where
+    C: Service<R>,
+    C::Response: Send,
+    C::Future: Send + 'static,
+    C::Error: Into<BoxError>,
+{
+    type Response = C::Response;
+    type Error = BoxError;
+    type Future = Pin<Box<dyn Future<Output = std::result::Result<C::Response, BoxError>> + Send>>;
+
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<std::result::Result<(), BoxError>> {
+        let endpoint = &self.endpoint;
+        self.inner.poll_ready(cx).map_err(|source| {
+            ConnectFailed {
+                endpoint: Arc::clone(endpoint),
+                source: source.into(),
+            }
+            .into()
+        })
+    }
+
+    fn call(&mut self, request: R) -> Self::Future {
+        let connecting = self.inner.call(request);
+        let endpoint = Arc::clone(&self.endpoint);
+        Box::pin(async move {
+            connecting.await.map_err(|source| {
+                ConnectFailed {
+                    endpoint,
+                    source: source.into(),
+                }
+                .into()
+            })
+        })
+    }
+}
+
 /// The HTTP client a `clickhouse::Client` sends through.
 ///
 /// HTTPS verifies the server's certificate and host name against the system
@@ -232,11 +308,16 @@ fn http_transport(config: &ClickHouseConfig) -> Result<clickhouse::Client> {
     let mut connector = HttpConnector::new();
     connector.set_keepalive(Some(TCP_KEEPALIVE));
     connector.set_connect_timeout(Some(config.connect_timeout()));
+    let endpoint: Arc<str> = config.primary_endpoint().unwrap_or_default().into();
     let mut pool = HyperClient::builder(TokioExecutor::new());
     // hyper-util evicts idle connections only when the pool has a timer.
     pool.pool_timer(TokioTimer::new())
         .pool_idle_timeout(POOL_IDLE_TIMEOUT);
     if !config.tls {
+        let connector = AtEndpoint {
+            endpoint,
+            inner: connector,
+        };
         return Ok(clickhouse::Client::with_http_client(pool.build(connector)));
     }
     connector.enforce_http(false);
@@ -250,6 +331,10 @@ fn http_transport(config: &ClickHouseConfig) -> Result<clickhouse::Client> {
         .https_only()
         .enable_http1()
         .wrap_connector(connector);
+    let https = AtEndpoint {
+        endpoint,
+        inner: https,
+    };
     Ok(clickhouse::Client::with_http_client(pool.build(https)))
 }
 
@@ -291,7 +376,7 @@ pub fn build_client(config: &ClickHouseConfig) -> Result<ChClient> {
                 .with_user(&config.username)
                 .with_database(&config.database);
             if !config.password.is_empty() {
-                c = c.with_password(&config.password);
+                c = c.with_password(config.password.expose());
             }
             ChClient::Http(c)
         }
@@ -330,7 +415,7 @@ fn native_transport(config: &ClickHouseConfig, endpoint: &str) -> TcpClient {
         .with_pool_create_timeout(Some(config.connect_timeout()))
         .with_read_timeout(Some(config.timeouts().request));
     if !config.password.is_empty() {
-        client = client.with_password(&config.password);
+        client = client.with_password(config.password.expose());
     }
     client
 }
@@ -1157,7 +1242,7 @@ mod tests {
         let config = ClickHouseConfig {
             hosts: hosts.iter().map(ToString::to_string).collect(),
             transport: super::super::config::Transport::Native,
-            password: password.to_string(),
+            password: password.into(),
             tls,
             ..Default::default()
         };
@@ -1198,7 +1283,7 @@ mod tests {
             transport: super::super::config::Transport::Http,
             database: "db".to_string(),
             username: "user".to_string(),
-            password: "s3cret!@#$".to_string(),
+            password: "s3cret!@#$".into(),
             ..Default::default()
         };
         let client = ClickHouseQueryClient::new(&config).unwrap();
@@ -1244,7 +1329,7 @@ mod tests {
         // Empty password (explicit or default) bypasses the with_password() call.
         let mut http_config = ClickHouseConfig::default();
         http_config.transport = super::super::config::Transport::Http;
-        http_config.password = String::new();
+        http_config.password = scalo::config::sensitive::SensitiveString::default();
         assert!(ClickHouseQueryClient::new(&http_config).is_ok());
     }
 
@@ -1459,5 +1544,94 @@ mod tests {
             elapsed >= Duration::from_millis(250) && elapsed < Duration::from_secs(3),
             "the query gave up after {elapsed:?}, not at its 300 ms bound"
         );
+    }
+
+    /// The text a health check against `config` fails with, bounded so a
+    /// resolver that never answers fails the test and does not hang it.
+    async fn health_check_failure(config: &ClickHouseConfig) -> String {
+        let client = ClickHouseQueryClient::new(config).unwrap();
+        tokio::time::timeout(Duration::from_secs(20), client.health_check())
+            .await
+            .expect("the health check ran past 20 s")
+            .expect_err("the health check reported success")
+            .to_string()
+    }
+
+    /// A TLS server whose certificate no trust store holds, so a verifying
+    /// client refuses it mid-handshake.
+    fn self_signed_tls_server() -> SocketAddr {
+        let certified = rcgen::generate_simple_self_signed(vec!["127.0.0.1".to_string()]).unwrap();
+        let key =
+            rustls::pki_types::PrivatePkcs8KeyDer::from(certified.signing_key.serialize_der());
+        let tls = Arc::new(
+            rustls::ServerConfig::builder_with_provider(Arc::new(
+                rustls::crypto::aws_lc_rs::default_provider(),
+            ))
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_no_client_auth()
+            .with_single_cert(vec![certified.cert.der().clone()], key.into())
+            .unwrap(),
+        );
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let (mut tcp, _) = listener.accept().unwrap();
+            let mut conn = rustls::ServerConnection::new(tls).unwrap();
+            // The client aborts on the certificate, so this ends in an error.
+            while conn.is_handshaking() && conn.complete_io(&mut tcp).is_ok() {}
+        });
+        addr
+    }
+
+    #[tokio::test]
+    async fn a_refused_connection_names_the_address_it_was_refused_at() {
+        let closed = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = closed.local_addr().unwrap();
+        drop(closed);
+
+        let text = health_check_failure(&http_config(addr, 2_000, 2_000)).await;
+
+        assert!(text.contains(&format!("connecting to {addr}")), "{text}");
+        assert!(text.contains("Connection refused"), "{text}");
+        assert!(!text.contains("dns error"), "{text}");
+        assert!(!text.contains("certificate"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn a_name_that_does_not_resolve_is_reported_as_a_lookup_failure() {
+        // `.invalid` never resolves (RFC 6761), with or without network.
+        let config = ClickHouseConfig {
+            hosts: vec!["clickhouse.invalid:8123".to_string()],
+            transport: super::super::config::Transport::Http,
+            database: "default".to_string(),
+            connect_timeout_ms: 2_000,
+            request_timeout_ms: 2_000,
+            ..Default::default()
+        };
+
+        let text = health_check_failure(&config).await;
+
+        assert!(
+            text.contains("connecting to clickhouse.invalid:8123"),
+            "{text}"
+        );
+        assert!(text.contains("dns error"), "{text}");
+        assert!(!text.contains("Connection refused"), "{text}");
+        assert!(!text.contains("certificate"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn an_untrusted_certificate_is_reported_with_the_verify_error() {
+        let addr = self_signed_tls_server();
+        let mut config = http_config(addr, 2_000, 2_000);
+        config.tls = true;
+
+        let text = health_check_failure(&config).await;
+
+        assert!(text.contains(&format!("connecting to {addr}")), "{text}");
+        assert!(text.contains("invalid peer certificate"), "{text}");
+        assert!(!text.contains("dns error"), "{text}");
+        assert!(!text.contains("Connection refused"), "{text}");
     }
 }

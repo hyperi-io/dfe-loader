@@ -15,10 +15,6 @@ quality:
     - tool: osv-scanner
       id: RUSTSEC-2024-0436
       reason: "paste (dtolnay) unmaintained, no replacement; transitive dep. Mirrors the deny.toml ignore. Drop when a maintained fork lands."
-    # No RustSec entry, so deny.toml needs no matching ignore.
-    - tool: osv-scanner
-      id: GHSA-w9wp-h8wv-79jx
-      reason: "CVE-2026-48504, opentelemetry_sdk 0.31.0 via scalo: unreachable, no Baggage propagator is registered in dfe-loader or scalo. Accepted risk in dfe-infra docs/THREAT-MODEL.md. Blocked on metrics-exporter-opentelemetry 0.2.1 requiring opentelemetry ^0.31; tracked in hyperi-io/scalo-rs#281."
   # Rust: test specific feature sets (avoids --all-features conflicts).
   rust:
     features:
@@ -59,11 +55,12 @@ build:
 # docs/deployment/publishing.md describes the release artefacts.
 release:
   enabled: true
+  candidates: true
   # Keep `library` at the scalo version in Cargo.toml: the library renders only the contract version its scalo release writes.
   helm:
     enabled: true
     contract: emit
-    library: "2.14.32"
+    library: "2.14.40"
   container:
     enabled: true
     dockerfile: Dockerfile

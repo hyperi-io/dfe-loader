@@ -627,7 +627,7 @@ pub fn create_http_test_client() -> Option<dfe_loader::clickhouse::ClickHouseQue
         transport: dfe_loader::clickhouse::Transport::Http,
         database: ch.database,
         username: ch.user,
-        password: ch.password,
+        password: ch.password.into(),
         tls: ch.tls,
         ..Default::default()
     };
@@ -670,14 +670,25 @@ pub async fn drop_http_test_table(
 // Test Data Generators
 // ============================================================================
 
+/// Milliseconds since the Unix epoch.
+pub fn epoch_millis() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| {
+            i64::try_from(since.as_millis()).unwrap_or(i64::MAX)
+        })
+}
+
+/// The current time as RFC 3339 text with a `+00:00` offset.
+pub fn now_rfc3339() -> String {
+    jiff::Timestamp::now()
+        .display_with_offset(jiff::tz::Offset::UTC)
+        .to_string()
+}
+
 /// Create a unique test table name (bare, no database).
 pub fn unique_table_name(prefix: &str) -> String {
-    format!(
-        "{}_{}_{}",
-        prefix,
-        std::process::id(),
-        chrono::Utc::now().timestamp_millis()
-    )
+    format!("{}_{}_{}", prefix, std::process::id(), epoch_millis())
 }
 
 /// Unique test table name qualified with the configured database.
@@ -709,7 +720,7 @@ pub fn generate_sample_event(id: u64, category: &str) -> Value {
             "source": "integration_test"
         },
         "value": id as f64 * 1.5,
-        "timestamp": chrono::Utc::now().to_rfc3339()
+        "timestamp": now_rfc3339()
     })
 }
 

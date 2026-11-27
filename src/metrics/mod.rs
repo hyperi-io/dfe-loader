@@ -57,6 +57,10 @@ pub mod names {
     /// Computed columns left unset, by `table`, `column` and `stage` (`compile`, `context`, `eval`).
     pub const COMPUTED_EVAL_FAILURES_TOTAL: &str = name!("computed_eval_failures_total");
 
+    /// Date-time values the loader replaced (`_timestamp`, with the ingest time) or left out (any other
+    /// column, so its NULL or DEFAULT applies), by `reason` (`unparseable`, `out_of_bounds`) and schema `column`.
+    pub const TIMESTAMP_REPLACED_TOTAL: &str = name!("timestamp_replaced_total");
+
     pub const MESSAGES_BY_TABLE_TOTAL: &str = name!(legacy "messages_by_table_total");
     pub const JSON_MAX_PATHS_EXCEEDED_TOTAL: &str = name!(legacy "json_max_paths_exceeded_total");
     pub const BUFFER_ROWS_BY_TABLE: &str = name!(legacy "buffer_rows_by_table");
@@ -216,6 +220,12 @@ impl Metrics {
         let _ = manager.counter(
             names::FIELDS_UNSTORED_TOTAL,
             "Payload fields that matched no column, in a table with no _json column to keep them",
+        );
+        let _ = manager.counter_with_labels(
+            names::TIMESTAMP_REPLACED_TOTAL,
+            "Date-time values replaced with the ingest time (_timestamp) or left out (other columns), by reason (unparseable, out_of_bounds) and column",
+            &["reason", "column"],
+            "transform",
         );
         let _ = manager.counter_with_labels(
             names::COMPUTED_EVAL_FAILURES_TOTAL,
@@ -506,7 +516,8 @@ impl Metrics {
     }
 
     /// Record `n` messages re-routed to the default table because `ClickHouse`
-    /// confirmed their destination table does not exist.
+    /// confirmed their destination table does not exist, or, under
+    /// `table="unlisted"`, because no deployed source owns it.
     ///
     /// Counted in bulk per table per batch: steady-state fallback traffic is
     /// the part that matters, and a per-row call would allocate the label on
@@ -875,6 +886,7 @@ mod tests {
             "dfe_loader_routing_field_absent_total",
             "dfe_loader_fields_unstored_total",
             "dfe_loader_computed_eval_failures_total",
+            "dfe_loader_timestamp_replaced_total",
             "loader_external_org_id_replaced_total",
             "loader_external_source_replaced_total",
             "dfe_loader_batched_array_messages_total",

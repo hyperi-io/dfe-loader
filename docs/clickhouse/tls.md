@@ -117,7 +117,7 @@ A private CA is trusted the way the system trusts it: add it to the image's trus
 
 A trust store with no readable CA certificate fails the client at startup instead of connecting unverified.
 
-`clickhouse.tls.ca_cert_file`, `cert_file`, `key_file` and `skip_verify` are refused by `config-check` and at startup: no client reads them. There is no skip-verify mode and no client-certificate (mTLS) auth.
+`clickhouse.tls.ca_paths`, `client_cert_path`, `client_key_path`, `skip_verify` and the other `tls` keys are refused by `config-check` and at startup: no client reads them. There is no skip-verify mode and no client-certificate (mTLS) auth.
 
 A private-CA cluster:
 

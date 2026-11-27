@@ -18,16 +18,13 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use backon::{BackoffBuilder, ExponentialBuilder};
 use rustc_hash::{FxHashMap, FxHashSet};
+use scalo::backoff::{Backoff, Delays};
 use scalo::dlq::DlqEntry;
 use scalo::sink_stack::SinkStackConfig;
 use tokio::time::Instant;
 
 use crate::buffer::{FlushBatch, KafkaOffset, Purged};
-
-/// The delay schedule `ExponentialBuilder` produces.
-type Schedule = <ExponentialBuilder as BackoffBuilder>::Backoff;
 
 /// Topic, partition and offset of a batch's first row.
 type FirstRow = (Arc<str>, i32, i64);
@@ -48,8 +45,8 @@ pub(crate) struct Unsettled {
     /// The lowest offset per partition of rows this process no longer holds,
     /// which only a re-read from Kafka after a restart can place.
     awaiting_reread: Vec<KafkaOffset>,
-    builder: ExponentialBuilder,
-    schedule: Schedule,
+    backoff: Backoff,
+    schedule: Delays,
     retry_at: Option<Instant>,
 }
 
@@ -127,22 +124,21 @@ fn lowest_per_partition<'a>(
 }
 
 impl Unsettled {
-    /// An empty hold whose attempts are never further apart than `max_delay`
-    /// before jitter.
+    /// An empty hold whose attempts are never further apart than `max_delay`.
     pub(crate) fn new(max_delay: Duration) -> Self {
         let config = SinkStackConfig {
             max_backoff_ms: u64::try_from(max_delay.as_millis()).unwrap_or(u64::MAX),
             ..SinkStackConfig::default()
         };
         // A held row has no other copy, so the schedule never runs out.
-        let builder = config.backoff().without_max_times();
+        let backoff = config.backoff();
         Self {
             batches: Vec::new(),
             first_held: FxHashMap::default(),
             dead_letters: Vec::new(),
             awaiting_reread: Vec::new(),
-            builder,
-            schedule: builder.build(),
+            backoff,
+            schedule: backoff.delays(),
             retry_at: None,
         }
     }
@@ -259,10 +255,10 @@ impl Unsettled {
         self.first_held.retain(|first, _| held.contains(first));
         if self.is_empty() {
             self.retry_at = None;
-            self.schedule = self.builder.build();
+            self.schedule = self.backoff.delays();
         } else if self.retry_at.is_none() {
-            // `without_max_times` makes the schedule endless; the fallback is
-            // unreachable and only keeps the hold from spinning if it were not.
+            // `delays()` is endless, so the fallback is unreachable and only
+            // keeps the hold from spinning if it were not.
             let delay = self.schedule.next().unwrap_or(Duration::from_secs(1));
             self.retry_at = Some(Instant::now() + delay);
         }
@@ -312,16 +308,15 @@ mod tests {
         let mut held = Unsettled::new(Duration::from_secs(5));
         held.hold(batch(3));
         held.rearm();
-        // Jitter adds up to the delay again, so the first attempt lands inside
-        // twice the schedule's first step.
-        tokio::time::timeout(Duration::from_millis(200), held.due())
+        // Jitter is +/-20%, so the first attempt lands inside 120 ms.
+        tokio::time::timeout(Duration::from_millis(120), held.due())
             .await
-            .expect("the first attempt was not due within twice the minimum delay");
+            .expect("the first attempt was not due within the jittered first step");
         assert_eq!(held.rows(), 3);
     }
 
     #[tokio::test(start_paused = true)]
-    async fn attempts_back_off_but_never_past_twice_the_cap() {
+    async fn attempts_back_off_but_never_past_the_cap() {
         let mut held = Unsettled::new(Duration::from_secs(5));
         let mut previous = Duration::ZERO;
         let mut grew = false;
@@ -331,7 +326,7 @@ mod tests {
             let start = Instant::now();
             held.due().await;
             let waited = start.elapsed();
-            assert!(waited <= Duration::from_secs(10), "waited {waited:?}");
+            assert!(waited <= Duration::from_secs(5), "waited {waited:?}");
             grew |= waited > previous;
             previous = waited;
             let _ = held.take();

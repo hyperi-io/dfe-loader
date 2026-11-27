@@ -147,7 +147,7 @@ HTTPS verifies the server's certificate and host name against the container's sy
 | Setting | Values | Effect |
 |---------|--------|--------|
 | `clickhouse.tls.enabled` | bool | TLS for the connection: HTTPS, or native TLS. When `clickhouse.tls` is absent, a host on 8443/9440 or under `clickhouse.cloud` turns it on |
-| `clickhouse.tls.ca_cert_file`, `cert_file`, `key_file`, `skip_verify` | -- | refused at startup: no client reads them |
+| `clickhouse.tls.ca_paths`, `client_cert_path`, `client_key_path`, `skip_verify` and the other `tls` keys | -- | refused at startup: no client reads them |
 
 See [clickhouse/tls.md](clickhouse/tls.md).
 
@@ -223,7 +223,7 @@ Config hot-reloads on change: `hot_reload.enabled` is on unless set false, and t
 - Restart-required, with a warning: `transport`, `kafka`, `grpc`, `clickhouse` (protocol, hosts, `insert_format`, TLS and the timeouts are built into the client), `payload`, `metrics`, `logging`, `scaling`, `hot_reload`, `schema`, `geoip`, `computed_columns`, `column_directives`, `routing.dlq`, `dlq_load`, `field_mapping` and `enrichment`.
 - Restart-required, with no warning: `memory` and `batch_processing`. scalo's runtime builds the memory guard and the batch engine from them once, at startup (`ServiceRuntime` in scalo-rs `src/cli/runtime.rs`).
 
-On Kubernetes the deployment contract lists `routing` in `hot_paths`, so the chart leaves it out of the pod's config checksum. A `routing` edit reaches the running pods through the refreshed ConfigMap, and an edit anywhere else still rolls them.
+On Kubernetes the deployment contract lists `routing` and `metadata.table_capture_modes` in `hot_paths`, so the chart leaves both out of the pod's config checksum. An edit to either reaches the running pods through the refreshed ConfigMap, and an edit anywhere else still rolls them.
 
 ## Verifying config drives behaviour
 

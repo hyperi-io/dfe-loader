@@ -9,16 +9,16 @@
 //!
 //! ## What this does NOT do
 //!
-//! - No flattening — a dotted source path is walked in place, never materialised
-//! - No `_json` injection — that is spliced zero-copy at serialisation time
-//! - No coercion — the `RowBinary` encoder reshapes values at insert
+//! - No flattening: a dotted source path is walked in place, never materialised
+//! - No `_json` injection: that is spliced zero-copy at serialisation time
+//! - No coercion: the `RowBinary` encoder reshapes values at insert
 //!
 //! ## Column handling
 //!
 //! | Column | Behaviour |
 //! |---|---|
-//! | `_uuid`, `_timestamp_load` | Skipped — ClickHouse DEFAULT generates these |
-//! | `_json` | Skipped — zero-copy splice at serialisation time, unless a `@source` directive names the field it reads, `{}` when that field is absent |
+//! | `_uuid`, `_timestamp_load` | Skipped: ClickHouse DEFAULT generates these |
+//! | `_json` | Skipped: zero-copy splice at serialisation time, unless a `@source` directive names the field it reads, `{}` when that field is absent |
 //! | `_org_id` | `routing.org_id_field` alone, never a directive. Absent, null or empty is `routing.default_org_id` |
 //! | `_source` | A null or empty value reads as absent, so the column's fallback applies |
 //! | `_timestamp_received` | The first hop's `_timestamp_received` stamp, then the directive's fields, then current UTC time |
@@ -39,17 +39,18 @@
 
 use std::sync::Arc;
 
-use chrono::{SubsecRound, Utc};
+use jiff::Timestamp;
 use parking_lot::RwLock;
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde_json::{Map, Value};
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::datetime::{self, utc_text};
 
 use crate::clickhouse::TableSchema;
 use crate::column_meta::{ColumnMetaCache, TOPIC_NAME_MARKER};
 use crate::config::{MetadataConfig, RoutingConfig, TimestampDqConfig};
+use crate::metrics::names;
 use crate::transform::timestamp::{TimestampResult, TimestampValidator};
 
 /// The reason a payload that parsed promoted nothing.
@@ -94,7 +95,7 @@ impl HeaderExtraction {
 pub(super) enum Sources<'a> {
     /// The column takes no value from the payload.
     None,
-    /// Try each path in order; the first one present wins.
+    /// Try each path in order, and the first one present wins.
     List(&'a [String]),
     /// Try the first path, then the second when there is one.
     Pair(&'a str, Option<&'a str>),
@@ -160,7 +161,7 @@ impl TablePlan {
     /// Whether the plan still describes this schema and directive generation.
     ///
     /// An ALTER that adds, drops or renames a column changes the name list, and
-    /// a changed COMMENT bumps the DDL generation; either rebuilds the plan
+    /// a changed COMMENT bumps the DDL generation. Either rebuilds the plan
     /// rather than leaving a new collision undetected.
     fn is_current(&self, schema: &TableSchema, ddl_version: u64) -> bool {
         self.ddl_version == ddl_version
@@ -306,25 +307,62 @@ impl HeaderExtractor {
         &self,
         validator: &TimestampValidator,
         value: &Value,
-        now: &chrono::DateTime<Utc>,
+        now: &Timestamp,
     ) -> String {
-        let result = match value {
+        // Whether the value named an instant, so a rejection is the bounds' and not the text's.
+        let (result, named_instant) = match value {
             Value::String(text) => match datetime::parse(text).ok().and_then(instant_time) {
-                Some(dt) => validator.check_bounds_with_now(dt, *now),
-                None => validator.validate_with_now(text, *now),
+                Some(dt) => (validator.check_bounds_with_now(dt, *now), true),
+                None => (validator.validate_with_now(text, *now), false),
             },
-            Value::Number(n) => epoch_time(n).map_or_else(
-                || TimestampResult::Invalid(format!("Invalid epoch: {n}")),
-                |dt| validator.check_bounds_with_now(dt, *now),
+            Value::Number(n) => match epoch_time(n) {
+                Some(dt) => (validator.check_bounds_with_now(dt, *now), true),
+                None => (
+                    TimestampResult::Invalid(format!("Invalid epoch: {n}")),
+                    false,
+                ),
+            },
+            _ => (
+                TimestampResult::Invalid("Timestamp must be string or number".into()),
+                false,
             ),
-            _ => TimestampResult::Invalid("Timestamp must be string or number".into()),
         };
         match result {
             TimestampResult::Valid(dt) | TimestampResult::Corrected(dt, _) => utc_text(&dt),
             TimestampResult::Invalid(reason) => {
                 debug!(reason = %reason, "_timestamp replaced with the ingest time");
+                count_timestamp_replaced(
+                    if named_instant {
+                        OUT_OF_BOUNDS
+                    } else {
+                        UNPARSEABLE
+                    },
+                    "_timestamp",
+                );
                 utc_text(now)
             }
+        }
+    }
+
+    /// `_timestamp` with `timestamp_dq` off: a value the insert cannot read
+    /// lands as the ingest time, every other value as it came.
+    fn unchecked_timestamp(map: &mut Map<String, Value>, name: &str, now: &Timestamp) {
+        if map.get(name).is_some_and(is_readable_datetime) {
+            normalise_datetime(map, name);
+        } else if let Some(value) = map.get_mut(name) {
+            count_timestamp_replaced(UNPARSEABLE, name);
+            *value = Value::String(utc_text(now));
+        }
+    }
+
+    /// A date-time column other than `_timestamp`: a value the insert cannot
+    /// read is left out, so the column's own NULL or DEFAULT applies, and every
+    /// other value is normalised as it came.
+    fn keep_readable_datetime(map: &mut Map<String, Value>, name: &str) {
+        if map.get(name).is_some_and(is_readable_datetime) {
+            normalise_datetime(map, name);
+        } else if map.remove(name).is_some() {
+            count_timestamp_replaced(UNPARSEABLE, name);
         }
     }
 
@@ -405,17 +443,17 @@ impl HeaderExtractor {
     /// Extract promoted fields from raw JSON bytes using schema column guidance.
     ///
     /// Parses the payload once with `sonic_rs::from_slice`, then performs O(1)
-    /// hash lookups per schema column. Returns only promoted fields — `_json` is
+    /// hash lookups per schema column. Returns only promoted fields: `_json` is
     /// NOT included (spliced zero-copy at serialisation time).
     ///
     /// Column directives are read from `col_meta` with full config cascade:
     /// per-table config > global config > DDL `@directive` annotations.
     ///
-    /// A pass that promotes nothing carries the reason back to the caller; the
+    /// A pass that promotes nothing carries the reason back to the caller. The
     /// caller owns the rejection, so it owns the log and the counter (#145).
     ///
     /// `topic_source` is the source this message's topic names, which the
-    /// `topic_name` fallback resolves to; `None` or an empty label leaves that
+    /// `topic_name` fallback resolves to. `None` or an empty label leaves that
     /// fallback unresolved and the column absent.
     pub fn extract(
         &self,
@@ -457,7 +495,7 @@ impl HeaderExtractor {
         stage_inputs: impl IntoIterator<Item = &'s str>,
     ) -> HeaderExtraction {
         // Ingest time is stamped to the millisecond.
-        let now = Utc::now().trunc_subsecs(3);
+        let now = datetime::ingest_now();
         let mut map = Map::with_capacity(schema.columns.len());
         let plan = self.plan_for(table, schema, col_meta);
         let contended = &plan.contended;
@@ -474,7 +512,7 @@ impl HeaderExtractor {
         for col in &schema.columns {
             let name = &col.name;
 
-            // ClickHouse generates these — never inject from source data.
+            // ClickHouse generates these, so source data never fills them.
             if matches!(name.as_str(), "_uuid" | "_timestamp_load") || is_generated(col) {
                 continue;
             }
@@ -511,7 +549,11 @@ impl HeaderExtractor {
                     let found = self
                         .sources_for(name, &directives.renamed, false)
                         .try_each(|path| take_path(&mut parsed, path, name, &mut map, contended));
-                    if found && !map.get(name.as_str()).is_some_and(Value::is_null) {
+                    let stamp = map.get(name.as_str());
+                    if found && stamp.is_some_and(|v| !v.is_null() && !is_readable_datetime(v)) {
+                        count_timestamp_replaced(UNPARSEABLE, name);
+                        map.insert(name.clone(), Value::String(utc_text(&now)));
+                    } else if found && !stamp.is_some_and(Value::is_null) {
                         normalise_datetime(&mut map, name);
                     } else {
                         map.insert(name.clone(), Value::String(utc_text(&now)));
@@ -521,7 +563,7 @@ impl HeaderExtractor {
             }
 
             // _timestamp: the fields its directive names, fall back to now() if missing.
-            // The column is NOT Nullable and has no DEFAULT — omitting it would
+            // The column is NOT Nullable and has no DEFAULT, so omitting it would
             // produce 1970-01-01 00:00:00.000 (epoch zero).
             if name == "_timestamp" {
                 let directives = col_meta.get(table, name);
@@ -534,7 +576,7 @@ impl HeaderExtractor {
                     let checked = self.checked_timestamp(validator, &map[name.as_str()], &now);
                     map.insert(name.clone(), Value::String(checked));
                 } else {
-                    normalise_datetime(&mut map, name);
+                    Self::unchecked_timestamp(&mut map, name, &now);
                 }
                 continue;
             }
@@ -562,7 +604,7 @@ impl HeaderExtractor {
             {
                 map.insert(name.clone(), value);
             } else if found && is_datetime(col) {
-                normalise_datetime(&mut map, name);
+                Self::keep_readable_datetime(&mut map, name);
             }
         }
 
@@ -611,16 +653,75 @@ fn is_generated(col: &crate::clickhouse::types::ColumnInfo) -> bool {
     matches!(col.default_kind.as_str(), "MATERIALIZED" | "ALIAS")
 }
 
+/// `reason` label of a `_timestamp` the insert could not read.
+const UNPARSEABLE: &str = "unparseable";
+/// `reason` label of a `_timestamp` that named an instant outside `timestamp_dq`'s bounds.
+const OUT_OF_BOUNDS: &str = "out_of_bounds";
+
+/// Count a date-time value the loader replaced or left out, and say so at most once a minute.
+///
+/// `column` is a schema column name, so the label set is bounded by the tables' DDL and never
+/// by record values. The original value stays in `_json` and `_raw` where the table captures them.
+fn count_timestamp_replaced(reason: &'static str, column: &str) {
+    metrics::counter!(
+        names::TIMESTAMP_REPLACED_TOTAL,
+        "reason" => reason,
+        "column" => column.to_string()
+    )
+    .increment(1);
+    static REPLACED_TS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    if scalo::logger::log_debounced(&REPLACED_TS, 60_000) {
+        warn!(
+            reason = reason,
+            column = column,
+            "date-time value replaced or left out (max 1 per 60s), see dfe_loader_timestamp_replaced_total"
+        );
+    }
+}
+
+/// Whether the insert reads the value as a date-time once [`normalise_datetime`] has run: text in
+/// the form `datetime::parse` reads, numeric text, or an epoch number. A null is the insert's own
+/// default.
+fn is_readable_datetime(value: &Value) -> bool {
+    match value {
+        Value::String(text) => {
+            let text = text.trim();
+            datetime::parse(text).is_ok() || text.parse::<i64>().is_ok()
+        }
+        Value::Number(n) => whole_epoch(n).is_some() || epoch_time(n).is_some(),
+        Value::Null => true,
+        _ => false,
+    }
+}
+
+/// The number as the encoder takes an epoch: an integer, or a whole float in `i64` range.
+fn whole_epoch(n: &serde_json::Number) -> Option<i64> {
+    n.as_i64().or_else(|| {
+        n.as_f64()
+            .filter(|f| f.fract() == 0.0 && *f >= i64::MIN as f64 && *f < -(i64::MIN as f64))
+            .map(|f| f as i64)
+    })
+}
+
+/// The instant a fractional epoch number names. The encoder refuses a fractional number.
+fn fractional_epoch(value: &Value) -> Option<Timestamp> {
+    match value {
+        Value::Number(n) if whole_epoch(n).is_none() => epoch_time(n),
+        _ => None,
+    }
+}
+
 /// The instant parsed date-time text names.
-fn instant_time(instant: datetime::UtcInstant) -> Option<chrono::DateTime<Utc>> {
-    chrono::DateTime::from_timestamp(instant.secs, instant.nanos)
+fn instant_time(instant: datetime::UtcInstant) -> Option<Timestamp> {
+    Timestamp::new(instant.secs, i32::try_from(instant.nanos).ok()?).ok()
 }
 
 /// A numeric epoch as an instant, its unit told by magnitude as the encoder
 /// tells it: seconds, then milliseconds past 10^12, microseconds past 10^15 and
-/// nanoseconds past 10^18. A fractional number is seconds.
-fn epoch_time(n: &serde_json::Number) -> Option<chrono::DateTime<Utc>> {
-    if let Some(ts) = n.as_i64() {
+/// nanoseconds past 10^18. A whole float is told the same way, and a fractional
+/// number is seconds.
+fn epoch_time(n: &serde_json::Number) -> Option<Timestamp> {
+    if let Some(ts) = whole_epoch(n) {
         let per_second: i64 = match ts.unsigned_abs() {
             m if m > 1_000_000_000_000_000_000 => 1_000_000_000,
             m if m > 1_000_000_000_000_000 => 1_000_000,
@@ -628,20 +729,16 @@ fn epoch_time(n: &serde_json::Number) -> Option<chrono::DateTime<Utc>> {
             _ => 1,
         };
         let nanos = ts.rem_euclid(per_second) * (1_000_000_000 / per_second);
-        return chrono::DateTime::from_timestamp(
-            ts.div_euclid(per_second),
-            u32::try_from(nanos).ok()?,
-        );
+        return Timestamp::new(ts.div_euclid(per_second), i32::try_from(nanos).ok()?).ok();
     }
     let secs = n.as_f64().filter(|f| f.is_finite())?;
     let whole = secs.floor();
     #[allow(
         clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        reason = "the whole part is range-checked by from_timestamp, the fraction is in [0, 1)"
+        reason = "the whole part is range-checked by Timestamp::new, the fraction is in [0, 1)"
     )]
-    let (whole_secs, nanos) = (whole as i64, ((secs - whole) * 1e9) as u32);
-    chrono::DateTime::from_timestamp(whole_secs, nanos)
+    let (whole_secs, nanos) = (whole as i64, ((secs - whole) * 1e9) as i32);
+    Timestamp::new(whole_secs, nanos).ok()
 }
 
 /// Whether a column takes a `ClickHouse` date-time text value.
@@ -654,13 +751,17 @@ fn is_datetime(col: &crate::clickhouse::types::ColumnInfo) -> bool {
     matches!(col.parsed_type.tag, TypeTag::DateTime | TypeTag::DateTime64)
 }
 
-/// Rewrite a zoned date-time as UTC text, keeping every fraction digit and the
-/// zone, so the insert reads the instant whatever the column's timezone.
-/// Zone-less text and epoch numbers are left alone.
+/// Rewrite a zoned date-time as UTC text, every fraction digit kept, and a
+/// fractional epoch as the UTC text of the instant it names, so the insert
+/// reads the instant whatever the column's timezone. Zone-less text and whole
+/// epoch numbers are left alone.
 #[inline]
 fn normalise_datetime(map: &mut Map<String, Value>, name: &str) {
     if let Some(value) = map.get_mut(name) {
-        datetime::normalise_zoned(value);
+        match fractional_epoch(value) {
+            Some(at) => *value = Value::String(utc_text(&at)),
+            None => datetime::normalise_zoned(value),
+        }
     }
 }
 
@@ -676,11 +777,7 @@ fn normalise_datetime(map: &mut Map<String, Value>, name: &str) {
 /// `None` leaves the column absent: a `topic_name` with no topic to resolve
 /// against must stay NULL rather than stamp the marker text into a dimension.
 #[inline]
-fn resolve_default(
-    default: &Value,
-    now: &chrono::DateTime<Utc>,
-    topic_source: Option<&str>,
-) -> Option<Value> {
+fn resolve_default(default: &Value, now: &Timestamp, topic_source: Option<&str>) -> Option<Value> {
     match default.as_str() {
         Some("now()") => Some(Value::String(utc_text(now))),
         Some("uuid()") => Some(Value::String(uuid::Uuid::now_v7().to_string())),
@@ -991,12 +1088,12 @@ mod tests {
 
     /// Whether `value` is the ingest-time fallback rather than a stamp the payload carried.
     fn is_ingest_time(value: Option<&Value>) -> bool {
-        let before = Utc::now() - chrono::Duration::seconds(5);
+        let before = Timestamp::now() - jiff::SignedDuration::from_secs(5);
         let Some(Value::String(ts)) = value else {
             return false;
         };
-        chrono::NaiveDateTime::parse_from_str(ts, "%Y-%m-%dT%H:%M:%S%.3fZ")
-            .is_ok_and(|parsed| parsed.and_utc() >= before)
+        ts.len() == "YYYY-MM-DDTHH:MM:SS.fffZ".len()
+            && ts.parse::<Timestamp>().is_ok_and(|parsed| parsed >= before)
     }
 
     #[test]
@@ -1037,7 +1134,7 @@ mod tests {
 
     #[test]
     fn timestamp_received_edge_stamp_beats_an_older_header_directive_234() {
-        // The 1.0.0 header names neither edge stamp; the edge stamp still wins.
+        // The 1.0.0 header names neither edge stamp, and the edge stamp still wins.
         let raw = br#"{"event":"x","received_at":"2024-01-01T00:00:00Z","_timestamp_received":1759700000123}"#;
         let directive = Some("first(timestamp_received/received_at)");
         assert_eq!(
@@ -1388,7 +1485,7 @@ mod tests {
 
     #[test]
     fn test_timestamp_fallback_to_now_when_missing() {
-        // _timestamp is NOT Nullable and has no DEFAULT — omitting it produces
+        // _timestamp is NOT Nullable and has no DEFAULT, so omitting it produces
         // epoch zero (1970-01-01 00:00:00.000). The extractor must inject now().
         let extractor = default_extractor();
         let raw = br#"{"severity": "high"}"#; // No "timestamp" or "_timestamp" field
@@ -1551,7 +1648,7 @@ mod tests {
 
     #[test]
     fn test_literal_dotted_key_still_matches() {
-        // A payload already flattened upstream keeps working — the literal key
+        // A payload already flattened upstream keeps working: the literal key
         // is the fast path, tried before any descent.
         let extractor = default_extractor();
         let raw = br#"{"host.name": "web-02"}"#;
@@ -2115,8 +2212,8 @@ mod tests {
 
     #[test]
     fn test_valid_object_matching_no_column_reports_a_reason() {
-        // The silent case: this parses, it is an object, and not one field is a
-        // column. It used to reach the caller looking like any other empty pass.
+        // This parses, it is an object, and not one field is a column, so the
+        // pass names a reason rather than looking like any other empty pass.
         let extractor = default_extractor();
         let schema = make_schema(&["message"]);
         let col_meta = empty_col_meta();
@@ -2592,6 +2689,275 @@ mod tests {
                 landed.starts_with("2026-09-07T05:53:53"),
                 "{raw:?} -> {landed}"
             );
+        }
+    }
+
+    /// A `_timestamp` the insert cannot read lands as the ingest time, counted by
+    /// reason, with `timestamp_dq` on or off. A readable time stays as it came,
+    /// and an instant outside the bounds is the check's alone. Any other
+    /// date-time column leaves an unreadable value out. A fractional epoch,
+    /// which the encoder refuses, lands as the UTC text it names.
+    #[test]
+    fn an_unreadable_datetime_never_rejects_the_row() {
+        use crate::metrics::counting::CountingRecorder;
+
+        enum Want {
+            Now(&'static str),
+            Kept(&'static str),
+        }
+        let on = true;
+        let off = false;
+        let cases: [(bool, &[u8], Want); 21] = [
+            (
+                on,
+                br#"{"timestamp": "0000-00-00 00:00:00.000000"}"#,
+                Want::Now("unparseable"),
+            ),
+            (
+                off,
+                br#"{"timestamp": "0000-00-00 00:00:00.000000"}"#,
+                Want::Now("unparseable"),
+            ),
+            (on, br#"{"timestamp": ""}"#, Want::Now("unparseable")),
+            (off, br#"{"timestamp": ""}"#, Want::Now("unparseable")),
+            (
+                on,
+                br#"{"timestamp": "not a date"}"#,
+                Want::Now("unparseable"),
+            ),
+            (
+                off,
+                br#"{"timestamp": "not a date"}"#,
+                Want::Now("unparseable"),
+            ),
+            (
+                on,
+                br#"{"timestamp": "2026-13-45 99:99:99"}"#,
+                Want::Now("unparseable"),
+            ),
+            (
+                off,
+                br#"{"timestamp": "2026-13-45 99:99:99"}"#,
+                Want::Now("unparseable"),
+            ),
+            (
+                off,
+                br#"{"timestamp": ["2026-03-15"]}"#,
+                Want::Now("unparseable"),
+            ),
+            (
+                on,
+                br#"{"timestamp": "2099-01-01T00:00:00Z"}"#,
+                Want::Now("out_of_bounds"),
+            ),
+            (
+                off,
+                br#"{"timestamp": "2099-01-01T00:00:00Z"}"#,
+                Want::Kept("2099-01-01"),
+            ),
+            (
+                on,
+                br#"{"timestamp": "2026-03-15 10:30:00.123"}"#,
+                Want::Kept("2026-03-15T10:30:00.123Z"),
+            ),
+            (
+                off,
+                br#"{"timestamp": "2026-03-15 10:30:00.123"}"#,
+                Want::Kept("2026-03-15 10:30:00.123"),
+            ),
+            (
+                off,
+                br#"{"timestamp": "2026-03-15T10:30:00.123+10:00"}"#,
+                Want::Kept("2026-03-15T00:30:00.123Z"),
+            ),
+            (
+                off,
+                br#"{"timestamp": "1788760433"}"#,
+                Want::Kept("1788760433"),
+            ),
+            (
+                off,
+                br#"{"timestamp": 1788760433}"#,
+                Want::Kept("1788760433"),
+            ),
+            // The encoder takes whole epochs only, so a fractional one lands as the UTC
+            // text it names, and a whole float as it came, for the encoder to read by magnitude.
+            (
+                off,
+                br#"{"timestamp": 1788760433.5}"#,
+                Want::Kept("2026-09-07T05:53:53.500Z"),
+            ),
+            (
+                on,
+                br#"{"timestamp": 1788760433.5}"#,
+                Want::Kept("2026-09-07T05:53:53.500Z"),
+            ),
+            (
+                off,
+                br#"{"timestamp": 1788760433123.0}"#,
+                Want::Kept("1788760433123"),
+            ),
+            (
+                on,
+                br#"{"timestamp": 1788760433123.0}"#,
+                Want::Kept("2026-09-07T05:53:53.123Z"),
+            ),
+            (off, br#"{"timestamp": 1e300}"#, Want::Now("unparseable")),
+        ];
+        let schema = make_datetime_schema(&["_timestamp"]);
+        let col_meta = empty_col_meta();
+        for (dq_on, raw, want) in cases {
+            let dq = TimestampDqConfig {
+                enabled: dq_on,
+                ..TimestampDqConfig::default()
+            };
+            let extractor = extractor_with(&MetadataConfig::default(), &dq);
+            let recorder = CountingRecorder::default();
+            let map = metrics::with_local_recorder(&recorder, || {
+                extractor
+                    .extract(raw, "dfe.events", &schema, &col_meta, None)
+                    .fields
+            });
+            let label = format!(
+                "{} with timestamp_dq on={dq_on}",
+                String::from_utf8_lossy(raw)
+            );
+            let landed = map["_timestamp"].to_string();
+            let name = names::TIMESTAMP_REPLACED_TOTAL;
+            match want {
+                Want::Now(reason) => {
+                    let text = map["_timestamp"].as_str().expect("text");
+                    let secs = datetime::parse(text).expect("ingest time reads back").secs;
+                    assert!(
+                        (secs - Timestamp::now().as_second()).abs() < 60,
+                        "{label}: not the ingest time: {landed}"
+                    );
+                    assert_eq!(recorder.labelled(name, "reason", reason), 1, "{label}");
+                    assert_eq!(recorder.total(name), 1, "{label}");
+                }
+                Want::Kept(shown) => {
+                    assert!(landed.contains(shown), "{label}: {landed}");
+                    assert_eq!(recorder.total(name), 0, "{label}: counted a readable time");
+                }
+            }
+        }
+
+        // pmacct pmbmpd writes 0000-00-00 00:00:00.000000 in its time fields on BMP init and
+        // in some route_monitor records. A date-time column other than `_timestamp` leaves
+        // the value out, so its NULL or DEFAULT applies and the row encodes.
+        use dfe_clickhouse::dynamic::{ColumnDef, DynamicRow};
+
+        let typed = |name: &str, ty: &str, default_kind: &str| ColumnInfo {
+            name: name.to_string(),
+            type_name: ty.to_string(),
+            parsed_type: ParsedType::parse(ty),
+            position: 1,
+            default_kind: default_kind.to_string(),
+            default_expression: if default_kind.is_empty() {
+                String::new()
+            } else {
+                "now64(6)".to_string()
+            },
+            comment: String::new(),
+            is_in_primary_key: false,
+            is_in_sorting_key: false,
+        };
+        let mut bmp = make_schema(&["event_type", "bmp_msg_type", "peer_ip_src"]);
+        bmp.columns.extend([
+            typed("_timestamp", "DateTime64(3)", ""),
+            typed("_timestamp_received", "DateTime64(3)", ""),
+            typed("timestamp_arrival", "Nullable(DateTime64(6))", ""),
+            typed("timestamp_start", "DateTime64(6)", "DEFAULT"),
+            typed("timestamp_last", "DateTime", ""),
+        ]);
+        let zero = "0000-00-00 00:00:00.000000";
+        // (record, columns left out, columns kept, columns counted)
+        let bmp_cases: [(String, &[&str], &[&str], u64); 4] = [
+            (
+                format!(
+                    r#"{{"event_type":"log","bmp_msg_type":"init","peer_ip_src":"10.0.0.1","timestamp":"{zero}","timestamp_arrival":"{zero}","timestamp_start":"{zero}","timestamp_last":"{zero}","_timestamp_received":"{zero}"}}"#
+                ),
+                &["timestamp_arrival", "timestamp_start", "timestamp_last"],
+                &["_timestamp", "_timestamp_received"],
+                5,
+            ),
+            (
+                format!(
+                    r#"{{"event_type":"log","bmp_msg_type":"route_monitor","peer_ip_src":"10.0.0.1","timestamp":"2026-11-25 11:00:00.123456","timestamp_arrival":"2026-11-25 11:00:00.100000","timestamp_start":"{zero}"}}"#
+                ),
+                &["timestamp_start"],
+                &["_timestamp", "timestamp_arrival"],
+                1,
+            ),
+            (
+                r#"{"event_type":"log","bmp_msg_type":"route_monitor","peer_ip_src":"10.0.0.1","timestamp":"2026-11-25 11:00:00.123456","timestamp_arrival":"2026-11-25 11:00:00.100000","timestamp_start":"2026-11-25 10:00:00","timestamp_last":1788760433}"#.to_string(),
+                &[],
+                &["_timestamp", "timestamp_arrival", "timestamp_start", "timestamp_last"],
+                0,
+            ),
+            (
+                r#"{"event_type":"log","bmp_msg_type":"route_monitor","peer_ip_src":"10.0.0.1","timestamp":"2026-11-25 11:00:00.123456","timestamp_arrival":1764068400.25,"timestamp_start":"2026-11-25 10:00:00","timestamp_last":1e300,"_timestamp_received":1764068400.5}"#.to_string(),
+                &["timestamp_last"],
+                &["_timestamp", "_timestamp_received", "timestamp_arrival", "timestamp_start"],
+                1,
+            ),
+        ];
+        let columns: Vec<ColumnDef> = bmp
+            .columns
+            .iter()
+            .map(|c| ColumnDef::with_default_kind(&c.name, &c.type_name, &c.default_kind))
+            .collect();
+        let encodes = |row: &Map<String, Value>| {
+            let insert: Vec<ColumnDef> = columns
+                .iter()
+                .filter(|c| row.contains_key(&c.name) || !c.has_default)
+                .cloned()
+                .collect();
+            DynamicRow::new(row, &insert).encode().map(|_| insert.len())
+        };
+        let extractor = default_extractor();
+        for (raw, left_out, kept, counted) in bmp_cases {
+            let recorder = CountingRecorder::default();
+            let map = metrics::with_local_recorder(&recorder, || {
+                extractor
+                    .extract(raw.as_bytes(), "dfe.bmp", &bmp, &col_meta, None)
+                    .fields
+            });
+            for name in left_out {
+                assert!(
+                    !map.contains_key(*name),
+                    "{name} was kept in {raw}: {map:?}"
+                );
+            }
+            for name in kept {
+                assert!(
+                    map.contains_key(*name),
+                    "{name} was dropped from {raw}: {map:?}"
+                );
+            }
+            let recorded = recorder.total(names::TIMESTAMP_REPLACED_TOTAL);
+            assert_eq!(recorded, counted, "replaced count for {raw}");
+            for name in left_out {
+                assert_eq!(
+                    recorder.labelled(names::TIMESTAMP_REPLACED_TOTAL, "column", name),
+                    1,
+                    "{name} in {raw}"
+                );
+            }
+            let landed = encodes(&map);
+            assert!(landed.is_ok(), "{raw} was rejected: {landed:?}");
+            if left_out.contains(&"timestamp_start") {
+                let omitted = columns.len() - landed.expect("encodes");
+                assert_eq!(
+                    omitted, 1,
+                    "the DEFAULT column leaves the INSERT's column list"
+                );
+            }
+            if counted > 0 {
+                let source: Map<String, Value> =
+                    serde_json::from_str(&raw).expect("record is an object");
+                assert!(encodes(&source).is_err(), "{raw} encoded without the fix");
+            }
         }
     }
 

@@ -383,7 +383,7 @@ pub(super) fn query_client(clickhouse: &str) -> ClickHouseQueryClient {
         transport: Transport::Http,
         database: "default".to_string(),
         username: "default".to_string(),
-        password: crate::common::containers::clickhouse_password(),
+        password: crate::common::containers::clickhouse_password().into(),
         tls: false,
         ..Default::default()
     })

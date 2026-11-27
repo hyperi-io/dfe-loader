@@ -123,8 +123,7 @@ pub struct Orchestrator {
     dlq_load: DlqLoadConfig,
 }
 
-/// A hold whose attempts are never further apart than the flush interval,
-/// before jitter.
+/// A hold whose attempts are never further apart than the flush interval.
 fn unsettled_for(config: &Config) -> Unsettled {
     Unsettled::new(Duration::from_secs(config.buffer.flush_age_secs.max(1)))
 }
@@ -501,6 +500,9 @@ impl Orchestrator {
                 .with_live_recheck(LIVE_ABSENT_RECHECK_FIRST, LIVE_ABSENT_RECHECK_CAP);
         absent_tables.set_live(collect_pre_warm_tables(&self.config.routing));
 
+        // Deployed tables' columns from the config, applied before the first receive.
+        let mut configured = configured_resolutions(&self.config.routing, |_, _| true);
+
         // Per-table capture overrides (_json/_raw disable via config + DDL tags)
         let mut capture_overrides = CaptureOverrides::new(&self.config.metadata);
 
@@ -647,6 +649,11 @@ impl Orchestrator {
                             absent_tables.remove(&new_stages.default_table);
                         }
                         stages = new_stages;
+                        let moved =
+                            forget_moved_schemas(&self.config.routing, &new_config.routing, &inserter);
+                        configured.extend(configured_resolutions(&new_config.routing, |table, qualified| {
+                            moved.contains(table) || schema_cache.needs_refresh(qualified)
+                        }));
                         let to_warm =
                             tables_to_warm(&new_config.routing, &mut absent_tables, &schema_cache);
                         self.recheck_retired_held(&absent_tables, &stages.default_table, &resolve_tx);
@@ -731,15 +738,18 @@ impl Orchestrator {
                     self.flush_or_settle(&inserter, &transport, dlq.as_ref(), held.batches, still_held, &mut buffer_manager, &mut pending_schema_buffer).await;
                 }
 
-                // Apply schema resolution results from background resolver.
+                // Apply schema resolution results: the configured columns of a
+                // deployed table first, then each read from the background resolver.
                 //
                 // Receives TableResolutionResult and applies to all three per-table caches:
                 //   - CaptureOverrides: DDL comment tags (_json/_raw disable)
                 //   - FieldMappingCache: rename/copy rules from schema + column comments
                 //   - ComputedColumnCache: CEL expressions from column comments
                 //   - SchemaCache: full schema for HeaderExtractor (Change A)
-                Some(result) = schema_result_rx.recv() => {
+                Some(result) = next_resolution(&mut configured, &mut schema_result_rx) => {
                     let table = &result.table;
+                    // Any answer, a failure included, starts the table's per-table cap.
+                    pending_schema_buffer.record_answer(table);
 
                     // A comment or directives read that failed keeps what the
                     // table had, so a transient failure erases nothing.
@@ -1118,6 +1128,7 @@ impl Orchestrator {
                                 metrics: &self.metrics,
                                 memory_guard: &self.memory_guard,
                                 pending_schema: &mut pending_schema_buffer,
+                                absent_tables: &absent_tables,
                             };
                             // When pre-route is active, results only contain passing
                             // messages — build the matching message slice.
@@ -1728,6 +1739,12 @@ impl Orchestrator {
                 self.count_placed(&dead_letters);
                 self.dlq_placed.extend(placed_offsets(&dead_letters));
             }
+            Placement::Refused { dropped, placed } => {
+                self.drop_broker_refused(&dropped);
+                self.count_placed(&placed);
+                self.dlq_placed.extend(placed_offsets(&dropped));
+                self.dlq_placed.extend(placed_offsets(&placed));
+            }
             Placement::Closed => {
                 warn!(
                     rows = dead_letters.len(),
@@ -2131,6 +2148,16 @@ impl Orchestrator {
         }
     }
 
+    /// Drop dead letters the DLQ's broker refused for their size once every
+    /// delivery report was in, so no retry can land them.
+    fn drop_broker_refused(&mut self, dropped: &[DlqEntry]) {
+        warn!(
+            rows = dropped.len(),
+            "The DLQ's broker refused dead letters for their size -- dropped, counted in pipeline_dead_letters_dropped_total and dfe_loader_rows_lost_total"
+        );
+        self.drop_dead_letters(dropped, DROPPED_TOO_LARGE);
+    }
+
     /// Drop every dead letter read from a `dlq_load` topic, and return the rest.
     ///
     /// Dead-lettering one again would feed it back to the topic it was read
@@ -2253,6 +2280,11 @@ impl Orchestrator {
             Placement::Written => {
                 self.count_placed(&dead_letters);
                 self.settle_dead_letters_as(&dead_letters, DeliveryStatus::Rejected);
+            }
+            Placement::Refused { dropped, placed } => {
+                self.drop_broker_refused(&dropped);
+                self.count_placed(&placed);
+                self.settle_dead_letters_as(&placed, DeliveryStatus::Rejected);
             }
             Placement::Closed => {
                 warn!(
@@ -2435,6 +2467,119 @@ fn tables_to_warm(
         .into_iter()
         .filter(|table| schema_cache.needs_refresh(table) && !absent_tables.contains(table))
         .collect()
+}
+
+/// Drop the cached schema of each table whose schema version `new` moves from
+/// `old`, in every database the routing writes to, and return those tables.
+///
+/// The insert encoder reads the table again before its next insert. A table
+/// `new` lists columns for is seeded from them in `default_db` by
+/// [`configured_resolutions`], and the reload's pre-warm reads it instead of
+/// waiting out the cache TTL.
+fn forget_moved_schemas(
+    old: &crate::config::RoutingConfig,
+    new: &crate::config::RoutingConfig,
+    inserter: &Inserter,
+) -> FxHashSet<String> {
+    let databases: std::collections::BTreeSet<&str> = std::iter::once(new.default_db.as_str())
+        .chain(
+            new.org_routes
+                .iter()
+                .map(crate::config::OrgRoute::effective_database),
+        )
+        .collect();
+    let mut moved = FxHashSet::default();
+    for (table, version) in &new.table_schema_versions {
+        if old.table_schema_versions.get(table) == Some(version) {
+            continue;
+        }
+        info!(
+            table = %table,
+            version = %version,
+            "Table schema version changed, re-reading its columns"
+        );
+        for db in &databases {
+            inserter.forget_schema(&format!("{db}.{table}"));
+        }
+        moved.insert(table.clone());
+    }
+    moved
+}
+
+/// A resolution in `routing.default_db` of each table `routing.table_schemas`
+/// lists columns for, for the tables `wanted` names by bare and qualified name.
+///
+/// The event loop applies them as it applies a read from `ClickHouse`, ahead of
+/// the next receive, so a deployed table never waits on its first read. The
+/// read still runs, and its answer replaces them. An org database is left to
+/// its read, since the deploy that sent the columns created the table in
+/// `default_db` only.
+fn configured_resolutions(
+    routing: &crate::config::RoutingConfig,
+    wanted: impl Fn(&str, &str) -> bool,
+) -> std::collections::VecDeque<TableResolutionResult> {
+    let db = routing.default_db.as_str();
+    let mut tables: Vec<(&String, &Vec<crate::config::TableColumn>)> =
+        routing.table_schemas.iter().collect();
+    tables.sort_unstable_by_key(|(table, _)| *table);
+    tables
+        .into_iter()
+        .filter(|(table, _)| wanted(table, &format!("{db}.{table}")))
+        .map(|(table, columns)| configured_resolution(db, table, columns))
+        .collect()
+}
+
+/// The resolution `db`.`table`'s configured columns stand for, with the column
+/// directives their comments carry, as a read from `ClickHouse` would give.
+fn configured_resolution(
+    db: &str,
+    table: &str,
+    columns: &[crate::config::TableColumn],
+) -> TableResolutionResult {
+    use crate::clickhouse::{ColumnInfo, ParsedType, TableSchema};
+
+    let schema = TableSchema {
+        database: db.to_string(),
+        table: table.to_string(),
+        columns: columns
+            .iter()
+            .zip(1_u64..)
+            .map(|(column, position)| ColumnInfo {
+                name: column.name.clone(),
+                type_name: column.ty.clone(),
+                parsed_type: ParsedType::parse(&column.ty),
+                position,
+                default_kind: column.default_kind.clone(),
+                default_expression: String::new(),
+                comment: column.comment.clone(),
+                is_in_primary_key: false,
+                is_in_sorting_key: false,
+            })
+            .collect(),
+        comment: String::new(),
+    };
+    let directives = columns
+        .iter()
+        .map(|column| (column.name.clone(), parse_directives(&column.comment)))
+        .collect();
+    TableResolutionResult {
+        table: format!("{db}.{table}"),
+        comment: None,
+        schema: SchemaResolution::Resolved(schema),
+        column_directives: Some(directives),
+    }
+}
+
+/// The next resolution to apply: a configured one first, else the next read
+/// from `ClickHouse`. Cancel-safe, as `recv` is.
+async fn next_resolution(
+    configured: &mut std::collections::VecDeque<TableResolutionResult>,
+    reads: &mut mpsc::Receiver<TableResolutionResult>,
+) -> Option<TableResolutionResult> {
+    if let Some(result) = configured.pop_front() {
+        return Some(result);
+    }
+    reads.recv().await
 }
 
 /// Collect the config-known tables to pre-warm (default table +
@@ -2783,8 +2928,9 @@ const LIVE_ABSENT_RECHECK_FIRST: Duration = Duration::from_secs(1);
 const LIVE_ABSENT_RECHECK_CAP: Duration = Duration::from_secs(30);
 
 /// Upper bound on tables tracked as absent. The routed table name comes from a
-/// payload field with no allowlist, so this is what stops untrusted input
-/// growing both the set and the per-table metric label set.
+/// payload field, held to the deployed tables only once dfe-engine has sent
+/// `routing.table_schemas`, so this is what stops untrusted input growing both
+/// the set and the per-table metric label set.
 const ABSENT_TABLE_CAPACITY: usize = 1024;
 
 /// Total budget for handing a whole flush CYCLE's dead letters to the DLQ,
@@ -2813,6 +2959,10 @@ const DROPPED_NO_PAYLOAD: &str = "no_payload";
 
 /// `reason` for dead letters read from a `dlq_load` topic that failed to load.
 const DROPPED_DLQ_LOAD: &str = "dlq_load";
+
+/// The `pipeline_dead_letters_dropped_total` reason for a dead letter the DLQ's
+/// broker refused for its size, as scalo's pipeline labels it.
+const DROPPED_TOO_LARGE: &str = "too_large";
 
 /// The record sequence number a gRPC offset carries: the adapter stores each
 /// token's `seq` as the message offset.
@@ -3150,32 +3300,34 @@ fn queue_rejected<'a>(
 }
 
 /// How handing a set of dead letters to the DLQ ended.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug)]
 enum Placement {
     /// A backend holds every one.
     Written,
+    /// The Kafka-only DLQ's broker holds `placed` and refused `dropped` for
+    /// their size: no retry can land those, so they are dropped.
+    Refused {
+        dropped: Vec<DlqEntry>,
+        placed: Vec<DlqEntry>,
+    },
     /// The DLQ's drain has exited, so no retry can land them.
     Closed,
     /// The DLQ still refused when the retry's expiry passed, or at shutdown.
     GaveUp(String),
 }
 
-/// The waits between DLQ write attempts: 100 ms doubling to 1 s, before
-/// jitter.
-fn dlq_retry_schedule() -> <backon::ExponentialBuilder as backon::BackoffBuilder>::Backoff {
-    use backon::BackoffBuilder;
-
+/// The waits between DLQ write attempts: 100 ms doubling to 1 s, +/-20%.
+fn dlq_retry_schedule() -> scalo::backoff::Delays {
     scalo::sink_stack::SinkStackConfig {
         min_backoff_ms: 100,
         max_backoff_ms: DLQ_RETRY_MAX_MS,
         ..scalo::sink_stack::SinkStackConfig::default()
     }
     .backoff()
-    .without_max_times()
-    .build()
+    .delays()
 }
 
-/// Longest wait between DLQ write attempts, before jitter.
+/// Longest wait between DLQ write attempts.
 const DLQ_RETRY_MAX_MS: u64 = 1_000;
 
 /// Write every dead letter to the DLQ as one batch and prove it written,
@@ -3206,6 +3358,16 @@ async fn place_dead_letters(
                     return Placement::Written;
                 }
                 Ok(Err(scalo::dlq::DlqError::Closed)) => return Placement::Closed,
+                Ok(Err(scalo::dlq::DlqError::Refused(refused))) => {
+                    let (dropped, placed) = split_refused(dead_letters, |entry| {
+                        refused.contains(&dlq.cap(entry.clone()))
+                    });
+                    return if dropped.is_empty() {
+                        Placement::Written
+                    } else {
+                        Placement::Refused { dropped, placed }
+                    };
+                }
                 Ok(Err(e)) => e.to_string(),
                 Err(_elapsed) => {
                     return Placement::GaveUp(
@@ -3218,7 +3380,7 @@ async fn place_dead_letters(
         if failures == 1 {
             warn!(rows = dead_letters.len(), error = %error, "DLQ refused dead letters, retrying with backoff");
         }
-        // The schedule is endless (`without_max_times`), so the fallback never runs.
+        // `delays()` is endless, so the fallback never runs.
         let wait = schedule
             .next()
             .unwrap_or(Duration::from_millis(DLQ_RETRY_MAX_MS));
@@ -3229,6 +3391,17 @@ async fn place_dead_letters(
             () = tokio::time::sleep(wait) => {}
         }
     }
+}
+
+/// Split `dead_letters` into those `is_refused` names and the rest.
+fn split_refused(
+    dead_letters: &[DlqEntry],
+    is_refused: impl Fn(&DlqEntry) -> bool,
+) -> (Vec<DlqEntry>, Vec<DlqEntry>) {
+    dead_letters
+        .iter()
+        .cloned()
+        .partition(|entry| is_refused(entry))
 }
 
 /// The `stage` label a DLQ write retry is counted under, as scalo's pipeline
@@ -3929,7 +4102,9 @@ mod tests {
             file: scalo::dlq::FileDlqConfig {
                 enabled: true,
                 path: dir.to_path_buf(),
-                compress_rotated: false,
+                compress_rotated: scalo::compression::Compression::new(
+                    scalo::compression::Codec::None,
+                ),
                 ..scalo::dlq::FileDlqConfig::default()
             },
             ..scalo::dlq::DlqConfig::default()
@@ -4021,9 +4196,11 @@ mod tests {
         let dead_letters =
             rejected_entries(&payloads, &rejected_rows(rows, "server error code 117"));
 
-        assert_eq!(
-            place(&dlq, &dead_letters, in_30s()).await,
-            Placement::Written,
+        assert!(
+            matches!(
+                place(&dlq, &dead_letters, in_30s()).await,
+                Placement::Written
+            ),
             "a working DLQ takes every rejected row"
         );
 
@@ -4342,9 +4519,11 @@ mod tests {
 
         let payloads: Vec<Arc<[u8]>> = vec![Arc::from(&b"{\"n\":1}"[..])];
         let dead_letters = rejected_entries(&payloads, &rejected_rows(1, "code 117"));
-        assert_eq!(
-            place(&dlq, &dead_letters, in_30s()).await,
-            Placement::Written,
+        assert!(
+            matches!(
+                place(&dlq, &dead_letters, in_30s()).await,
+                Placement::Written
+            ),
             "the gRPC DLQ refused a dead letter"
         );
 
@@ -4422,9 +4601,11 @@ mod tests {
             (source.topic.as_deref(), source.partition, source.offset),
             (Some("dfe-events"), Some(3), Some(77))
         );
-        assert_eq!(
-            place(&dlq, &dead_letters, in_30s()).await,
-            Placement::Written,
+        assert!(
+            matches!(
+                place(&dlq, &dead_letters, in_30s()).await,
+                Placement::Written
+            ),
             "a working DLQ takes the row"
         );
 
@@ -4451,9 +4632,11 @@ mod tests {
             row_json: Some(br#"{"_raw":"{\"user\":\"kaz\"}"}"#.to_vec()),
         }];
 
-        assert_eq!(
-            place(&dlq, &rejected_entries(&payloads, &failed), in_30s()).await,
-            Placement::Written,
+        assert!(
+            matches!(
+                place(&dlq, &rejected_entries(&payloads, &failed), in_30s()).await,
+                Placement::Written
+            ),
             "a working DLQ takes the row"
         );
 
@@ -4538,9 +4721,11 @@ mod tests {
             "clickhouse_permanent_reject",
             b"{\"kept\":1}".to_vec(),
         )];
-        assert_eq!(
-            place(&dlq, &dead_letters, in_30s()).await,
-            Placement::Written,
+        assert!(
+            matches!(
+                place(&dlq, &dead_letters, in_30s()).await,
+                Placement::Written
+            ),
             "a working DLQ takes rows written after an earlier loss"
         );
         assert!(
@@ -4566,10 +4751,10 @@ mod tests {
             })
             .collect();
 
-        assert_eq!(
+        assert!(matches!(
             place(&dlq, &dead_letters, in_30s()).await,
             Placement::Written
-        );
+        ));
         assert_eq!(spooled_lines(&dir).len(), 3);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -4586,9 +4771,11 @@ mod tests {
         )];
 
         let started = std::time::Instant::now();
-        assert_eq!(
-            place(&dlq, &dead_letters, in_30s()).await,
-            Placement::Closed,
+        assert!(
+            matches!(
+                place(&dlq, &dead_letters, in_30s()).await,
+                Placement::Closed
+            ),
             "a stopped DLQ was taken as a home for the rows"
         );
         assert!(
@@ -4705,6 +4892,58 @@ mod tests {
             }
         }
         dlq.shutdown().await.expect("stop the DLQ");
+    }
+
+    /// `RefusedEntries` cannot be built outside scalo, so the broker's answer is
+    /// stood in for by the predicate `split_refused` takes.
+    #[test]
+    fn the_entries_a_refusal_names_split_from_the_rest() {
+        let entries: Vec<DlqEntry> = (1..=4).map(|seq| dead_letter_for(seq, 8)).collect();
+        let named = |entry: &DlqEntry| {
+            entry
+                .source
+                .as_ref()
+                .and_then(|s| s.offset)
+                .is_some_and(|offset| offset % 2 == 0)
+        };
+
+        let (dropped, placed) = split_refused(&entries, named);
+        assert_eq!(dropped.len(), 2);
+        assert_eq!(placed.len(), 2);
+        assert!(dropped.iter().all(named) && !placed.iter().any(named));
+
+        let (dropped, placed) = split_refused(&entries, |_| false);
+        assert!(dropped.is_empty() && placed.len() == 4);
+    }
+
+    #[test]
+    fn a_dead_letter_the_broker_refused_is_counted_lost_and_answered_dropped() {
+        for holds_answers in [false, true] {
+            let mut orchestrator = Orchestrator::new(Config::default());
+            orchestrator.holds_answers = holds_answers;
+            orchestrator.acks.admit(41);
+            let recorder = crate::metrics::counting::CountingRecorder::default();
+            let _local = metrics::set_default_local_recorder(&recorder);
+
+            orchestrator.drop_broker_refused(&[dead_letter_for(41, 8)]);
+
+            assert_eq!(
+                recorder.labelled(
+                    crate::metrics::DEAD_LETTERS_DROPPED_TOTAL,
+                    "reason",
+                    "too_large"
+                ),
+                1,
+                "the refused row was not counted (holds_answers {holds_answers})"
+            );
+            assert_eq!(recorder.total(crate::metrics::RETRIES_TOTAL), 0);
+            let released = orchestrator.acks.take_settled();
+            if holds_answers {
+                assert_eq!(released, vec![(DeliveryStatus::Dropped, vec![41])]);
+            } else {
+                assert_eq!(released.len(), 0);
+            }
+        }
     }
 
     /// A dead letter of the record read from `topic` at `offset`.
@@ -5415,6 +5654,181 @@ mod tests {
                 "marked {marked}, routing names {named:?}"
             );
         }
+    }
+
+    fn routing_versions(versions: &[(&str, &str)]) -> crate::config::RoutingConfig {
+        let mut routing = routing_naming(&["rcproof"]);
+        routing.org_routes = vec![crate::config::OrgRoute {
+            org_id: "acme".to_string(),
+            database: None,
+        }];
+        routing.table_schema_versions = versions
+            .iter()
+            .map(|(table, version)| ((*table).to_string(), (*version).to_string()))
+            .collect();
+        routing
+    }
+
+    #[test]
+    fn a_reload_that_moves_a_table_s_schema_version_re_reads_that_table_alone() {
+        // A deploy that adds a column moves only the table's version in the
+        // loader's config, and a cached schema leaves the column NULL until its TTL.
+        let no_versions: crate::config::RoutingConfig =
+            serde_json::from_str(r#"{"source_to_table": {"rcproof": "rcproof"}}"#)
+                .expect("an overlay with no versions loads");
+        assert!(no_versions.table_schema_versions.is_empty());
+
+        // (versions before, versions after, tables re-read)
+        let cases: [(&[(&str, &str)], &[(&str, &str)], &[&str]); 4] = [
+            (
+                &[("rcproof", "1.0.0")],
+                &[("rcproof", "2.0.0")],
+                &["acme.rcproof", "dfe.rcproof"],
+            ),
+            (&[("rcproof", "1.0.0")], &[("rcproof", "1.0.0")], &[]),
+            (
+                &[],
+                &[("rcproof", "1.0.0")],
+                &["acme.rcproof", "dfe.rcproof"],
+            ),
+            (&[("rcproof", "1.0.0")], &[], &[]),
+        ];
+        for (before, after, want) in cases {
+            let cache = Arc::new(SchemaCache::new(300));
+            let inserter = inserter_for(&Config::default()).with_schema_cache(Arc::clone(&cache));
+            let cached = ["acme.rcproof", "dfe.main", "dfe.rcproof"];
+            for table in cached {
+                cache.insert(table.to_string(), cached_schema(table));
+            }
+
+            forget_moved_schemas(
+                &routing_versions(before),
+                &routing_versions(after),
+                &inserter,
+            );
+
+            let re_read: Vec<&str> = cached
+                .into_iter()
+                .filter(|table| cache.get(table).is_none())
+                .collect();
+            assert_eq!(re_read, want, "versions {before:?} then {after:?}");
+            let mut absent =
+                super::super::types::AbsentTables::new(ABSENT_TABLE_TTL, ABSENT_TABLE_CAPACITY);
+            let warm = tables_to_warm(&routing_versions(after), &mut absent, &cache);
+            assert_eq!(
+                warm,
+                want.iter()
+                    .filter(|table| table.starts_with("dfe."))
+                    .map(|table| (*table).to_string())
+                    .collect::<Vec<String>>(),
+                "the reload's pre-warm reads the moved table again, versions {before:?} then {after:?}"
+            );
+        }
+    }
+
+    fn routing_with_columns() -> crate::config::RoutingConfig {
+        serde_json::from_value(serde_json::json!({
+            "default_db": "dfe",
+            "org_routes": [{"org_id": "acme"}],
+            "table_schema_versions": {"fw": "1.0.0"},
+            "table_schemas": {"fw": [
+                {"name": "host", "type": "LowCardinality(String)", "comment": "@source: host.name - Host"},
+                {"name": "shout", "type": "String", "default_kind": "MATERIALIZED"},
+                {"name": "n", "type": "Nullable(UInt64)"},
+            ]},
+        }))
+        .expect("routing with table_schemas loads")
+    }
+
+    /// A deployed table's configured columns stand in for a read in the default
+    /// database alone, with the directives their comments carry.
+    #[test]
+    fn configured_columns_resolve_a_deployed_table_in_the_default_database() {
+        let resolutions = configured_resolutions(&routing_with_columns(), |_, _| true);
+        let tables: Vec<&str> = resolutions.iter().map(|r| r.table.as_str()).collect();
+        assert_eq!(tables, ["dfe.fw"], "an org database waits on its own read");
+        for resolution in &resolutions {
+            let SchemaResolution::Resolved(schema) = &resolution.schema else {
+                panic!(
+                    "{}: configured columns are a resolved schema",
+                    resolution.table
+                );
+            };
+            let columns: Vec<(&str, &str, u64, &str)> = schema
+                .columns
+                .iter()
+                .map(|c| {
+                    (
+                        c.name.as_str(),
+                        c.type_name.as_str(),
+                        c.position,
+                        c.default_kind.as_str(),
+                    )
+                })
+                .collect();
+            assert_eq!(
+                columns,
+                [
+                    ("host", "LowCardinality(String)", 1, ""),
+                    ("shout", "String", 2, "MATERIALIZED"),
+                    ("n", "Nullable(UInt64)", 3, ""),
+                ]
+            );
+            assert!(schema.columns[2].is_nullable());
+            let directives = resolution
+                .column_directives
+                .as_ref()
+                .expect("directives from the comments");
+            assert_eq!(directives["host"].renamed, ["host.name"]);
+            assert_eq!(directives["n"].renamed, Vec::<String>::new());
+        }
+    }
+
+    /// A reload seeds a table whose version moved, or one with no fresh schema,
+    /// and leaves a table `ClickHouse` already answered for alone.
+    #[test]
+    fn a_reload_seeds_only_moved_or_uncached_tables() {
+        let routing = routing_with_columns();
+        // (case, moved, cached, tables seeded)
+        let cases: [(&str, bool, bool, &[&str]); 3] = [
+            ("cached and unchanged", false, true, &[]),
+            ("cached and moved", true, true, &["dfe.fw"]),
+            ("not cached", false, false, &["dfe.fw"]),
+        ];
+        for (case, moved, cached, want) in cases {
+            let cache = SchemaCache::new(300);
+            if cached {
+                cache.insert("dfe.fw".into(), cached_schema("dfe.fw"));
+            }
+            let seeded = configured_resolutions(&routing, |_, qualified| {
+                moved || cache.needs_refresh(qualified)
+            });
+            let tables: Vec<&str> = seeded.iter().map(|r| r.table.as_str()).collect();
+            assert_eq!(tables, want, "{case}");
+        }
+    }
+
+    /// Configured columns are applied ahead of any read, and a read waits its turn.
+    #[tokio::test]
+    async fn configured_resolutions_come_before_reads() {
+        let (tx, mut rx) = mpsc::channel(4);
+        tx.send(TableResolutionResult {
+            table: "dfe.read".into(),
+            comment: None,
+            schema: SchemaResolution::Unavailable,
+            column_directives: None,
+        })
+        .await
+        .expect("send a read");
+        let mut configured = configured_resolutions(&routing_with_columns(), |_, _| true);
+        let mut order = Vec::new();
+        for _ in 0..2 {
+            let next = next_resolution(&mut configured, &mut rx)
+                .await
+                .expect("a resolution");
+            order.push(next.table);
+        }
+        assert_eq!(order, ["dfe.fw", "dfe.read"]);
     }
 
     #[test]

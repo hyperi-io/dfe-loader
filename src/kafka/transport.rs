@@ -338,13 +338,7 @@ impl TransportAdapter {
             if transport_config.security_protocol == "plaintext" {
                 transport_config.security_protocol = "ssl".to_string();
             }
-            transport_config
-                .ssl_ca_location
-                .clone_from(&tls.ca_cert_file);
-            transport_config
-                .ssl_certificate_location
-                .clone_from(&tls.cert_file);
-            transport_config.ssl_key_location.clone_from(&tls.key_file);
+            transport_config.tls.clone_from(&tls.client);
             transport_config.ssl_skip_verify = tls.skip_verify;
         }
 
@@ -551,7 +545,6 @@ impl GrpcTransportAdapter {
             recv_buffer_size: config.recv_buffer_size,
             recv_timeout_ms: config.recv_timeout_ms,
             max_message_size: config.max_message_size,
-            compression: config.compression,
             ..Default::default()
         };
 
@@ -1355,6 +1348,39 @@ mod discovery_tests {
     /// scalo's own defaults, which the loader's excludes are appended to.
     fn scalo_default_excludes() -> Vec<String> {
         TransportKafkaConfig::default().topic_exclude
+    }
+
+    /// An enabled `kafka.tls` hands scalo its whole client section, and a
+    /// disabled one leaves scalo's default.
+    #[test]
+    fn the_kafka_tls_section_reaches_the_transport() {
+        let section = scalo::tls_config::ClientTlsConfig {
+            trust: scalo::tls_config::TrustChoice::Bundle,
+            ca_paths: vec!["/certs/ca.pem".into()],
+            client_cert_path: Some("/certs/client.pem".into()),
+            client_key_path: Some("/certs/client.key".into()),
+            ..Default::default()
+        };
+        for (enabled, protocol, want) in [
+            (true, "ssl", section.clone()),
+            (
+                false,
+                "plaintext",
+                scalo::tls_config::ClientTlsConfig::default(),
+            ),
+        ] {
+            let config = KafkaConfig {
+                tls: Some(crate::config::TlsConfig {
+                    enabled,
+                    client: section.clone(),
+                    ..Default::default()
+                }),
+                ..KafkaConfig::default()
+            };
+            let cfg = TransportAdapter::convert_config(&config, &dlq_land(), &[]);
+            assert_eq!(cfg.security_protocol, protocol, "enabled: {enabled}");
+            assert_eq!(cfg.tls, want, "enabled: {enabled}");
+        }
     }
 
     /// Discovery subscribes to the topics ending in a configured suffix, each
