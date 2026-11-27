@@ -858,8 +858,8 @@ impl Inserter {
             }
         }
 
-        // Defence-in-depth: escape db/tbl identifiers even though both are
-        // operator-controlled (routing config + sanitised _source).
+        // Escaped because the table can come from a record's `_source`, held to
+        // the deployed tables only once dfe-engine has sent `routing.table_schemas`.
         let sql = format!(
             "INSERT INTO {}.{} FORMAT JSONEachRow",
             escape_identifier(db),

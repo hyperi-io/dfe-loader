@@ -143,6 +143,28 @@ fn log_routing_field_absent(topic: &str, table: &str) {
     }
 }
 
+/// The `table` label a fallback from an unlisted table counts under. The name
+/// the record gave is left out, so record values can't add labels.
+pub(crate) const UNLISTED_TABLE: &str = "unlisted";
+
+/// Say at most once a minute that records named a table no deployed source
+/// owns and landed in the default table.
+fn log_unlisted_table(topic: &str) {
+    static WARNED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    if scalo::logger::log_debounced(&WARNED, 60_000) {
+        scalo::logger::security::input_validation_failure(
+            "routing",
+            "record named a table no deployed source owns",
+            None,
+        );
+        warn!(
+            topic = %topic,
+            reason = "unlisted_table",
+            "Records named a table no deployed source owns and landed in the default table (max 1 per 60s)"
+        );
+    }
+}
+
 /// Whether the payload itself is written to `_raw` as UTF-8 text.
 ///
 /// `RawOnly` always writes it. `Full` writes it only for a payload that is not
@@ -281,7 +303,10 @@ impl MessageProcessor<'_> {
         // An unknown source lands in the default table rather than the DLQ, and a
         // dead letter waits for its own. The emptiness check keeps the common
         // case free of a hash lookup.
-        let (table, fell_back_from) = if choice != TableChoice::Pinned
+        let (table, fell_back_from) = if choice == TableChoice::Unlisted {
+            log_unlisted_table(&msg.topic);
+            (routed, Some(UNLISTED_TABLE.to_string()))
+        } else if choice != TableChoice::Pinned
             && !self.absent_tables.is_empty()
             && self.absent_tables.contains(&routed)
         {
@@ -1059,6 +1084,38 @@ mod tests {
 
         let processed = proc.process(&msg).expect("should succeed");
         assert_eq!(processed.table, "dfe.acme_widgets");
+    }
+
+    /// Once dfe-engine lists its deployed tables, a record naming another lands in
+    /// the default table, counted under one label whatever name it gave.
+    #[test]
+    fn a_record_naming_a_table_no_source_owns_lands_in_the_default_table() {
+        let mut config = Config::default();
+        config.routing.table_fields = vec!["_source".to_string()];
+        config.routing.table_schemas.insert(
+            "fw".to_string(),
+            vec![crate::config::TableColumn {
+                name: "host".to_string(),
+                ty: "String".to_string(),
+                default_kind: String::new(),
+                comment: String::new(),
+            }],
+        );
+        let harness = TestHarness::with_config(config);
+        let proc = harness.processor();
+        // (source, table landed in, fallback counted under)
+        for (source, table, counted) in [
+            ("repository", "dfe.main", Some(super::UNLISTED_TABLE)),
+            ("schema_lock", "dfe.main", Some(super::UNLISTED_TABLE)),
+            ("fw", "dfe.fw", None),
+        ] {
+            let payload = serde_json::to_vec(&json!({"_source": source})).expect("serialize");
+            let processed = proc
+                .process(&harness.make_msg(&payload))
+                .expect("should succeed");
+            assert_eq!(processed.table, table, "{source}");
+            assert_eq!(processed.fell_back_from.as_deref(), counted, "{source}");
+        }
     }
 
     /// Routing config matching a deployment: `_source` names the table, the

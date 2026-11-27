@@ -2928,8 +2928,9 @@ const LIVE_ABSENT_RECHECK_FIRST: Duration = Duration::from_secs(1);
 const LIVE_ABSENT_RECHECK_CAP: Duration = Duration::from_secs(30);
 
 /// Upper bound on tables tracked as absent. The routed table name comes from a
-/// payload field with no allowlist, so this is what stops untrusted input
-/// growing both the set and the per-table metric label set.
+/// payload field, held to the deployed tables only once dfe-engine has sent
+/// `routing.table_schemas`, so this is what stops untrusted input growing both
+/// the set and the per-table metric label set.
 const ABSENT_TABLE_CAPACITY: usize = 1024;
 
 /// Total budget for handing a whole flush CYCLE's dead letters to the DLQ,

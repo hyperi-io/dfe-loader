@@ -516,7 +516,8 @@ impl Metrics {
     }
 
     /// Record `n` messages re-routed to the default table because `ClickHouse`
-    /// confirmed their destination table does not exist.
+    /// confirmed their destination table does not exist, or, under
+    /// `table="unlisted"`, because no deployed source owns it.
     ///
     /// Counted in bulk per table per batch: steady-state fallback traffic is
     /// the part that matters, and a per-row call would allocate the label on

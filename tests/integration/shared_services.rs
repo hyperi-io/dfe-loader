@@ -211,7 +211,7 @@ impl ClickHouseTarget {
             transport,
             database: database.to_string(),
             username: self.user.clone(),
-            password: self.password.clone(),
+            password: self.password.clone().into(),
             tls,
             ..Default::default()
         }

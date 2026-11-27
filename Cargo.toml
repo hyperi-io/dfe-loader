@@ -173,8 +173,8 @@ debug = true
 strip = false
 
 [lints.rust]
-# Tests require unsafe for env::set_var/remove_var (edition 2024).
-unsafe_code = "allow"
+# Only the test modules that call env::set_var or remove_var (unsafe in edition 2024) allow it.
+unsafe_code = "deny"
 # cargo-tarpaulin sets `cfg(tarpaulin)`.
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tarpaulin)'] }
 # Some clippy allows below name lints an older toolchain does not know.

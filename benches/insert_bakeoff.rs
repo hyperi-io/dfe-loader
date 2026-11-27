@@ -151,7 +151,7 @@ impl BenchEnv {
             transport: Transport::Http,
             database: self.database.clone(),
             username: self.user.clone(),
-            password: self.password.clone(),
+            password: self.password.clone().into(),
             ..Default::default()
         };
         ClickHouseQueryClient::new(&config).expect("http client")

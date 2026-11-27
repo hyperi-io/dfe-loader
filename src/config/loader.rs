@@ -241,7 +241,7 @@ impl From<&ClickHouseConfig> for crate::clickhouse::ClickHouseConfig {
             insert_format: cfg.insert_format,
             database: cfg.database.clone(),
             username: cfg.username.clone(),
-            password: cfg.password.expose().to_string(),
+            password: cfg.password.clone(),
             tls,
             connect_timeout_ms: cfg.connect_timeout_ms,
             request_timeout_ms: cfg.request_timeout_ms,
@@ -1056,6 +1056,10 @@ impl Config {
 }
 
 #[cfg(test)]
+#[allow(
+    unsafe_code,
+    reason = "the tests set the process env, unsafe in edition 2024"
+)]
 mod tests {
     use super::*;
 
@@ -2008,7 +2012,7 @@ kafka:
         assert_eq!(client_cfg.hosts, vec!["ch:9000"]);
         assert_eq!(client_cfg.database, "mydb");
         assert_eq!(client_cfg.username, "user");
-        assert_eq!(client_cfg.password, "pwd");
+        assert_eq!(client_cfg.password.expose(), "pwd");
         assert!(matches!(
             client_cfg.transport,
             crate::clickhouse::Transport::Native
